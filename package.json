@@ -14,9 +14,9 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.0",
-    "@deepseek-ai/dsh-permission-presets": "^0.1.0",
-    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0"
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-permission-presets": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.6"
   },
   "dsh": {
     "bundle": {

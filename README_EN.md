@@ -42,7 +42,7 @@ Install from GitHub:
 dsh plugin --profile web add github:MrWeiCodes/dsh-permgate
 ```
 
-Install from a local checkout:
+Install from a local checkout (dependencies resolve only when the checkout lives inside the profile directory; otherwise use Option 3):
 
 ```powershell
 dsh plugin --profile web add ./dsh-permgate

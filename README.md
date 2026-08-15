@@ -42,7 +42,7 @@
 dsh plugin --profile web add github:MrWeiCodes/dsh-permgate
 ```
 
-从本地 checkout 安装：
+从本地 checkout 安装（仅当 checkout 位于 profile 目录内时依赖才能解析；否则请用方式三）：
 
 ```powershell
 dsh plugin --profile web add ./dsh-permgate
