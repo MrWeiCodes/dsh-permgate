@@ -1,0 +1,35 @@
+# ── dsh-permgate 补丁层（bundle layer）────────────────────────────────
+# 由 package.json 的 "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+# 声明。`dsh plugin --profile <name> add <spec>` 安装后自动作为补丁层应用，
+# 无需手工合并。
+# 手动安装（无 pnpm 环境）时：把本文件内容并入 profile 的 cordis.patch.yml
+# （在文件末尾追加）。
+
+# 插件本体（宿主半 + 浏览器半）
+- insert:
+    - id: permgate
+      name: dsh-permgate
+
+# 权限预设表：新增「自定义审查」表项（会话级可选，每个对话独立记忆）。
+# - custom-review 的 approval 为 ask：权限网关的前置审查（分类/例外/规则）使用
+#   自己的弹窗（不经 DSH approval 服务）；放行后被底层沙箱拒绝（如工作区外写入）
+#   时，DSH 会弹出原生的沙箱升级审批。底层文件沙箱默认 workspace-write，
+#   可在权限网关设置页的「底层沙箱」中切换为 Full access（即时写入会话）。
+# - 整行 config 覆盖（patch 语义），因此重述全部表项；可按需调整。
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      custom-review:
+        sandbox: workspace-write
+        approval: ask
+        name: 自定义审查
+        description: 按分类逐项审查工具调用；被底层沙箱拒绝时弹出升级审批
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
