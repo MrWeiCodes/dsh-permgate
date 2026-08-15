@@ -92,6 +92,29 @@ Fallback for environments without pnpm or for offline use:
 3. Append the contents of `cordis.patch.yml` to your profile's `cordis.patch.yml`.
 4. Reinstall dependencies and restart: `pnpm install` (or `npm install`), then `dsh web`.
 
+## Updating
+
+Pick the command matching how you installed — **your configuration (`$DSH_HOME/dsh-permgate/config.json`) is preserved across updates**, no need to reconfigure.
+
+- **Installed via Option 1 (AI)**: just tell your AI assistant "update the dsh-permgate plugin".
+- **Installed via Option 2 (dsh plugin)**:
+  ```powershell
+  dsh plugin --profile web update dsh-permgate
+  ```
+  If the latest commit is not fetched (git dependencies are cached), remove and re-add:
+  ```powershell
+  dsh plugin --profile web remove dsh-permgate
+  dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
+  ```
+  Then restart `dsh web`.
+- **Installed via Option 3 (manual)**:
+  ```powershell
+  cd "$HOME\.dsh\profiles\web\packages\dsh-permgate"
+  git pull            # or re-copy the new version over the old files
+  pnpm install        # run only if the dependency declarations changed
+  ```
+  Then restart `dsh web`.
+
 ## Uninstallation
 
 ### Installed via Option 1 (AI): let the AI uninstall

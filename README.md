@@ -93,6 +93,29 @@ dsh plugin --profile web add -w ./dsh-permgate
 3. 把 `cordis.patch.yml` 的内容并入 profile 的 `cordis.patch.yml`（在文件末尾追加）。
 4. 重新安装依赖并重启：`pnpm install`（或 `npm install`）、`dsh web`。
 
+## 更新
+
+按安装方式对应操作，**配置（`$DSH_HOME/dsh-permgate/config.json`）在更新后都会保留**，无需重新设置。
+
+- **方式一（AI 安装）安装的**：直接告诉 AI「更新 dsh-permgate 插件」即可。
+- **方式二（dsh plugin）安装的**：
+  ```powershell
+  dsh plugin --profile web update dsh-permgate
+  ```
+  若没有拉到最新提交（git 依赖有缓存），先移除再添加一次：
+  ```powershell
+  dsh plugin --profile web remove dsh-permgate
+  dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
+  ```
+  然后重启 `dsh web`。
+- **方式三（手动）安装的**：
+  ```powershell
+  cd "$HOME\.dsh\profiles\web\packages\dsh-permgate"
+  git pull            # 或重新拷贝新版本覆盖
+  pnpm install        # 依赖声明有变化时执行
+  ```
+  然后重启 `dsh web`。
+
 ## 卸载
 
 ### 方式一（AI 安装）安装的：让 AI 卸载
