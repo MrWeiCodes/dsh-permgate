@@ -16,15 +16,38 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
 ## Features
 
-- **Six permission categories**: `directory` (outside-workspace access), `command` (run commands), `read` (read files), `edit` (write/edit files), `subagent` (spawn subagents), `doomloop` (repeated identical calls). Each category: `ask / allow / deny` (project level also supports `inherit global`).
-- **Global / project levels**: project settings override global; projects can inherit global.
-- **Exceptions (allow/deny lists)**: the four path/command categories support path-glob or command-substring exceptions that bypass further prompts.
-- **Quick tools**: uncategorized tools (`web_search`, `skill`, `grep`, `glob`, `web_fetch`, …) use their own allow/ask/deny defaults.
-- **Custom rules**: match any combination of `tool` (wildcard), `path` (glob), `args` (substring). Priority: custom rules > category exceptions > category defaults / quick tools.
-- **Approval modal**: shows the tool, intent, collapsible args, a **diff detail** for edit/write approvals (`▸ Details` expands +N/-N stats), and "add to project rules" candidates (one click turns this operation into a project exception).
-- **Sandbox upgrade**: after a permgate allow, if the underlying sandbox rejects the call (e.g. writing outside the workspace), the native sandbox-upgrade approval pops up automatically (one-shot upgrade, written back afterwards).
-- **Bilingual UI**: follows the DSH interface language (missing/invalid language parameters default to Chinese).
-- **Persistence**: configuration is stored at `$DSH_HOME/dsh-permgate/config.json` and survives restarts.
+- **Six permission categories**: outside-workspace directories, command execution, file read/write, subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
+- **Global / project levels**: one set of global rules for every project, fine-tuned per project; anything unset in a project automatically follows global — no duplicate configuration.
+- **Exceptions (allow/deny lists)**: put paths or commands you "always allow" or "never allow" into exceptions — matched calls are allowed or denied outright, without prompting you every time.
+- **Quick tools**: tools that don't map to files or commands (`web_search`, `skill`, `grep`, `glob`, `web_fetch`, …) can also get their own default: ask, allow or deny.
+- **Custom rules**: combine tool name, file path and argument content into rules (e.g. "no tool may run `rm -rf`") — more flexible than category exceptions. Priority: custom rules > exceptions > defaults, so a few rules cover most situations.
+- **Approval modal**: one popup shows everything — what the AI wants to do, why, and the concrete arguments; edit/write approvals also display the diff inline (+N/-N lines) so you don't need to compare files yourself. If a type of operation no longer needs asking, add it to the project allow/deny list in one click.
+- **Custom rejection reason**: when denying, you can tell the AI "why not, and what to do instead" — the AI gets a clear reason and adjusts its plan immediately, instead of retrying against a cold "User denied".
+- **Sandbox upgrade**: even after you allow a call, if DSH's underlying sandbox still blocks it (e.g. writing outside the workspace), the native sandbox-upgrade approval pops up — a one-shot grant that is automatically reverted afterwards, an extra layer of safety.
+- **Bilingual UI**: follows the DSH interface language automatically (missing/invalid language parameters default to Chinese).
+- **Persistence**: all settings live in the user directory and survive restarts.
+
+## Usage
+
+- **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log.
+- **Default permission for new sessions**: set "Custom Review" as the default for new conversations in Settings, and every new conversation enables it automatically — no need to pick it manually each time.
+
+  ![Default permission](assets/default-permission-en.jpg)
+- **Composer dock bar / session permission picker**: while the current conversation is under "Custom Review", the dock below the input shows the six categories' current modes at a glance — you can see at a glance what the AI is allowed to do right now.
+
+  ![Session permission picker](assets/permission-picker-en.jpg)
+- **Approval modal**: edit/write approvals expand the diff detail by default and collapse the raw args, so you can quickly judge whether the change is reasonable; command approvals offer one-click rule candidates (e.g. `git status *`), so commands you often allow can be added to the exceptions on the spot.
+
+  ![Approval modal](assets/approval-modal-en.jpg)
+- **Custom rejection reason**: type your feedback when denying, and the AI receives a clear "why not, and what to do instead" and adjusts its plan right away.
+
+  ![Rejection reason](assets/reject-reason-en.jpg)
+
+## Quick permission setup via the GUI
+
+No more editing configuration files by hand — adjust permissions quickly through the settings page.
+
+![Permission Gateway settings](assets/settings-page-en.jpg)
 
 ## Installation
 
@@ -105,6 +128,14 @@ dsh plugin --profile web remove dsh-permgate
 - **Browser side**: the badge and preset-name DOM injections live only in page memory and vanish on refresh; approval modals are in-memory and disappear with the process.
 - No global registry, npm global packages, or system-level writes.
 
+## Configuration file location
+
+`$DSH_HOME/dsh-permgate/config.json`
+
+## Language and preset-name display
+
+- The plugin's own UI strings (modal, panel, dock) are registered with DSH's locale service and follow the interface language; missing/invalid language parameters default to Chinese.
+
 ## Compatibility & conflicts
 
 - **Zero-intrusion, trace-free plug & unplug**: the plugin uses only DSH's public interfaces (plugin loading, `webServer` routes, the `tools` pre-execute review chain, `locale`/`slots` services, …) and does **not** modify native DSH code or internals via hooks or patching. Uninstalling removes it completely from the process; after a page refresh nothing remains in the browser.
@@ -114,33 +145,6 @@ dsh plugin --profile web remove dsh-permgate
 - **Similar permission plugins**: installing another pre-execute review plugin (e.g. dsh-auto-approve) alongside means both review chains run and may double-prompt — keep only one.
 - **Native approval service**: permgate's pre-review uses its own modal (not DSH's approval service); the sandbox-upgrade approval uses the native `approval.request` — no conflict.
 - **Display layer**: preset-name localization and the badge are a best-effort DOM layer, display-only; other plugins touching the same DOM may visually overlap, which never affects enforcement.
-
-## Usage
-
-- **Settings → Permission Gateway**: category defaults, exceptions, quick tools, custom rules, the underlying sandbox (global/project tabs; projects can inherit global), plus recent-decision stats.
-- **Default permission for new sessions**:
-
-  ![Default permission](assets/default-permission-en.jpg)
-- **Composer dock bar / session permission picker**: shown only while the current session is "Custom Review".
-
-  ![Session permission picker](assets/permission-picker-en.jpg)
-- **Approval modal**: edit/write approvals expand the diff detail by default and collapse args; command approvals offer subcommand-grained candidates (e.g. `git status *`).
-
-  ![Approval modal](assets/approval-modal-en.jpg)
-
-## Quick permission setup via the GUI
-
-No more editing configuration files by hand — adjust permissions quickly through the settings page.
-
-![Permission Gateway settings](assets/settings-page-en.jpg)
-
-## Configuration file location
-
-`$DSH_HOME/dsh-permgate/config.json`
-
-## Language and preset-name display
-
-- The plugin's own UI strings (modal, panel, dock) are registered with DSH's locale service and follow the interface language; missing/invalid language parameters default to Chinese.
 
 ## Custom development
 

@@ -1264,11 +1264,12 @@ export default {
             }
             allow = choice === 'allow' || choice === 'allow-global' || choice === 'allow-project'
           }
+          const customReason = typeof a.reason === 'string' ? a.reason.trim().slice(0, 500) : ''
           entry.cleanup()
           if (ruleCount > 0) await persist()
           entry.resolve(allow
             ? { kind: 'allow', ruleAdded: ruleCount > 0 }
-            : { kind: 'deny', reason: lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝') })
+            : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')) })
           return json(res, { ok: true, ruleAdded: ruleCount > 0 })
         }
         if (pathname === '/permgate/set-sandbox' && method === 'POST') {

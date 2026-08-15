@@ -429,6 +429,9 @@ window.__ModuleLoader__.load({
 				'app.deny': '拒绝',
 				'app.allowOne': '√ 允许',
 				'app.denyOne': '× 拒绝',
+				'app.denyReason': '拒绝意见',
+				'app.denyReasonPh': '选填：填写后作为拒绝理由告知 agent（默认为「用户拒绝」）',
+				'app.confirmDeny': '确认拒绝',
 				'app.detail': '详情',
 				'app.diffNew': '新增',
 				'app.diffMod': '修改',
@@ -531,6 +534,9 @@ window.__ModuleLoader__.load({
 				'app.deny': 'Deny',
 				'app.allowOne': '√ Allow',
 				'app.denyOne': '× Deny',
+				'app.denyReason': 'Rejection reason',
+				'app.denyReasonPh': 'Optional: sent to the agent as the denial reason (default: User denied)',
+				'app.confirmDeny': 'Confirm deny',
 				'app.detail': 'Details',
 				'app.diffNew': 'New file',
 				'app.diffMod': 'Modified',
@@ -644,6 +650,8 @@ window.__ModuleLoader__.load({
 			const [sel, setSel] = React.useState({});
 			const [openDetail, setOpenDetail] = React.useState({});
 			const [openArgs, setOpenArgs] = React.useState({});
+			const [denyText, setDenyText] = React.useState({});
+			const [denyMode, setDenyMode] = React.useState({});
 			useLocaleTick();
 			const poll = () => {
 				call('permgate:pending', {}).then((r) => setPending(Array.isArray(r) ? r : [])).catch(() => {});
@@ -655,9 +663,9 @@ window.__ModuleLoader__.load({
 				});
 				return () => off();
 			}, []);
-			const decide = (id, action, rules) => {
+			const decide = (id, action, rules, reason) => {
 				setBusyId(id);
-				call('permgate:decide', { id, action, rules }).then(poll).catch(() => {}).then(() => setBusyId(null));
+				call('permgate:decide', { id, action, rules, reason: reason || undefined }).then(poll).catch(() => {}).then(() => setBusyId(null));
 			};
 			if (!pending.length) return null;
 			const pick = (candId, v) => {
@@ -670,6 +678,13 @@ window.__ModuleLoader__.load({
 				const rules = (p.candidates || []).filter((c) => sel[c.id]).map((c) => ({ value: c.value, kind: c.kind, decision: sel[c.id] }));
 				decide(p.id, action, rules);
 			};
+			// 两段式拒绝：确认阶段提交（携带意见）或取消返回
+			const confirmDeny = (p) => {
+				const reason = (denyText[p.id] || '').trim();
+				setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
+				decide(p.id, 'deny', [], reason || undefined);
+			};
+			const cancelDeny = (p) => setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
 			const radio = (p, c, v, label, cls) => React.createElement('button', {
 				className: 'pg-radio' + (sel[c.id] === v ? ' ' + cls : ''),
 				disabled: busyId === p.id,
@@ -727,8 +742,20 @@ window.__ModuleLoader__.load({
 							radio(p, c, 'deny', T('app.denyOne'), 'pg-radio-deny'),
 						)),
 					) : null,
-					React.createElement('div', { className: 'pg-footer' },
-						React.createElement('button', { className: 'pg-action pg-action-deny', disabled: busyId === p.id, onClick: () => submit(p, 'deny') }, T('app.deny')),
+					// 两段式拒绝：平时只显示 拒绝/允许 两个按钮；点「拒绝」后展开
+					// 意见输入框 + 「确认拒绝/取消」（Enter 确认、Esc 取消），
+					// 输入框只在真要拒绝时出现，允许仍是一键。
+					denyMode[p.id] ? React.createElement('div', null,
+						React.createElement('div', { style: { margin: '8px 0 4px' } },
+							React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-primary, #24292f)', marginBottom: 4 } }, T('app.denyReason')),
+							React.createElement('input', { className: 'pg-field', autoFocus: true, style: { width: '100%', boxSizing: 'border-box' }, placeholder: T('app.denyReasonPh'), value: denyText[p.id] || '', onChange: (e) => setDenyText(Object.assign({}, denyText, { [p.id]: e.target.value })), onKeyDown: (e) => { if (e.key === 'Enter') { e.preventDefault(); confirmDeny(p); } else if (e.key === 'Escape') { e.preventDefault(); cancelDeny(p); } } }),
+						),
+						React.createElement('div', { className: 'pg-footer' },
+							React.createElement('button', { className: 'pg-action pg-action-deny', disabled: busyId === p.id, onClick: () => confirmDeny(p) }, T('app.confirmDeny')),
+							React.createElement('button', { className: 'pg-action', disabled: busyId === p.id, onClick: () => cancelDeny(p) }, T('panel.cancel')),
+						),
+					) : React.createElement('div', { className: 'pg-footer' },
+						React.createElement('button', { className: 'pg-action pg-action-deny', disabled: busyId === p.id, onClick: () => setDenyMode(Object.assign({}, denyMode, { [p.id]: true })) }, T('app.deny')),
 						React.createElement('button', { className: 'pg-action pg-action-allow', disabled: busyId === p.id, onClick: () => submit(p, 'allow') }, T('app.allow')),
 					),
 				)),
