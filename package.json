@@ -3,13 +3,13 @@
   "description": "Permission gateway for DSH (DeepSeek Harness): reviews tool calls per category (directory/command/read/edit/subagent/doom loop) with global/project config, exceptions, quick-tool defaults, custom rules, bilingual approval modal and sandbox-upgrade flow. Config persisted at $DSH_HOME/dsh-permgate/config.json.",
   "version": "1.0.1",
   "type": "module",
-  "main": "lib/index.js",
+  "main": "index.js",
   "exports": {
     ".": {
-      "default": "./lib/index.js"
+      "default": "./index.js"
     },
     "./client": {
-      "default": "./lib/client.js"
+      "default": "./client.js"
     },
     "./package.json": "./package.json"
   },
@@ -30,7 +30,9 @@
     }
   },
   "files": [
-    "lib"
+    "index.js",
+    "client.js",
+    "cordis.patch.yml"
   ],
   "license": "MIT"
 }
