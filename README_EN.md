@@ -39,13 +39,13 @@ DeepSeek Harness requires a supported Node.js version. The host-side plugin is p
 Install from GitHub:
 
 ```powershell
-dsh plugin --profile web add github:MrWeiCodes/dsh-permgate
+dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
 ```
 
 Install from a local checkout (dependencies resolve only when the checkout lives inside the profile directory; otherwise use Option 3):
 
 ```powershell
-dsh plugin --profile web add ./dsh-permgate
+dsh plugin --profile web add -w ./dsh-permgate
 ```
 
 Restart `dsh web`, then select **"Custom Review"** in the session permission picker (`/permission`, remembered per conversation); optionally set it as the default for new sessions in Settings → Permission.

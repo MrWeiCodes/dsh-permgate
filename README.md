@@ -39,13 +39,13 @@
 从 GitHub 安装：
 
 ```powershell
-dsh plugin --profile web add github:MrWeiCodes/dsh-permgate
+dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
 ```
 
 从本地 checkout 安装（仅当 checkout 位于 profile 目录内时依赖才能解析；否则请用方式三）：
 
 ```powershell
-dsh plugin --profile web add ./dsh-permgate
+dsh plugin --profile web add -w ./dsh-permgate
 ```
 
 重启 `dsh web`，然后在会话的权限选择器（`/permission`）中选择 **「自定义审查」**（每个对话独立记忆）；也可在 设置 → Permission 里把它设为新会话默认。
