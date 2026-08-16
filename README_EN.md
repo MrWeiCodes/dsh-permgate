@@ -29,25 +29,27 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
 ## Usage
 
-- **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log.
+- **Session permission picker**: pick **"Custom Review"** in the permission picker below the input, and every tool call is reviewed per category by the permission gateway.
+
+  ![Session permission picker](assets/permission-picker-en.jpg)
+
 - **Default permission for new sessions**: set "Custom Review" as the default for new conversations in Settings, and every new conversation enables it automatically — no need to pick it manually each time.
 
   ![Default permission](assets/default-permission-en.jpg)
-- **Composer dock bar / session permission picker**: while the current conversation is under "Custom Review", the dock below the input shows the six categories' current modes at a glance — you can see at a glance what the AI is allowed to do right now.
 
-  ![Session permission picker](assets/permission-picker-en.jpg)
-- **Approval modal**: edit/write approvals expand the diff detail by default and collapse the raw args, so you can quickly judge whether the change is reasonable; command approvals offer one-click rule candidates (e.g. `git status *`), so commands you often allow can be added to the exceptions on the spot.
+- **Approval modal**: edit/write approvals show the diff detail so you can quickly judge whether the change is reasonable; run-command approvals show the command and its arguments — commands matching an exception pass through, others ask — with one-click rule candidates (e.g. `git status *`) to add frequently allowed commands to the exceptions.
 
-  ![Approval modal](assets/approval-modal-en.jpg)
+  ![Approval modal](assets/approval-modal-en.png)
+
+  ![Pwsh command approval](assets/pwsh-approval-en.png)
+
 - **Custom rejection reason**: type your feedback when denying, and the AI receives a clear "why not, and what to do instead" and adjusts its plan right away.
 
-  ![Rejection reason](assets/reject-reason-en.jpg)
+  ![Rejection reason](assets/reject-reason-en.png)
 
-## Quick permission setup via the GUI
+- **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log. No more editing configuration files by hand — adjust permissions quickly through the settings page.
 
-No more editing configuration files by hand — adjust permissions quickly through the settings page.
-
-![Permission Gateway settings](assets/settings-page-en.jpg)
+  ![Permission Gateway settings](assets/settings-page-en.jpg)
 
 ## Installation
 
