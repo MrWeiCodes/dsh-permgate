@@ -551,7 +551,9 @@ export default {
     // 客户端渲染成带行号/底色的 unified diff（dsh-file-review 风格）；read 返回
     // 文件内容预览。软失败：内容过大/读取失败返回 {ok:false}；变更行数或中间区
     // 过大时走 fallback 旧式 ± 视图（前 200 变更行 + 截断计数，不阻塞审批）。
-    const DIFF_MAX_CHARS = 65536
+    // DIFF_MAX_CHARS：对比双方文本总长上限（edit 为磁盘全文+新文本；write 为磁盘+内容）。
+    // 1MB 覆盖常见大文件（如打包产物）；超限返回「文件过大，无法生成对比」。
+    const DIFF_MAX_CHARS = 1048576
     const DIFF_MAX_LINES = 200
     // Myers 中间区行数预算：超限走旧式 fallback（避免 trace 内存暴涨）。2048 行最坏时
     // trace 累计约 33MB 瞬时分配 + 数百万次迭代（服务端主线程）；512 行时约 2MB/数十万次，
@@ -632,24 +634,44 @@ export default {
         return v && typeof v === 'object' ? v : {}
       } catch (e) { return {} }
     }
-    // 上下文运行折叠：>6 行时保留头尾各 3 行，中间折叠为 gap（c: 隐藏行数，lines: 可展开数据）
-    function pushCtxRun(out, lines, startOld, startNew) {
-      const MAX_CTX = 200
+    // 上下文运行折叠：>12 行时保留头尾各 3 行，中间折叠为 gap（c: 隐藏行数，lines: 可展开数据）。
+    // MAX_CTX 为 gap 携带的隐藏行上限（100000）：未超过时 gap 携带完整行数据、可展开；
+    // 超过时 op.lines 为 null，客户端降级为「…」提示（pg2-gap-more）。pos 决定 gap 与
+    // 上下文的位置（避免 gap 前后都贴内容显得突兀）：
+    // - lead（窗口/文件开头段）：gap 在外侧，尾部 3 行贴改动侧
+    // - trail（结尾段）：头部 3 行贴改动侧，gap 在外侧
+    // ≤12 行的小段直接全显示不折叠。
+    function pushCtxRun(out, lines, startOld, startNew, pos) {
+      const MAX_CTX = 100000
+      const FULL = 12
       let o = startOld
       let n = startNew
-      if (lines.length <= 6) {
+      if (lines.length <= FULL) {
         for (const s of lines) { out.push({ t: 'c', o, n, s }); o++; n++ }
         return
       }
-      for (const s of lines.slice(0, 3)) { out.push({ t: 'c', o, n, s }); o++; n++ }
-      const hidden = lines.slice(3, lines.length - 3)
-      out.push({ t: 'g', c: hidden.length, lines: hidden.length <= MAX_CTX ? hidden.map((s, i) => ({ o: o + i, n: n + i, s })) : null })
-      o += hidden.length
-      n += hidden.length
-      for (const s of lines.slice(lines.length - 3)) { out.push({ t: 'c', o, n, s }); o++; n++ }
+      const push = (arr) => {
+        for (const s of arr) { out.push({ t: 'c', o, n, s }); o++; n++ }
+      }
+      // 仅在隐藏行数不超过 MAX_CTX（需要携带行数据）时才做 slice/map，避免对超大上下文
+      // 段先整段复制再丢弃（服务端主线程瞬时大数组分配）。
+      const gap = (hidden, mk) => {
+        out.push({ t: 'g', c: hidden, lines: hidden <= MAX_CTX ? mk() : null })
+        o += hidden
+        n += hidden
+      }
+      if (pos === 'lead') {
+        gap(lines.length - 3, () => lines.slice(0, lines.length - 3).map((s, i) => ({ o: o + i, n: n + i, s })))
+        push(lines.slice(lines.length - 3))
+      } else if (pos === 'trail') {
+        push(lines.slice(0, 3))
+        gap(lines.length - 3, () => lines.slice(3).map((s, i) => ({ o: o + i, n: n + i, s })))
+      }
     }
-    // 完整 diff payload（pretty 模式）；超限时自动降级为旧式 fallback（不返回 null）
-    function diffPayloadOrFallback(fp, oldText, newText, kind) {
+    // 完整 diff payload（pretty 模式）；超限时自动降级为旧式 fallback（不返回 null）。
+    // baseLine：窗口化对比时传入窗口首行的真实行号（默认 1），保证行号与文件实际位置一致。
+    function diffPayloadOrFallback(fp, oldText, newText, kind, baseLine) {
+      const base = baseLine || 1
       const oldLines = splitDiffLines(oldText)
       const newLines = splitDiffLines(newText)
       let p = 0
@@ -676,15 +698,15 @@ export default {
         }
         if (added + removed <= DIFF_MAX_LINES) {
           const out = []
-          pushCtxRun(out, oldLines.slice(0, p), 1, 1)
-          for (const op of ops) out.push({ t: op.t, o: op.o === null ? null : op.o + p, n: op.n === null ? null : op.n + p, s: op.s })
-          let curO = p + 1
-          let curN = p + 1
+          pushCtxRun(out, oldLines.slice(0, p), base, base, 'lead')
+          for (const op of ops) out.push({ t: op.t, o: op.o === null ? null : op.o + p + base - 1, n: op.n === null ? null : op.n + p + base - 1, s: op.s })
+          let curO = base + p
+          let curN = base + p
           for (const op of ops) {
             if (op.o !== null) curO++
             if (op.n !== null) curN++
           }
-          pushCtxRun(out, oldLines.slice(oldLines.length - s), curO, curN)
+          pushCtxRun(out, oldLines.slice(oldLines.length - s), curO, curN, 'trail')
           return { ok: true, kind, file: fp, added, removed, ops: out, truncated: 0 }
         }
       }
@@ -713,10 +735,63 @@ export default {
           const info = await fsService.stat(target)
           if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
           if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
-          if (info.size !== undefined && info.size > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法预览', 'File too large to preview') }
-          const text = await fsService.readText(target)
-          if (text.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法预览', 'File too large to preview') }
-          return { ok: true, kind: 'read', file: fp, text }
+          // 窗口化读取：只取 offset/limit 附近（前后各 W 行）的内容，流式消费到窗口末尾即停，
+          // 不整读大文件；末尾省略行数未知，由客户端显示通用提示。
+          // 资源上限：offset/limit 来自 agent 工具参数（不可信），且文件中可能存在无换行的
+          // 极长行，故对窗口行数（MAX_LIMIT）、返回文本总字节（MAX_BYTES）与单行长度
+          // （MAX_LINE）设硬上限，超限即截断并标记省略，避免服务端主线程无界内存分配。
+          const W = 200
+          const MAX_LIMIT = 4096
+          const MAX_BYTES = 262144
+          const MAX_LINE = 65536
+          const offset = Number.isFinite(args.offset) && args.offset > 0 ? Math.floor(args.offset) : 1
+          const limit = Math.min(Number.isFinite(args.limit) && args.limit > 0 ? Math.floor(args.limit) : 200, MAX_LIMIT)
+          const winStart = Math.max(1, offset - W)
+          const winEnd = offset + limit - 1 + W
+          const out = []
+          let outBytes = 0
+          let cut = false
+          let buf = ''
+          let line = 0
+          let done = false
+          let sawMore = false
+          outer:
+          for await (const chunk of await fsService.streamText(target)) {
+            buf += chunk
+            // 无换行的极长行：只保留尾部片段，防止 buf 无界增长；该行内容被截断时标记省略
+            if (buf.indexOf('\n') === -1 && buf.length > MAX_LINE) { cut = true; buf = buf.slice(buf.length - MAX_LINE) }
+            let nl
+            while ((nl = buf.indexOf('\n')) !== -1) {
+              line++
+              // 窗口末行之后确认还有内容才标记「下方还有更多行」（文件恰好结束在窗口边界时不误报）
+              if (done) { sawMore = true; break outer }
+              if (line >= winStart && line <= winEnd) {
+                if (outBytes < MAX_BYTES) {
+                  let s = buf.slice(0, nl)
+                  if (s.length > MAX_LINE) { s = s.slice(0, MAX_LINE); cut = true }
+                  out.push(s)
+                  outBytes += s.length
+                } else { cut = true; break outer }
+              }
+              buf = buf.slice(nl + 1)
+              if (line >= winEnd) done = true
+            }
+          }
+          if (done && buf !== '') sawMore = true
+          if (!done && buf !== '') {
+            line++
+            if (line >= winStart && line <= winEnd) {
+              if (outBytes < MAX_BYTES) {
+                let s = buf
+                if (s.length > MAX_LINE) { s = s.slice(0, MAX_LINE); cut = true }
+                out.push(s)
+                outBytes += s.length
+              } else {
+                cut = true
+              }
+            }
+          }
+          return { ok: true, kind: 'read', file: fp, text: out.join('\n'), startLine: winStart, topOmitted: winStart > 1 && line >= winStart, bottomOmitted: sawMore || cut }
         } catch (e) {
           // 注意：不能与字符串直接拼接（bi() 返回 {zh,en} 对象，+ 会得到 "[object Object]"）；
           // 返回双语对象，由路由侧 L(r.error, lang) 按语言取值。
@@ -730,7 +805,39 @@ export default {
           const oldText = typeof args.old_string === 'string' ? args.old_string : ''
           const newText = typeof args.new_string === 'string' ? args.new_string : ''
           if (oldText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容过大，无法生成对比', 'Content too large to compare') }
-          return diffPayloadOrFallback(fp, oldText, newText, 'modified')
+          // 关键：edit 是补丁式，仅对比 old_string/new_string 会丢失文件上下文（抽屉只会显示
+          // 补丁那几行）。改为读取磁盘当前内容、应用补丁后，取改动前后各 W 行的窗口做 diff——
+          // 行号从真实位置起算，payload 恒定小，大文件无需整文件对比（write 才是整文件语义）。
+          try {
+            const target = await fsService.resolve(fp)
+            const info = await fsService.stat(target)
+            if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
+            if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+            if (info.size !== undefined && info.size + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+            const fileText = await fsService.readText(target)
+            if (fileText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+            const idx = oldText ? fileText.indexOf(oldText) : -1
+            if (idx === -1) {
+              // 磁盘内容已与提案脱节（旧文本未找到）：退回补丁级对比，至少展示改动意图
+              return diffPayloadOrFallback(fp, oldText, newText, 'modified')
+            }
+            const applied = fileText.slice(0, idx) + newText + fileText.slice(idx + oldText.length)
+            const W = 200
+            const oldLines = splitDiffLines(fileText)
+            const newLines = splitDiffLines(applied)
+            const lineStart = fileText.slice(0, idx).split('\n').length
+            const oldCnt = splitDiffLines(oldText).length
+            const newCnt = splitDiffLines(newText).length
+            const winStart = Math.max(1, lineStart - W)
+            const winOldEnd = Math.min(oldLines.length, lineStart + oldCnt - 1 + W)
+            const winNewEnd = Math.min(newLines.length, lineStart + newCnt - 1 + W)
+            const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
+            const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
+            return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+          } catch (e) {
+            const emsg = (e && e.message ? e.message : String(e))
+            return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+          }
         }
         const content = typeof args.content === 'string' ? args.content : ''
         if (!content || content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容缺失或过大', 'Content missing or too large') }

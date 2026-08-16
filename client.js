@@ -11,7 +11,7 @@ window.__ModuleLoader__.load({
 		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; }';
 
 		// dsh-file-review 风格 unified diff + 右侧对比抽屉（浅/深色主题 token 跟随）
-		const DIFF2_CSS = '.pg2-block { position: relative; margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg2-header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; } .pg2-status { color: var(--dsw-alias-state-success-primary, #1a7f37); font-weight: 700; } .pg2-status-read { color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 700; } .pg2-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; } .pg2-path:hover { color: var(--dsw-alias-brand-primary, #1f6feb); text-decoration: underline; } .pg2-added { margin-left: auto; color: var(--dsw-alias-state-success-primary, #1a7f37); } .pg2-removed { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-copy { border: 0; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-copy:hover { color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-body { overflow: auto; max-height: 240px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5; } .pg2-row { display: grid; grid-template-columns: 40px 40px 22px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-old, .pg2-new { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-sign { text-align: center; user-select: none; } .pg2-text { padding-right: 12px; } .pg2-del { color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.10); } .pg2-add { color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.10); } .pg2-ctx { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap { display: block; width: 100%; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.07)); color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: ui-monospace, Consolas, monospace; text-align: left; padding: 4px 8px 4px 104px; } .pg2-gap:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap-more { padding: 4px 8px 4px 104px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; } .pg2-fadd { color: #2e7d32; } .pg2-fdel { color: #c62828; } .pg2-fctx { color: rgba(128,128,128,0.7); } .pg2-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-size: 11px; color: rgba(128,128,128,0.8); } .pg2-rrow { display: grid; grid-template-columns: 40px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-rnum { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-load { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-err { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-state-error-primary, #cf222e); } .pg-path-link { color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; word-break: break-all; flex: 1; } .pg-path-link:hover { text-decoration: underline; } .pg2-drawer { position: fixed; top: 0; right: 0; bottom: 0; left: auto; width: 42vw; min-width: 480px; max-width: 96vw; z-index: 10000; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border-left: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); box-shadow: -8px 0 28px rgba(0,0,0,0.25); display: flex; flex-direction: column; } .pg2-drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); min-height: 44px; } .pg2-drawer-file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; flex: 1; min-width: 0; } .pg2-drawer-close { border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; } .pg2-drawer-close:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-drawer-body { flex: 1; overflow: hidden; padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-block { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-body { flex: 1; overflow: auto; max-height: none; min-height: 0; } .pg2-drawer-body .pg2-load, .pg2-drawer-body .pg2-err { flex: 1; display: flex; align-items: center; justify-content: center; } .pg2-drawer-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; } .pg2-drawer-resize:hover, .pg2-drawer-resize.drag { background: rgba(31, 111, 235, 0.18); } .pg2-drawer-open { border: 1px solid var(--dsw-alias-brand-primary, #1f6feb); background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 2px 10px; height: 26px; cursor: pointer; font-size: 12px; flex: 0 0 auto; } .pg2-drawer-open:hover { background: rgba(31, 111, 235, 0.10); } .pg2-edit-msg { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-right: 6px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pg2-edit-msg.err { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-expand { border: 0; background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-expand:hover { text-decoration: underline; }';
+		const DIFF2_CSS = '.pg2-block { position: relative; margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg2-header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; } .pg2-status { color: var(--dsw-alias-state-success-primary, #1a7f37); font-weight: 700; } .pg2-status-read { color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 700; } .pg2-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; } .pg2-path:hover { color: var(--dsw-alias-brand-primary, #1f6feb); text-decoration: underline; } .pg2-added { margin-left: auto; color: var(--dsw-alias-state-success-primary, #1a7f37); } .pg2-removed { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-copy { border: 0; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-copy:hover { color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-body { overflow: auto; max-height: 240px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5; } .pg2-row { display: grid; grid-template-columns: 40px 40px 22px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-old, .pg2-new { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-sign { text-align: center; user-select: none; } .pg2-text { padding-right: 12px; } .pg2-del { color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.10); } .pg2-add { color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.10); } .pg2-ctx { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap { display: block; width: 100%; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.07)); color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: ui-monospace, Consolas, monospace; text-align: left; padding: 4px 8px 4px 104px; } .pg2-gap:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap-more { padding: 4px 8px 4px 104px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; } .pg2-fadd { color: #2e7d32; } .pg2-fdel { color: #c62828; } .pg2-fctx { color: rgba(128,128,128,0.7); } .pg2-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-size: 11px; color: rgba(128,128,128,0.8); } .pg2-rrow { display: grid; grid-template-columns: 40px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-rnum { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-load { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-err { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-state-error-primary, #cf222e); } .pg-path-link { color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; word-break: break-all; flex: 1; } .pg-path-link:hover { text-decoration: underline; } .pg2-drawer { position: fixed; top: 0; right: 0; bottom: 0; left: auto; width: 42vw; min-width: 480px; max-width: 96vw; z-index: 10000; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border-left: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); box-shadow: -8px 0 28px rgba(0,0,0,0.25); display: flex; flex-direction: column; } .pg2-drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); min-height: 44px; } .pg2-drawer-file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; flex: 1; min-width: 0; } .pg2-drawer-close { border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; } .pg2-drawer-close:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-drawer-body { flex: 1; overflow: hidden; padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-block { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-body { flex: 1; overflow: auto; max-height: none; min-height: 0; } .pg2-drawer-body .pg2-load, .pg2-drawer-body .pg2-err { flex: 1; display: flex; align-items: center; justify-content: center; } .pg2-drawer-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; } .pg2-drawer-resize:hover, .pg2-drawer-resize.drag { background: rgba(31, 111, 235, 0.18); } .pg2-drawer-open { border: 1px solid var(--dsw-alias-brand-primary, #1f6feb); background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 2px 10px; height: 26px; cursor: pointer; font-size: 12px; flex: 0 0 auto; } .pg2-drawer-open:hover { background: rgba(31, 111, 235, 0.10); } .pg2-edit-msg { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-right: 6px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pg2-edit-msg.err { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-expand { border: 0; background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-expand:hover { text-decoration: underline; } .pg2-romit { padding: 3px 8px 3px 48px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; font-style: italic; }';
 
 		const ROUTES = {
 			'permgate:status': ['GET', '/permgate/status'],
@@ -458,6 +458,8 @@ window.__ModuleLoader__.load({
 				'app.diffCollapse': '收缩',
 				'app.diffRead': '读取',
 				'app.diffLines': '{n} 行',
+				'app.diffTopMore': '… 上方还有 {n} 行',
+				'app.diffBottomMore': '… 下方还有更多行',
 				'app.diffClose': '关闭',
 				'app.openFile': '打开文件',
 				'app.editOpened': '已用默认编辑器打开',
@@ -583,6 +585,8 @@ window.__ModuleLoader__.load({
 				'app.diffCollapse': 'Collapse',
 				'app.diffRead': 'Read',
 				'app.diffLines': '{n} lines',
+				'app.diffTopMore': '… {n} more lines above',
+				'app.diffBottomMore': '… more lines below',
 				'app.diffClose': 'Close',
 				'app.openFile': 'Open File',
 				'app.editOpened': 'Opened with default editor',
@@ -810,7 +814,7 @@ window.__ModuleLoader__.load({
 							if (!c.ok) return React.createElement('div', { className: 'pg2-err' }, (c.error || T('app.diffErr')))
 							return c.kind === 'read'
 								? React.createElement(ReadBlock, { data: c, onOpenFile: (f) => openFile(p, f) })
-								: React.createElement(DiffBlock, { data: c, onOpenFile: (f) => openFile(p, f) })
+								: React.createElement(DiffBlock, { data: c, onOpenFile: (f) => openFile(p, f), changesOnly: true })
 						})() : null,
 					) : null,
 					(p.candidates || []).length ? React.createElement('div', null,
@@ -857,7 +861,7 @@ window.__ModuleLoader__.load({
 			}
 			return out.join('\n');
 		}
-		function DiffBlock({ data, onOpenFile, onCollapse }) {
+		function DiffBlock({ data, onOpenFile, onCollapse, changesOnly }) {
 			const [copied, setCopied] = React.useState(false);
 			const [gaps, setGaps] = React.useState({});
 			useLocaleTick();
@@ -900,6 +904,8 @@ window.__ModuleLoader__.load({
 			let gi = 0;
 			let ri = 0;
 			for (const op of data.ops || []) {
+				// 权限弹窗内联视图（changesOnly）：只显示修改行，不渲染上下文/gap
+				if (changesOnly && op.t !== 'a' && op.t !== 'd') continue
 				if (op.t === 'g') {
 					const id = 'g' + (gi++);
 					const expanded = !!gaps[id];
@@ -948,6 +954,10 @@ window.__ModuleLoader__.load({
 			const [copied, setCopied] = React.useState(false);
 			useLocaleTick();
 			const text = data.text || '';
+			// 窗口化读取：行号从 startLine 起算，上下省略时显示灰色提示行
+			const startLine = data.startLine || 1;
+			const topOmitted = data.topOmitted === true;
+			const bottomOmitted = data.bottomOmitted === true;
 			const body = text.endsWith('\n') ? text.slice(0, -1) : text;
 			const lines = body === '' ? [] : body.split('\n');
 			const onCopy = () => {
@@ -956,11 +966,25 @@ window.__ModuleLoader__.load({
 					navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1000) }).catch(() => {});
 				}
 			};
+			const rows = [];
+			let ri = 0;
+			if (topOmitted) {
+				rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-romit' }, T('app.diffTopMore').replace('{n}', String(startLine - 1))));
+			}
+			for (let i = 0; i < lines.length; i++) {
+				rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-rrow' },
+					React.createElement('span', { className: 'pg2-rnum' }, String(startLine + i)),
+					React.createElement('span', { className: 'pg2-text' }, lines[i]),
+				));
+			}
+			if (bottomOmitted) {
+				rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-romit' }, T('app.diffBottomMore')));
+			}
 			return React.createElement('div', { className: 'pg2-block' },
 				React.createElement('div', { className: 'pg2-header' },
 					React.createElement('span', { className: 'pg2-status-read', title: T('app.diffRead') }, 'R'),
 					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
-					React.createElement('span', { className: 'pg2-added' }, T('app.diffLines').replace('{n}', String(lines.length))),
+					React.createElement('span', { className: 'pg2-added' }, T('app.diffLines').replace('{n}', String(lines.length) + (topOmitted || bottomOmitted ? '+' : ''))),
 					React.createElement('button', { className: 'pg2-copy', onClick: onCopy }, copied ? T('app.diffCopied') : T('app.diffCopy')),
 					(typeof onOpenFile === 'function')
 						? React.createElement('button', { className: 'pg2-expand', onClick: () => onOpenFile(data.file), title: T('app.diffExpand') }, T('app.diffExpand'))
@@ -969,12 +993,7 @@ window.__ModuleLoader__.load({
 						? React.createElement('button', { className: 'pg2-expand', onClick: onCollapse, title: T('app.diffCollapse') }, T('app.diffCollapse'))
 						: null,
 				),
-				React.createElement('div', { className: 'pg2-body' },
-					lines.map((l, i) => React.createElement('div', { key: i, className: 'pg2-rrow' },
-						React.createElement('span', { className: 'pg2-rnum' }, String(i + 1)),
-						React.createElement('span', { className: 'pg2-text' }, l),
-					)),
-				),
+				React.createElement('div', { className: 'pg2-body' }, rows),
 			);
 		}
 		function CompareDrawer({ pin, onClose }) {
