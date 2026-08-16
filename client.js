@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
 			'permgate:add-rule': ['POST', '/permgate/add-rule'],
 			'permgate:remove-rule': ['POST', '/permgate/remove-rule'],
 			'permgate:reload': ['POST', '/permgate/reload'],
+			'permgate:open-config': ['POST', '/permgate/open-config'],
 		};
 		function call(method, args) {
 			const entry = ROUTES[method] || ['GET', '/permgate/status'];
@@ -410,6 +411,8 @@ window.__ModuleLoader__.load({
 
 		const CATS = ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop'];
 		const EXC_CATS = ['directory', 'command', 'read', 'edit'];
+		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
+		const EXC_COLLAPSE_THRESHOLD = 6;
 		const ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
 		const MODES = ['ask', 'allow', 'deny'];
 		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888' };
@@ -502,7 +505,9 @@ window.__ModuleLoader__.load({
 				'panel.noRules': '暂无规则',
 				'panel.decisions': '最近决策',
 				'panel.noDecisions': '暂无决策记录',
-				'panel.reload': '重新加载配置',
+				'panel.reload': '重新加载配置文件',
+				'panel.openConfig': '打开',
+				'panel.openConfigDone': '已用默认编辑器打开配置文件',
 				'panel.saved': '已保存',
 				'panel.savedToGlobal': '已保存到全局',
 				'panel.savedToProject': '已保存到当前项目',
@@ -514,6 +519,10 @@ window.__ModuleLoader__.load({
 				'panel.excCmdHint': '：匹配命令子串/glob，优先于分类默认',
 				'panel.excPathHint': '：路径 glob，优先于分类默认',
 				'panel.excNone': '无例外',
+				'panel.excExpand': '展开',
+				'panel.excCollapse': '折叠',
+				'panel.excListLink': '例外列表',
+				'panel.excUnit': '条',
 				'panel.excPh': '命令子串/glob',
 				'panel.excPathPh': '路径 glob',
 				'panel.addExc': '添加例外',
@@ -607,7 +616,9 @@ window.__ModuleLoader__.load({
 				'panel.noRules': 'No rules',
 				'panel.decisions': 'Recent decisions',
 				'panel.noDecisions': 'No decisions yet',
-				'panel.reload': 'Reload config',
+				'panel.reload': 'Reload config file',
+				'panel.openConfig': 'Open',
+				'panel.openConfigDone': 'Opened with default editor',
 				'panel.saved': 'Saved',
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
 				'panel.needValue': 'Enter a match value first',
@@ -616,6 +627,10 @@ window.__ModuleLoader__.load({
 				'panel.excCmdHint': ': command substring/glob, overrides category default',
 				'panel.excPathHint': ': path glob, overrides category default',
 				'panel.excNone': 'No exceptions',
+				'panel.excExpand': 'Expand',
+				'panel.excCollapse': 'Collapse',
+				'panel.excListLink': 'Exception list',
+				'panel.excUnit': 'items',
 				'panel.excPh': 'command substring/glob',
 				'panel.excPathPh': 'path glob',
 				'panel.addExc': 'Add exception',
@@ -789,7 +804,11 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function Panel() {
+		function Panel(props) {
+			// settings.section 是 root 作用域槽：不直接给 sessionId，但注入 useSessions
+			// 标准 hook。用它订阅当前活动会话（SessionListState.current），会话切换时
+			// 选择器变化触发重渲染 + 重新查询，面板始终显示当前会话的项目配置。
+			const sessionId = (props && typeof props.useSessions === 'function') ? props.useSessions((st) => (st ? st.current : undefined)) : undefined;
 			const [status, setStatus] = React.useState(null);
 			const [busy, setBusy] = React.useState(false);
 			const [msg, setMsg] = React.useState('');
@@ -801,6 +820,7 @@ window.__ModuleLoader__.load({
 			const [newTool, setNewTool] = React.useState('');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
+			const [excCollapsed, setExcCollapsed] = React.useState({});
 
 			React.useEffect(() => {
 				if (confirm === null) return undefined;
@@ -833,21 +853,22 @@ window.__ModuleLoader__.load({
 			};
 
 			const refresh = () => {
-				call('permgate:status', {}).then(applyStatus).catch((e) => setMsg(String((e && e.message) || e)));
+				call('permgate:status', { sessionId: sessionId || undefined }).then(applyStatus).catch((e) => setMsg(String((e && e.message) || e)));
 			};
-			React.useEffect(refresh, []);
-			// 设置页打开期间也跟随 SSE 联动（如模型经工具改配置、其他标签页改动）
+			// 会话切换（useSessions 选择器变化）与 SSE 联动都会触发重查，
+			// 保证切换会话后面板立即显示当前会话的项目配置
 			React.useEffect(() => {
+				refresh();
 				const off = subscribeEvents((ev) => {
 					if (ev.type === 'status' || ev.type === 'refresh') refresh();
 				});
 				return () => off();
-			}, []);
+			}, [sessionId]);
 
 			const invoke = (method, args, done) => {
 				setBusy(true);
 				setMsg('');
-				call(method, args).then((r) => {
+				call(method, Object.assign({}, args || {}, { sessionId: sessionId || undefined })).then((r) => {
 					if (r && r.error) { setMsg(String(r.error)); return; }
 					setMsg(T('panel.saved'));
 					applyStatus(r && r.status ? r.status : r);
@@ -892,6 +913,7 @@ window.__ModuleLoader__.load({
 			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });
 			const removeRule = (id) => invoke('permgate:remove-rule', { target: tab, id });
 			const reload = () => invoke('permgate:reload', {});
+			const openConfig = () => invoke('permgate:open-config', {}, () => setMsg(T('panel.openConfigDone')));
 
 			const badge = (action) => React.createElement('span', { style: { color: MODE_COLORS[action] || '#888', fontWeight: 600, marginRight: 6 } }, modeLabel(action));
 
@@ -905,6 +927,9 @@ window.__ModuleLoader__.load({
 				const mode = cats[tab] ? (cats[tab][c] || (tab === 'project' ? 'inherit' : 'ask')) : (tab === 'project' ? 'inherit' : 'ask');
 				const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
 				const excList = block && block[c] && Array.isArray(block[c].exceptions) ? block[c].exceptions : [];
+				// 例外折叠：列表超过阈值默认收起（长列表不再撑爆面板），添加行始终可见
+				const excCollapsedState = excCollapsed[c] === undefined ? excList.length > EXC_COLLAPSE_THRESHOLD : excCollapsed[c];
+				const toggleExc = () => setExcCollapsed(Object.assign({}, excCollapsed, { [c]: !excCollapsedState }));
 				return React.createElement('div', { key: c, style: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: 8, padding: 10, marginBottom: 10 } },
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, catLabel(c)),
@@ -914,14 +939,24 @@ window.__ModuleLoader__.load({
 						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } },
 							T('panel.excCount').replace('{n}', String(excList.length)) + (c === 'command' ? T('panel.excCmdHint') : T('panel.excPathHint')),
 						),
-						excList.length ? excList.map((r) => React.createElement('div', { key: r.id, style: rowStyle },
-							badge(r.action),
-							React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
-							React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
-								React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
-								confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
-							),
-						)) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone')),
+						excCollapsedState
+							? React.createElement('div', { style: { fontSize: 12, color: '#1f6feb', cursor: 'pointer', userSelect: 'none', padding: '2px 0' }, onClick: toggleExc, title: T('panel.excExpand') },
+								'> ' + T('panel.excListLink') + '（' + String(excList.length) + ' ' + T('panel.excUnit') + '）',
+							)
+							: (excList.length ? React.createElement('div', null,
+								// 展开/折叠开关固定在占位行位置：展开后原地变为「▾ 折叠」，条目列在下方
+								React.createElement('div', { style: { fontSize: 12, color: '#1f6feb', cursor: 'pointer', userSelect: 'none', padding: '2px 0', marginBottom: 2 }, onClick: toggleExc, title: T('panel.excCollapse') },
+									'▾ ' + T('panel.excCollapse'),
+								),
+								excList.map((r) => React.createElement('div', { key: r.id, style: rowStyle },
+									badge(r.action),
+									React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
+									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
+										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
+										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
+									),
+								)),
+							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 							React.createElement('input', { className: 'pg-field', placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'), value: exVals[c] || '', onChange: (e) => setExVals(Object.assign({}, exVals, { [c]: e.target.value })), disabled: busy }),
 							React.createElement('select', { className: 'pg-field', style: { padding: '2px 6px' }, value: exAction, onChange: (e) => setExAction(e.target.value), disabled: busy },
@@ -992,7 +1027,11 @@ window.__ModuleLoader__.load({
 						T('panel.effCats'),
 						eff ? CATS.map((c) => React.createElement('span', { key: c, style: { color: MODE_COLORS[eff[c]] || '#888', fontWeight: 600, marginRight: 8 } }, (catLabel(c) + ':' + modeLabel(eff[c])))) : '…',
 					),
-					React.createElement('div', { style: small }, T('panel.config') + (status ? status.configPath : '…')),
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+						React.createElement('span', { style: small }, T('panel.config') + (status ? status.configPath : '…')),
+						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: openConfig }, T('panel.openConfig')),
+						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: reload }, T('panel.reload')),
+					),
 					React.createElement('div', { style: small }, T('panel.project') + (status ? status.projectKey : '…')),
 					React.createElement('div', { style: small }, T('panel.stats').replace('{d}', String(stats.deny)).replace('{a}', String(stats.ask))),
 					status && status.loadError ? React.createElement('div', { style: { color: '#c62828', fontSize: 12 } }, T('panel.loadErr') + status.loadError) : null,
@@ -1051,9 +1090,6 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, d.tool),
 						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, d.reason || ''),
 					)) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noDecisions')),
-					React.createElement('div', { style: { marginTop: 8 } },
-						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: reload }, T('panel.reload')),
-					),
 				),
 				msg ? React.createElement('div', { style: { fontSize: 12, color: '#1e88e5', marginBottom: 8 } }, msg) : null,
 			);

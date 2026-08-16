@@ -561,8 +561,10 @@ export default {
       const n = Math.max(removed.length, added.length)
       for (let i = 0; i < n; i++) {
         if (lines.length >= DIFF_MAX_LINES) break
-        if (i < removed.length) { lines.push('- ' + removed[i]); shownR++ }
-        if (i < added.length) { lines.push('+ ' + added[i]); shownA++ }
+        // 行号：差异区从 prefix+1 行开始；删除行标旧文件行号，新增行标新文件行号
+        const no = String(prefix + i + 1).padStart(4, ' ')
+        if (i < removed.length) { lines.push('- ' + no + ' ' + removed[i]); shownR++ }
+        if (i < added.length) { lines.push('+ ' + no + ' ' + added[i]); shownA++ }
       }
       return { added: added.length, removed: removed.length, lines, truncated: (removed.length - shownR) + (added.length - shownA) }
     }
@@ -582,9 +584,9 @@ export default {
           if (!fp || content.length > DIFF_MAX_CHARS) return null
           return fsService.resolve(fp).then((target) => fsService.stat(target)).then((info) => {
             if (info === undefined) {
-              // 新文件：全部为新增行
+              // 新文件：全部为新增行（带行号）
               const total = splitDiffLines(content).length
-              const lines = splitDiffLines(content).slice(0, DIFF_MAX_LINES).map((l) => '+ ' + l)
+              const lines = splitDiffLines(content).slice(0, DIFF_MAX_LINES).map((l, i) => '+ ' + String(i + 1).padStart(4, ' ') + ' ' + l)
               return { file: fp, kind: 'new', added: total, removed: 0, lines, truncated: Math.max(0, total - lines.length) }
             }
             return fsService.readText(target).then((oldText) => {
@@ -1066,16 +1068,32 @@ export default {
       }
     }
 
+    // 最近一次成功读取/写入的磁盘原文：persist 前与磁盘比对，防止覆盖外部手工编辑
+    let lastDiskJson = null
+
     async function persist(exec) {
       try {
         const t = await ensureTarget(exec)
         await ensureConfigDir()
+        // 防覆盖守卫：配置在加载后被外部修改（手工编辑、其他实例写入）时拒绝保存，
+        // 避免静默覆盖用户规则；点击「重新加载配置文件」后守卫自动放行。
+        try {
+          const cur = await fs.readText(t)
+          if (lastDiskJson !== null && String(cur || '').trim() !== lastDiskJson) {
+            saveError = uiLang === 'en' ? 'Config file changed on disk; save cancelled. Click "Reload config file" first.' : '配置文件已被外部修改，已取消保存；请先点击「重新加载配置文件」'
+            broadcast({ type: 'status' })
+            return false
+          }
+        } catch (e) {}
         const writePolicy = { mode: 'danger-full-access', workspaceRoot: root }
         await fs.writeText(t, JSON.stringify(config, null, 2), undefined, undefined, writePolicy)
+        lastDiskJson = JSON.stringify(config, null, 2)
         saveError = null
         broadcast({ type: 'status' })
+        return true
       } catch (e) {
         saveError = (e && e.message) ? e.message : String(e)
+        return false
       }
     }
 
@@ -1083,16 +1101,31 @@ export default {
       try {
         const t = await ensureTarget(exec)
         let text = null
-        try { text = await fs.readText(t) } catch (e) { text = null }
-        if (text === null) {
-          config = freshConfig()
-          await persist(exec)
+        let missing = false
+        try {
+          const info = await fs.stat(t)
+          missing = !info
+        } catch (e) { missing = true }
+        if (!missing) {
+          try { text = await fs.readText(t) } catch (e) { text = null }
+        }
+        if (missing || text === null) {
+          // 文件不存在 → 首次运行，落盘默认配置；
+          // 存在但读取失败 → 保留内存配置并提示，绝不静默覆盖磁盘（避免误删规则）
+          if (missing) {
+            loadError = null
+            config = freshConfig()
+            await persist(exec)
+          } else {
+            loadError = uiLang === 'en' ? 'Cannot read config file: ' + t : '无法读取配置文件: ' + t
+          }
           return
         }
         const parsed = JSON.parse(text)
         if (!parsed || typeof parsed !== 'object') throw new Error('根节点必须是对象')
         const isOld = parsed.global && typeof parsed.global === 'object' && parsed.global.mode !== undefined && parsed.global.directory === undefined
         config = isOld ? migrateOld(parsed) : buildConfig(parsed)
+        lastDiskJson = String(text).trim()
         loadError = null
         if (isOld) await persist(exec)
         broadcast({ type: 'status' })
@@ -1215,6 +1248,16 @@ export default {
         // 语言参数归一化：缺失/空/非法一律中文；同时更新 uiLang 供宿主即时文案
         const lang = normLang(method === 'GET' ? (search ? search.get('lang') : null) : a.lang)
         uiLang = lang
+        // 按会话解析（设置面板/DockBar 传 sessionId）：后续所有项目解析跟随该会话，
+        // 切换会话后面板显示与写入的都是当前会话的项目配置
+        let exec = null
+        const sid = method === 'POST' ? a.sessionId : (search ? search.get('sessionId') : null)
+        if (sid && ctx.sessions && typeof ctx.sessions.get === 'function') {
+          try {
+            const s = ctx.sessions.get(sid)
+            if (s) exec = { agent: { session: s } }
+          } catch (e) {}
+        }
         if (pathname === '/permgate/pending' && method === 'GET') {
           const out = []
           for (const e of pendingApprovals.values()) {
@@ -1226,17 +1269,9 @@ export default {
           return json(res, out)
         }
         if (pathname === '/permgate/status' && method === 'GET') {
-          await init()
-          // 按会话查询：web 端 DockBar 传 sessionId，状态只反映该会话的权限；
+          await init(exec)
+          // 按会话查询：web 端 DockBar/设置面板传 sessionId，状态只反映该会话的权限；
           // 缺失时走全局回退（最近权限事件会话 / 最后创建会话）
-          let exec = null
-          const sid = search ? search.get('sessionId') : null
-          if (sid && ctx.sessions && typeof ctx.sessions.get === 'function') {
-            try {
-              const s = ctx.sessions.get(sid)
-              if (s) exec = { agent: { session: s } }
-            } catch (e) {}
-          }
           return json(res, statusView(exec, lang))
         }
         if (pathname === '/permgate/decide' && method === 'POST') {
@@ -1273,15 +1308,15 @@ export default {
           return json(res, { ok: true, ruleAdded: ruleCount > 0 })
         }
         if (pathname === '/permgate/set-sandbox' && method === 'POST') {
-          await init()
+          await init(exec)
           const target = a.target === 'project' ? 'project' : 'global'
           if (!setSandboxConfig(target, a.mode)) return json(res, { error: '非法沙箱参数: target=' + target + ' mode=' + a.mode })
-          await persist()
-          syncSandbox()
-          return json(res, statusView())
+          await persist(exec)
+          syncSandbox(exec)
+          return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-categories' && method === 'POST') {
-          await init()
+          await init(exec)
           for (const t of ['global', 'project']) {
             const src = a[t]
             if (!src || typeof src !== 'object') continue
@@ -1289,29 +1324,29 @@ export default {
               if (typeof src[c] === 'string') setCategoryMode(t, c, src[c])
             }
           }
-          await persist()
-          return json(res, statusView())
+          await persist(exec)
+          return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-category' && method === 'POST') {
-          await init()
+          await init(exec)
           if (CATS.indexOf(a.category) === -1) return json(res, { error: '未知分类: ' + a.category })
           if (!setCategoryMode(a.target, a.category, a.mode)) return json(res, { error: '非法的 target/mode 组合' })
-          await persist()
-          return json(res, statusView())
+          await persist(exec)
+          return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-quick' && method === 'POST') {
-          await init()
+          await init(exec)
           if (!a.tool || !String(a.tool)) return json(res, { error: 'tool 不能为空' })
           if (ALL_MODES.indexOf(a.action) === -1) return json(res, { error: '非法动作' })
           const block = a.target === 'project' ? ensureProject() : config.global
           if (!block.quickTools) block.quickTools = {}
           if (a.action === 'inherit') delete block.quickTools[a.tool]
           else block.quickTools[a.tool] = a.action
-          await persist()
-          return json(res, statusView())
+          await persist(exec)
+          return json(res, statusView(exec))
         }
         if (pathname === '/permgate/add-exception' && method === 'POST') {
-          await init()
+          await init(exec)
           if (EXC_CATS.indexOf(a.category) === -1) return json(res, { error: '该分类不支持例外' })
           if (!a.match || !String(a.match)) return json(res, { error: 'match 不能为空' })
           const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
@@ -1320,44 +1355,67 @@ export default {
           if (!block[a.category]) block[a.category] = freshCategory(a.category, a.target === 'project')
           if (!block[a.category].exceptions) block[a.category].exceptions = []
           block[a.category].exceptions.push(e)
-          await persist()
-          return json(res, { added: e, status: statusView() })
+          await persist(exec)
+          return json(res, { added: e, status: statusView(exec) })
         }
         if (pathname === '/permgate/remove-exception' && method === 'POST') {
-          await init()
+          await init(exec)
           const block = a.target === 'project' ? ensureProject() : config.global
           const cat = block[a.category]
           if (!cat || !Array.isArray(cat.exceptions)) return json(res, { removed: false, reason: '例外列表不存在' })
           const idx = cat.exceptions.findIndex((r) => r.id === a.id)
           if (idx === -1) return json(res, { removed: false, reason: '未找到 id=' + a.id })
           const removed = cat.exceptions.splice(idx, 1)[0]
-          await persist()
-          return json(res, { removed: true, exception: removed, status: statusView() })
+          await persist(exec)
+          return json(res, { removed: true, exception: removed, status: statusView(exec) })
         }
         if (pathname === '/permgate/add-rule' && method === 'POST') {
-          await init()
+          await init(exec)
           if (!a.tool && !a.path && !a.args) return json(res, { error: '至少提供 tool/path/args 之一' })
           const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: a.action, tool: a.tool, path: a.path, args: a.args, reason: a.reason })
           if (!rule) return json(res, { error: '非法的规则参数' })
           const block = a.target === 'project' ? ensureProject() : config.global
           if (!block.custom) block.custom = []
           block.custom.push(rule)
-          await persist()
-          return json(res, { added: rule, status: statusView() })
+          await persist(exec)
+          return json(res, { added: rule, status: statusView(exec) })
         }
         if (pathname === '/permgate/remove-rule' && method === 'POST') {
-          await init()
+          await init(exec)
           const block = a.target === 'project' ? ensureProject() : config.global
           const list = block.custom || []
           const idx = list.findIndex((r) => r.id === a.id)
           if (idx === -1) return json(res, { removed: false, reason: '未找到 id=' + a.id })
           const removed = list.splice(idx, 1)[0]
-          await persist()
-          return json(res, { removed: true, rule: removed, status: statusView() })
+          await persist(exec)
+          return json(res, { removed: true, rule: removed, status: statusView(exec) })
         }
         if (pathname === '/permgate/reload' && method === 'POST') {
-          await load()
-          return json(res, statusView())
+          await load(exec)
+          return json(res, statusView(exec))
+        }
+        // 打开配置文件：用系统默认关联的编辑器打开（Windows: cmd start）
+        if (pathname === '/permgate/open-config' && method === 'POST') {
+          await init(exec)
+          const t = target
+          if (!t) return json(res, { error: '配置文件路径未知' })
+          const sub = ctx.get('subprocess')
+          if (!sub) return json(res, { error: 'subprocess 服务不可用' })
+          try {
+            const winPath = fs.processPath ? fs.processPath(t) : String(t).replace(/\//g, '\\')
+            const exe = await sub.resolveExecutable('cmd')
+            const handle = sub.spawn({
+              argv: [exe, '/c', 'start', '', winPath],
+              cwd: String(root || 'C:\\').replace(/\//g, '\\'),
+              stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
+              graceMs: 5000,
+            })
+            await handle.done
+            // 附带 status：客户端 invoke 会把响应应用为面板状态，缺了会把配置路径冲掉
+            return json(res, { ok: true, path: winPath, status: statusView(exec) })
+          } catch (e) {
+            return json(res, { error: '打开配置文件失败: ' + ((e && e.message) || String(e)) })
+          }
         }
         return json(res, { error: 'not found: ' + pathname }, 404)
       } catch (e) {
