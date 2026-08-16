@@ -559,8 +559,13 @@ export default {
     // trace 累计约 33MB 瞬时分配 + 数百万次迭代（服务端主线程）；512 行时约 2MB/数十万次，
     // 足够覆盖常规编辑场景。
     const DIFF_BUDGET_LINES = 512
+    // 行尾归一化（CRLF/CR → LF）：splitDiffLines 与 edit 预览的归一化匹配共用同一规则，
+    // 保证 fileNorm.indexOf(oldNorm) 得到的偏移与 splitDiffLines 的行边界精确对齐
+    function normEol(s) {
+      return String(s == null ? '' : s).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    }
     function splitDiffLines(s) {
-      return String(s == null ? '' : s).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+      return normEol(s).split('\n')
     }
     function computeLineDiff(oldText, newText) {
       const oldLines = splitDiffLines(oldText)
@@ -816,24 +821,51 @@ export default {
             if (info.size !== undefined && info.size + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
             const fileText = await fsService.readText(target)
             if (fileText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-            const idx = oldText ? fileText.indexOf(oldText) : -1
+            // 行尾处理：磁盘文件可能是 CRLF/CR 而工具参数为 LF。优先按原始文本字面匹配
+            // （预览与实际 edit 结果一致）；字面匹配失败且磁盘含 CR/CRLF 时，退而按 \n
+            // 归一化匹配构建预览窗口（与 splitDiffLines 同一归一化规则），并在 payload 上
+            // 标记 eolNormalized——此时预览仅为意图展示：实际 edit 按原始字节字面匹配
+            // 仍可能失败，由客户端提示，避免审批者基于"假成功"预览做决策。
+            const rawIdx = oldText ? fileText.indexOf(oldText) : -1
+            // oldNorm/newNorm 为补丁级小字符串，供行数统计与归一化预览共用；fileNorm
+            // 为全文件副本，仅在字面匹配失败且文件确实含 \r 时才构建（避免常见路径对
+            // 最多 1MB 文件做两趟全量 replace 扫描）。
+            const oldNorm = normEol(oldText)
+            const newNorm = normEol(newText)
+            let eolNormalized = false
+            let idx = rawIdx
+            let baseText = fileText
+            let oldLen = oldText.length
+            if (rawIdx === -1 && oldNorm && fileText.indexOf('\r') !== -1) {
+              const fileNorm = normEol(fileText)
+              const normIdx = fileNorm.indexOf(oldNorm)
+              if (normIdx !== -1) {
+                idx = normIdx
+                baseText = fileNorm
+                oldLen = oldNorm.length
+                eolNormalized = true
+              }
+            }
             if (idx === -1) {
               // 磁盘内容已与提案脱节（旧文本未找到）：退回补丁级对比，至少展示改动意图
               return diffPayloadOrFallback(fp, oldText, newText, 'modified')
             }
-            const applied = fileText.slice(0, idx) + newText + fileText.slice(idx + oldText.length)
+            const applied = baseText.slice(0, idx) + (eolNormalized ? newNorm : newText) + baseText.slice(idx + oldLen)
             const W = 200
-            const oldLines = splitDiffLines(fileText)
+            const oldLines = splitDiffLines(baseText)
             const newLines = splitDiffLines(applied)
-            const lineStart = fileText.slice(0, idx).split('\n').length
-            const oldCnt = splitDiffLines(oldText).length
-            const newCnt = splitDiffLines(newText).length
+            const lineStart = baseText.slice(0, idx).split('\n').length
+            const oldCnt = splitDiffLines(oldNorm).length
+            const newCnt = splitDiffLines(newNorm).length
             const winStart = Math.max(1, lineStart - W)
             const winOldEnd = Math.min(oldLines.length, lineStart + oldCnt - 1 + W)
             const winNewEnd = Math.min(newLines.length, lineStart + newCnt - 1 + W)
             const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
             const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
-            return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+            const payload = diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+            // diffPayloadOrFallback 恒返回 ok:true 的 payload（失败时返回 fallback 视图而非 ok:false）
+            if (eolNormalized) payload.eolNormalized = true
+            return payload
           } catch (e) {
             const emsg = (e && e.message ? e.message : String(e))
             return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
