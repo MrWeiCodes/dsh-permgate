@@ -537,11 +537,26 @@ export default {
       try { return args && typeof args === 'object' && typeof args.file_path === 'string' ? args.file_path : null } catch (e) { return null }
     }
 
-    // ── 编辑/写入审批的「详情」diff 预览 ─────────────────────────────
-    // 弹窗里展开显示：文件路径、+/- 行、统计（类似版本控制 diff）。软失败：
-    // 文件过大、无法读取旧内容等一律返回 null（不显示详情，不影响审批）。
+    // open-file 允许打开的扩展名白名单（文本/文档类）。`cmd /c start` 对 Windows 上"运行"关联的
+    // 可执行/脚本类（exe/bat/cmd/ps1/vbs/js/py/msi/jar/lnk/svg 等）执行的是运行而非编辑，
+    // 白名单之外的扩展名一律拒绝，防止点击「打开文件」执行 agent 可控路径的脚本。
+    const OPEN_TEXT_EXTS = new Set([
+      'txt', 'md', 'markdown', 'json', 'jsonc', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'log',
+      'csv', 'tsv', 'xml', 'html', 'htm', 'css', 'ts', 'tsx', 'jsx', 'c', 'h', 'cpp', 'hpp', 'cc',
+      'cxx', 'cs', 'java', 'go', 'rs', 'sql', 'gradle', 'properties',
+    ])
+
+    // ── 文件对比数据（按需路由 /permgate/file-diff 生成）───────────────
+    // 弹窗「详情」与右侧对比抽屉共用：edit/write 生成行级 Myers diff 操作流，
+    // 客户端渲染成带行号/底色的 unified diff（dsh-file-review 风格）；read 返回
+    // 文件内容预览。软失败：内容过大/读取失败返回 {ok:false}；变更行数或中间区
+    // 过大时走 fallback 旧式 ± 视图（前 200 变更行 + 截断计数，不阻塞审批）。
     const DIFF_MAX_CHARS = 65536
     const DIFF_MAX_LINES = 200
+    // Myers 中间区行数预算：超限走旧式 fallback（避免 trace 内存暴涨）。2048 行最坏时
+    // trace 累计约 33MB 瞬时分配 + 数百万次迭代（服务端主线程）；512 行时约 2MB/数十万次，
+    // 足够覆盖常规编辑场景。
+    const DIFF_BUDGET_LINES = 512
     function splitDiffLines(s) {
       return String(s == null ? '' : s).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
     }
@@ -568,34 +583,173 @@ export default {
       }
       return { added: added.length, removed: removed.length, lines, truncated: (removed.length - shownR) + (added.length - shownA) }
     }
-    function buildFileDiff(name, args, fsService) {
+    // Myers 行级 diff：返回相对输入数组的 op 流（t: c/a/d，o/n: 1 基行号，s: 行文本）
+    function myersOps(a, b) {
+      const n = a.length
+      const m = b.length
+      const max = n + m
+      const off = max
+      const v = new Int32Array(2 * max + 1)
+      const trace = []
+      let d = 0
+      let done = false
+      for (; d <= max; d++) {
+        trace.push(v.slice())
+        for (let k = -d; k <= d; k += 2) {
+          let x
+          if (k === -d || (k !== d && v[k - 1 + off] < v[k + 1 + off])) x = v[k + 1 + off]
+          else x = v[k - 1 + off] + 1
+          let y = x - k
+          while (x < n && y < m && a[x] === b[y]) { x++; y++ }
+          v[k + off] = x
+          if (x >= n && y >= m) { done = true; break }
+        }
+        if (done) break
+      }
+      const ops = []
+      let x = n
+      let y = m
+      for (let di = d; di > 0; di--) {
+        const prev = trace[di]
+        const k = x - y
+        const kOff = k + off
+        let prevK
+        if (k === -di || (k !== di && prev[kOff - 1] < prev[kOff + 1])) prevK = k + 1
+        else prevK = k - 1
+        const px = prev[prevK + off]
+        const py = px - prevK
+        while (x > px && y > py) { ops.push({ t: 'c', o: x, n: y, s: a[x - 1] }); x--; y-- }
+        if (x === px) { ops.push({ t: 'a', o: null, n: y, s: b[y - 1] }); y-- }
+        else { ops.push({ t: 'd', o: x, n: null, s: a[x - 1] }); x-- }
+      }
+      while (x > 0 && y > 0) { ops.push({ t: 'c', o: x, n: y, s: a[x - 1] }); x--; y-- }
+      ops.reverse()
+      return ops
+    }
+    function parseEntryArgs(entry) {
       try {
+        const v = JSON.parse(entry.argsJson || '{}')
+        return v && typeof v === 'object' ? v : {}
+      } catch (e) { return {} }
+    }
+    // 上下文运行折叠：>6 行时保留头尾各 3 行，中间折叠为 gap（c: 隐藏行数，lines: 可展开数据）
+    function pushCtxRun(out, lines, startOld, startNew) {
+      const MAX_CTX = 200
+      let o = startOld
+      let n = startNew
+      if (lines.length <= 6) {
+        for (const s of lines) { out.push({ t: 'c', o, n, s }); o++; n++ }
+        return
+      }
+      for (const s of lines.slice(0, 3)) { out.push({ t: 'c', o, n, s }); o++; n++ }
+      const hidden = lines.slice(3, lines.length - 3)
+      out.push({ t: 'g', c: hidden.length, lines: hidden.length <= MAX_CTX ? hidden.map((s, i) => ({ o: o + i, n: n + i, s })) : null })
+      o += hidden.length
+      n += hidden.length
+      for (const s of lines.slice(lines.length - 3)) { out.push({ t: 'c', o, n, s }); o++; n++ }
+    }
+    // 完整 diff payload（pretty 模式）；超限时自动降级为旧式 fallback（不返回 null）
+    function diffPayloadOrFallback(fp, oldText, newText, kind) {
+      const oldLines = splitDiffLines(oldText)
+      const newLines = splitDiffLines(newText)
+      let p = 0
+      const maxP = Math.min(oldLines.length, newLines.length)
+      while (p < maxP && oldLines[p] === newLines[p]) p++
+      let s = 0
+      while (s < oldLines.length - p && s < newLines.length - p && oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]) s++
+      const midA = oldLines.slice(p, oldLines.length - s)
+      const midB = newLines.slice(p, newLines.length - s)
+      // 廉价预过滤：|midA.length - midB.length| > DIFF_MAX_LINES 时 added+removed 必超 200
+      // （added - removed === midB.length - midA.length），Myers 结果必被丢弃，直接走 fallback，
+      // 避免无谓的 O((N+M)*D) 计算与 trace 内存。
+      if (Math.abs(midA.length - midB.length) > DIFF_MAX_LINES) {
+        const d = computeLineDiff(oldText, newText)
+        return { ok: true, kind, file: fp, fallback: true, added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
+      }
+      if (midA.length + midB.length <= DIFF_BUDGET_LINES) {
+        const ops = myersOps(midA, midB)
+        let added = 0
+        let removed = 0
+        for (const op of ops) {
+          if (op.t === 'a') added++
+          else if (op.t === 'd') removed++
+        }
+        if (added + removed <= DIFF_MAX_LINES) {
+          const out = []
+          pushCtxRun(out, oldLines.slice(0, p), 1, 1)
+          for (const op of ops) out.push({ t: op.t, o: op.o === null ? null : op.o + p, n: op.n === null ? null : op.n + p, s: op.s })
+          let curO = p + 1
+          let curN = p + 1
+          for (const op of ops) {
+            if (op.o !== null) curO++
+            if (op.n !== null) curN++
+          }
+          pushCtxRun(out, oldLines.slice(oldLines.length - s), curO, curN)
+          return { ok: true, kind, file: fp, added, removed, ops: out, truncated: 0 }
+        }
+      }
+      const d = computeLineDiff(oldText, newText)
+      return { ok: true, kind, file: fp, fallback: true, added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
+    }
+    // 新文件（write 到不存在路径）：全部为新增行
+    function newFilePayload(fp, content) {
+      const total = splitDiffLines(content).length
+      if (total > DIFF_MAX_LINES) {
+        const lines = splitDiffLines(content).slice(0, DIFF_MAX_LINES).map((l, i) => '+ ' + String(i + 1).padStart(4, ' ') + ' ' + l)
+        return { ok: true, kind: 'new', file: fp, fallback: true, added: total, removed: 0, lines, truncated: total - lines.length }
+      }
+      const ops = splitDiffLines(content).map((s, i) => ({ t: 'a', o: null, n: i + 1, s }))
+      return { ok: true, kind: 'new', file: fp, added: total, removed: 0, ops, truncated: 0 }
+    }
+    // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
+    async function buildFileDiffData(entry, fsService) {
+      const name = entry.tool
+      const args = parseEntryArgs(entry)
+      const fp = pathArg(args)
+      if (FILE_READ_TOOLS[name]) {
+        if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
+        try {
+          const target = await fsService.resolve(fp)
+          const info = await fsService.stat(target)
+          if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
+          if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+          if (info.size !== undefined && info.size > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法预览', 'File too large to preview') }
+          const text = await fsService.readText(target)
+          if (text.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法预览', 'File too large to preview') }
+          return { ok: true, kind: 'read', file: fp, text }
+        } catch (e) {
+          // 注意：不能与字符串直接拼接（bi() 返回 {zh,en} 对象，+ 会得到 "[object Object]"）；
+          // 返回双语对象，由路由侧 L(r.error, lang) 按语言取值。
+          const emsg = (e && e.message ? e.message : String(e))
+          return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+        }
+      }
+      if (FILE_WRITE_TOOLS[name]) {
+        if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
         if (name === 'edit') {
-          const fp = pathArg(args)
-          const oldText = args && typeof args.old_string === 'string' ? args.old_string : ''
-          const newText = args && typeof args.new_string === 'string' ? args.new_string : ''
-          if (!fp || oldText.length + newText.length > DIFF_MAX_CHARS) return null
-          const d = computeLineDiff(oldText, newText)
-          return { file: fp, kind: 'modified', added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
+          const oldText = typeof args.old_string === 'string' ? args.old_string : ''
+          const newText = typeof args.new_string === 'string' ? args.new_string : ''
+          if (oldText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容过大，无法生成对比', 'Content too large to compare') }
+          return diffPayloadOrFallback(fp, oldText, newText, 'modified')
         }
-        if (name === 'write') {
-          const fp = pathArg(args)
-          const content = args && typeof args.content === 'string' ? args.content : ''
-          if (!fp || content.length > DIFF_MAX_CHARS) return null
-          return fsService.resolve(fp).then((target) => fsService.stat(target)).then((info) => {
-            if (info === undefined) {
-              // 新文件：全部为新增行（带行号）
-              const total = splitDiffLines(content).length
-              const lines = splitDiffLines(content).slice(0, DIFF_MAX_LINES).map((l, i) => '+ ' + String(i + 1).padStart(4, ' ') + ' ' + l)
-              return { file: fp, kind: 'new', added: total, removed: 0, lines, truncated: Math.max(0, total - lines.length) }
-            }
-            return fsService.readText(target).then((oldText) => {
-              const d = computeLineDiff(oldText, content)
-              return { file: fp, kind: 'modified', added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
-            })
-          }).catch(() => null)
+        const content = typeof args.content === 'string' ? args.content : ''
+        if (!content || content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容缺失或过大', 'Content missing or too large') }
+        try {
+          const target = await fsService.resolve(fp)
+          const info = await fsService.stat(target)
+          if (info === undefined) return newFilePayload(fp, content)
+          if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+          if (info.size !== undefined && info.size + content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          const oldText = await fsService.readText(target)
+          if (oldText.length + content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          return diffPayloadOrFallback(fp, oldText, content, 'modified')
+        } catch (e) {
+          // 注意：不能与字符串直接拼接（bi() 返回 {zh,en} 对象，+ 会得到 "[object Object]"）；
+          // 返回双语对象，由路由侧 L(r.error, lang) 按语言取值。
+          const emsg = (e && e.message ? e.message : String(e))
+          return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
         }
-      } catch (e) {}
+      }
       return null
     }
 
@@ -709,11 +863,13 @@ export default {
     function humanArgsPreview(name, args) {
       const lang = uiLang
       const lines = []
-      const push = (label, value) => {
+      const push = (label, value, extra) => {
         if (value === undefined || value === null) return
         const s = String(value)
         if (!s) return
-        lines.push({ label, value: s.length > 200 ? s.slice(0, 200) + '…' : s })
+        const e = { label, value: s.length > 200 ? s.slice(0, 200) + '…' : s }
+        if (extra) { for (const k of Object.keys(extra)) e[k] = extra[k] }
+        lines.push(e)
       }
       const t = (zh, en) => (lang === 'en' ? en : zh)
       try {
@@ -721,13 +877,15 @@ export default {
         const fp = typeof args.file_path === 'string' ? args.file_path : null
         if (FILE_READ_TOOLS[name]) {
           const target = fp || args.path || ''
-          push(name === 'read_image' ? t('读取图片', 'Read image') : t('读取', 'Read'), target ? baseName(target) : '')
-          if (fp) push(t('路径', 'Path'), fp)
+          // 图片无法按文本预览，路径不做可点击（其余 read 可点击打开内容预览）
+          const clickable = name === 'read_image' ? undefined : { path: fp }
+          push(name === 'read_image' ? t('读取图片', 'Read image') : t('读取', 'Read'), target ? baseName(target) : '', fp ? clickable : undefined)
+          if (fp) push(t('路径', 'Path'), fp, clickable)
           if (args.offset !== undefined) push(t('偏移', 'Offset'), args.offset)
           if (args.limit !== undefined) push(t('行数', 'Lines'), args.limit)
         } else if (FILE_WRITE_TOOLS[name]) {
-          push(name === 'edit' ? t('修改', 'Edit') : t('写入', 'Write'), fp ? baseName(fp) : '')
-          if (fp) push(t('路径', 'Path'), fp)
+          push(name === 'edit' ? t('修改', 'Edit') : t('写入', 'Write'), fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
+          if (fp) push(t('路径', 'Path'), fp, { path: fp })
           const content = typeof args.content === 'string' ? args.content : (typeof args.new_string === 'string' ? args.new_string : '')
           if (content) push(t('内容', 'Content'), content.length > 140 ? content.slice(0, 140) + '…（共 ' + content.length + ' 字符）' : content)
         } else if (COMMAND_TOOLS[name]) {
@@ -970,7 +1128,8 @@ export default {
           ts: Date.now(),
           candidates: [],
           argLines: humanArgsPreview(exec.name, exec.arguments),
-          diff: null,
+          // 编辑/写入且有文件路径 → 弹窗「详情」默认展开、按需取对比数据
+          hasDiff: !!FILE_WRITE_TOOLS[exec.name] && !!pathArg(exec.arguments),
           resolve,
           cleanup() {
             if (onAbort && exec.signal) { try { exec.signal.removeEventListener('abort', onAbort) } catch (e) {} }
@@ -981,12 +1140,6 @@ export default {
         entry.candidates = buildCandidates(entry)
         pendingApprovals.set(id, entry)
         broadcast({ type: 'pending' })
-        // 编辑/写入：异步补充 diff 详情（软失败，不阻塞审批）
-        if (FILE_WRITE_TOOLS[exec.name]) {
-          Promise.resolve(buildFileDiff(exec.name, exec.arguments, fs)).then((diff) => {
-            if (diff && !settled) { entry.diff = diff; broadcast({ type: 'pending' }) }
-          }).catch(() => {})
-        }
         // 永不超时：审批完全由用户在弹窗中决定，不会自动拒绝。
         // 唯一结束路径：用户允许/拒绝，或执行被取消（abort，见下）。
         onAbort = () => {
@@ -1264,9 +1417,23 @@ export default {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
             const reason = typeof e.reason === 'string' ? e.reason : L(e.reason, lang)
             const intent = typeof e.intent === 'string' ? e.intent : L(e.intent, lang)
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], diff: e.diff || null })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true })
           }
           return json(res, out)
+        }
+        if (pathname === '/permgate/file-diff' && method === 'POST') {
+          const entry = pendingApprovals.get(a.id)
+          if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
+          try {
+            const r = await buildFileDiffData(entry, fs)
+            if (!r) return json(res, { ok: false, error: lang === 'en' ? 'Cannot build comparison' : '无法生成对比' })
+            if (!r.ok) return json(res, { ok: false, error: typeof r.error === 'string' ? r.error : L(r.error, lang) })
+            return json(res, r)
+          } catch (e) {
+            // 记录真实错误，避免生产故障只以泛化文案呈现而不可见
+            console.error('[permgate] file-diff error:', e)
+            return json(res, { ok: false, error: lang === 'en' ? 'Cannot build comparison' : '无法生成对比' })
+          }
         }
         if (pathname === '/permgate/status' && method === 'GET') {
           await init(exec)
@@ -1415,6 +1582,38 @@ export default {
             return json(res, { ok: true, path: winPath, status: statusView(exec) })
           } catch (e) {
             return json(res, { error: '打开配置文件失败: ' + ((e && e.message) || String(e)) })
+          }
+        }
+        // 打开被对比的文件：用系统默认关联的编辑器打开（同 open-config 的做法）。
+        // 安全约束：仅文件读写工具（read/write/edit）的待审批 entry 可触发，且仅允许
+        // 文本/文档类扩展名——`cmd /c start` 对 .exe/.bat/.ps1 等执行的是"运行"而非"编辑"。
+        if (pathname === '/permgate/open-file' && method === 'POST') {
+          const entry = pendingApprovals.get(a.id)
+          if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
+          if (!FILE_READ_TOOLS[entry.tool] && !FILE_WRITE_TOOLS[entry.tool]) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported tool for opening file' : '该审批不支持打开文件' })
+          const args = parseEntryArgs(entry)
+          const fp = pathArg(args)
+          if (!fp) return json(res, { ok: false, error: lang === 'en' ? 'Missing file path' : '缺少文件路径' })
+          // 仅允许文本/文档类扩展名（点开头文件如 .gitignore 视为无扩展名，Windows 不会执行）
+          const openBase = String(fp).split(/[\\/]/).pop() || ''
+          const openExt = openBase.indexOf('.') > 0 ? openBase.slice(openBase.lastIndexOf('.') + 1).toLowerCase() : ''
+          if (openExt && !OPEN_TEXT_EXTS.has(openExt)) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported file type: ' + openExt : '不支持打开该文件类型: ' + openExt })
+          const sub = ctx.get('subprocess')
+          if (!sub) return json(res, { ok: false, error: 'subprocess 服务不可用' })
+          try {
+            const t = await fs.resolve(fp)
+            const winPath = fs.processPath ? fs.processPath(t) : String(t).replace(/\//g, '\\')
+            const exe = await sub.resolveExecutable('cmd')
+            const handle = sub.spawn({
+              argv: [exe, '/c', 'start', '', winPath],
+              cwd: String(root || 'C:\\').replace(/\//g, '\\'),
+              stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
+              graceMs: 5000,
+            })
+            await handle.done
+            return json(res, { ok: true, path: winPath })
+          } catch (e) {
+            return json(res, { ok: false, error: lang === 'en' ? 'Cannot open file: ' + ((e && e.message) || String(e)) : '打开文件失败: ' + ((e && e.message) || String(e)) })
           }
         }
         return json(res, { error: 'not found: ' + pathname }, 404)

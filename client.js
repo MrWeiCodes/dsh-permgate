@@ -8,11 +8,15 @@ window.__ModuleLoader__.load({
 
 		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
 
-		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; } .pg-diff { margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 6px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg-diff-file { padding: 5px 8px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: rgba(128,128,128,0.95); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); word-break: break-all; } .pg-diff-body { margin: 0; padding: 6px 8px; max-height: 240px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; } .pg-diff-add { color: #2e7d32; } .pg-diff-del { color: #c62828; } .pg-diff-ctx { color: rgba(128,128,128,0.7); } .pg-diff-more { color: rgba(128,128,128,0.6); font-style: italic; } .pg-diff-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: rgba(128,128,128,0.8); }';
+		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; }';
+
+		// dsh-file-review 风格 unified diff + 右侧对比抽屉（浅/深色主题 token 跟随）
+		const DIFF2_CSS = '.pg2-block { position: relative; margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg2-header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; } .pg2-status { color: var(--dsw-alias-state-success-primary, #1a7f37); font-weight: 700; } .pg2-status-read { color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 700; } .pg2-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; } .pg2-path:hover { color: var(--dsw-alias-brand-primary, #1f6feb); text-decoration: underline; } .pg2-added { margin-left: auto; color: var(--dsw-alias-state-success-primary, #1a7f37); } .pg2-removed { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-copy { border: 0; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-copy:hover { color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-body { overflow: auto; max-height: 240px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5; } .pg2-row { display: grid; grid-template-columns: 40px 40px 22px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-old, .pg2-new { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-sign { text-align: center; user-select: none; } .pg2-text { padding-right: 12px; } .pg2-del { color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.10); } .pg2-add { color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.10); } .pg2-ctx { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap { display: block; width: 100%; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.07)); color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: ui-monospace, Consolas, monospace; text-align: left; padding: 4px 8px 4px 104px; } .pg2-gap:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap-more { padding: 4px 8px 4px 104px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; } .pg2-fadd { color: #2e7d32; } .pg2-fdel { color: #c62828; } .pg2-fctx { color: rgba(128,128,128,0.7); } .pg2-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-size: 11px; color: rgba(128,128,128,0.8); } .pg2-rrow { display: grid; grid-template-columns: 40px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-rnum { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-load { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-err { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-state-error-primary, #cf222e); } .pg-path-link { color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; word-break: break-all; flex: 1; } .pg-path-link:hover { text-decoration: underline; } .pg2-drawer { position: fixed; top: 0; right: 0; bottom: 0; left: auto; width: 42vw; min-width: 480px; max-width: 96vw; z-index: 10000; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border-left: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); box-shadow: -8px 0 28px rgba(0,0,0,0.25); display: flex; flex-direction: column; } .pg2-drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); min-height: 44px; } .pg2-drawer-file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; flex: 1; min-width: 0; } .pg2-drawer-close { border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; } .pg2-drawer-close:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-drawer-body { flex: 1; overflow: hidden; padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-block { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-body { flex: 1; overflow: auto; max-height: none; min-height: 0; } .pg2-drawer-body .pg2-load, .pg2-drawer-body .pg2-err { flex: 1; display: flex; align-items: center; justify-content: center; } .pg2-drawer-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; } .pg2-drawer-resize:hover, .pg2-drawer-resize.drag { background: rgba(31, 111, 235, 0.18); } .pg2-drawer-open { border: 1px solid var(--dsw-alias-brand-primary, #1f6feb); background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 2px 10px; height: 26px; cursor: pointer; font-size: 12px; flex: 0 0 auto; } .pg2-drawer-open:hover { background: rgba(31, 111, 235, 0.10); } .pg2-edit-msg { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-right: 6px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pg2-edit-msg.err { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-expand { border: 0; background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-expand:hover { text-decoration: underline; }';
 
 		const ROUTES = {
 			'permgate:status': ['GET', '/permgate/status'],
 			'permgate:pending': ['GET', '/permgate/pending'],
+			'permgate:file-diff': ['POST', '/permgate/file-diff'],
 			'permgate:decide': ['POST', '/permgate/decide'],
 			'permgate:set-sandbox': ['POST', '/permgate/set-sandbox'],
 			'permgate:set-categories': ['POST', '/permgate/set-categories'],
@@ -24,6 +28,7 @@ window.__ModuleLoader__.load({
 			'permgate:remove-rule': ['POST', '/permgate/remove-rule'],
 			'permgate:reload': ['POST', '/permgate/reload'],
 			'permgate:open-config': ['POST', '/permgate/open-config'],
+			'permgate:open-file': ['POST', '/permgate/open-file'],
 		};
 		function call(method, args) {
 			const entry = ROUTES[method] || ['GET', '/permgate/status'];
@@ -413,6 +418,9 @@ window.__ModuleLoader__.load({
 		const EXC_CATS = ['directory', 'command', 'read', 'edit'];
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
+		// 文件对比缓存：按审批 id 缓存 /permgate/file-diff 结果（弹窗详情与右侧抽屉共用）
+		const diffCache = new Map();
+		const diffFetching = new Set();
 		const ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
 		const MODES = ['ask', 'allow', 'deny'];
 		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888' };
@@ -439,7 +447,21 @@ window.__ModuleLoader__.load({
 				'app.diffNew': '新增',
 				'app.diffMod': '修改',
 				'app.diffMore': '其余 {n} 行',
-				'app.diffFile': '文件',
+				'app.diffLoading': '加载中…',
+				'app.diffErr': '无法生成对比',
+				'app.diffGapShow': '显示 {n} 行未更改',
+				'app.diffGapHide': '隐藏 {n} 行',
+				'app.diffGapMore': '… {n} 行未更改',
+				'app.diffCopy': '复制',
+				'app.diffCopied': '已复制',
+				'app.diffExpand': '展开',
+				'app.diffCollapse': '收缩',
+				'app.diffRead': '读取',
+				'app.diffLines': '{n} 行',
+				'app.diffClose': '关闭',
+				'app.openFile': '打开文件',
+				'app.editOpened': '已用默认编辑器打开',
+				'app.diffResize': '拖动调整宽度',
 				'dock.title': '● 权限网关',
 				'settings.title': '权限网关',
 				'dock.refresh': '刷新',
@@ -550,7 +572,21 @@ window.__ModuleLoader__.load({
 				'app.diffNew': 'New file',
 				'app.diffMod': 'Modified',
 				'app.diffMore': '{n} more lines',
-				'app.diffFile': 'file',
+				'app.diffLoading': 'Loading…',
+				'app.diffErr': 'Cannot build comparison',
+				'app.diffGapShow': 'Show {n} unchanged lines',
+				'app.diffGapHide': 'Hide {n} lines',
+				'app.diffGapMore': '… {n} unchanged lines',
+				'app.diffCopy': 'Copy',
+				'app.diffCopied': 'Copied',
+				'app.diffExpand': 'Expand',
+				'app.diffCollapse': 'Collapse',
+				'app.diffRead': 'Read',
+				'app.diffLines': '{n} lines',
+				'app.diffClose': 'Close',
+				'app.openFile': 'Open File',
+				'app.editOpened': 'Opened with default editor',
+				'app.diffResize': 'Drag to resize',
 				'dock.title': '● Permission Gate',
 				'settings.title': 'Permissions',
 				'dock.refresh': 'Refresh',
@@ -659,7 +695,7 @@ window.__ModuleLoader__.load({
 		const small = { fontSize: 12, color: 'rgba(128,128,128,0.95)', marginRight: 6 };
 		const h = () => ({ fontSize: 13, fontWeight: 600, margin: '0 0 8px' });
 
-		function ApprovalOverlay() {
+		function ApprovalOverlay(props) {
 			const [pending, setPending] = React.useState([]);
 			const [busyId, setBusyId] = React.useState(null);
 			const [sel, setSel] = React.useState({});
@@ -667,6 +703,7 @@ window.__ModuleLoader__.load({
 			const [openArgs, setOpenArgs] = React.useState({});
 			const [denyText, setDenyText] = React.useState({});
 			const [denyMode, setDenyMode] = React.useState({});
+			const [, setTick] = React.useState(0);
 			useLocaleTick();
 			const poll = () => {
 				call('permgate:pending', {}).then((r) => setPending(Array.isArray(r) ? r : [])).catch(() => {});
@@ -678,6 +715,29 @@ window.__ModuleLoader__.load({
 				});
 				return () => off();
 			}, []);
+			// 懒加载对比数据：详情默认展开的编辑/写入审批按需拉取（缓存按审批 id 复用）。
+			// 注意：必须在 `if (!pending.length) return null` 提前返回之前声明（hooks 顺序约束）。
+			React.useEffect(() => {
+				// 缓存随待审批池淘汰：已结算/已消失的审批 id 立即清理，避免长期会话无界增长
+				const aliveIds = new Set(pending.map((p) => p.id));
+				for (const key of diffCache.keys()) if (!aliveIds.has(key)) diffCache.delete(key);
+				for (const key of diffFetching) if (!aliveIds.has(key)) diffFetching.delete(key);
+				for (const p of pending) {
+					if (!p.hasDiff || diffCache.has(p.id) || diffFetching.has(p.id)) continue
+					const open = openDetail[p.id] === undefined ? true : openDetail[p.id] === true
+					if (!open) continue
+					diffFetching.add(p.id)
+					call('permgate:file-diff', { id: p.id }).then((r) => {
+						diffCache.set(p.id, (r && typeof r === 'object') ? r : { ok: false, error: '' })
+						diffFetching.delete(p.id)
+						setTick((v) => v + 1)
+					}).catch(() => {
+						diffCache.set(p.id, { ok: false, error: '' })
+						diffFetching.delete(p.id)
+						setTick((v) => v + 1)
+					})
+				}
+			});
 			const decide = (id, action, rules, reason) => {
 				setBusyId(id);
 				call('permgate:decide', { id, action, rules, reason: reason || undefined }).then(poll).catch(() => {}).then(() => setBusyId(null));
@@ -706,15 +766,20 @@ window.__ModuleLoader__.load({
 				onClick: () => pick(c.id, v),
 			}, label);
 			// 编辑/写入审批（有 diff）：详情默认展开、参数默认收起；无 diff 时参数照常显示
-			const detailOpen = (p) => (openDetail[p.id] === undefined ? !!p.diff : openDetail[p.id]);
-			const argsOpen = (p) => (openArgs[p.id] === undefined ? !p.diff : openArgs[p.id]);
+			const detailOpen = (p) => (openDetail[p.id] === undefined ? !!p.hasDiff : openDetail[p.id]);
+			const argsOpen = (p) => (openArgs[p.id] === undefined ? !p.hasDiff : openArgs[p.id]);
 			const toggle = (map, setMap, p, v) => setMap(Object.assign({}, map, { [p.id]: v }));
+			// 点击文件名 → 打开右侧对比抽屉（父组件 OverlayRoot 持有 pin 状态）
+			const openFile = (p, file) => {
+				if (props && typeof props.onOpenFile === 'function') props.onOpenFile(p.id, file);
+			};
 			const argsBox = (p) => React.createElement('div', { className: 'pg-args' },
 				React.createElement('span', { className: 'pg-args-tag' }, T('app.args')),
 				(p.argLines && p.argLines.length)
 					? p.argLines.map((l, i) => React.createElement('div', { key: i, className: 'pg-args-row' },
 						React.createElement('span', { className: 'pg-args-label' }, l.label + '：'),
-						React.createElement('span', { className: 'pg-args-val' }, l.value),
+						l.path ? React.createElement('span', { className: 'pg-path-link', title: l.path, onClick: () => openFile(p, l.path) }, l.value)
+							: React.createElement('span', { className: 'pg-args-val' }, l.value),
 					))
 					: React.createElement('span', null, p.args),
 			);
@@ -727,7 +792,7 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { className: 'pg-intent-tag' }, T('app.intent')),
 						React.createElement('span', null, p.intent),
 					) : null,
-					(p.args || (p.argLines && p.argLines.length)) ? (p.diff
+					(p.args || (p.argLines && p.argLines.length)) ? (p.hasDiff
 						? React.createElement('div', null,
 							React.createElement('button', { className: 'pg-link', onClick: () => toggle(openArgs, setOpenArgs, p, !argsOpen(p)) },
 								(argsOpen(p) ? '▾ ' : '▸ ') + T('app.args'),
@@ -735,18 +800,18 @@ window.__ModuleLoader__.load({
 							argsOpen(p) ? argsBox(p) : null,
 						)
 						: argsBox(p)) : null,
-					p.diff ? React.createElement('div', null,
+					p.hasDiff ? React.createElement('div', null,
 						React.createElement('button', { className: 'pg-link', onClick: () => toggle(openDetail, setOpenDetail, p, !detailOpen(p)) },
 							(detailOpen(p) ? '▾ ' : '▸ ') + T('app.detail'),
 						),
-						detailOpen(p) ? React.createElement('div', { className: 'pg-diff' },
-							React.createElement('div', { className: 'pg-diff-file' }, (p.diff.kind === 'new' ? T('app.diffNew') : T('app.diffMod')) + '：' + p.diff.file),
-							React.createElement('div', { className: 'pg-diff-body' },
-								p.diff.lines.map((l, i) => React.createElement('div', { key: i, className: l[0] === '+' ? 'pg-diff-add' : l[0] === '-' ? 'pg-diff-del' : 'pg-diff-ctx' }, l)),
-								p.diff.truncated > 0 ? React.createElement('div', { className: 'pg-diff-more' }, '… ' + T('app.diffMore').replace('{n}', String(p.diff.truncated))) : null,
-							),
-							React.createElement('div', { className: 'pg-diff-foot' }, '└ +' + p.diff.added + ' -' + p.diff.removed + ' · 1 ' + T('app.diffFile')),
-						) : null,
+						detailOpen(p) ? (() => {
+							const c = diffCache.get(p.id)
+							if (!c) return React.createElement('div', { className: 'pg2-load' }, T('app.diffLoading'))
+							if (!c.ok) return React.createElement('div', { className: 'pg2-err' }, (c.error || T('app.diffErr')))
+							return c.kind === 'read'
+								? React.createElement(ReadBlock, { data: c, onOpenFile: (f) => openFile(p, f) })
+								: React.createElement(DiffBlock, { data: c, onOpenFile: (f) => openFile(p, f) })
+						})() : null,
 					) : null,
 					(p.candidates || []).length ? React.createElement('div', null,
 						React.createElement('div', { className: 'pg-cand-head' }, T('app.cand.head')),
@@ -774,6 +839,233 @@ window.__ModuleLoader__.load({
 						React.createElement('button', { className: 'pg-action pg-action-allow', disabled: busyId === p.id, onClick: () => submit(p, 'allow') }, T('app.allow')),
 					),
 				)),
+			);
+		}
+
+		// ── 文件对比（dsh-file-review 风格 unified diff + 右侧抽屉）─────────
+		// 弹窗内联「详情」与右侧抽屉共用 DiffBlock/ReadBlock；数据来自
+		// /permgate/file-diff（按审批 id 取，diffCache 缓存复用）。
+		function diffOpsText(file, ops) {
+			const out = [file];
+			for (const op of ops || []) {
+				if (op.t === 'g') {
+					if (op.lines) { for (const l of op.lines) out.push(' ' + l.s) }
+					else out.push('…');
+				} else if (op.t === 'a') out.push('+ ' + op.s);
+				else if (op.t === 'd') out.push('- ' + op.s);
+				else out.push(' ' + op.s);
+			}
+			return out.join('\n');
+		}
+		function DiffBlock({ data, onOpenFile, onCollapse }) {
+			const [copied, setCopied] = React.useState(false);
+			const [gaps, setGaps] = React.useState({});
+			useLocaleTick();
+			const onCopy = () => {
+				if (copied) return;
+				const text = data.fallback ? (data.lines || []).join('\n') : diffOpsText(data.file, data.ops || []);
+				if (typeof navigator !== 'undefined' && navigator.clipboard) {
+					navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1000) }).catch(() => {});
+				}
+			};
+			const kindLabel = data.kind === 'new' ? T('app.diffNew') : T('app.diffMod');
+			const badge = data.kind === 'new' ? '+' : 'M';
+			const copyBtn = React.createElement('button', { className: 'pg2-copy', onClick: onCopy }, copied ? T('app.diffCopied') : T('app.diffCopy'));
+			// 「展开」按钮：仅弹窗内联上下文显示（onOpenFile 存在时），点击打开右侧栏面板
+			const expandBtn = (typeof onOpenFile === 'function')
+				? React.createElement('button', { className: 'pg2-expand', onClick: () => onOpenFile(data.file), title: T('app.diffExpand') }, T('app.diffExpand'))
+				: null;
+			// 「收缩」按钮：仅在侧边栏面板内显示（onCollapse 存在时），放在复制按钮旁边，点击回到权限弹窗
+			const collapseBtn = (typeof onCollapse === 'function')
+				? React.createElement('button', { className: 'pg2-expand', onClick: onCollapse, title: T('app.diffCollapse') }, T('app.diffCollapse'))
+				: null;
+			if (data.fallback) {
+				return React.createElement('div', { className: 'pg2-block' },
+					React.createElement('div', { className: 'pg2-header' },
+						React.createElement('span', { className: 'pg2-status', title: kindLabel }, badge),
+						React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+						React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
+						React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
+						copyBtn,
+						expandBtn,
+						collapseBtn,
+					),
+					React.createElement('div', { className: 'pg2-body' },
+						(data.lines || []).map((l, i) => React.createElement('div', { key: i, className: l[0] === '+' ? 'pg2-fadd' : l[0] === '-' ? 'pg2-fdel' : 'pg2-fctx' }, l)),
+					),
+					data.truncated > 0 ? React.createElement('div', { className: 'pg2-foot' }, '… ' + T('app.diffMore').replace('{n}', String(data.truncated))) : null,
+				);
+			}
+			const rows = [];
+			let gi = 0;
+			let ri = 0;
+			for (const op of data.ops || []) {
+				if (op.t === 'g') {
+					const id = 'g' + (gi++);
+					const expanded = !!gaps[id];
+					if (op.lines) {
+						rows.push(React.createElement('button', { key: 'r' + (ri++), className: 'pg2-gap', onClick: () => setGaps(Object.assign({}, gaps, { [id]: !expanded })) },
+							(expanded ? '▾ ' : '↕ ') + (expanded ? T('app.diffGapHide') : T('app.diffGapShow')).replace('{n}', String(op.c)),
+						));
+						if (expanded) {
+							for (const l of op.lines) {
+								rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-row pg2-ctx' },
+									React.createElement('span', { className: 'pg2-old' }, String(l.o)),
+									React.createElement('span', { className: 'pg2-new' }, String(l.n)),
+									React.createElement('span', { className: 'pg2-sign' }, ' '),
+									React.createElement('span', { className: 'pg2-text' }, l.s),
+								));
+							}
+						}
+					} else {
+						rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-gap-more' }, T('app.diffGapMore').replace('{n}', String(op.c))));
+					}
+				} else {
+					const cls = op.t === 'a' ? 'pg2-add' : op.t === 'd' ? 'pg2-del' : 'pg2-ctx';
+					const sign = op.t === 'a' ? '+' : op.t === 'd' ? '-' : ' ';
+					rows.push(React.createElement('div', { key: 'r' + (ri++), className: 'pg2-row ' + cls },
+						React.createElement('span', { className: 'pg2-old' }, op.o === null ? '' : String(op.o)),
+						React.createElement('span', { className: 'pg2-new' }, op.n === null ? '' : String(op.n)),
+						React.createElement('span', { className: 'pg2-sign' }, sign),
+						React.createElement('span', { className: 'pg2-text' }, op.s),
+					));
+				}
+			}
+			return React.createElement('div', { className: 'pg2-block' },
+				React.createElement('div', { className: 'pg2-header' },
+					React.createElement('span', { className: 'pg2-status', title: kindLabel }, badge),
+					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+					React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
+					React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
+					copyBtn,
+					expandBtn,
+					collapseBtn,
+				),
+				React.createElement('div', { className: 'pg2-body' }, rows),
+			);
+		}
+		function ReadBlock({ data, onOpenFile, onCollapse }) {
+			const [copied, setCopied] = React.useState(false);
+			useLocaleTick();
+			const text = data.text || '';
+			const body = text.endsWith('\n') ? text.slice(0, -1) : text;
+			const lines = body === '' ? [] : body.split('\n');
+			const onCopy = () => {
+				if (copied) return;
+				if (typeof navigator !== 'undefined' && navigator.clipboard) {
+					navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1000) }).catch(() => {});
+				}
+			};
+			return React.createElement('div', { className: 'pg2-block' },
+				React.createElement('div', { className: 'pg2-header' },
+					React.createElement('span', { className: 'pg2-status-read', title: T('app.diffRead') }, 'R'),
+					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+					React.createElement('span', { className: 'pg2-added' }, T('app.diffLines').replace('{n}', String(lines.length))),
+					React.createElement('button', { className: 'pg2-copy', onClick: onCopy }, copied ? T('app.diffCopied') : T('app.diffCopy')),
+					(typeof onOpenFile === 'function')
+						? React.createElement('button', { className: 'pg2-expand', onClick: () => onOpenFile(data.file), title: T('app.diffExpand') }, T('app.diffExpand'))
+						: null,
+					(typeof onCollapse === 'function')
+						? React.createElement('button', { className: 'pg2-expand', onClick: onCollapse, title: T('app.diffCollapse') }, T('app.diffCollapse'))
+						: null,
+				),
+				React.createElement('div', { className: 'pg2-body' },
+					lines.map((l, i) => React.createElement('div', { key: i, className: 'pg2-rrow' },
+						React.createElement('span', { className: 'pg2-rnum' }, String(i + 1)),
+						React.createElement('span', { className: 'pg2-text' }, l),
+					)),
+				),
+			);
+		}
+		function CompareDrawer({ pin, onClose }) {
+			const [data, setData] = React.useState(null);
+			const [err, setErr] = React.useState('');
+			const [editMsg, setEditMsg] = React.useState(null);
+			const [width, setWidth] = React.useState(null);
+			useLocaleTick();
+			React.useEffect(() => {
+				setData(null);
+				setErr('');
+				// 与弹窗内联详情共用 diffCache：命中直接渲染（含失败态），未命中才请求并回写
+				const cached = diffCache.get(pin.id);
+				if (cached) {
+					if (cached.ok) setData(cached);
+					else setErr((cached.error) ? cached.error : T('app.diffErr'));
+					return;
+				}
+				let alive = true;
+				call('permgate:file-diff', { id: pin.id }).then((r) => {
+					if (!alive) return;
+					const norm = (r && typeof r === 'object') ? r : { ok: false, error: '' };
+					diffCache.set(pin.id, norm);
+					if (norm.ok) setData(norm);
+					else setErr((norm.error) ? norm.error : T('app.diffErr'));
+				}).catch(() => { if (alive) setErr(T('app.diffErr')) });
+				return () => { alive = false };
+			}, [pin.id]);
+			// 左边缘拖动调整侧边栏宽度（面板固定在右侧，向左拖变宽）
+			const onResizeStart = (e) => {
+				if (e && e.preventDefault) e.preventDefault();
+				const startX = e.clientX;
+				const el = e.currentTarget ? e.currentTarget.parentElement : null;
+				const startW = el ? el.getBoundingClientRect().width : (width || 600);
+				let active = true;
+				const onMove = (ev) => {
+					if (!active) return;
+					const maxW = (typeof window !== 'undefined' ? window.innerWidth : 1200) - 80;
+					setWidth(Math.round(Math.min(Math.max(startW + (startX - ev.clientX), 480), maxW)));
+				};
+				const onUp = () => {
+					active = false;
+					if (typeof document !== 'undefined') {
+						document.removeEventListener('mousemove', onMove);
+						document.removeEventListener('mouseup', onUp);
+						document.body.style.cursor = '';
+					}
+				};
+				if (typeof document !== 'undefined') {
+					document.body.style.cursor = 'col-resize';
+					document.addEventListener('mousemove', onMove);
+					document.addEventListener('mouseup', onUp);
+				}
+			};
+			const onEdit = () => {
+				setEditMsg(null);
+				call('permgate:open-file', { id: pin.id }).then((r) => {
+					setEditMsg(r && r.ok ? { ok: true, text: T('app.editOpened') } : { ok: false, text: (r && r.error) || T('app.diffErr') });
+					setTimeout(() => setEditMsg(null), 2500);
+				}).catch(() => {
+					setEditMsg({ ok: false, text: T('app.diffErr') });
+					setTimeout(() => setEditMsg(null), 2500);
+				});
+			};
+			let body;
+			if (data) {
+				body = data.kind === 'read'
+					? React.createElement(ReadBlock, { data, onOpenFile: null, onCollapse: onClose })
+					: React.createElement(DiffBlock, { data, onOpenFile: null, onCollapse: onClose });
+			} else if (err) {
+				body = React.createElement('div', { className: 'pg2-err' }, err);
+			} else {
+				body = React.createElement('div', { className: 'pg2-load' }, T('app.diffLoading'));
+			}
+			return React.createElement('div', { className: 'pg2-drawer', style: width ? { width: width + 'px' } : undefined },
+				React.createElement('div', { className: 'pg2-drawer-resize', onMouseDown: onResizeStart, title: T('app.diffResize') }),
+				React.createElement('div', { className: 'pg2-drawer-head' },
+					React.createElement('span', { className: 'pg2-drawer-file', title: pin.file }, pin.file),
+					editMsg ? React.createElement('span', { className: 'pg2-edit-msg' + (editMsg.ok ? '' : ' err') }, editMsg.text) : null,
+					React.createElement('button', { className: 'pg2-drawer-open', onClick: onEdit, title: T('app.openFile') }, T('app.openFile')),
+					React.createElement('button', { className: 'pg2-drawer-close', onClick: onClose, title: T('app.diffClose') }, '✕'),
+				),
+				React.createElement('div', { className: 'pg2-drawer-body' }, body),
+			);
+		}
+		// shell.overlay 入口：审批弹窗 + 右侧对比抽屉共享 pin 状态
+		function OverlayRoot() {
+			const [pin, setPin] = React.useState(null);
+			return React.createElement('div', null,
+				React.createElement(ApprovalOverlay, { onOpenFile: (id, file) => setPin({ id, file }) }),
+				pin ? React.createElement(CompareDrawer, { pin, onClose: () => setPin(null) }) : null,
 			);
 		}
 
@@ -1126,6 +1418,14 @@ window.__ModuleLoader__.load({
 				document.head.appendChild(tag);
 				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
 			}
+			if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="dsh-permgate-diff2"]') === null) {
+				const tag = document.createElement('style');
+				tag.dataset.plugin = 'dsh-permgate';
+				tag.dataset.pluginCss = 'dsh-permgate-diff2';
+				tag.textContent = DIFF2_CSS;
+				document.head.appendChild(tag);
+				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
+			}
 			// 权限选择器兼容层：图标徽标为纯 CSS（按 aria-label 选择器，零 JS 依赖，
 			// 跟随语言自动显示）；预设名文本交换由 MutationObserver 驱动（childList +
 			// characterData + attributes 全覆盖）+ locale 订阅，无定时器。安装仅在
@@ -1165,7 +1465,7 @@ window.__ModuleLoader__.load({
 			));
 			slots.inject('shell.overlay', () => slots.register(
 				{ name: 'shell.overlay', id: 'permgate-approval', order: 100 },
-				ApprovalOverlay,
+				OverlayRoot,
 			));
 		}
 
