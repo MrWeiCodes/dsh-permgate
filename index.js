@@ -1956,12 +1956,20 @@ export default {
 
     // 会话权限/沙箱/审批变化（DSH 侧写入，不经 permgate）→ 推送浏览器刷新，
     // 让快捷栏/设置页在选择器切换权限后立即联动。
-    ctx.on('session/event', (session, event) => {
+    ctx.on('session/event', async (session, event) => {
       try {
         if (!event) return
         if (event.type === 'permission/preset' || event.type === 'sandbox/mode' || event.type === 'approval/policy') {
           if (agentRef === null && session) agentRef = { session }
           broadcast({ type: 'status' })
+        }
+        // 自动同步：用户在设置页/快捷栏切换权限预设（仅「自定义审查」）后，
+        // 立即把 permgate 配置解析出的沙箱模式推给该会话，无需再手动去拨沙箱开关。
+        // sandbox/mode 是我们 setSandboxMode 自己的回声，跳过以杜绝同步环。
+        if (event.type === 'permission/preset' && session) {
+          const exec = { agent: { session } }
+          await init(exec)
+          syncSandbox(exec)
         }
       } catch (e) {}
     })
@@ -1970,7 +1978,8 @@ export default {
       try {
         await init(exec)
         // 注意：聊天/工具调用绝不改写会话 sandbox knob（否则权限选择器显示会漂移）；
-        // 底层沙箱只在设置页显式切换时经 /permgate/set-sandbox 同步一次。
+        // 底层沙箱只在设置页显式切换（/permgate/set-sandbox）或用户切换
+        // 「自定义审查」预设时（session/event → permission/preset 自动同步）写入。
         const d = decide(exec)
         recordDecision(d, exec)
         if (typeof exec.name !== 'string' || exec.name.indexOf('perm_') !== 0) {
