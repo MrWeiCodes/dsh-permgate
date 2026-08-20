@@ -537,6 +537,18 @@ export default {
       try { return args && typeof args === 'object' && typeof args.file_path === 'string' ? args.file_path : null } catch (e) { return null }
     }
 
+    // 工具参数里的文件路径可能是相对路径：fs 服务默认按自身 cwd 解析，会解析到错误位置
+    // （导致「文件不存在」/ 打不开文件）。这里把相对路径先按 permgate 项目 root 归一化为
+    // 绝对路径；绝对路径 / UNC / file:// 原样返回。
+    function resolveArgPath(fp) {
+      const s = norm(String(fp || ''))
+      if (s === '') return s
+      if (s.indexOf('://') !== -1) return s
+      if (/^[a-zA-Z]:[\\/]/.test(s)) return s
+      if (s[0] === '/') return s
+      return root ? norm(root + '/' + s) : s
+    }
+
     // open-file 允许打开的扩展名白名单（文本/文档类）。`cmd /c start` 对 Windows 上"运行"关联的
     // 可执行/脚本类（exe/bat/cmd/ps1/vbs/js/py/msi/jar/lnk/svg 等）执行的是运行而非编辑，
     // 白名单之外的扩展名一律拒绝，防止点击「打开文件」执行 agent 可控路径的脚本。
@@ -736,7 +748,7 @@ export default {
       if (FILE_READ_TOOLS[name]) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
         try {
-          const target = await fsService.resolve(fp)
+          const target = await fsService.resolve(resolveArgPath(fp))
           const info = await fsService.stat(target)
           if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
           if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
@@ -814,7 +826,7 @@ export default {
           // 补丁那几行）。改为读取磁盘当前内容、应用补丁后，取改动前后各 W 行的窗口做 diff——
           // 行号从真实位置起算，payload 恒定小，大文件无需整文件对比（write 才是整文件语义）。
           try {
-            const target = await fsService.resolve(fp)
+            const target = await fsService.resolve(resolveArgPath(fp))
             const info = await fsService.stat(target)
             if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
             if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
@@ -874,7 +886,7 @@ export default {
         const content = typeof args.content === 'string' ? args.content : ''
         if (!content || content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容缺失或过大', 'Content missing or too large') }
         try {
-          const target = await fsService.resolve(fp)
+          const target = await fsService.resolve(resolveArgPath(fp))
           const info = await fsService.stat(target)
           if (info === undefined) return newFilePayload(fp, content)
           if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
@@ -1740,7 +1752,7 @@ export default {
           const sub = ctx.get('subprocess')
           if (!sub) return json(res, { ok: false, error: 'subprocess 服务不可用' })
           try {
-            const t = await fs.resolve(fp)
+            const t = await fs.resolve(resolveArgPath(fp))
             const winPath = fs.processPath ? fs.processPath(t) : String(t).replace(/\//g, '\\')
             const exe = await sub.resolveExecutable('cmd')
             const handle = sub.spawn({
