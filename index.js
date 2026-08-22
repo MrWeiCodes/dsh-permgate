@@ -607,6 +607,9 @@ export default {
     function myersOps(a, b) {
       const n = a.length
       const m = b.length
+      // 双空输入防御：d 循环（d<=max=0）只跑 d=0 一轮且 done 置不齐，回溯 trace[1]
+      // 不存在 → undefined[-1] 崩溃；直接返回空 op 流。
+      if (n === 0 && m === 0) return []
       const max = n + m
       const off = max
       const v = new Int32Array(2 * max + 1)
@@ -699,6 +702,13 @@ export default {
       while (s < oldLines.length - p && s < newLines.length - p && oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]) s++
       const midA = oldLines.slice(p, oldLines.length - s)
       const midB = newLines.slice(p, newLines.length - s)
+      // 完全相同（含空窗口）：无差异，直接返回空 ops。
+      // 不能落入 myersOps([], [])：其 d 循环读 v[off+1] 越界 undefined 置不齐 done，
+      // 回溯取 trace[d]（d=1 时不存在）→ undefined[-1] 抛
+      // "Cannot read properties of undefined (reading '-1')"。
+      if (midA.length === 0 && midB.length === 0) {
+        return { ok: true, kind, file: fp, added: 0, removed: 0, ops: [], truncated: 0 }
+      }
       // 廉价预过滤：|midA.length - midB.length| > DIFF_MAX_LINES 时 added+removed 必超 200
       // （added - removed === midB.length - midA.length），Myers 结果必被丢弃，直接走 fallback，
       // 避免无谓的 O((N+M)*D) 计算与 trace 内存。
