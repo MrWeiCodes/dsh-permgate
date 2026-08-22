@@ -1796,6 +1796,39 @@ export default {
       }
     }, 30000))
 
+    // 启动后全量对齐：重启时恢复的会话由 dsh-permission-presets 的 pinInitialPermission
+    // 按预设捆绑 seed，会话沙箱旋钮可能 ≠ permgate 配置（如项目配置 full access 被
+    // 写回 workspace-write）。此时恢复会话的 seed 事件可能发生在插件加载之前，
+    // session/event hook 捕捉不到。这里延迟等会话恢复完成后，对所有处于
+    // 「自定义审查」的会话补一次同步，使配置真正生效。
+    onDispose(ctx.timer.setTimeout(() => {
+      (async () => {
+        try {
+          const all = ctx.sessions && typeof ctx.sessions.list === 'function' ? ctx.sessions.list() : []
+          if (!Array.isArray(all)) return
+          for (const s of all) {
+            if (!s) continue
+            try {
+              const ex = { agent: { session: s } }
+              await init(ex)
+              syncSandbox(ex)
+            } catch (e) {}
+          }
+        } catch (e) {
+          console.error('[permgate] startup sandbox sync error:', e)
+        }
+      })()
+    }, 1200))
+
+    // ── 工具注册 ────────────────────────────────────────────────────────────────
+
+    function renderer() {
+      return function (_a, v) { return [{ type: 'text', text: JSON.stringify(v, null, 2) }] }
+    }
+
+    function registerTool(definition) {
+      onDispose(ctx.tools.register(defineTool(definition)))
+    }
     // ── 工具注册 ────────────────────────────────────────────────────────────────
 
     function renderer() {
@@ -1976,6 +2009,18 @@ export default {
         if (agentRef === null) agentRef = { session }
         broadcast({ type: 'status' })
       } catch (e) {}
+      // 沙箱对齐：session/created 是同步 emit，本监听可能在 pinInitialPermission
+      // 之前/之后执行、且恢复会话的 seed 事件在插件加载前已发生。延迟一 tick 后
+      // 再按 permgate 配置对齐该会话沙箱（对 custom-review 会话幂等）。
+      ctx.timer.setTimeout(() => {
+        (async () => {
+          try {
+            const ex = { agent: { session } }
+            await init(ex)
+            syncSandbox(ex)
+          } catch (e) {}
+        })()
+      }, 0)
     })
 
     // ── 预执行审查 ──────────────────────────────────────────────────────────────
