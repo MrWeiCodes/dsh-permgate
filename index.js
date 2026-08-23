@@ -92,6 +92,10 @@ export default {
       const value = key === 'command' ? r.match : r.path
       if (typeof value !== 'string' || !value) return null
       const e = { id: r.id || 'e' + Math.random().toString(36).slice(2, 8), action: r.action }
+      // 仅 deny 例外支持自定义拒绝原因（allow 例外存了也用不上）
+      if (r.action === 'deny' && typeof r.reason === 'string' && r.reason.trim()) {
+        e.reason = r.reason.trim().slice(0, 200)
+      }
       if (key === 'command') e.match = value
       else e.path = value
       return e
@@ -525,9 +529,9 @@ export default {
       const gCat = config.global[catKey] || freshCategory(catKey, false)
       if (value !== null && value !== undefined && EXC_CATS.indexOf(catKey) !== -1) {
         const pl = pCat && Array.isArray(pCat.exceptions) ? pCat.exceptions : []
-        for (const r of pl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id }
+        for (const r of pl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined }
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
-        for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id }
+        for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined }
       }
       const mode = (pCat && pCat.mode && pCat.mode !== 'inherit') ? pCat.mode : (gCat.mode || 'allow')
       return { action: mode, ruleId: null }
@@ -1067,6 +1071,17 @@ export default {
     function decide(exec) {
       const name = exec.name
       const args = exec.arguments
+      // deny 例外可携带自定义拒绝原因；有则用自定义文案，无则回退「（例外 id）」标注
+      const exReason = (d) => {
+        if (d && d.action === 'deny' && d.reason) return d.reason
+        if (d && d.ruleId) return '（例外 ' + d.ruleId + '）'
+        return ''
+      }
+      const exReasonEn = (d) => {
+        if (d && d.action === 'deny' && d.reason) return d.reason
+        if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
+        return ''
+      }
       if (typeof name === 'string' && name.indexOf('perm_') === 0) {
         return { action: 'allow', reason: bi('permgate 自身管理工具，始终放行', 'permgate management tool, always allowed'), cat: null, value: null, kind: null }
       }
@@ -1092,26 +1107,26 @@ export default {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           const d = resolveCategory('directory', fp, 'path')
-          const exZh = d.ruleId ? '（例外 ' + d.ruleId + '）' : ''
-          const exEn = d.ruleId ? ' (exception ' + d.ruleId + ')' : ''
+          const exZh = exReason(d)
+          const exEn = exReasonEn(d)
           return { action: d.action, reason: bi('目录权限：访问工作区外 ' + fp + exZh, 'Directory permission: access outside workspace ' + fp + exEn), ruleId: d.ruleId, cat: 'directory', value: fp, kind: 'path' }
         }
         const d = resolveCategory('read', fp, 'path')
-        const exZh = d.ruleId ? '（例外 ' + d.ruleId + '）' : ''
-        const exEn = d.ruleId ? ' (exception ' + d.ruleId + ')' : ''
+        const exZh = exReason(d)
+        const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
       }
       if (FILE_WRITE_TOOLS[name]) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           const d = resolveCategory('directory', fp, 'path')
-          const exZh = d.ruleId ? '（例外 ' + d.ruleId + '）' : ''
-          const exEn = d.ruleId ? ' (exception ' + d.ruleId + ')' : ''
+          const exZh = exReason(d)
+          const exEn = exReasonEn(d)
           return { action: d.action, reason: bi('目录权限：访问工作区外 ' + fp + exZh, 'Directory permission: access outside workspace ' + fp + exEn), ruleId: d.ruleId, cat: 'directory', value: fp, kind: 'path' }
         }
         const d = resolveCategory('edit', fp, 'path')
-        const exZh = d.ruleId ? '（例外 ' + d.ruleId + '）' : ''
-        const exEn = d.ruleId ? ' (exception ' + d.ruleId + ')' : ''
+        const exZh = exReason(d)
+        const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
       }
       if (COMMAND_TOOLS[name]) {
@@ -1121,13 +1136,13 @@ export default {
           return { action: 'allow', reason: bi('命令组成均已命中例外，放行', 'All command tokens covered by exceptions, allowed'), cat: null, value: null, kind: null }
         }
         const d = resolveCategory('command', cmd, 'command')
-        const exZh = d.ruleId ? '（例外 ' + d.ruleId + '）' : ''
-        const exEn = d.ruleId ? ' (exception ' + d.ruleId + ')' : ''
+        const exZh = exReason(d)
+        const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('执行命令' + exZh, 'Run command' + exEn), ruleId: d.ruleId, cat: 'command', value: cmd, kind: 'command' }
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null)
-        return { action: d.action, reason: bi('启动子代理' + (d.ruleId ? '（例外）' : ''), 'Spawn subagent' + (d.ruleId ? ' (exception)' : '')), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
+        return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
       }
       const q = quickAction(name)
       if (q) return { action: q.action, reason: bi('快捷设置：' + name + ' → ' + q.action, 'Quick setting: ' + name + ' → ' + q.action), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
@@ -1681,7 +1696,7 @@ export default {
           await init(exec)
           if (EXC_CATS.indexOf(a.category) === -1) return json(res, { error: '该分类不支持例外' })
           if (!a.match || !String(a.match)) return json(res, { error: 'match 不能为空' })
-          const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
+          const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, reason: a.reason, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
           if (!e) return json(res, { error: '非法的例外参数' })
           const block = a.target === 'project' ? ensureProject() : config.global
           if (!block[a.category]) block[a.category] = freshCategory(a.category, a.target === 'project')
@@ -1873,13 +1888,14 @@ export default {
         category: { type: 'string', required: true, enum: ['directory', 'command', 'read', 'edit'] },
         match: { type: 'string', required: true, description: '路径 glob 或命令名/子串（* 匹配任意剩余）' },
         action: { type: 'string', required: true, enum: ['allow', 'deny'], description: '命中例外后的动作' },
+        reason: { type: 'string', description: '自定义拒绝原因（仅 deny 例外生效；allow 例外忽略）' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
         if (EXC_CATS.indexOf(args.category) === -1) return { error: '该分类不支持例外' }
         if (!args.match || !String(args.match)) return { error: 'match 不能为空' }
-        const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
+        const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
         if (!e) return { error: '非法的例外参数' }
         const block = args.target === 'project' ? ensureProject() : config.global
         if (!block[args.category]) block[args.category] = freshCategory(args.category, args.target === 'project')

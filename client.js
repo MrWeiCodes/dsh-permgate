@@ -783,6 +783,8 @@ window.__ModuleLoader__.load({
 				'panel.excUnit': '条',
 				'panel.excPh': '命令子串/glob',
 				'panel.excPathPh': '路径 glob',
+				'panel.excReason': '拒绝原因',
+				'panel.excReasonPh': '选填：拒绝时显示的提示',
 				'panel.addExc': '添加例外',
 				'panel.confirmDel': '确认删除？',
 				'panel.cancel': '取消',
@@ -909,6 +911,8 @@ window.__ModuleLoader__.load({
 				'panel.excUnit': 'items',
 				'panel.excPh': 'command substring/glob',
 				'panel.excPathPh': 'path glob',
+				'panel.excReason': 'Deny reason',
+				'panel.excReasonPh': 'optional: shown when denied',
 				'panel.addExc': 'Add exception',
 				'panel.confirmDel': 'Confirm delete?',
 				'panel.cancel': 'Cancel',
@@ -1479,6 +1483,7 @@ window.__ModuleLoader__.load({
 			const [quickSel, setQuickSel] = React.useState({});
 			const [exVals, setExVals] = React.useState({ directory: '', command: '', read: '', edit: '' });
 			const [exAction, setExAction] = React.useState('allow');
+			const [exReasonVal, setExReasonVal] = React.useState('');
 			const [newTool, setNewTool] = React.useState('');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
@@ -1566,7 +1571,8 @@ window.__ModuleLoader__.load({
 				const v = String(exVals[c] || '').trim();
 				if (!v) { setMsg(T('panel.needValue')); return; }
 				setExVals(Object.assign({}, exVals, { [c]: '' }));
-				invoke('permgate:add-exception', { target: tab, category: c, match: v, action: exAction });
+				setExReasonVal('');
+				invoke('permgate:add-exception', { target: tab, category: c, match: v, action: exAction, reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined });
 			};
 
 			const removeException = (c, id) => invoke('permgate:remove-exception', { target: tab, category: c, id });
@@ -1613,6 +1619,7 @@ window.__ModuleLoader__.load({
 								excList.map((r) => React.createElement('div', { key: r.id, style: rowStyle },
 									badge(r.action),
 									React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
+									r.action === 'deny' && r.reason ? React.createElement('span', { style: { fontSize: 12, color: '#c62828', marginLeft: 6 } }, '「' + r.reason + '」') : null,
 									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
 										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
 										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
@@ -1624,6 +1631,7 @@ window.__ModuleLoader__.load({
 							React.createElement('select', { className: 'pg-field', style: { padding: '2px 6px' }, value: exAction, onChange: (e) => setExAction(e.target.value), disabled: busy },
 								React.createElement('option', { value: 'allow' }, T('panel.allow')), React.createElement('option', { value: 'deny' }, T('panel.deny')),
 							),
+							exAction === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exReasonVal, onChange: (e) => setExReasonVal(e.target.value), disabled: busy }) : null,
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => addException(c) }, T('panel.addExc')),
 						),
 					) : null,
