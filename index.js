@@ -538,7 +538,13 @@ export default {
     }
 
     function pathArg(args) {
-      try { return args && typeof args === 'object' && typeof args.file_path === 'string' ? args.file_path : null } catch (e) { return null }
+      try {
+        if (!args || typeof args !== 'object') return null
+        // read/edit 工具用 path，write 工具用 file_path；两类都取，缺省取不到返回 null
+        if (typeof args.file_path === 'string') return args.file_path
+        if (typeof args.path === 'string') return args.path
+        return null
+      } catch (e) { return null }
     }
 
     // 工具参数里的文件路径可能是相对路径：fs 服务默认按自身 cwd 解析，会解析到错误位置
