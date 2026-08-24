@@ -68,7 +68,7 @@ export default {
     }
 
     function freshConfig() {
-      const g = { quickTools: {}, custom: [], sandboxMode: 'workspace-write' }
+      const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access' }
       for (const c of CATS) g[c] = freshCategory(c, false)
       for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = QUICK_DEFAULTS[k]
       return { global: g, projects: {} }
@@ -133,7 +133,7 @@ export default {
 
     function buildConfig(parsed) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
-      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: g.sandboxMode === 'danger-full-access' ? 'danger-full-access' : 'workspace-write' }
+      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access' }
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
       const projects = {}
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
@@ -224,7 +224,7 @@ export default {
       const proj = projectBlock()
       const p = proj && proj.sandboxMode ? proj.sandboxMode : 'inherit'
       if (p !== 'inherit') return p
-      return config.global.sandboxMode || 'workspace-write'
+      return config.global.sandboxMode || 'danger-full-access'
     }
 
     function setSandboxConfig(target, mode) {
@@ -1484,7 +1484,7 @@ export default {
         active: true,
         preset: sessionPresetName(exec),
         sandbox: {
-          global: config.global.sandboxMode || 'workspace-write',
+          global: config.global.sandboxMode || 'danger-full-access',
           project: (projectBlock() && projectBlock().sandboxMode) || 'inherit',
           effective: effectiveSandboxConfig(),
         },
