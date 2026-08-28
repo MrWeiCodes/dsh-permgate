@@ -1245,14 +1245,22 @@ export default {
       return sub ? [first, sub] : [first]
     }
 
-    // 命令的所有可识别命令 token（如 Get-ChildItem / git status）是否均已命中 allow 例外
+    // 命令的所有可识别命令 token（如 Get-ChildItem / git status）是否均已命中 allow 例外。
+    // 两道安全闸：① 破坏性命令（杀进程/删文件/改系统）一律不走「全命中」快速通道，
+    // ② 任一命令段识别不出命令 token（变量赋值/表达式/字符串拼接等）也不视为已覆盖。
+    // 两者命中时仍需弹窗走正常判定（用户显式配置的 allow 例外仍会命中，这里只挡「碰巧覆盖」）。
+    const DANGEROUS_CMD_RE = /\b(?:Stop-Process|Stop-Service|Stop-Computer|Stop-Job|Restart-Computer|Restart-Service|Remove-Item|Remove-ItemProperty|Remove-Service|Remove-PSDrive|Remove-Variable|Remove-Alias|Remove-Event|Remove-Job|Start-Process|Start-Service|Start-Computer|Start-Job|taskkill|shutdown|format|diskpart|rmdir|erase|Clear-Content|Clear-Item|Set-ExecutionPolicy|icacls|takeown|attrib|reg\s+delete|wmic\s+process)\b/i
     function commandFullyCovered(cmd) {
       try {
-        const parts = String(cmd || '').split(/[|;]/)
+        const whole = String(cmd || '')
+        // 破坏性命令：即便命令 token 命中 allow 例外，也不允许静默放行
+        if (DANGEROUS_CMD_RE.test(whole)) return false
+        const parts = whole.split(/[|;]/)
         const results = []
         for (const seg of parts) {
           const toks = commandTokens(seg)
-          if (!toks.length) continue
+          // 识别不出命令 token 的段：解析器看不懂，不能当作「已覆盖」
+          if (!toks.length) return false
           let label = toks[0]
           if (toks.length >= 2 && ROUTER_CMDS[toks[0].toLowerCase()]) label = toks[0] + ' ' + toks[1]
           const value = label + ' *'
