@@ -1125,10 +1125,19 @@ export default {
       if (FILE_WRITE_TOOLS[name]) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
+          // 双重审查：工作区外写入先过「目录访问」闸（能否触碰），directory 不拒绝时再过「编辑」闸。
+          // 合并矩阵：任一 deny → 拒绝；否则任一 ask → 弹窗一次；否则放行。
           const d = resolveCategory('directory', fp, 'path')
-          const exZh = exReason(d)
-          const exEn = exReasonEn(d)
-          return { action: d.action, reason: bi('目录权限：访问工作区外 ' + fp + exZh, 'Directory permission: access outside workspace ' + fp + exEn), ruleId: d.ruleId, cat: 'directory', value: fp, kind: 'path' }
+          const e = resolveCategory('edit', fp, 'path')
+          if (d.action === 'deny' || e.action === 'deny') {
+            const src = d.action === 'deny' ? d : e
+            return { action: 'deny', reason: bi('目录权限：拒绝写入工作区外 ' + fp + exReason(src), 'Directory permission: write to outside workspace denied ' + fp + exReasonEn(src)), ruleId: src.ruleId, cat: 'directory', value: fp, kind: 'path' }
+          }
+          if (d.action === 'ask' || e.action === 'ask') {
+            return { action: 'ask', reason: bi('目录权限：访问工作区外 ' + fp + '（写入需确认）', 'Directory permission: access outside workspace ' + fp + ' (write requires confirmation)'), ruleId: null, cat: 'directory', value: fp, kind: 'path' }
+          }
+          const src = d.ruleId ? d : (e.ruleId ? e : null)
+          return { action: 'allow', reason: bi('目录权限：访问工作区外 ' + fp + (src ? exReason(src) : ''), 'Directory permission: access outside workspace ' + fp + (src ? exReasonEn(src) : '')), ruleId: src ? src.ruleId : null, cat: 'directory', value: fp, kind: 'path' }
         }
         const d = resolveCategory('edit', fp, 'path')
         const exZh = exReason(d)
