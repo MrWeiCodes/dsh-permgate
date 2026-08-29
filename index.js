@@ -828,14 +828,19 @@ export default {
         } finally { try { db.close() } catch (e) {} }
       } catch (e) { return null }
     }
-    // 顺序应用 better-edit edits（hash 锚点 → 行号区间替换），返回应用后的全文；任一锚点失效返回 null
+    // 顺序应用 better-edit edits（hash 锚点 → 行号区间替换），返回 { text, minLine, maxLine }；
+    // 任一锚点失效返回 null。语义对齐 better-edit 的稳定重哈希：应用一个 edit 后，
+    // 未变行保留原 hash（后续锚点可继续解析），被删行失去 hash，新增行无法预知 hash
+    // （agent 只能引用 read 时的旧锚点，指向新增行必然失效 → 与 better-edit 实际行为一致）。
     function applyBetterEdits(fileText, edits, hashes) {
       try {
-        // 与 better-edit 一致：按 \n 切分（行尾统一）
         const normEolTxt = String(fileText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
         const lines = normEolTxt.split('\n')
-        const hashIndex = new Map()
-        for (let i = 0; i < hashes.length; i++) hashIndex.set(hashes[i], i)
+        // curHash[i]：当前 lines[i] 的 hash（未变行保持原 hash；被删/新增行置 null）
+        const curHash = hashes.slice()
+        if (curHash.length < lines.length) curHash.length = lines.length
+        let minLine = Infinity
+        let maxLine = -Infinity
         for (const raw of edits) {
           let e = raw
           if (Array.isArray(raw) && raw.length >= 3) e = { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] }
@@ -843,32 +848,32 @@ export default {
           const toHash = betterEditAnchor(e && e.remove_to)
           const repl = (e && typeof e.replacement_text === 'string') ? e.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
           if (!fromHash || !toHash) return null
-          const start = hashIndex.get(fromHash)
-          const end = hashIndex.get(toHash)
-          if (start === undefined || end === undefined) return null
+          // 在当前（已部分应用）的内容上找锚点：仅未变行的原 hash 有效
+          const start = curHash.indexOf(fromHash)
+          const end = curHash.indexOf(toHash)
+          if (start === undefined || start < 0 || end === undefined || end < 0) return null
           const s = Math.min(start, end)
           const t = Math.max(start, end)
           if (s < 0 || t >= lines.length) return null
           const replLines = repl === '' ? [] : repl.split('\n')
+          // 记录变更范围（1 基行号，用当前行号；最终窗口按原始锚点行换算见调用方）
+          if (s + 1 < minLine) minLine = s + 1
+          if (t + 1 > maxLine) maxLine = t + 1
+          // 替换区间：删除 [s..t]，插入 replLines
           lines.splice(s, t - s + 1, ...replLines)
-          // 重哈希后续锚点：better-edit 顺序应用时重算 hashes；这里用内容匹配重建受影响行的 index
-          // （简化为：重新 build 全文件 index，保证后续 edit 的锚点在已变更内容上仍可解析）
-          hashIndex.clear()
-          for (let i = 0; i < lines.length; i++) {
-            // 无法复刻 xxhash：用行内容哈希替代（仅用于本预览的内部锚点解析，非 better-edit 的 hash）
-            hashIndex.set(previewHash(lines[i]), i)
-          }
+          // 稳定重哈希：区间内原 hash 删除；区间后未变行 hash 平移保留；新增行 hash 未知（null）
+          const removedHashes = curHash.slice(s, t + 1)
+          const tailHashes = curHash.slice(t + 1)
+          curHash.length = s
+          for (let i = 0; i < removedHashes.length; i++) curHash[s + i] = null
+          for (let i = 0; i < replLines.length; i++) curHash[s + i] = null
+          for (let i = 0; i < tailHashes.length; i++) curHash[s + replLines.length + i] = tailHashes[i]
+          // 清理尾部空洞
+          while (curHash.length > lines.length) curHash.pop()
+          while (curHash.length > 0 && curHash[curHash.length - 1] === null) curHash.pop()
         }
-        return lines.join('\n')
+        return { text: lines.join('\n'), minLine, maxLine }
       } catch (e) { return null }
-    }
-    // 预览用行哈希（非 better-edit 官方 hash）：多 edit 时后续锚点需在变更后内容上解析。
-    // 由于我们无法计算 xxhash32(canon(line))，后续锚点若落在变更区会失效 → 降级，可接受。
-    function previewHash(line) {
-      let h = 5381
-      const s = String(line || '').replace(/[ \t\r\n]+/g, '')
-      for (let i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0 }
-      return h.toString(36).slice(0, 3)
     }
 
     // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
@@ -978,20 +983,27 @@ export default {
                 }).join('\n')
                 return diffPayloadOrFallback(fp, '', intent, 'modified')
               }
-              // 窗口 diff：取第一个 edit 的起始行为中心，前后各 W 行
+              // 窗口 diff：以全部 edit 锚点的原始行号并集为中心，前后各 W 行。
+              // 窗口起点之前无任何变更 → 新旧两侧从同一 winStart 起、行号对齐。
               const W = 200
               const oldLines = splitDiffLines(fileText)
-              const newLines = splitDiffLines(applied)
-              const firstFrom = Array.isArray(args.edits[0]) ? args.edits[0][0] : (args.edits[0] && args.edits[0].remove_from)
-              const firstHash = betterEditAnchor(firstFrom)
-              let anchorLine = 1
-              if (firstHash && hashes) {
-                const idx = hashes.indexOf(firstHash)
-                if (idx >= 0) anchorLine = idx + 1
+              const newLines = splitDiffLines(applied.text)
+              let minAnchor = Infinity
+              let maxAnchor = -Infinity
+              for (const raw of args.edits) {
+                const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1] } : raw
+                const a = betterEditAnchor(e && e.remove_from)
+                const b = betterEditAnchor(e && e.remove_to)
+                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) { if (i + 1 < minAnchor) minAnchor = i + 1; if (i + 1 > maxAnchor) maxAnchor = i + 1 } }
+                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0) { if (i + 1 < minAnchor) minAnchor = i + 1; if (i + 1 > maxAnchor) maxAnchor = i + 1 } }
               }
-              const winStart = Math.max(1, anchorLine - W)
-              const winOldEnd = Math.min(oldLines.length, anchorLine + W)
-              const winNewEnd = Math.min(newLines.length, anchorLine + W)
+              if (minAnchor === Infinity) minAnchor = applied.minLine || 1
+              if (maxAnchor === -Infinity) maxAnchor = applied.maxLine || minAnchor
+              const winStart = Math.max(1, minAnchor - W)
+              const winOldEnd = Math.min(oldLines.length, maxAnchor + W)
+              // 新侧终点：maxAnchor 在应用后的位置 = maxAnchor + 总行数差（近似）；不足则取 min(…, newLines.length)
+              const delta = newLines.length - oldLines.length
+              const winNewEnd = Math.min(newLines.length, maxAnchor + delta + W)
               const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
               const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
               return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
