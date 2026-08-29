@@ -4,7 +4,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { effectivePermissionPreset } from '@deepseek-ai/dsh-permission-presets'
 import { effectiveSandboxMode, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-
+import { join as pathJoin } from 'node:path'
+import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync } from 'node:fs'
 const CATS = ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop']
 const EXC_CATS = ['directory', 'command', 'read', 'edit']
 const MODES = ['ask', 'allow', 'deny']
@@ -761,6 +762,115 @@ export default {
       const ops = splitDiffLines(content).map((s, i) => ({ t: 'a', o: null, n: i + 1, s }))
       return { ok: true, kind: 'new', file: fp, added: total, removed: 0, ops, truncated: 0 }
     }
+
+    // ── dsh-better-edit 兼容：hash 锚点 edit 的 diff 预览 ──────────────────
+    // better-edit 的 edit 参数是 {path, edits:[[remove_from,remove_to,replacement_text],...]}，
+    // 锚点是 3 字符行 hash（来自 read 输出的 HASH│ 前缀）。要生成 diff 需把 hash 映射回行号：
+    // better-edit 把每行 hash 持久化在 ~/.dsh/plugins/dsh-better-edit/runtime/<ws>-<hash8>/hash-store.sqlite
+    // （snapshots 表：path → hashes JSON 数组，按行对应）。permgate 扫描 runtime 目录、用 .wsPath
+    // sidecar 匹配项目根，读目标文件的 hashes，再按 [start,end] 行区间应用替换。
+    // 任何一步失败（store 不存在/无快照/锚点失效）→ 降级为补丁意图展示，不阻塞审批。
+    const BETTER_EDIT_ANCHOR_RE = /^([+-]?)([A-Za-z0-9]{3})[│|]/i
+    function betterEditAnchor(ref) {
+      try {
+        const s = String(ref || '').trim()
+        const m = s.match(BETTER_EDIT_ANCHOR_RE)
+        if (m) return m[2]
+        if (/^[A-Za-z0-9]{3}$/.test(s)) return s
+        return null
+      } catch (e) { return null }
+    }
+    // 扫描 better-edit runtime 目录，返回匹配 projRoot 的 store 路径（.wsPath sidecar 匹配）
+    function betterEditStoreFor(projRoot) {
+      try {
+        let base = process.env.DSH_HOME || (process.env.HOME || process.env.USERPROFILE)
+        if (!base) return null
+        // DSH_HOME 已含 .dsh（如 C:\Users\71026\.dsh）时不再重复拼接
+        if (!/[/\\]\.dsh$/.test(base)) base = pathJoin(base, '.dsh')
+        const rt = pathJoin(base, 'plugins', 'dsh-better-edit', 'runtime')
+        if (!fsExistsSync(rt)) return null
+        const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        const want = norm(projRoot)
+        for (const dir of fsReaddirSync(rt)) {
+          const full = pathJoin(rt, dir)
+          const wsPath = pathJoin(full, '.wsPath')
+          let ws = null
+          try { ws = fsReadFileSync(wsPath, 'utf8').trim() } catch (e) {}
+          if (ws && norm(ws) === want) {
+            const store = pathJoin(full, 'hash-store.sqlite')
+            return fsExistsSync(store) ? store : null
+          }
+        }
+        return null
+      } catch (e) { return null }
+    }
+    // 从 better-edit store 读取目标文件的 hashes 数组（按行）。path 匹配做大小写/斜杠归一化。
+    async function betterEditHashesFor(projRoot, targetPath) {
+      const storePath = betterEditStoreFor(projRoot)
+      if (!storePath) return null
+      try {
+        const { DatabaseSync } = await import('node:sqlite')
+        const normKey = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        const want = normKey(targetPath)
+        const db = new DatabaseSync(storePath, { readOnly: true })
+        try {
+          const rows = db.prepare('SELECT path, hashes FROM snapshots').all()
+          for (const row of rows) {
+            if (normKey(row.path) === want) {
+              try {
+                const arr = JSON.parse(row.hashes)
+                if (Array.isArray(arr)) return arr
+              } catch (e) {}
+              return null
+            }
+          }
+          return null
+        } finally { try { db.close() } catch (e) {} }
+      } catch (e) { return null }
+    }
+    // 顺序应用 better-edit edits（hash 锚点 → 行号区间替换），返回应用后的全文；任一锚点失效返回 null
+    function applyBetterEdits(fileText, edits, hashes) {
+      try {
+        // 与 better-edit 一致：按 \n 切分（行尾统一）
+        const normEolTxt = String(fileText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+        const lines = normEolTxt.split('\n')
+        const hashIndex = new Map()
+        for (let i = 0; i < hashes.length; i++) hashIndex.set(hashes[i], i)
+        for (const raw of edits) {
+          let e = raw
+          if (Array.isArray(raw) && raw.length >= 3) e = { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] }
+          const fromHash = betterEditAnchor(e && e.remove_from)
+          const toHash = betterEditAnchor(e && e.remove_to)
+          const repl = (e && typeof e.replacement_text === 'string') ? e.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
+          if (!fromHash || !toHash) return null
+          const start = hashIndex.get(fromHash)
+          const end = hashIndex.get(toHash)
+          if (start === undefined || end === undefined) return null
+          const s = Math.min(start, end)
+          const t = Math.max(start, end)
+          if (s < 0 || t >= lines.length) return null
+          const replLines = repl === '' ? [] : repl.split('\n')
+          lines.splice(s, t - s + 1, ...replLines)
+          // 重哈希后续锚点：better-edit 顺序应用时重算 hashes；这里用内容匹配重建受影响行的 index
+          // （简化为：重新 build 全文件 index，保证后续 edit 的锚点在已变更内容上仍可解析）
+          hashIndex.clear()
+          for (let i = 0; i < lines.length; i++) {
+            // 无法复刻 xxhash：用行内容哈希替代（仅用于本预览的内部锚点解析，非 better-edit 的 hash）
+            hashIndex.set(previewHash(lines[i]), i)
+          }
+        }
+        return lines.join('\n')
+      } catch (e) { return null }
+    }
+    // 预览用行哈希（非 better-edit 官方 hash）：多 edit 时后续锚点需在变更后内容上解析。
+    // 由于我们无法计算 xxhash32(canon(line))，后续锚点若落在变更区会失效 → 降级，可接受。
+    function previewHash(line) {
+      let h = 5381
+      const s = String(line || '').replace(/[ \t\r\n]+/g, '')
+      for (let i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0 }
+      return h.toString(36).slice(0, 3)
+    }
+
     // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
     async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
@@ -840,6 +950,56 @@ export default {
       if (FILE_WRITE_TOOLS[name]) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
         if (name === 'edit') {
+          // dsh-better-edit 兼容：{path, edits:[[remove_from,remove_to,replacement_text],...]} hash 锚点格式。
+          // 与旧格式（old_string/new_string）互斥，优先识别 edits 数组。
+          if (Array.isArray(args.edits) && args.edits.length > 0) {
+            try {
+              const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
+              const info = await fsService.stat(target)
+              if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
+              if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+              const fileText = await fsService.readText(target)
+              if (fileText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+              const hashes = await betterEditHashesFor(entry.projRoot, target)
+              // 无 store 快照：无法映射锚点，退回补丁意图展示（至少显示替换文本）
+              if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
+                const intent = args.edits.map((e) => {
+                  const arr = Array.isArray(e) ? e : null
+                  return arr ? arr[2] : (e && e.replacement_text) || ''
+                }).join('\n')
+                return diffPayloadOrFallback(fp, '', intent, 'modified')
+              }
+              const applied = applyBetterEdits(fileText, args.edits, hashes)
+              if (applied === null) {
+                // 锚点失效或 store 与磁盘不一致：退回补丁意图展示
+                const intent = args.edits.map((e) => {
+                  const arr = Array.isArray(e) ? e : null
+                  return arr ? arr[2] : (e && e.replacement_text) || ''
+                }).join('\n')
+                return diffPayloadOrFallback(fp, '', intent, 'modified')
+              }
+              // 窗口 diff：取第一个 edit 的起始行为中心，前后各 W 行
+              const W = 200
+              const oldLines = splitDiffLines(fileText)
+              const newLines = splitDiffLines(applied)
+              const firstFrom = Array.isArray(args.edits[0]) ? args.edits[0][0] : (args.edits[0] && args.edits[0].remove_from)
+              const firstHash = betterEditAnchor(firstFrom)
+              let anchorLine = 1
+              if (firstHash && hashes) {
+                const idx = hashes.indexOf(firstHash)
+                if (idx >= 0) anchorLine = idx + 1
+              }
+              const winStart = Math.max(1, anchorLine - W)
+              const winOldEnd = Math.min(oldLines.length, anchorLine + W)
+              const winNewEnd = Math.min(newLines.length, anchorLine + W)
+              const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
+              const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
+              return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+            } catch (e) {
+              const emsg = (e && e.message ? e.message : String(e))
+              return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+            }
+          }
           const oldText = typeof args.old_string === 'string' ? args.old_string : ''
           const newText = typeof args.new_string === 'string' ? args.new_string : ''
           if (oldText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容过大，无法生成对比', 'Content too large to compare') }
