@@ -906,8 +906,10 @@ export default {
     // 任一锚点失效返回 null。语义对齐 better-edit 的稳定重哈希：应用一个 edit 后，
     // 未变行保留原 hash（后续锚点可继续解析），被删行失去 hash，新增行无法预知 hash
     // （agent 只能引用 read 时的旧锚点，指向新增行必然失效 → 与 better-edit 实际行为一致）。
-    function applyBetterEdits(fileText, edits, hashes) {
+    function applyBetterEdits(fileText, edits, hashes, only) {
       try {
+        // only：可选索引集合，只应用这些 edit（供分窗口 diff：每组只看自己的变更）
+        const indices = only ? [...only].sort((a, b) => a - b) : edits.map((_, i) => i)
         const normEolTxt = String(fileText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
         const lines = normEolTxt.split('\n')
         // curHash[i]：当前 lines[i] 的 hash（未变行保持原 hash；被删/新增行置 null）
@@ -915,7 +917,8 @@ export default {
         if (curHash.length < lines.length) curHash.length = lines.length
         let minLine = Infinity
         let maxLine = -Infinity
-        for (const raw of edits) {
+        for (const idx of indices) {
+          const raw = edits[idx]
           let e = raw
           if (Array.isArray(raw) && raw.length >= 3) e = { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] }
           const fromHash = betterEditAnchor(e && e.remove_from)
@@ -1061,30 +1064,71 @@ export default {
                 }).join('\n')
                 return diffPayloadOrFallback(fp, '', intent, 'modified')
               }
-              // 窗口 diff：以全部 edit 锚点的原始行号并集为中心，前后各 W 行。
-              // 窗口起点之前无任何变更 → 新旧两侧从同一 winStart 起、行号对齐。
+              // 分窗口 diff：把相距较远的 edits 分成多组（相邻间隔 ≤ 2W 同组），
+              // 每组独立生成一个小窗口 diff 再拼接——避免单个大窗口把中间大段未变内容
+              // 算成 +N/-N 假变更（如 +300 -300）。每组 old/new 都从各自锚点行截取，
+              // 行号各自正确；客户端按 o/n 行号渲染，天然呈多个 hunk。
               const W = 200
-              const oldLines = splitDiffLines(fileText)
-              const newLines = splitDiffLines(applied.text)
-              let minAnchor = Infinity
-              let maxAnchor = -Infinity
-              for (const raw of args.edits) {
+              // 行尾归一化与 applyBetterEdits 一致（CRLF/CR → LF），否则旧侧每行带 \r 导致整窗口误判为全变
+              const oldLines = splitDiffLines(String(fileText).replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+              // 计算每个 edit 的锚点行（原始文件 1 基）
+              const anchorLines = args.edits.map((raw) => {
                 const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1] } : raw
                 const a = betterEditAnchor(e && e.remove_from)
                 const b = betterEditAnchor(e && e.remove_to)
-                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) { if (i + 1 < minAnchor) minAnchor = i + 1; if (i + 1 > maxAnchor) maxAnchor = i + 1 } }
-                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0) { if (i + 1 < minAnchor) minAnchor = i + 1; if (i + 1 > maxAnchor) maxAnchor = i + 1 } }
+                let line = 0
+                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) line = i + 1 }
+                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0 && (line === 0 || i + 1 > line)) line = i + 1 }
+                return line
+              })
+              // 分组：按锚点行排序，间隔 > 2W 开新组
+              const order = args.edits.map((_, i) => i).sort((x, y) => anchorLines[x] - anchorLines[y])
+              const groups = []
+              let cur = null
+              for (const i of order) {
+                const line = anchorLines[i]
+                if (!cur || line - cur.max > 2 * W) {
+                  cur = { min: line, max: line, indices: [i] }
+                  groups.push(cur)
+                } else {
+                  cur.max = Math.max(cur.max, line)
+                  cur.indices.push(i)
+                }
               }
-              if (minAnchor === Infinity) minAnchor = applied.minLine || 1
-              if (maxAnchor === -Infinity) maxAnchor = applied.maxLine || minAnchor
-              const winStart = Math.max(1, minAnchor - W)
-              const winOldEnd = Math.min(oldLines.length, maxAnchor + W)
-              // 新侧终点：maxAnchor 在应用后的位置 = maxAnchor + 总行数差（近似）；不足则取 min(…, newLines.length)
-              const delta = newLines.length - oldLines.length
-              const winNewEnd = Math.min(newLines.length, maxAnchor + delta + W)
-              const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
-              const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
-              return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+              // 逐组生成 diff，拼接 ops
+              const allOps = []
+              let totalAdded = 0
+              let totalRemoved = 0
+              let anyFallback = false
+              for (const g of groups) {
+                const gMin = Math.max(1, g.min - W)
+                const gOldEnd = Math.min(oldLines.length, g.max + W)
+                // 新侧：只应用该组的 edits，行号与原始文件对齐（其他组不应用 → 不产生行偏移）
+                const gOnly = applyBetterEdits(fileText, args.edits, hashes, g.indices)
+                if (!gOnly) continue
+                const gNewLines = splitDiffLines(gOnly.text)
+                const gNewEnd = Math.min(gNewLines.length, g.max + W)
+                const oldWin = oldLines.slice(gMin - 1, gOldEnd).join('\n')
+                const newWin = gNewLines.slice(gMin - 1, gNewEnd).join('\n')
+                const p = diffPayloadOrFallback(fp, oldWin, newWin, 'modified', gMin)
+                if (!p || !p.ok) continue
+                if (p.fallback) anyFallback = true
+                totalAdded += p.added || 0
+                totalRemoved += p.removed || 0
+                if (Array.isArray(p.ops)) {
+                  // 保留完整 ops（含上下文 c 与折叠 g）：分组保证相邻组窗口不重叠
+                  // （间隔 > 2W 才开新组），所以组间上下文不会重复；客户端按真实行号渲染
+                  // 时天然呈多个 hunk，且每处都带附近几行与折叠。
+                  for (const op of p.ops) allOps.push(op)
+                } else if (p.lines) {
+                  // fallback 模式：行文本已带行号前缀，无法拼接，直接返回首个 fallback
+                  return p
+                }
+              }
+              if (allOps.length === 0 && totalAdded === 0 && totalRemoved === 0) {
+                return diffPayloadOrFallback(fp, oldLines.join('\n'), splitDiffLines(applied.text).join('\n'), 'modified', 1)
+              }
+              return { ok: true, kind: 'modified', file: fp, added: totalAdded, removed: totalRemoved, ops: allOps, truncated: 0, grouped: true }
             } catch (e) {
               const emsg = (e && e.message ? e.message : String(e))
               return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
