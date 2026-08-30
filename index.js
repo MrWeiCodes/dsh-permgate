@@ -828,6 +828,80 @@ export default {
         } finally { try { db.close() } catch (e) {} }
       } catch (e) { return null }
     }
+
+    // ── 从磁盘内容重算 better-edit 行 hash ─────────────────────────────
+    // store 快照可能过期（文件在 read 后被改）：此时按 better-edit 的 hash 算法
+    // （canon → xxh32(seed=0) → probe 分配，见 hashline/hash-assign.js）从磁盘全文重算，
+    // 这样锚点总能映射到当前文件。xxh32 用 xxhash-wasm 的 wasm 实现（file URL 动态加载，
+    // 绕过 pnpm 隔离；加载失败自动降级返回 null，走原有降级路径）。
+    const BE_ALPH = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    const BE_HASH_LEN = 3
+    const BE_HASH_SPACE = BE_ALPH.length ** BE_HASH_LEN
+    const BE_PROBE_STRIDE = BE_ALPH.length ** 2 + BE_ALPH.length + 1
+    const BE_BITSET_WORDS = Math.ceil(BE_HASH_SPACE / 32)
+    let beHasherP = null
+    function beIdxToHash(idx) {
+      let out = ''
+      for (let j = 0; j < BE_HASH_LEN; j++) { out = BE_ALPH[idx % BE_ALPH.length] + out; idx = Math.floor(idx / BE_ALPH.length) }
+      return out
+    }
+    function beCanon(line) { return String(line || '').replace(/[ \t\r\n]+/g, '') }
+    function beLoadHasher() {
+      if (beHasherP) return beHasherP
+      beHasherP = (async () => {
+        // 在 better-edit 的安装树里找 xxhash-wasm 的 esm 入口
+        const homedir = process.env.DSH_HOME || (process.env.HOME || process.env.USERPROFILE)
+        const base = /[/\\]\.dsh$/.test(homedir) ? homedir : pathJoin(homedir, '.dsh')
+        const profileNm = pathJoin(base, 'profiles', 'web', 'node_modules', '.pnpm')
+        const dirs = fsExistsSync(profileNm) ? fsReaddirSync(profileNm) : []
+        let entry = null
+        for (const d of dirs) {
+          if (d.indexOf('xxhash-wasm@') !== 0) continue
+          const cand = pathJoin(profileNm, d, 'node_modules', 'xxhash-wasm', 'esm', 'xxhash-wasm.js')
+          if (fsExistsSync(cand)) { entry = cand; break }
+        }
+        if (!entry) return null
+        const mod = await import('file:///' + entry.replace(/\\/g, '/'))
+        const api = await mod.default()
+        return api.h32 || null
+      })().catch(() => null)
+      return beHasherP
+    }
+    // 复刻 lineHashesPure：返回每行 3 字符 hash（未剥离 BOM——调用方先 strip）
+    async function betterEditHashesFromDisk(fileText) {
+      const h32 = await beLoadHasher()
+      if (!h32) return null
+      try {
+        const norm = String(fileText || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+        const lines = norm.split('\n')
+        const hashes = new Array(lines.length)
+        const used = new Uint32Array(BE_BITSET_WORDS)
+        let hint = 0
+        const getBit = (idx) => (used[idx >>> 5] >>> (idx & 31) & 1) !== 0
+        const setBit = (idx) => { used[idx >>> 5] |= 1 << (idx & 31) }
+        const nextZero = (start) => {
+          let idx = start % BE_HASH_SPACE
+          for (let i = 0; i < BE_HASH_SPACE; i++) {
+            if (!getBit(idx)) return idx
+            idx += BE_PROBE_STRIDE
+            if (idx >= BE_HASH_SPACE) idx -= BE_HASH_SPACE
+          }
+          return -1
+        }
+        for (let i = 0; i < lines.length; i++) {
+          const base = (h32(beCanon(lines[i]), 0) >>> 14) % BE_HASH_SPACE
+          if (!getBit(base)) {
+            setBit(base); hint = base + BE_PROBE_STRIDE; hashes[i] = beIdxToHash(base)
+          } else {
+            const nxt = nextZero(hint)
+            if (nxt < 0) return null
+            setBit(nxt); hint = nxt + BE_PROBE_STRIDE; hashes[i] = beIdxToHash(nxt)
+          }
+        }
+        return hashes
+      } catch (e) { return null }
+    }
+
     // 顺序应用 better-edit edits（hash 锚点 → 行号区间替换），返回 { text, minLine, maxLine }；
     // 任一锚点失效返回 null。语义对齐 better-edit 的稳定重哈希：应用一个 edit 后，
     // 未变行保留原 hash（后续锚点可继续解析），被删行失去 hash，新增行无法预知 hash
@@ -965,9 +1039,13 @@ export default {
               if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
               const fileText = await fsService.readText(target)
               if (fileText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-              const hashes = await betterEditHashesFor(entry.projRoot, target)
-              // 无 store 快照：无法映射锚点，退回补丁意图展示（至少显示替换文本）
+              // 1) 优先 store 快照；2) 快照过期则从磁盘内容重算（xxh32 复刻）；3) 都失败再降级
+              let hashes = await betterEditHashesFor(entry.projRoot, target)
               if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
+                hashes = await betterEditHashesFromDisk(fileText)
+              }
+              if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
+                // 无任何 hash 来源：无法映射锚点，退回补丁意图展示（至少显示替换文本）
                 const intent = args.edits.map((e) => {
                   const arr = Array.isArray(e) ? e : null
                   return arr ? arr[2] : (e && e.replacement_text) || ''
