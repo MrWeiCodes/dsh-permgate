@@ -1066,27 +1066,32 @@ export default {
               }
               // 分窗口 diff：把相距较远的 edits 分成多组（相邻间隔 ≤ 2W 同组），
               // 每组独立生成一个小窗口 diff 再拼接——避免单个大窗口把中间大段未变内容
-              // 算成 +N/-N 假变更（如 +300 -300）。每组 old/new 都从各自锚点行截取，
-              // 行号各自正确；客户端按 o/n 行号渲染，天然呈多个 hunk。
+              // 算成 +N/-N 假变更（如 +300 -300）。
+              // 关键：new 侧不从「整文件应用后按行号切片」——行数变化（如 1 行换 52 行）会让
+              // new 侧整体偏移，窗口尾部与 old 错位，把大量未变行误判为变更（+52/-52、+342/-342
+              // 等假象）。改为以 old 窗口行为基底、仅在该窗口内应用本组 edits（跟踪 offset），
+              // 使 old/new 覆盖同一内容区域、行号天然对齐。
               const W = 200
-              // 行尾归一化与 applyBetterEdits 一致（CRLF/CR → LF），否则旧侧每行带 \r 导致整窗口误判为全变
               const oldLines = splitDiffLines(String(fileText).replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
-              // 计算每个 edit 的锚点行（原始文件 1 基）
-              const anchorLines = args.edits.map((raw) => {
+              // 每个 edit 的原始行区间（0 基）
+              const editRanges = args.edits.map((raw) => {
                 const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1] } : raw
                 const a = betterEditAnchor(e && e.remove_from)
                 const b = betterEditAnchor(e && e.remove_to)
-                let line = 0
-                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) line = i + 1 }
-                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0 && (line === 0 || i + 1 > line)) line = i + 1 }
-                return line
+                let s = -1, t = -1
+                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) s = i }
+                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0) t = i }
+                if (s < 0 && t >= 0) s = t
+                if (t < 0 && s >= 0) t = s
+                return { s, t }
               })
-              // 分组：按锚点行排序，间隔 > 2W 开新组
-              const order = args.edits.map((_, i) => i).sort((x, y) => anchorLines[x] - anchorLines[y])
+              // 分组：按起始行排序，间隔 > 2W 开新组
+              const order = args.edits.map((_, i) => i).sort((x, y) => editRanges[x].s - editRanges[y].s)
               const groups = []
               let cur = null
               for (const i of order) {
-                const line = anchorLines[i]
+                const line = editRanges[i].s
+                if (line < 0) continue
                 if (!cur || line - cur.max > 2 * W) {
                   cur = { min: line, max: line, indices: [i] }
                   groups.push(cur)
@@ -1095,33 +1100,46 @@ export default {
                   cur.indices.push(i)
                 }
               }
-              // 逐组生成 diff，拼接 ops
               const allOps = []
               let totalAdded = 0
               let totalRemoved = 0
-              let anyFallback = false
               for (const g of groups) {
-                const gMin = Math.max(1, g.min - W)
-                const gOldEnd = Math.min(oldLines.length, g.max + W)
-                // 新侧：只应用该组的 edits，行号与原始文件对齐（其他组不应用 → 不产生行偏移）
-                const gOnly = applyBetterEdits(fileText, args.edits, hashes, g.indices)
-                if (!gOnly) continue
-                const gNewLines = splitDiffLines(gOnly.text)
-                const gNewEnd = Math.min(gNewLines.length, g.max + W)
+                let gMin0 = Infinity, gMax0 = -Infinity
+                for (const i of g.indices) {
+                  const r = editRanges[i]
+                  if (r.s < gMin0) gMin0 = r.s
+                  if (r.t > gMax0) gMax0 = r.t
+                }
+                if (gMin0 === Infinity) continue
+                const gMin = Math.max(1, gMin0 + 1 - W)
+                const gOldEnd = Math.min(oldLines.length, gMax0 + 1 + W)
+                // 新侧：以 old 窗口为基底，仅应用本组 edits，跟踪 offset
+                const local = oldLines.slice(gMin - 1, gOldEnd)
+                let off = 0
+                let resolved = true
+                for (const i of g.indices) {
+                  const r = editRanges[i]
+                  const raw = args.edits[i]
+                  const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] } : raw
+                  const repl = (e && typeof e.replacement_text === 'string') ? e.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
+                  const ls = r.s - (gMin - 1) + off
+                  const lt = r.t - (gMin - 1) + off
+                  if (ls < 0 || lt < ls || lt > local.length) { resolved = false; break }
+                  const replLines = repl === '' ? [] : repl.split('\n')
+                  local.splice(ls, lt - ls + 1, ...replLines)
+                  off += replLines.length - (lt - ls + 1)
+                }
+                if (!resolved) continue
                 const oldWin = oldLines.slice(gMin - 1, gOldEnd).join('\n')
-                const newWin = gNewLines.slice(gMin - 1, gNewEnd).join('\n')
+                const newWin = local.join('\n')
                 const p = diffPayloadOrFallback(fp, oldWin, newWin, 'modified', gMin)
                 if (!p || !p.ok) continue
-                if (p.fallback) anyFallback = true
+                if (p.fallback) return p
                 totalAdded += p.added || 0
                 totalRemoved += p.removed || 0
                 if (Array.isArray(p.ops)) {
-                  // 保留完整 ops（含上下文 c 与折叠 g）：分组保证相邻组窗口不重叠
-                  // （间隔 > 2W 才开新组），所以组间上下文不会重复；客户端按真实行号渲染
-                  // 时天然呈多个 hunk，且每处都带附近几行与折叠。
                   for (const op of p.ops) allOps.push(op)
                 } else if (p.lines) {
-                  // fallback 模式：行文本已带行号前缀，无法拼接，直接返回首个 fallback
                   return p
                 }
               }
