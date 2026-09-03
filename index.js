@@ -2,8 +2,7 @@
 // 注册 perm_* 工具、挂钩 tools/pre-execute 审查、经 webServer 提供 /permgate/* JSON 路由供浏览器 UI 调用。
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { effectivePermissionPreset } from '@deepseek-ai/dsh-permission-presets'
-import { effectiveSandboxMode, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { join as pathJoin } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync } from 'node:fs'
 const CATS = ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop']
@@ -205,15 +204,41 @@ export default {
     // 当前会话选中的权限预设：显式 permission/preset 事件优先（保持既有语义，
     // 即使 knobs 被手动改偏也按所选预设审查）；无显式事件时用
     // permissionPresets.current() 派生（覆盖仅由 knobs 决定的会话）。
+    // 兼容层：0.1.2 读 permissions 投影折叠态（permissionState API，等价于 0.1.1 的
+    // effectivePermissionPreset(events)）；0.1.1 无该 API 时自行折叠 session.events。
+    function explicitPreset(session) {
+      try {
+        const pp = ctx.permissionPresets
+        if (pp && typeof pp.permissionState === 'function') {
+          // 0.1.2：读取 permissions 投影折叠态得到显式选择
+          return pp.permissionState(session).preset || null
+        }
+        // 0.1.1 兼容：无 permissionState API 时自行折叠 session.events 日志，
+        // 取最后一个 permission/preset 事件（与 0.1.1 导出的
+        // effectivePermissionPreset(events) 同算法）。
+        const evs = session && session.events
+        if (Array.isArray(evs)) {
+          for (let i = evs.length - 1; i >= 0; i--) {
+            const e = evs[i]
+            if (e && e.type === 'permission/preset' && e.data) return e.data.preset || null
+          }
+        }
+      } catch (e) {}
+      return null
+    }
+
     function sessionPresetName(exec) {
       try {
         const session = currentSession(exec)
         if (!session) return null
-        const explicit = effectivePermissionPreset(session.events)
+        const explicit = explicitPreset(session)
         if (explicit) return explicit
         const pp = ctx.permissionPresets
         if (pp && typeof pp.current === 'function') {
-          const c = pp.current(session.events)
+          // 0.1.2 起 current 收 session；0.1.1 收 events 数组（foldKnobs 遍历）。
+          // 以 permissionState API 是否存在作为 0.1.2 特征检测。
+          const arg = typeof pp.permissionState === 'function' ? session : (session && session.events)
+          const c = pp.current(arg)
           return c === 'custom' ? null : c
         }
       } catch (e) {}
@@ -248,7 +273,7 @@ export default {
         const agent = (exec && exec.agent) || agentRef
         const session = agent && agent.session
         if (!session) return
-        const cur = effectiveSandboxMode(session.events)
+        const cur = sp.overrideOf(session)
         if (cur !== mode) setSandboxMode(session, mode)
       } catch (e) {
         console.error('[permgate] syncSandbox error:', e)
@@ -264,7 +289,7 @@ export default {
         const agent = (exec && exec.agent) || agentRef
         const session = agent && agent.session
         if (!session) return false
-        return effectiveSandboxMode(session.events) === 'workspace-write'
+        return sp.overrideOf(session) === 'workspace-write'
       } catch (e) { return false }
     }
 
@@ -283,7 +308,7 @@ export default {
           signal: exec.signal,
         })
         if (outcome !== 'allowed-once') return false
-        upgradedCalls.set(exec.token, { session, prev: effectiveSandboxMode(session.events) || 'workspace-write' })
+        upgradedCalls.set(exec.token, { session, prev: sp.overrideOf(session) || 'workspace-write' })
         setSandboxMode(session, 'danger-full-access')
         return true
       } catch (e) {
@@ -2338,28 +2363,11 @@ export default {
       async execute(_args, exec) { await load(exec); return statusView(exec) },
     })
 
-    // 新会话默认权限修正：平台对 seeded 会话（web 新窗口几乎都是）固定为
-    // 「组合派生预设」，忽略用户在设置里选的默认。这里在会话创建时检测：
-    // 全新（无任何活动）+ 当前预设恰为组合派生值 + 用户默认不同 → 按用户默认
-    // 重定。已恢复/有历史的会话（hasActivity）保持原样。
+    // 新会话默认权限修正已交由 dsh-permission-presets 0.1.2 原生处理：其在
+    // session/created 钩子里调用 pinInitialPermission，为新会话 seed 用户默认
+    // 预设、对 seeded/恢复会话保留其有效值。旧 0.1.1 时代这里的 re-seed 补偿
+    // （检测「全新无活动 + 组合派生预设 ≠ 用户默认」后重定）已移除。
     ctx.on('session/created', (session) => {
-      try {
-        if (!session) return
-        const pp = ctx.permissionPresets
-        if (!pp || typeof pp.current !== 'function' || typeof pp.set !== 'function') return
-        const composedDefault = pp.current([])
-        const userDefault = pp.defaultPreset
-        if (!userDefault || userDefault === composedDefault) return
-        const evs = session.events || []
-        // 真正的「已使用」判定：发生过轮次/工具调用。seed 里可能含合成的
-        // user/message，不能作为已使用的依据；恢复的会话历史必然含 turn/start。
-        const hasActivity = evs.some((e) => e.type === 'turn/start' || e.type === 'tool/call')
-        if (hasActivity) return
-        if (pp.current(evs) !== composedDefault) return
-        pp.set(session, userDefault)
-        if (agentRef === null) agentRef = { session }
-        broadcast({ type: 'status' })
-      } catch (e) {}
       // 沙箱对齐：session/created 是同步 emit，本监听可能在 pinInitialPermission
       // 之前/之后执行、且恢复会话的 seed 事件在插件加载前已发生。延迟一 tick 后
       // 再按 permgate 配置对齐该会话沙箱（对 custom-review 会话幂等）。
