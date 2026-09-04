@@ -325,7 +325,7 @@ window.__ModuleLoader__.load({
 		const PG_NAME_EN = 'Custom Review';
 		const PG_DESC_ZH = '按分类逐项审查工具调用；被底层沙箱拒绝时弹出升级审批';
 		const PG_DESC_EN = 'Per-category tool review; sandbox denials trigger an upgrade approval';
-		const PG_PERMISSION_LABELS = new Set(['Read Only', 'Workspace Write', '自定义审查', 'Custom Review', 'Full access']);
+		const PG_PERMISSION_LABELS = new Set(['Read Only', 'Workspace Write', '自定义审查', 'Custom Review', 'Full access', '仅可查看', '工作区内修改', '完全权限']);
 		const PG_TRIGGER_PREFIXES = ['访问模式，当前：', 'Access mode, current: '];
 		const PG_TRIGGER_SELECTOR = ['button[aria-label^="访问模式，当前："]', 'button[aria-label^="Access mode, current: "]'].join(',');
 		const PG_MASK = 'url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22 fill=%22none%22%3E%3Cpath d=%22M8.20554%200.899994L14.7901%203.36857V7.01026C14.7901%2012%2011.0466%2014.2103%208.20554%2015.3C5.36446%2014.2103%201.62012%2012%201.62012%207.01026V3.36857L8.20554%200.899994Z%22 stroke=%22black%22 stroke-width=%221.31831%22 stroke-linejoin=%22round%22/%3E%3Ccircle cx=%227%22 cy=%227%22 r=%222.9%22 stroke=%22black%22 stroke-width=%221.2%22/%3E%3Cpath d=%22M9.2%209.2L11.6%2011.6%22 stroke=%22black%22 stroke-width=%221.4%22 stroke-linecap=%22round%22/%3E%3C/svg%3E")';
@@ -514,22 +514,34 @@ window.__ModuleLoader__.load({
 			} catch (e) {}
 			return false;
 		}
-		function pgCustomItem(menu) {
+		function pgCustomItem(container) {
 			try {
 				const labels = new Set();
 				let custom = undefined;
-				for (const item of Array.from(menu.querySelectorAll('button[role="menuitem"]'))) {
-					const label = item.textContent ? item.textContent.trim() : '';
+				// 兼容各代权限选择器结构：旧 Menu（menuitem*）、0.1.2 popupSelect
+				// （div[role="option"]）。label 一律优先取首个非空 SPAN 子元素，
+				// 排除 detail/check 兄弟节点，避免文本并入误判；无 SPAN 时回退整项文本。
+				const items = Array.from(container.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"]'));
+				for (const item of items) {
+					let label = '';
+					// 优先取第一个非空 SPAN 子元素（label），排除 detail/check 兄弟，
+					// 避免文本并入误判；无 SPAN 时回退整项文本（旧 Menu 按钮结构）
+					for (const child of Array.from(item.children || [])) {
+						if (child.tagName !== 'SPAN') continue;
+						const t = (child.textContent || '').trim();
+						if (t) { label = t; break; }
+					}
+					if (!label) label = item.textContent ? item.textContent.trim() : '';
 					if (!label || labels.has(label)) continue;
 					labels.add(label);
-					if (label === PG_CUSTOM_LABEL || label === PG_NAME_EN) custom = item;
+					if (label === PG_CUSTOM_LABEL || label === PG_NAME_EN || label.indexOf(PG_CUSTOM_LABEL) !== -1 || label.indexOf(PG_NAME_EN) !== -1) custom = item;
 				}
 				if (!custom) return undefined;
 				let hits = 0;
 				for (const want of PG_PERMISSION_LABELS) {
 					if (labels.has(want)) hits++;
 				}
-				// 至少命中 3 项预设标签才认定是权限菜单（宽容标签变体；其他菜单
+				// 至少命中 3 项预设标签才认定是权限选择器（宽容标签变体；其他菜单
 				// 不可能同时含有自定义审查/多项预设名，误伤概率为零）
 				return hits >= 3 ? custom : undefined;
 			} catch (e) { return undefined; }
@@ -558,9 +570,10 @@ window.__ModuleLoader__.load({
 		}
 		function pgScanIcons(document) {
 			try {
-				// 菜单是 portal 渲染（不位于触发器旁边），全文档扫描所有 role=menu；
-				// pgCustomItem 要求四项预设齐全才认，误伤其他菜单的概率为零
-				for (const menu of Array.from(document.querySelectorAll('[role="menu"]'))) {
+				// 菜单/选择器是 portal 渲染（不位于触发器旁边），全文档扫描所有
+				// role=menu（旧 Menu 组件）与 role=listbox（0.1.2 popupSelect）；
+				// pgCustomItem 要求多项预设齐全才认，误伤其他菜单的概率为零
+				for (const menu of Array.from(document.querySelectorAll('[role="menu"], [role="listbox"]'))) {
 					const customItem = pgCustomItem(menu);
 					if (customItem !== undefined) pgEnsureMenuIcon(document, customItem);
 				}
