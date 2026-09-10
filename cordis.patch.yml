@@ -8,7 +8,7 @@
 # 插件本体（宿主半 + 浏览器半）
 - insert:
     - id: permgate
-      name: dsh-permgate
+      name: '@mrweicodes/dsh-permgate'
 
 # 权限预设表：新增「自定义审查」表项（会话级可选，每个对话独立记忆）。
 # - custom-review 的 approval 为 ask：权限网关的前置审查（分类/例外/规则）使用

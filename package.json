@@ -1,5 +1,5 @@
 {
-  "name": "dsh-permgate",
+  "name": "@mrweicodes/dsh-permgate",
   "description": "Permission gateway for DSH (DeepSeek Harness): reviews tool calls per category (directory/command/read/edit/subagent/doom loop) with global/project config, exceptions, quick-tool defaults, custom rules, bilingual approval modal and sandbox-upgrade flow. Config persisted at $DSH_HOME/dsh-permgate/config.json.",
   "version": "1.3.9",
   "repository": {
