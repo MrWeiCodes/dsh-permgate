@@ -55,7 +55,7 @@
 
 ### 方式一：插件市场安装（dsh-market，推荐）
 
-已安装 [dsh-market](https://github.com/dsh-market/dsh-market)（DSH 插件市场）的用户：打开 **设置 → 插件市场（Plugin Market）**，搜索 `dsh-permgate`，点卡片上的「安装」并按提示确认来源（`github:MrWeiCodes/dsh-permgate`）。安装完成后**重启 `dsh web`**。然后在会话的权限选择器（`/permission`）中选择 **「自定义审查」**。
+已安装 [dsh-market](https://github.com/dsh-market/dsh-market)（DSH 插件市场）的用户：打开 **设置 → 插件市场（Plugin Market）**，搜索 `dsh-permgate`，点卡片上的「安装」并按提示确认来源（npm：`@mrweicodes/dsh-permgate`；若卡片显示 GitHub 源则为 `github:MrWeiCodes/dsh-permgate`）。安装完成后**重启 `dsh web`**。然后在会话的权限选择器（`/permission`）中选择 **「自定义审查」**。
 
 ### 方式二：让 AI 安装（最简单）
 
@@ -64,6 +64,12 @@
 ### 方式三：一行命令（自助安装）
 
 宿主侧插件为纯 ESM JavaScript，浏览器注册脚本也作为运行时文件随仓库直接提交。本包没有 build、prepare 或 install 脚本，因此从 Git 安装时不需要授权 pnpm 执行构建。
+
+从 npm 安装（推荐）：
+
+```powershell
+dsh plugin --profile web add @mrweicodes/dsh-permgate
+```
 
 从 GitHub 安装：
 
@@ -93,12 +99,20 @@ dsh plugin --profile web add -w ./dsh-permgate
    ```
 2. 在 profile 的 `package.json` 的 `dependencies` 中加入：
    ```json
-   "dsh-permgate": "file:./packages/dsh-permgate"
+   "@mrweicodes/dsh-permgate": "file:./packages/dsh-permgate"
    ```
 3. 把 `cordis.patch.yml` 的内容并入 profile 的 `cordis.patch.yml`（在文件末尾追加）。
 4. 重新安装依赖并重启：`pnpm install`（或 `npm install`）、`dsh web`。
 
 ## 更新
+> **⚠️ 1.3.9 起包名变更为 `@mrweicodes/dsh-permgate`**（原 `dsh-permgate`）。
+> - **插件市场安装的**：在市场点「更新」即可——市场会自动完成源迁移（移除旧包名、装入新包名），失败会自动回滚。
+> - **手动安装的（方式三／方式四）**：请先移除再重新安装：
+>   ```powershell
+>   dsh plugin --profile web remove dsh-permgate
+>   dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
+>   ```
+> - 配置（`$DSH_HOME/dsh-permgate/config.json`）不受影响，无需重新设置。
 
 按安装方式对应操作，**配置（`$DSH_HOME/dsh-permgate/config.json`）在更新后都会保留**，无需重新设置。
 
@@ -106,11 +120,11 @@ dsh plugin --profile web add -w ./dsh-permgate
 - **方式二（AI 安装）安装的**：直接告诉 AI「更新 dsh-permgate 插件」即可。
 - **方式三（dsh plugin）安装的**：
   ```powershell
-  dsh plugin --profile web update dsh-permgate
+  dsh plugin --profile web update @mrweicodes/dsh-permgate
   ```
   若没有拉到最新提交（git 依赖有缓存），先移除再添加一次：
   ```powershell
-  dsh plugin --profile web remove dsh-permgate
+  dsh plugin --profile web remove @mrweicodes/dsh-permgate
   dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
   ```
   然后重启 `dsh web`。
@@ -135,7 +149,7 @@ dsh plugin --profile web add -w ./dsh-permgate
 ### 方式三（dsh plugin）安装的
 
 ```powershell
-dsh plugin --profile web remove dsh-permgate
+dsh plugin --profile web remove @mrweicodes/dsh-permgate
 ```
 
 `dsh plugin remove` 只移除插件本体与补丁层，**不会删除配置目录**——需按下方清单删除 `$DSH_HOME/dsh-permgate/`。
@@ -143,7 +157,7 @@ dsh plugin --profile web remove dsh-permgate
 ### 方式四（手动）安装的
 
 1. 从 profile 的 `cordis.patch.yml` 中删除 `- insert: permgate` 行；`permission` 预设覆盖整行可一并删除（恢复平台默认预设表）。
-2. 从 profile 的 `package.json` 的 `dependencies` 中删除 `"dsh-permgate": ...`。
+2. 从 profile 的 `package.json` 的 `dependencies` 中删除 `"@mrweicodes/dsh-permgate": ...`。
 3. 重新安装依赖并重启：`pnpm install`（或 `npm install`）、`dsh web`。
 4. 删除插件目录与配置目录（路径见下方清单）。
 
@@ -151,7 +165,7 @@ dsh plugin --profile web remove dsh-permgate
 
 - **配置目录**：`$DSH_HOME/dsh-permgate/`——`$DSH_HOME` 默认是 `~/.dsh`（Windows 下 `C:\Users\<用户名>\.dsh`），插件的 `config.json` 保存在这里。卸载不会自动删除，AI 卸载时按此路径删除整个目录。
 - **插件目录**（方式四安装时）：`$DSH_HOME/profiles/<profile>/packages/dsh-permgate/`。
-- **依赖与补丁**（方式四安装时）：profile 的 `package.json` 中的 `"dsh-permgate": ...` 依赖、`cordis.patch.yml` 中的 `- insert: permgate` 行与 `permission` 预设覆盖。
+- **依赖与补丁**（方式四安装时）：profile 的 `package.json` 中的 `"@mrweicodes/dsh-permgate": ...` 依赖、`cordis.patch.yml` 中的 `- insert: permgate` 行与 `permission` 预设覆盖。
 - **会话日志**：会话中的 `permission/preset: custom-review` 事件是 DSH 自身的记录，**不属于插件残留，不要删除**。
 
 ### 卸载残留

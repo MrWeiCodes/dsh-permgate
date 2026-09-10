@@ -55,7 +55,7 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
 ### Option 1: install from the plugin market (dsh-market, recommended)
 
-If you have [dsh-market](https://github.com/dsh-market/dsh-market) (the DSH plugin market) installed: open **Settings → Plugin Market**, search for `dsh-permgate`, click **Install** on the card and confirm the source when prompted (`github:MrWeiCodes/dsh-permgate`). After it finishes, **restart `dsh web`**. Then select **"Custom Review"** in the session permission picker (`/permission`).
+If you have [dsh-market](https://github.com/dsh-market/dsh-market) (the DSH plugin market) installed: open **Settings → Plugin Market**, search for `dsh-permgate`, click **Install** on the card and confirm the source when prompted (npm: `@mrweicodes/dsh-permgate`; if the card shows a GitHub source, `github:MrWeiCodes/dsh-permgate`). After it finishes, **restart `dsh web`**. Then select **"Custom Review"** in the session permission picker (`/permission`).
 
 ### Option 2: let the AI install (easiest)
 
@@ -64,6 +64,12 @@ Just tell your DSH AI assistant the repository URL, e.g. "install the plugin htt
 ### Option 3: one-liner (self-service)
 
 DeepSeek Harness requires a supported Node.js version. The host-side plugin is plain ESM JavaScript and the browser registration script ships as a runtime file committed directly in this repository. The package has no build, prepare or install scripts, so installing from Git does not require authorizing pnpm to run builds.
+
+Install from npm (recommended):
+
+```powershell
+dsh plugin --profile web add @mrweicodes/dsh-permgate
+```
 
 Install from GitHub:
 
@@ -93,12 +99,21 @@ Fallback for environments without pnpm or for offline use:
    ```
 2. Add to the `dependencies` of the profile's `package.json`:
    ```json
-   "dsh-permgate": "file:./packages/dsh-permgate"
+   "@mrweicodes/dsh-permgate": "file:./packages/dsh-permgate"
    ```
 3. Append the contents of `cordis.patch.yml` to your profile's `cordis.patch.yml`.
 4. Reinstall dependencies and restart: `pnpm install` (or `npm install`), then `dsh web`.
 
 ## Updating
+
+> **⚠️ Note: renamed to `@mrweicodes/dsh-permgate` as of 1.3.9** (previously `dsh-permgate`).
+> - **Installed via the plugin market**: click **Update** — the market performs the source migration automatically (removes the old name, installs the new one) and rolls back on failure.
+> - **Manually installed (Option 3/4)**: remove and reinstall:
+>   ```powershell
+>   dsh plugin --profile web remove dsh-permgate
+>   dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
+>   ```
+> - Your configuration (`$DSH_HOME/dsh-permgate/config.json`) is unaffected.
 
 Pick the command matching how you installed — **your configuration (`$DSH_HOME/dsh-permgate/config.json`) is preserved across updates**, no need to reconfigure.
 
@@ -106,11 +121,11 @@ Pick the command matching how you installed — **your configuration (`$DSH_HOME
 - **Installed via Option 2 (AI)**: just tell your AI assistant "update the dsh-permgate plugin".
 - **Installed via Option 3 (dsh plugin)**:
   ```powershell
-  dsh plugin --profile web update dsh-permgate
+  dsh plugin --profile web update @mrweicodes/dsh-permgate
   ```
   If the latest commit is not fetched (git dependencies are cached), remove and re-add:
   ```powershell
-  dsh plugin --profile web remove dsh-permgate
+  dsh plugin --profile web remove @mrweicodes/dsh-permgate
   dsh plugin --profile web add -w github:MrWeiCodes/dsh-permgate
   ```
   Then restart `dsh web`.
@@ -135,7 +150,7 @@ Just tell your AI assistant "uninstall the dsh-permgate plugin". The AI removes 
 ### Installed via Option 3 (dsh plugin)
 
 ```powershell
-dsh plugin --profile web remove dsh-permgate
+dsh plugin --profile web remove @mrweicodes/dsh-permgate
 ```
 
 `dsh plugin remove` only removes the plugin itself and its patch layer — it does **not** delete the config directory; delete `$DSH_HOME/dsh-permgate/` per the checklist below.
@@ -143,7 +158,7 @@ dsh plugin --profile web remove dsh-permgate
 ### Installed via Option 4 (manual)
 
 1. Remove the `- insert: permgate` row from your profile's `cordis.patch.yml`; the `permission` preset override block can be removed too (restores the platform's default preset table).
-2. Remove `"dsh-permgate": ...` from the `dependencies` of the profile's `package.json`.
+2. Remove `"@mrweicodes/dsh-permgate": ...` from the `dependencies` of the profile's `package.json`.
 3. Reinstall dependencies and restart: `pnpm install` (or `npm install`), then `dsh web`.
 4. Delete the plugin directory and the config directory (paths in the checklist below).
 
@@ -151,7 +166,7 @@ dsh plugin --profile web remove dsh-permgate
 
 - **Config directory**: `$DSH_HOME/dsh-permgate/` — `$DSH_HOME` defaults to `~/.dsh` (`C:\Users\<username>\.dsh` on Windows); the plugin's `config.json` lives here. Uninstallation does not delete it automatically; the AI deletes the whole directory when uninstalling.
 - **Plugin directory** (Option 4 installs): `$DSH_HOME/profiles/<profile>/packages/dsh-permgate/`.
-- **Dependency & patch** (Option 4 installs): the `"dsh-permgate": ...` dependency in the profile's `package.json`, plus the `- insert: permgate` row and the `permission` preset override in `cordis.patch.yml`.
+- **Dependency & patch** (Option 4 installs): the `"@mrweicodes/dsh-permgate": ...` dependency in the profile's `package.json`, plus the `- insert: permgate` row and the `permission` preset override in `cordis.patch.yml`.
 - **Session logs**: the `permission/preset: custom-review` events in sessions are DSH's own records — **not plugin residue, do not delete them**.
 
 ### Uninstall leftovers
