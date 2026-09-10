@@ -180,6 +180,7 @@ dsh plugin --profile web remove dsh-permgate
 - **同类权限插件**：若同时安装其它 pre-execute 审查插件，两个审查链都会生效、可能重复弹窗——建议只保留一个。
 - **原生 approval 服务**：permgate 的前置审查使用自己的弹窗（不经 DSH approval 服务）；沙箱升级审批使用原生 `approval.request`，互不冲突。
 - **显示层**：预设名语言化与徽标是 best-effort DOM 层，仅影响显示；与其他操作同一 DOM 的插件可能视觉叠加，不影响审查功能。
+- **已兼容 [dsh-better-edit](https://github.com/Rianico/dsh-better-edit)**：其 `edit` 工具使用按行 hash 锚点（`{path, edits:[[remove_from,remove_to,replacement_text],…]}`）；permgate 的审批弹窗与文件对比面板能直接解析该格式并渲染改动预览（复刻 better-edit 的行 hash 定位算法，读取其 `hash-store.sqlite` 快照、快照过期时从磁盘重算），两者可同时安装、互不冲突。
 
 ## 自定义功能开发
 

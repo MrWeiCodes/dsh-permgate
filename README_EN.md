@@ -179,6 +179,7 @@ dsh plugin --profile web remove dsh-permgate
 - **Similar permission plugins**: installing another pre-execute review plugin (e.g. dsh-auto-approve) alongside means both review chains run and may double-prompt — keep only one.
 - **Native approval service**: permgate's pre-review uses its own modal (not DSH's approval service); the sandbox-upgrade approval uses the native `approval.request` — no conflict.
 - **Display layer**: preset-name localization and the badge are a best-effort DOM layer, display-only; other plugins touching the same DOM may visually overlap, which never affects enforcement.
+- **Compatible with [dsh-better-edit](https://github.com/Rianico/dsh-better-edit)**: its `edit` tool uses per-line hash anchors (`{path, edits:[[remove_from,remove_to,replacement_text], …]}`); permgate's approval modal and comparison panel parse that format directly and render the change preview (replicating better-edit's line-hash location algorithm, reading its `hash-store.sqlite` snapshot and recomputing from disk when the snapshot is stale). Both plugins can be installed together without conflict.
 
 ## Custom development
 
