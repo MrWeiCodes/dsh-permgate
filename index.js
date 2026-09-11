@@ -1548,7 +1548,8 @@ export default {
         t = t.replace(/^[.\/\\]/, '').trim()
         if (!t) return ''
         if (t.indexOf('$') !== -1 || t.indexOf('@') !== -1) return ''
-        if (!/^[A-Za-z_]/.test(t)) return ''
+        if (t.indexOf(':') !== -1 || t.indexOf('\\') !== -1 || t.indexOf('/') !== -1) return ''
+        if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(t)) return ''
         if (/[()[\]{}'"]/.test(t)) return ''
         return t
       }
@@ -1618,11 +1619,36 @@ export default {
       } catch (e) { return false }
     }
 
+    // 引号感知的命令分段：只把引号外的 | 与 ; 当分段符。
+    // 正则/字符串里常含 |（如匹配盘符的正则），按管道切开会产生 C:\ 这类假命令。
+    function splitCommandSegments(s) {
+      const out = []
+      let cur = ''
+      let quote = null
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i]
+        if (quote !== null) {
+          cur += ch
+          if (ch === quote) {
+            if (quote === "'" && s[i + 1] === "'") { cur += s[++i]; continue }
+            if (quote === '"' && s[i - 1] === '`') continue
+            quote = null
+          }
+          continue
+        }
+        if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue }
+        if (ch === '|' || ch === ';') { out.push(cur); cur = ''; continue }
+        cur += ch
+      }
+      out.push(cur)
+      return out
+    }
+
     function buildCandidates(entry) {
       const out = []
       const push = (label, value, kind) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind })
       if (entry.kind === 'command' && entry.value) {
-        const parts = String(entry.value).split(/[|;]/)
+        const parts = splitCommandSegments(String(entry.value))
         const seen = {}
         for (const seg of parts) {
           const toks = commandTokens(seg)
