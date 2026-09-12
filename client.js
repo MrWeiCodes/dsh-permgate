@@ -777,7 +777,7 @@ window.__ModuleLoader__.load({
 				'panel.quick': '快捷工具（其他工具快速设置）',
 				'panel.quickHint': '无文件/命令语义的工具，按工具名设定默认动作；不在清单里的工具走兜底策略，改动即时生效。',
 				'panel.quickAdd': '新增工具名（如 todo_write，支持通配）',
-				'panel.quickAddBtn': '添加（默认允许）',
+				'panel.quickAddBtn': '添加',
 				'panel.rules': '自定义规则（通用匹配）',
 				'panel.actionDeny': 'deny 拒绝',
 				'panel.actionAsk': 'ask 审批',
@@ -934,7 +934,7 @@ window.__ModuleLoader__.load({
 				'panel.quick': 'Quick tools (other tools)',
 				'panel.quickHint': 'Tools without file/command semantics: set a default per tool name; anything outside this list follows the fallback policy. Changes apply immediately.',
 				'panel.quickAdd': 'New tool name (e.g. todo_write, wildcards allowed)',
-				'panel.quickAddBtn': 'Add (allow by default)',
+				'panel.quickAddBtn': 'Add',
 				'panel.rules': 'Custom rules (generic matching)',
 				'panel.actionDeny': 'deny Deny',
 				'panel.actionAsk': 'ask Ask',
@@ -1582,6 +1582,7 @@ window.__ModuleLoader__.load({
 			const [exAction, setExAction] = React.useState('allow');
 			const [exReasonVal, setExReasonVal] = React.useState('');
 			const [newTool, setNewTool] = React.useState('');
+			const [newToolAction, setNewToolAction] = React.useState('allow');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
@@ -1669,7 +1670,7 @@ window.__ModuleLoader__.load({
 
 			const addQuick = () => {
 				if (!newTool || !String(newTool).trim()) { setMsg(T('panel.needTool')); return; }
-				invoke('permgate:set-quick', { target: tab, tool: String(newTool).trim(), action: 'allow' }, () => setNewTool(''));
+				invoke('permgate:set-quick', { target: tab, tool: String(newTool).trim(), action: newToolAction }, () => setNewTool(''));
 			};
 
 			// 删除该行在当前 tab 的快捷工具设置（服务端收到 action=inherit 即删除该键）；
@@ -1867,6 +1868,7 @@ window.__ModuleLoader__.load({
 					quickTools.map(quickRow),
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 						React.createElement('input', { className: 'pg-field', placeholder: T('panel.quickAdd'), value: newTool, onChange: (e) => setNewTool(e.target.value), disabled: busy }),
+						sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: addQuick }, T('panel.quickAddBtn')),
 					),
 				),
