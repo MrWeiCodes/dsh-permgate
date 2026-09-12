@@ -3,15 +3,20 @@
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { join as pathJoin } from 'node:path'
-import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync } from 'node:fs'
-const CATS = ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop']
-const EXC_CATS = ['directory', 'command', 'read', 'edit']
+import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
+import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
+import { homedir as osHomedir } from 'node:os'
+const CATS = ['directory', 'command', 'read', 'edit', 'undo', 'subagent', 'doomloop']
+const EXC_CATS = ['directory', 'command', 'read', 'edit', 'undo']
+// 分类枚举清单派生：三处工具 schema 的 enum 直接引用，避免新增分类时逐处漏改
+const CATEGORY_ENUM = CATS.slice()
+const EXC_CATEGORY_ENUM = EXC_CATS.slice()
 const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 const MAX_DECISIONS = 30
 const QUICK_PRESET = ['web_search', 'skill', 'grep', 'glob', 'web_fetch']
 const QUICK_DEFAULTS = { web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask' }
+// eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
 const REPEAT_STREAK = 4
@@ -24,11 +29,82 @@ const FILE_WRITE_TOOLS = { write: 1, edit: 1 }
 const COMMAND_TOOLS = { pwsh: 1, bash: 1 }
 const SUBAGENT_TOOLS = { subagent: 1, subagent_fork: 1, workflow: 1, ralph: 1 }
 
+// str_replace_editor 的写命令（view 只读；undo_edit 只抛 E_UNSUPPORTED、不写盘，故不计入写）
+const SRE_WRITE_CMDS = { create: 1, str_replace: 1, insert: 1 }
+
+// str_replace_editor 的内核：DSH 内置（官方语义，insert_line 0 基、插到该行之后）
+// 或 dsh-better-edit 的同名 shadow 覆盖（1 基、插到该行之前）。两者语义相反，
+// 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
+const EDITOR_KERNELS = ['auto', 'builtin', 'shadow']
+const EDITOR_KERNEL_VALUES = ['auto', 'builtin', 'shadow', 'inherit']
+
+// str_replace_editor 命令名提取统一：isFileWrite/isFileRead 与各预览分支共用同一解析口径，
+// 避免命令字符串解析在多处独立演化（create 等命令的判定曾在两处各写一份）
+function sreCommand(args) {
+  try { return String((args && args.command) || '') } catch (e) { return '' }
+}
+
+// 文件写工具判定：write/edit 原生工具，或 str_replace_editor 的写命令
+function isFileWrite(name, args) {
+  if (FILE_WRITE_TOOLS[name]) return true
+  if (name !== 'str_replace_editor') return false
+  return !!SRE_WRITE_CMDS[sreCommand(args)]
+}
+
+// 文件读工具判定：read/read_image，或 str_replace_editor 的 view
+function isFileRead(name, args) {
+  if (FILE_READ_TOOLS[name]) return true
+  if (name !== 'str_replace_editor') return false
+  return sreCommand(args) === 'view'
+}
+
+// 撤销类工具（dsh-better-edit 的 undo_last_edit）：会写盘但不是「编辑」——它恢复既有内容、
+// 不接受调用方提供的新内容，因此单列一类（undo），默认询问。
+const UNDO_TOOLS = { undo_last_edit: 1 }
+function isUndo(name) { return !!UNDO_TOOLS[name] }
+
+// 「可预览文件内容」判定：详情 diff 与「打开文件」路由共用同一口径（写类/读类/撤销类），
+// 避免两处判据分叉导致「面板有对比但打开文件报不支持」
+function isPreviewableFileTool(name, args) {
+  return !!(isFileWrite(name, args) || isFileRead(name, args) || isUndo(name))
+}
+
+// target 归一化统一：缺失/非法一律落到 global（三个设置路由共用，避免漏改某处把项目设置写进全局）
+function normTarget(a) {
+  return a && a.target === 'project' ? 'project' : 'global'
+}
+
+// 路径归一化（better-edit store 路径匹配共用）：大小写/斜杠/尾斜杠归一化
+function normPathKey(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+// 「文件过大」预检统一口径：size 为字节数（多字节 UTF-8 下 ≥ 字符数），超过上限即可安全提前拒绝；
+// 各分支读盘后另有字符数兜底（磁盘全文 + 新增文本总长），两层守卫互补
+function fileTooLarge(info, maxChars) {
+  return !!(info && typeof info.size === 'number' && info.size > maxChars)
+}
+
+// 「文件过大」字符数兜底统一：磁盘全文 + 新增文本总长超过 DIFF_MAX_CHARS 即拒绝。
+// 各读盘分支共用，避免上限口径多份独立演化（文案由调用方按场景选择）。
+// 常量必须定义在模块作用域：overMaxChars 是模块级函数，访问不到 apply() 内的局部常量
+const DIFF_MAX_CHARS = 1048576
+
+function overMaxChars(a, b) {
+  return String(a == null ? '' : a).length + String(b == null ? '' : b).length > DIFF_MAX_CHARS
+}
+
 // 双语文案：bi(zh, en) 生成 {zh,en}；L(obj, lang) 按语言取值（缺省回退中文）
 const bi = (zh, en) => ({ zh, en })
 const L = (o, lang) => (o && (o[lang] || o.zh)) || ''
 // 语言参数归一化：只有 en 用英文，其余（缺失/空/非法）一律中文
 const normLang = (v) => (v === 'en' ? 'en' : 'zh')
+
+// 「读取失败」错误对象统一构造：各读盘/预检分支共用，避免中英文案与字段在多处独立演化
+const readFail = (e) => {
+  const emsg = (e && e.message ? e.message : String(e))
+  return { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg }
+}
 
 export default {
   inject: ['fs', 'sandboxPolicy', 'tools', 'webServer', 'timer', 'approval', 'permissionPresets', 'sessions'],
@@ -46,6 +122,10 @@ export default {
     let loaded = false
     let agentRef = null
     let dshHomeCache = null
+    // home 解析失败后的抑制窗口：load/persist 一次流程内会多次调用 resolveDshHome，
+    // 失败即重试会导致每次调用都重新 spawn cmd 探测并刷错误日志
+    let dshHomeFailAt = 0
+    const HOME_FAIL_TTL_MS = 200
     let config = freshConfig()
     let loadError = null
     let saveError = null
@@ -68,20 +148,20 @@ export default {
     }
 
     function freshConfig() {
-      const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access' }
+      const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask', editorKernel: 'auto' }
       for (const c of CATS) g[c] = freshCategory(c, false)
       for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = QUICK_DEFAULTS[k]
       return { global: g, projects: {} }
     }
 
     function freshProject() {
-      const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit' }
+      const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit', editorKernel: 'inherit' }
       for (const c of CATS) pb[c] = freshCategory(c, true)
       return pb
     }
 
     function freshCategory(key, inheritDefault) {
-      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'doomloop' ? 'ask' : 'allow') }
+      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'undo' || key === 'doomloop' ? 'ask' : 'allow') }
       if (EXC_CATS.indexOf(key) !== -1) cat.exceptions = []
       return cat
     }
@@ -133,13 +213,13 @@ export default {
 
     function buildConfig(parsed) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
-      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access' }
+      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask', editorKernel: EDITOR_KERNELS.indexOf(g.editorKernel) !== -1 ? g.editorKernel : 'auto' }
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
       const projects = {}
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
-        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit' }
+        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit', editorKernel: EDITOR_KERNEL_VALUES.indexOf(p.editorKernel) !== -1 ? p.editorKernel : 'inherit' }
         for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
         projects[key] = pb
       }
@@ -152,6 +232,7 @@ export default {
       const cfg = freshConfig()
       const map = { off: 'allow', permissive: 'allow', locked: 'deny' }
       for (const c of CATS) cfg.global[c].mode = map[oldMode] || 'allow'
+      cfg.global.fallbackMode = map[oldMode]
       cfg.global.doomloop.mode = oldMode === 'off' ? 'allow' : 'ask'
       if (oldMode === 'locked') {
         for (const k of Object.keys(cfg.global.quickTools)) cfg.global.quickTools[k] = 'deny'
@@ -160,13 +241,17 @@ export default {
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
-        const pm = ['off', 'permissive', 'locked'].indexOf(p.mode) !== -1 ? p.mode : 'off'
+        const explicitMode = ['off', 'permissive', 'locked'].indexOf(p.mode) !== -1
+        const pm = explicitMode ? p.mode : 'off'
         const pb = { quickTools: {}, custom: Array.isArray(p.rules) ? p.rules.map(normalizeRule).filter(Boolean) : [] }
         for (const c of CATS) {
           pb[c] = freshCategory(c, true)
           pb[c].mode = pm === 'off' ? 'allow' : (map[pm] || 'allow')
         }
         pb.doomloop.mode = pm === 'off' ? 'allow' : 'ask'
+        // 仅显式配置过旧模式的项目保留旧行为（off→allow）；未显式配置（缺省 off）用 inherit 跟随全局，
+        // 否则之后全局收紧兜底时这些老项目仍按 allow 静默放行
+        pb.fallbackMode = explicitMode ? (pm === 'off' ? 'allow' : map[pm]) : 'inherit'
         if (pm === 'locked') {
           for (const k of QUICK_PRESET) pb.quickTools[k] = 'deny'
         }
@@ -283,7 +368,7 @@ export default {
     // 写类工具 + 目标在工作区外 + 会话沙箱受限（workspace-write）→ 需要沙箱升级
     function needsUpgrade(exec) {
       try {
-        if (!FILE_WRITE_TOOLS[exec.name]) return false
+        if (!isFileWrite(exec.name, exec.arguments) && !isUndo(exec.name)) return false
         const fp = pathArg(exec.arguments)
         if (!fp || !isOutside(fp, root)) return false
         const agent = (exec && exec.agent) || agentRef
@@ -320,18 +405,55 @@ export default {
     // 兜底：异常/取消路径残留的升级在下次调用前写回
     function flushStaleUpgrades() {
       if (!upgradedCalls.size) return
-      for (const [tok, rec] of upgradedCalls) {
+      for (const rec of upgradedCalls.values()) {
         try { if (rec && rec.session) setSandboxMode(rec.session, rec.prev || 'workspace-write') } catch (e) {}
       }
       upgradedCalls.clear()
     }
 
+    // 从宿主环境变量/系统 home 解析 DSH home（跨平台，且能省掉一次 cmd 子进程探测）：
+    // DSH_HOME 本身即 home；否则 用户家目录 + '/.dsh'
+    function homeFromEnv() {
+      try {
+        const win = process.platform === 'win32'
+        // win32 上还要求盘符或 UNC 前缀（charCode 92 为反斜杠、47 为斜杠），
+        // 避免 /c/Users/x 这类取值被 path.resolve 解析到当前盘
+        const isWinAbs = (s) => (s.length > 2 && s.charAt(1) === ':' && (s.charCodeAt(2) === 92 || s.charCodeAt(2) === 47)) || (s.charCodeAt(0) === 92 && s.charCodeAt(1) === 92)
+        const localAbs = (v) => {
+          const s = String(v == null ? '' : v).trim()
+          if (!s || !pathIsAbsolute(s)) return null
+          if (win && !isWinAbs(s)) return null
+          return norm(s)
+        }
+        // 顺序与 harness（@deepseek-ai/dsh-home-paths）一致：DSH_HOME → os.homedir()/.dsh → HOME/USERPROFILE
+        const dh = localAbs(process.env.DSH_HOME)
+        if (dh) return dh
+        const oh = osHomedir()
+        if (oh) return norm(String(oh) + '/.dsh')
+        const h = localAbs(process.env.HOME || process.env.USERPROFILE)
+        if (h) return norm(h + '/.dsh')
+      } catch (e) {}
+      return null
+    }
+
+    // home 配置目标路径统一：ensureTarget/persist/probeHomeConfig/load 共用同一拼接，
+    // 避免同一路径多处内联后漂移（读一个文件、写另一个文件）
+    async function homeConfigTarget(home) {
+      return await fs.resolve(String(home) + '/dsh-permgate/config.json')
+    }
+
     async function resolveDshHome() {
       if (dshHomeCache !== null) return dshHomeCache
-      dshHomeCache = ''
+      // 失败不缓存（初始化早期 subprocess 可能未就绪，保持 null 以便后续重试），
+      // 但抑制短时间内重复重试：load/persist 一次流程会多次调用本函数
+      if (dshHomeFailAt && Date.now() - dshHomeFailAt < HOME_FAIL_TTL_MS) return null
+      // 先看宿主环境变量与系统 home（跨平台）：cmd 探测只在 Windows 可用，
+      // 仅依赖它会让 macOS/Linux 上 home 恒解析失败、配置永久无法落盘
+      const envHome = homeFromEnv()
+      if (envHome) { dshHomeCache = envHome; return dshHomeCache }
       try {
         const sub = ctx.get('subprocess')
-        if (!sub) return dshHomeCache
+        if (!sub) { dshHomeFailAt = Date.now(); return dshHomeCache }
         const exe = await sub.resolveExecutable('cmd')
         const tryEcho = async (expr) => {
           const handle = sub.spawn({
@@ -357,6 +479,7 @@ export default {
       } catch (e) {
         console.error('[permgate] resolveDshHome error:', e)
       }
+      dshHomeFailAt = Date.now()
       return dshHomeCache
     }
 
@@ -369,8 +492,14 @@ export default {
       root = base
       rootSource = source
       const home = await resolveDshHome()
-      const abs = home ? home + '/dsh-permgate/config.json' : (base ? base + '/.dsh/.permgate.json' : '.dsh/.permgate.json')
-      target = await fs.resolve(abs)
+      const resolved = home
+        ? await homeConfigTarget(home)
+        : await fs.resolve(base ? base + '/.dsh/.permgate.json' : '.dsh/.permgate.json')
+      // 配置路径发生切换时不重置磁盘快照：persist 的防覆盖守卫（磁盘内容 vs 快照）依赖它，
+      // 置空会让守卫整段跳过，可能用「旧路径加载的内存配置」静默覆盖新路径上已存在的配置。
+      // 切换后由 load() 对新目标重新建立快照基线；若 persist 在切换后未经 load 直接保存，
+      // 守卫会因新旧目标内容不一致而拒绝并提示「重新加载配置文件」，方向安全。
+      target = resolved
       return target
     }
 
@@ -394,22 +523,10 @@ export default {
           await handle.done
           return true
         }
-        const dir = root ? root + '/.dsh' : '.dsh'
-        const d = await fs.resolve(dir)
-        const info = await fs.stat(d)
-        if (info) return true
-        const sub = ctx.get('subprocess')
-        if (!sub) return false
-        const exe = await sub.resolveExecutable('cmd')
-        const winPath = String(dir).replace(/\//g, '\\')
-        const handle = sub.spawn({
-          argv: [exe, '/c', 'mkdir', winPath],
-          cwd: String(root || '.').replace(/\//g, '\\'),
-          stdio: { stdin: 'ignore', stdout: { maxBytes: 8192 }, stderr: { maxBytes: 8192 } },
-          graceMs: 5000,
-        })
-        await handle.done
-        return true
+        // home 不可用（初始化早期 subprocess 未就绪等）时不再创建目录：旧实现在此
+        // mkdir <root>/.dsh，而 home 恢复后配置写回 home，项目里只留下一个空 .dsh。
+        // 配置目录应与实际写入位置一致；home 不可用是暂时状态，重试即恢复。
+        return false
       } catch (e) {
         console.error('[permgate] ensureConfigDir error:', e)
         return false
@@ -531,7 +648,15 @@ export default {
     }
 
     function ensureProject() {
-      if (!config.projects[root]) config.projects[root] = freshProject()
+      // 与 projectBlock() 同口径查找：迁移来的 key 可能只是大小写/斜杠形式不同，
+      // 若这里用精确 root 查找会另建一个条目，同一项目出现两个 key（面板改动看似无效）
+      const key = norm(root).toLowerCase()
+      const projs = config.projects || {}
+      for (const k of Object.keys(projs)) {
+        if (norm(k).toLowerCase() === key) return projs[k]
+      }
+      if (!config.projects) config.projects = {}
+      config.projects[root] = freshProject()
       return config.projects[root]
     }
 
@@ -541,6 +666,75 @@ export default {
       const block = targetKey === 'global' ? config.global : ensureProject()
       if (!block[cat]) block[cat] = freshCategory(cat, targetKey !== 'global')
       block[cat].mode = mode
+      return true
+    }
+
+    // 覆盖语义统一：project 显式配置优先、inherit 穿透到 global、缺省用 def。
+    // fallback 与分类 mode 共用（缺省值不同：fallback='ask'、分类='allow'），避免覆盖判定独立演化
+    function firstEffective(projVal, globalVal, def) {
+      if (projVal && projVal !== 'inherit') return projVal
+      return globalVal || def
+    }
+
+    // 编辑器内核判别：str_replace_editor 可能被 dsh-better-edit 的同名 shadow 实现覆盖，
+    // 两者 insert 的 insert_line 语义相反（内置 0 基、插到该行之后 / shadow 1 基、插到该行之前），
+    // 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
+    // 判别顺序：显式配置 > 工具描述探测 > 回退内置（内置始终存在）。
+    function editorKernelSetting() {
+      const proj = projectBlock()
+      return firstEffective(proj && proj.editorKernel, config.global.editorKernel, 'auto')
+    }
+
+    function detectEditorKernel(exec) {
+      try {
+        const tools = ctx.tools
+        if (!tools || typeof tools.get !== 'function') return null
+        const def = tools.get('str_replace_editor', (exec && exec.agent) || agentRef)
+        // 内置的「AFTER the line」只出现在 insert_line 的**参数**描述里（顶层描述没有该短语），
+        // 故把参数描述一并纳入匹配，使两种内核都能被正向识别，而不是让内置只能靠回退
+        const top = def && typeof def.description === 'string' ? def.description : ''
+        const params = def && def.parameters && typeof def.parameters === 'object' ? def.parameters : null
+        // defineTool 编译后 parameters 是 JSON Schema（{type:'object', properties:{...}}），
+        // 参数描述在 properties.insert_line.description；兼容可能存在的旧式扁平结构
+        const props = params && params.properties && typeof params.properties === 'object' ? params.properties : params
+        const insDesc = (props && props.insert_line && typeof props.insert_line.description === 'string') ? props.insert_line.description : ''
+        const desc = top + '\n' + insDesc
+        if (!desc.trim()) return null
+        // shadow: "inserts new line(s) before insert_line (1-indexed, lines+1 appends)"
+        if (/before\s+insert_line/i.test(desc) || /1-indexed/i.test(desc)) return 'shadow'
+        // 内置: "The `new_str` will be inserted AFTER the line `insert_line`"
+        if (/AFTER the line/i.test(desc)) return 'builtin'
+        return null
+      } catch (e) { return null }
+    }
+
+    function resolveEditorKernel(exec) {
+      const setting = editorKernelSetting()
+      if (setting === 'builtin' || setting === 'shadow') return { kernel: setting, source: 'config' }
+      const detected = detectEditorKernel(exec)
+      if (detected) return { kernel: detected, source: 'detected' }
+      return { kernel: 'builtin', source: 'fallback' }
+    }
+
+    function setEditorKernel(targetKey, mode) {
+      const allowed = targetKey === 'global' ? EDITOR_KERNELS : EDITOR_KERNEL_VALUES
+      if (allowed.indexOf(mode) === -1) return false
+      const block = targetKey === 'global' ? config.global : ensureProject()
+      block.editorKernel = mode
+      return true
+    }
+
+    // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）
+    function fallbackMode() {
+      const proj = projectBlock()
+      return firstEffective(proj && proj.fallbackMode, config.global.fallbackMode, 'ask')
+    }
+
+    function setFallbackMode(targetKey, mode) {
+      const allowed = targetKey === 'global' ? MODES : ALL_MODES
+      if (allowed.indexOf(mode) === -1) return false
+      const block = targetKey === 'global' ? config.global : ensureProject()
+      block.fallbackMode = mode
       return true
     }
 
@@ -559,14 +753,17 @@ export default {
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
         for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined }
       }
-      const mode = (pCat && pCat.mode && pCat.mode !== 'inherit') ? pCat.mode : (gCat.mode || 'allow')
+      const mode = firstEffective(pCat && pCat.mode, gCat.mode, 'allow')
       return { action: mode, ruleId: null }
     }
 
     function pathArg(args) {
       try {
         if (!args || typeof args !== 'object') return null
-        // read/edit 工具用 path，write 工具用 file_path；两类都取，缺省取不到返回 null
+        // 工具参数里的文件路径：str_replace_editor（内置与 better-edit shadow）只读 path，
+        // 而 read/write 用 file_path。若统一让 file_path 优先，agent 同时传两个字段时就会
+        // 「审查/预览看一个文件、实际写另一个文件」，故先按工具语义取 path
+        if (typeof args.command === 'string' && typeof args.path === 'string') return args.path
         if (typeof args.file_path === 'string') return args.file_path
         if (typeof args.path === 'string') return args.path
         return null
@@ -602,7 +799,6 @@ export default {
     // 过大时走 fallback 旧式 ± 视图（前 200 变更行 + 截断计数，不阻塞审批）。
     // DIFF_MAX_CHARS：对比双方文本总长上限（edit 为磁盘全文+新文本；write 为磁盘+内容）。
     // 1MB 覆盖常见大文件（如打包产物）；超限返回「文件过大，无法生成对比」。
-    const DIFF_MAX_CHARS = 1048576
     const DIFF_MAX_LINES = 200
     // Myers 中间区行数预算：超限走旧式 fallback（避免 trace 内存暴涨）。2048 行最坏时
     // trace 累计约 33MB 瞬时分配 + 数百万次迭代（服务端主线程）；512 行时约 2MB/数十万次，
@@ -616,14 +812,35 @@ export default {
     function splitDiffLines(s) {
       return normEol(s).split('\n')
     }
-    function computeLineDiff(oldText, newText) {
+
+    // 统计字符串 [0, end) 区间的换行数：只计数不物化数组
+    //（避免为取一个行号对最大 1MB 文本 split 出数十万元素的数组）
+    function countNewlines(s, end) {
+      const t = String(s == null ? '' : s)
+      const n = Math.min(typeof end === 'number' ? end : t.length, t.length)
+      let c = 0
+      for (let i = 0; i < n; i++) if (t.charCodeAt(i) === 10) c++
+      return c
+    }
+
+    // 公共前缀/后缀长度（行对齐共用）：computeLineDiff 与 undo 窗口预览复用，避免同一算法两份实现漂移
+    function commonPrefixLen(a, b) {
+      const maxP = Math.min(a.length, b.length)
+      let p = 0
+      while (p < maxP && a[p] === b[p]) p++
+      return p
+    }
+    function commonSuffixLen(a, b, prefix) {
+      let s = 0
+      while (s < a.length - prefix && s < b.length - prefix && a[a.length - 1 - s] === b[b.length - 1 - s]) s++
+      return s
+    }
+    function computeLineDiff(oldText, newText, baseLine) {
+      const b = baseLine || 1
       const oldLines = splitDiffLines(oldText)
       const newLines = splitDiffLines(newText)
-      let prefix = 0
-      const maxP = Math.min(oldLines.length, newLines.length)
-      while (prefix < maxP && oldLines[prefix] === newLines[prefix]) prefix++
-      let suffix = 0
-      while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix && oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]) suffix++
+      const prefix = commonPrefixLen(oldLines, newLines)
+      const suffix = commonSuffixLen(oldLines, newLines, prefix)
       const removed = oldLines.slice(prefix, oldLines.length - suffix)
       const added = newLines.slice(prefix, newLines.length - suffix)
       const lines = []
@@ -633,7 +850,7 @@ export default {
       for (let i = 0; i < n; i++) {
         if (lines.length >= DIFF_MAX_LINES) break
         // 行号：差异区从 prefix+1 行开始；删除行标旧文件行号，新增行标新文件行号
-        const no = String(prefix + i + 1).padStart(4, ' ')
+        const no = String(prefix + i + b).padStart(4, ' ')
         if (i < removed.length) { lines.push('- ' + no + ' ' + removed[i]); shownR++ }
         if (i < added.length) { lines.push('+ ' + no + ' ' + added[i]); shownA++ }
       }
@@ -731,11 +948,8 @@ export default {
       const base = baseLine || 1
       const oldLines = splitDiffLines(oldText)
       const newLines = splitDiffLines(newText)
-      let p = 0
-      const maxP = Math.min(oldLines.length, newLines.length)
-      while (p < maxP && oldLines[p] === newLines[p]) p++
-      let s = 0
-      while (s < oldLines.length - p && s < newLines.length - p && oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]) s++
+      const p = commonPrefixLen(oldLines, newLines)
+      const s = commonSuffixLen(oldLines, newLines, p)
       const midA = oldLines.slice(p, oldLines.length - s)
       const midB = newLines.slice(p, newLines.length - s)
       // 完全相同（含空窗口）：无差异，直接返回空 ops。
@@ -749,7 +963,7 @@ export default {
       // （added - removed === midB.length - midA.length），Myers 结果必被丢弃，直接走 fallback，
       // 避免无谓的 O((N+M)*D) 计算与 trace 内存。
       if (Math.abs(midA.length - midB.length) > DIFF_MAX_LINES) {
-        const d = computeLineDiff(oldText, newText)
+        const d = computeLineDiff(oldText, newText, base)
         return { ok: true, kind, file: fp, fallback: true, added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
       }
       if (midA.length + midB.length <= DIFF_BUDGET_LINES) {
@@ -774,7 +988,7 @@ export default {
           return { ok: true, kind, file: fp, added, removed, ops: out, truncated: 0 }
         }
       }
-      const d = computeLineDiff(oldText, newText)
+      const d = computeLineDiff(oldText, newText, base)
       return { ok: true, kind, file: fp, fallback: true, added: d.added, removed: d.removed, lines: d.lines, truncated: d.truncated }
     }
     // 新文件（write 到不存在路径）：全部为新增行
@@ -805,53 +1019,101 @@ export default {
         return null
       } catch (e) { return null }
     }
+    // better-edit store 定位缓存（projRoot → store 路径）：runtime 目录扫描是 30+ 次文件 IO，
+    // 每次 undo/edit 预览详情都重复执行；projRoot 在会话内不变，缓存安全
+    const betterEditStoreCache = new Map()
+    // store 缓存失效统一：DB 打开/查询失败时清掉正缓存，避免坏结果被固化
+    function invalidateStoreCache(projRoot) {
+      try { betterEditStoreCache.delete(projRoot) } catch (e) {}
+    }
     // 扫描 better-edit runtime 目录，返回匹配 projRoot 的 store 路径（.wsPath sidecar 匹配）
     function betterEditStoreFor(projRoot) {
+      if (betterEditStoreCache.has(projRoot)) return betterEditStoreCache.get(projRoot)
+      let found = null
       try {
-        let base = process.env.DSH_HOME || (process.env.HOME || process.env.USERPROFILE)
-        if (!base) return null
-        // DSH_HOME 已含 .dsh（如 C:\Users\71026\.dsh）时不再重复拼接
-        if (!/[/\\]\.dsh$/.test(base)) base = pathJoin(base, '.dsh')
-        const rt = pathJoin(base, 'plugins', 'dsh-better-edit', 'runtime')
-        if (!fsExistsSync(rt)) return null
-        const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-        const want = norm(projRoot)
-        for (const dir of fsReaddirSync(rt)) {
-          const full = pathJoin(rt, dir)
-          const wsPath = pathJoin(full, '.wsPath')
-          let ws = null
-          try { ws = fsReadFileSync(wsPath, 'utf8').trim() } catch (e) {}
-          if (ws && norm(ws) === want) {
-            const store = pathJoin(full, 'hash-store.sqlite')
-            return fsExistsSync(store) ? store : null
+        // 与 homeFromEnv()/harness 同口径：DSH_HOME 本身即 home，其它情况才是「用户家目录 + '/.dsh'」
+        const base = homeFromEnv()
+        if (base) {
+          const rt = pathJoin(base, 'plugins', 'dsh-better-edit', 'runtime')
+          if (fsExistsSync(rt)) {
+            const want = normPathKey(projRoot)
+            for (const dir of fsReaddirSync(rt)) {
+              const full = pathJoin(rt, dir)
+              const wsPath = pathJoin(full, '.wsPath')
+              let ws = null
+              try { ws = fsReadFileSync(wsPath, 'utf8').trim() } catch (e) {}
+              if (ws && normPathKey(ws) === want) {
+                const store = pathJoin(full, 'hash-store.sqlite')
+                if (fsExistsSync(store)) { found = store; break }
+              }
+            }
           }
         }
-        return null
-      } catch (e) { return null }
+      } catch (e) { found = null }
+      // 负缓存修复：store 未创建（found=null）时不缓存，避免 better-edit 后续创建 store 后
+      // 本会话永远找不到；正结果仍缓存（命中路径性能不受影响）
+      if (found) betterEditStoreCache.set(projRoot, found)
+      return found
     }
-    // 从 better-edit store 读取目标文件的 hashes 数组（按行）。path 匹配做大小写/斜杠归一化。
-    async function betterEditHashesFor(projRoot, targetPath) {
+    // store 查询路径统一提取：resolve 结果对象 → targetKey（realpath）优先，displayPath 次之，fallback 兜底。
+    // betterEditHashesFor 与 buildUndoDiffData 共用，避免 fallback 语义分叉（'' vs fp）
+    // resolve 结果对象 → 原生路径字符串统一口径：processPath（targetKey=realpath）优先，
+    // 其次 targetKey/displayPath，最后 fallback。store 查询、持久化路径比较与迁移清理共用，
+    // 避免「比较用路径」与「操作用路径」分叉（曾导致删除落到 realpath 指向的工作区外文件）
+    function pathString(v, fallback) {
+      if (typeof v === 'string') return v
+      if (v && typeof v === 'object') {
+        const viaProcess = fs.processPath && fs.processPath(v)
+        return String(viaProcess || v.targetKey || v.displayPath || fallback || '')
+      }
+      return String(v == null ? (fallback || '') : v)
+    }
+
+    // store 查询路径统一提取：betterEditHashesFor 与 buildUndoDiffData 共用（复用统一 pathString）
+    function extractStorePath(v, fallback) {
+      return pathString(v, fallback)
+    }
+    // better-edit store 行查找统一：WHERE path 精确查询（走主键），miss 时全表按归一化匹配回退。
+    // undo/snapshots 两表共用，避免查询策略独立演化（table/cols 均为内部常量，无注入面）
+    function storeRowByPath(db, table, cols, rawPath, want) {
+      const exact = String(rawPath || '')
+      const row = db.prepare('SELECT ' + cols + ' FROM ' + table + ' WHERE path = ?').get(exact) || null
+      if (row) return row
+      // 回退：只取主键列做归一化匹配，命中后再按主键取大列——一次 miss 不应把整表大字段
+      // （undo 的 content/result_content 是编辑前后全文）全部物化为 JS 字符串
+      const keys = db.prepare('SELECT path FROM ' + table).all()
+      let hit = null
+      for (const r of keys) { if (normPathKey(r.path) === want) { hit = r.path; break } }
+      if (hit === null) return null
+      return db.prepare('SELECT ' + cols + ' FROM ' + table + ' WHERE path = ?').get(hit) || null
+    }
+
+    async function betterEditHashesFor(projRoot, targetPath, fallbackFp) {
       const storePath = betterEditStoreFor(projRoot)
       if (!storePath) return null
       try {
         const { DatabaseSync } = await import('node:sqlite')
-        const normKey = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-        const want = normKey(targetPath)
+        // fsService.resolve 可能返回 {displayPath, targetKey} 对象（dsh-fs-local resolveLocalTarget），
+        // 先提取路径字符串，否则 String() 恒得 '[object Object]'，WHERE 与归一化匹配全部落空
+        // targetKey（realpath）优先：store 的 path 列存的是磁盘真实大小写，用输入大小写的
+        // displayPath 做 WHERE 在 Windows 上大小写不一致时确定 miss、回退全表载入大列
+        const rawPath = extractStorePath(targetPath, fallbackFp || '')
+        const want = normPathKey(rawPath)
         const db = new DatabaseSync(storePath, { readOnly: true })
         try {
-          const rows = db.prepare('SELECT path, hashes FROM snapshots').all()
-          for (const row of rows) {
-            if (normKey(row.path) === want) {
-              try {
-                const arr = JSON.parse(row.hashes)
-                if (Array.isArray(arr)) return arr
-              } catch (e) {}
-              return null
-            }
+          // 优先按 path 精确查询（snapshots 表 path 是主键，可走索引，避免全表载入全部 hashes）；
+          // 存储格式与磁盘路径可能不完全一致（大小写/斜杠），miss 时回退全表按归一化匹配。
+          const row = storeRowByPath(db, 'snapshots', 'path, hashes', rawPath, want)
+          if (row) {
+            try {
+              const arr = JSON.parse(row.hashes)
+              if (Array.isArray(arr)) return arr
+            } catch (e) {}
+            return null
           }
           return null
         } finally { try { db.close() } catch (e) {} }
-      } catch (e) { return null }
+      } catch (e) { invalidateStoreCache(projRoot); return null }
     }
 
     // ── 从磁盘内容重算 better-edit 行 hash ─────────────────────────────
@@ -875,8 +1137,9 @@ export default {
       if (beHasherP) return beHasherP
       beHasherP = (async () => {
         // 在 better-edit 的安装树里找 xxhash-wasm 的 esm 入口
-        const homedir = process.env.DSH_HOME || (process.env.HOME || process.env.USERPROFILE)
-        const base = /[/\\]\.dsh$/.test(homedir) ? homedir : pathJoin(homedir, '.dsh')
+        // 与 homeFromEnv()/harness 同口径（见 betterEditStoreFor）
+        const base = homeFromEnv()
+        if (!base) return null
         const profileNm = pathJoin(base, 'profiles', 'web', 'node_modules', '.pnpm')
         const dirs = fsExistsSync(profileNm) ? fsReaddirSync(profileNm) : []
         let entry = null
@@ -944,11 +1207,10 @@ export default {
         let maxLine = -Infinity
         for (const idx of indices) {
           const raw = edits[idx]
-          let e = raw
-          if (Array.isArray(raw) && raw.length >= 3) e = { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] }
+          const e = editTuple(raw)
           const fromHash = betterEditAnchor(e && e.remove_from)
           const toHash = betterEditAnchor(e && e.remove_to)
-          const repl = (e && typeof e.replacement_text === 'string') ? e.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
+          const repl = editReplNorm(raw)
           if (!fromHash || !toHash) return null
           // 在当前（已部分应用）的内容上找锚点：仅未变行的原 hash 有效
           const start = curHash.indexOf(fromHash)
@@ -978,13 +1240,172 @@ export default {
       } catch (e) { return null }
     }
 
+    // 撤销（undo_last_edit）的对比数据：读 better-edit 的 undo 行取「撤销后内容」，
+    // 与磁盘当前内容做窗口 diff。文件在编辑后被改动时 better-edit 会拒绝撤销（E_UNDO_STALE），
+    // 此处按同一条件提示，避免展示一次不会执行的变化。
+    // 窗口化 diff 共用：给定变化区（1 基 changeStart 起始行 + old/new 侧变化行数），
+    // 生成前后各 W 行的展示窗口并交给 diffPayloadOrFallback。undo/insert 预览共用，
+    // 避免窗口公式多份独立演化（曾因此产生 insert 预览 off-by-one）。
+    function windowedDiffPayload(fp, oldLines, newLines, changeStart, oldSpan, newSpan, W) {
+      const winStart = Math.max(1, changeStart - W)
+      const winOldText = oldLines.slice(winStart - 1, Math.min(oldLines.length, changeStart - 1 + oldSpan + W)).join('\n')
+      const winNewText = newLines.slice(winStart - 1, Math.min(newLines.length, changeStart - 1 + newSpan + W)).join('\n')
+      return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
+    }
+
+    // 插入预览统一：内置（0 基 after）与 shadow（1 基 before）只差插入点索引与上限的换算，
+    // 参数校验、越界文案与窗口渲染全部共用，避免两侧独立演化（该公式历史上出现过 off-by-one）
+    function previewInsert(fp, oldLines, addedLines, at, maxAt) {
+      if (!Number.isInteger(at) || at < 0) return { ok: false, error: bi('insert_line 无效，无法预览', 'Invalid insert_line; cannot preview') }
+      if (at > maxAt) return { ok: false, error: bi('插入位置超出文件范围', 'Insert position is beyond end of file') }
+      // 只构造窗口范围（±W 行）再交给 diffPayloadOrFallback：避免为渲染小窗口深拷贝整文件行数组
+      const W = 200
+      const winStart = Math.max(0, at - W)
+      const winEnd = Math.min(oldLines.length, at + W)
+      const winOld = oldLines.slice(winStart, winEnd)
+      const k = at - winStart
+      const winNew = winOld.slice(0, k).concat(addedLines, winOld.slice(k))
+      return diffPayloadOrFallback(fp, winOld.join('\n'), winNew.join('\n'), 'modified', winStart + 1)
+    }
+
+    async function buildUndoDiffData(entry, fsService, fp) {
+      if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
+      let row = null
+      // 先 stat + size 预检，再读 DB：避免 >1MB 文件先全量载入 undo 大行（content/result_content 各约等于文件大小）
+      const st = await statTargetChecked(fp, entry.projRoot, fsService)
+      if (!st.ok) return st
+      const target = st.target
+      const info = st.info
+      try {
+        const storePath = betterEditStoreFor(entry.projRoot)
+        const resolved0 = target
+        if (storePath) {
+          const { DatabaseSync } = await import('node:sqlite')
+          const db = new DatabaseSync(storePath, { readOnly: true })
+          try {
+            const rawPath = extractStorePath(resolved0, fp)
+            const want = normPathKey(rawPath)
+            // undo 行 content/result_content 为历史全文（编辑时大小、无上限）：读行前先做 SQL 层
+            // 大小预检，避免 >1MB 历史行被全量载入后才被字符数兜底拒绝（WHERE 精确命中时有效）
+            const lenRow = db.prepare('SELECT LENGTH(content) + LENGTH(result_content) AS total FROM undo WHERE path = ?').get(String(rawPath || ''))
+            if (lenRow && typeof lenRow.total === 'number' && lenRow.total > DIFF_MAX_CHARS) {
+              return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+            }
+            // 优先按 path 精确查询（undo 表 path 是主键，可走索引，避免全表载入全部历史编辑内容）；
+            // 存储格式与磁盘路径可能不完全一致（大小写/斜杠），miss 时回退全表按归一化匹配。
+            row = storeRowByPath(db, 'undo', 'path, content, result_content, bom, ending', rawPath, want)
+          } finally { try { db.close() } catch (e) {} }
+        }
+      } catch (e) { invalidateStoreCache(entry.projRoot); row = null }
+      if (!row) return { ok: false, error: bi('该文件没有可撤销的编辑记录，撤销会被跳过', 'No undo history for this file; the undo will be skipped') }
+      try {
+        const curText = await fsService.readText(target)
+        const after = row.content === null || row.content === undefined ? '' : String(row.content)
+        if (overMaxChars(curText, after)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+        // 与 better-edit 的校验口径对齐：better-edit 用 undo 行的 bom/ending 做字节级精确比较，
+        // 撤销校验含 BOM 与行尾。这里先做归一化比较，再对 BOM/行尾做敏感复核——
+        // 仅行尾（CRLF↔LF）或 BOM 差异的覆盖在 better-edit 会返回 E_UNDO_STALE，预览同步按 stale 处理。
+        const resultContent = row.result_content === null || row.result_content === undefined ? '' : String(row.result_content)
+        const normTxt = (s) => normEol(String(s || '').replace(/^\uFEFF/, ''))
+        if (normTxt(curText) !== normTxt(resultContent)) {
+          return { ok: false, error: bi('文件在该次编辑后已被改动，撤销不会执行（无变化）', 'File changed after that edit; the undo will not run (no change)') }
+        }
+        const undoBom = row.bom === '\uFEFF' ? '\uFEFF' : ''
+        const undoEnding = row.ending === '\r\n' || row.ending === '\r' ? row.ending : '\n'
+        // 磁盘真实 BOM 状态：readText 经 TextDecoder 解码会剥离前导 BOM，故直接读前 3 字节比对
+        // EF BB BF；读不到时回退到「stat.size 与文本字节数比对」的旧判据，与 undo.bom 不一致视为 stale
+        if (typeof info.size === 'number') {
+          let diskHasBom = false
+          try {
+            // readBytes 的 maxBytes 是「整文件上限」（超限直接抛 FS_TOO_LARGE），
+            // 取文件头要用区间读取；不支持时由 catch 回退到 size 判据
+            const head = (fsService.readByteRange && target) ? await fsService.readByteRange(target, { offset: 0, length: 3 }, undefined) : null
+            diskHasBom = !!(head && head.length >= 3 && head[0] === 0xEF && head[1] === 0xBB && head[2] === 0xBF)
+          } catch (e) {
+            diskHasBom = info.size === Buffer.byteLength(curText, 'utf8') + 3
+          }
+          const wantBom = undoBom !== ''
+          if (diskHasBom !== wantBom) {
+            return { ok: false, error: bi('文件 BOM 在该次编辑后已被改动，撤销不会执行（无变化）', 'File BOM changed after that edit; the undo will not run (no change)') }
+          }
+        }
+        // 内容与行尾精确比较：curText 保留原始 CRLF；resultContent 为 \n 规范化存储，按 undo.ending 还原
+        // undoEnding 为 '\n'（LF 文件，最常见）时该 replace 是恒等变换，短路避免整串副本
+        const exactResult = undoEnding === '\n' ? String(resultContent) : String(resultContent).replace(/\n/g, undoEnding)
+        if (curText !== exactResult) {
+          return { ok: false, error: bi('文件行尾/编码在该次编辑后已被改动，撤销不会执行（无变化）', 'File line endings or encoding changed after that edit; the undo will not run (no change)') }
+        }
+        const oldLines = splitDiffLines(curText)
+        const newLines = splitDiffLines(after)
+        const p = commonPrefixLen(oldLines, newLines)
+        const s = commonSuffixLen(oldLines, newLines, p)
+        return windowedDiffPayload(fp, oldLines, newLines, p + 1, oldLines.length - s - p, newLines.length - s - p, 200)
+      } catch (e) {
+        return { ok: false, error: readFail(e) }
+      }
+    }
+    // edits 条目统一解析：元组 [remove_from, remove_to, replacement_text] 或对象 {remove_from, remove_to, replacement_text}
+    function editTuple(raw) {
+      if (Array.isArray(raw) && raw.length >= 3) return { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] }
+      return raw || {}
+    }
+    // replacement_text 统一提取（不含行尾归一化，供「过大」上限等上界用途）
+    function editReplacement(raw) {
+      const t = editTuple(raw)
+      return typeof t.replacement_text === 'string' ? t.replacement_text : ''
+    }
+    // replacement_text 统一提取（行尾归一化，供补丁应用/窗口 diff 用途）
+    function editReplNorm(raw) {
+      const t = editTuple(raw)
+      return (t && typeof t.replacement_text === 'string') ? t.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
+    }
+
+
+    // 统一「resolve→stat→存在/类型/size」预检（不 readText）：readTargetChecked 与 undo 预检共用，
+    // 避免预检检查与文案多份独立演化（曾因此出现 size 预检形式漂移）
+    // 配置目标存在性判定（守卫方向敏感）：stat 失败按「存在」处理——
+    // 宁可拒绝写入并提示，也不静默覆盖已有配置
+    async function configExists(fsService, p) {
+      try { return (await fsService.stat(p)) !== undefined } catch (e) { return true }
+    }
+
+    async function statTargetChecked(fp, projRoot, fsService) {
+      try {
+        const target = await fsService.resolve(resolveArgPath(fp, projRoot))
+        const info = await fsService.stat(target)
+        if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
+        if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+        if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+        return { ok: true, target, info }
+      } catch (e) {
+        return { ok: false, error: readFail(e) }
+      }
+    }
+
+    // 统一「预检 + readText」：返回 {ok:true,target,info,text} 或 {ok:false,error}。
+    // 写分支各读盘入口共用；preText 非空时直接复用（调用方已完成预检读盘，如 str_replace 唯一性检查），避免双读盘
+    async function readTargetChecked(fp, projRoot, fsService, preText) {
+      if (preText !== null && preText !== undefined) return { ok: true, target: null, info: null, text: preText }
+      const st = await statTargetChecked(fp, projRoot, fsService)
+      if (!st.ok) return st
+      try {
+        const text = await fsService.readText(st.target)
+        return { ok: true, target: st.target, info: st.info, text }
+      } catch (e) {
+        return { ok: false, error: readFail(e) }
+      }
+    }
+
     // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
     async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
       const fp = pathArg(args)
-      if (FILE_READ_TOOLS[name]) {
+      if (isUndo(name)) return await buildUndoDiffData(entry, fsService, fp)
+      if (isFileRead(name, args)) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
+        // read_image 读的是二进制：不做文本预览（否则乱码占满详情区）
+        if (name === 'read_image') return { ok: false, error: bi('图片内容不在此预览', 'Image content is not previewed here') }
         try {
           const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
           const info = await fsService.stat(target)
@@ -999,8 +1420,23 @@ export default {
           const MAX_LIMIT = 4096
           const MAX_BYTES = 262144
           const MAX_LINE = 65536
-          const offset = Number.isFinite(args.offset) && args.offset > 0 ? Math.floor(args.offset) : 1
-          const limit = Math.min(Number.isFinite(args.limit) && args.limit > 0 ? Math.floor(args.limit) : 200, MAX_LIMIT)
+          // str_replace_editor 的 view 用 view_range（[start, end]，1 基，end=-1 表示到文件尾）；
+          // 预览据此换算 offset/limit，否则展示区域与实际读取不符（恒为文件开头）
+          let vOffset = args.offset
+          let vLimit = args.limit
+          if (name === 'str_replace_editor' && Array.isArray(args.view_range) && args.view_range.length >= 2) {
+            const vs = Number(args.view_range[0])
+            const ve = Number(args.view_range[1])
+            if (Number.isFinite(vs) && vs > 0) {
+              vOffset = vs
+              // end=-1 表示到文件尾（受 MAX_LIMIT 截断）；end<start 等非法组合会被工具报错，预览同样提示失败
+              if (Number.isFinite(ve) && ve === -1) vLimit = MAX_LIMIT
+              else if (Number.isFinite(ve) && ve >= vs) vLimit = ve - vs + 1
+              else return { ok: false, error: bi('view_range 不合法，该命令将失败（无改动可预览）', 'Invalid view_range; the command will fail (no change to preview)') }
+            }
+          }
+          const offset = Number.isFinite(vOffset) && vOffset > 0 ? Math.floor(vOffset) : 1
+          const limit = Math.min(Number.isFinite(vLimit) && vLimit > 0 ? Math.floor(vLimit) : 200, MAX_LIMIT)
           const winStart = Math.max(1, offset - W)
           const winEnd = offset + limit - 1 + W
           const out = []
@@ -1050,196 +1486,240 @@ export default {
         } catch (e) {
           // 注意：不能与字符串直接拼接（bi() 返回 {zh,en} 对象，+ 会得到 "[object Object]"）；
           // 返回双语对象，由路由侧 L(r.error, lang) 按语言取值。
-          const emsg = (e && e.message ? e.message : String(e))
-          return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+          return { ok: false, error: readFail(e) }
         }
       }
-      if (FILE_WRITE_TOOLS[name]) {
+      // str_replace_editor 的 undo_edit 命令不写盘（better-edit 直接抛 E_UNSUPPORTED），无改动可预览
+      if (name === 'str_replace_editor' && sreCommand(args) === 'undo_edit') {
+        return { ok: false, error: bi('该命令没有可预览的改动', 'This command has no previewable change') }
+      }
+      if (isFileWrite(name, args)) {
+        // str_replace 唯一性检查已读盘时缓存文本，供下方 edit 分支复用，避免同一文件双读盘
+        let sreText = null
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
-        if (name === 'edit') {
+        // str_replace_editor 参数适配：折算成 write/edit 的等价形式复用下面的成熟路径
+        // （create→write 全文；str_replace/insert→edit 补丁；undo_edit 无改动内容可预览）
+        let tool = name
+        // sreKind：本次预览的 str_replace_editor 子命令（非 sre 工具时为空串），
+        // 供下方 write 分支特判 create 复用，避免同一命令在两处各判一次
+        let sreKind = ''
+        // str_replace_editor 只有被 shadow 覆盖时 insert_line 才是 1 基/插到该行之前；
+        // 内核在审批发起时判定并存入 entry（entry 生命周期内不变）；resolveEditorKernel 恒返回
+        // builtin|shadow，故这里只在异常数据下用 'builtin' 兜底，不再重复做一次探测
+        const kernel = entry.editorKernel || 'builtin'
+        if (name === 'str_replace_editor') {
+          const cmd = sreCommand(args)
+          sreKind = cmd
+          if (cmd === 'create') {
+            // create 拒绝覆盖已存在文件（E_FILE_EXISTS，不写盘）：已存在时不能生成覆盖 diff。
+            // 存在性检查由下方 write 分支的 stat 承担（此处不再重复 resolve+stat）
+            tool = 'write'
+            args.content = typeof args.file_text === 'string' ? args.file_text : ''
+          } else if (cmd === 'str_replace') {
+            // 两种内核在 old_str 多次匹配时都拒绝写盘（内置抛 FS_AMBIGUOUS_EDIT、shadow 同要求唯一匹配），
+            // 故不做内核分叉：一律按「不唯一即失败」提示，避免展示一次永远不会发生的替换
+            const oldStr = typeof args.old_str === 'string' ? args.old_str : ''
+            if (oldStr) {
+              const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+              if (!rd.ok) return rd
+              let count = 0
+              let at = 0
+              while (count < 2 && (at = rd.text.indexOf(oldStr, at)) !== -1) { count++; at += oldStr.length }
+              if (count > 1) {
+                return { ok: false, error: bi('old_str 出现多次，该命令将失败（无改动可预览）', 'old_str occurs multiple times; the command will fail (no change to preview)') }
+              }
+              sreText = rd.text
+            }
+            tool = 'edit'
+            args.old_string = oldStr
+            args.new_string = typeof args.new_str === 'string' ? args.new_str : ''
+          } else if (cmd === 'insert') {
+            // insert 的 insert_line 语义随内核相反：DSH 内置 0 基、插到该行之后（官方语义）；
+            // dsh-better-edit shadow 1 基、插到该行之前。按审批发起时判定的内核解释，
+            // 否则会把插入位置画到错误的地方。
+            // 不能折算成 old_string='' 的 edit —— 那会让 rawIdx 恒为 -1，插入位置被伪造成
+            // 「文件开头第 1 行」。这里读盘后按真实插入点生成窗口 diff，行号与实际执行一致。
+            // null/''/false 等占位值不得折算为 0：内置取参把 null 视为未提供并报 required，
+            // 折算成 0 会被当成合法的 0 基位置，预览出一次必定失败的插入
+            const rawInsLine = args.insert_line
+            const insLine = (rawInsLine === null || rawInsLine === undefined || rawInsLine === '' || rawInsLine === false) ? NaN : Number(rawInsLine)
+            const insText = typeof args.new_str === 'string' ? args.new_str : ''
+            const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+            if (!rd.ok) return rd
+            const fileText = rd.text
+            if (overMaxChars(fileText, insText)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+            const addedLines = splitDiffLines(insText)
+            if (kernel === 'builtin') {
+              // 官方语义：insert_line 0 基，插入到该 index 之前（= 第 insert_line 行之后），范围 [0, 行数]
+              const oldLines = splitDiffLines(fileText)
+              return previewInsert(fp, oldLines, addedLines, insLine, oldLines.length)
+            }
+            // shadow：insert_line 1 基、插入到该行之前；空文件行数组为 []、上限「去尾换行行数 + 1」
+            const oldLines = fileText.length === 0 ? [] : splitDiffLines(fileText)
+            const maxInsert = fileText.length === 0 ? 1 : (fileText.endsWith('\n') ? oldLines.length : oldLines.length + 1)
+            return previewInsert(fp, oldLines, addedLines, insLine - 1, maxInsert - 1)
+          }
+        }
+        if (tool === 'edit') {
           // dsh-better-edit 兼容：{path, edits:[[remove_from,remove_to,replacement_text],...]} hash 锚点格式。
           // 与旧格式（old_string/new_string）互斥，优先识别 edits 数组。
           if (Array.isArray(args.edits) && args.edits.length > 0) {
-            try {
-              const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
-              const info = await fsService.stat(target)
-              if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
-              if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
-              const fileText = await fsService.readText(target)
-              if (fileText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-              // 1) 优先 store 快照；2) 快照过期则从磁盘内容重算（xxh32 复刻）；3) 都失败再降级
-              let hashes = await betterEditHashesFor(entry.projRoot, target)
-              if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
-                hashes = await betterEditHashesFromDisk(fileText)
-              }
-              if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
-                // 无任何 hash 来源：无法映射锚点，退回补丁意图展示（至少显示替换文本）
-                const intent = args.edits.map((e) => {
-                  const arr = Array.isArray(e) ? e : null
-                  return arr ? arr[2] : (e && e.replacement_text) || ''
-                }).join('\n')
-                return diffPayloadOrFallback(fp, '', intent, 'modified')
-              }
-              const applied = applyBetterEdits(fileText, args.edits, hashes)
-              if (applied === null) {
-                // 锚点失效或 store 与磁盘不一致：退回补丁意图展示
-                const intent = args.edits.map((e) => {
-                  const arr = Array.isArray(e) ? e : null
-                  return arr ? arr[2] : (e && e.replacement_text) || ''
-                }).join('\n')
-                return diffPayloadOrFallback(fp, '', intent, 'modified')
-              }
-              // 分窗口 diff：把相距较远的 edits 分成多组（相邻间隔 ≤ 2W 同组），
-              // 每组独立生成一个小窗口 diff 再拼接——避免单个大窗口把中间大段未变内容
-              // 算成 +N/-N 假变更（如 +300 -300）。
-              // 关键：new 侧不从「整文件应用后按行号切片」——行数变化（如 1 行换 52 行）会让
-              // new 侧整体偏移，窗口尾部与 old 错位，把大量未变行误判为变更（+52/-52、+342/-342
-              // 等假象）。改为以 old 窗口行为基底、仅在该窗口内应用本组 edits（跟踪 offset），
-              // 使 old/new 覆盖同一内容区域、行号天然对齐。
-              const W = 200
-              const oldLines = splitDiffLines(String(fileText).replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
-              // 每个 edit 的原始行区间（0 基）
-              const editRanges = args.edits.map((raw) => {
-                const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1] } : raw
-                const a = betterEditAnchor(e && e.remove_from)
-                const b = betterEditAnchor(e && e.remove_to)
-                let s = -1, t = -1
-                if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) s = i }
-                if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0) t = i }
-                if (s < 0 && t >= 0) s = t
-                if (t < 0 && s >= 0) t = s
-                return { s, t }
-              })
-              // 分组：按起始行排序，间隔 > 2W 开新组
-              const order = args.edits.map((_, i) => i).sort((x, y) => editRanges[x].s - editRanges[y].s)
-              const groups = []
-              let cur = null
-              for (const i of order) {
-                const line = editRanges[i].s
-                if (line < 0) continue
-                if (!cur || line - cur.max > 2 * W) {
-                  cur = { min: line, max: line, indices: [i] }
-                  groups.push(cur)
-                } else {
-                  cur.max = Math.max(cur.max, line)
-                  cur.indices.push(i)
-                }
-              }
-              const allOps = []
-              let totalAdded = 0
-              let totalRemoved = 0
-              for (const g of groups) {
-                let gMin0 = Infinity, gMax0 = -Infinity
-                for (const i of g.indices) {
-                  const r = editRanges[i]
-                  if (r.s < gMin0) gMin0 = r.s
-                  if (r.t > gMax0) gMax0 = r.t
-                }
-                if (gMin0 === Infinity) continue
-                const gMin = Math.max(1, gMin0 + 1 - W)
-                const gOldEnd = Math.min(oldLines.length, gMax0 + 1 + W)
-                // 新侧：以 old 窗口为基底，仅应用本组 edits，跟踪 offset
-                const local = oldLines.slice(gMin - 1, gOldEnd)
-                let off = 0
-                let resolved = true
-                for (const i of g.indices) {
-                  const r = editRanges[i]
-                  const raw = args.edits[i]
-                  const e = Array.isArray(raw) && raw.length >= 3 ? { remove_from: raw[0], remove_to: raw[1], replacement_text: raw[2] } : raw
-                  const repl = (e && typeof e.replacement_text === 'string') ? e.replacement_text.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : ''
-                  const ls = r.s - (gMin - 1) + off
-                  const lt = r.t - (gMin - 1) + off
-                  if (ls < 0 || lt < ls || lt > local.length) { resolved = false; break }
-                  const replLines = repl === '' ? [] : repl.split('\n')
-                  local.splice(ls, lt - ls + 1, ...replLines)
-                  off += replLines.length - (lt - ls + 1)
-                }
-                if (!resolved) continue
-                const oldWin = oldLines.slice(gMin - 1, gOldEnd).join('\n')
-                const newWin = local.join('\n')
-                const p = diffPayloadOrFallback(fp, oldWin, newWin, 'modified', gMin)
-                if (!p || !p.ok) continue
-                if (p.fallback) return p
-                totalAdded += p.added || 0
-                totalRemoved += p.removed || 0
-                if (Array.isArray(p.ops)) {
-                  for (const op of p.ops) allOps.push(op)
-                } else if (p.lines) {
-                  return p
-                }
-              }
-              if (allOps.length === 0 && totalAdded === 0 && totalRemoved === 0) {
-                return diffPayloadOrFallback(fp, oldLines.join('\n'), splitDiffLines(applied.text).join('\n'), 'modified', 1)
-              }
-              return { ok: true, kind: 'modified', file: fp, added: totalAdded, removed: totalRemoved, ops: allOps, truncated: 0, grouped: true }
-            } catch (e) {
-              const emsg = (e && e.message ? e.message : String(e))
-              return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+            const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+            if (!rd.ok) return rd
+            const fileText = rd.text
+            const target = rd.target
+            // 「文件过大」兜底：磁盘全文 + 全部 replacement_text 总长（agent 可控，必须计入上限）
+            let replTotal = 0
+            for (const raw of args.edits) { replTotal += editReplacement(raw).length }
+            if (overMaxChars(fileText, replTotal)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+            // 1) 优先 store 快照；2) 快照过期则从磁盘内容重算（xxh32 复刻）；3) 都失败再降级
+            let hashes = await betterEditHashesFor(entry.projRoot, target, fp)
+            if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
+              hashes = await betterEditHashesFromDisk(fileText)
             }
+            if (!hashes || !Array.isArray(hashes) || hashes.length === 0) {
+              // 无任何 hash 来源：无法映射锚点，退回补丁意图展示（至少显示替换文本）
+              const intent = args.edits.map(editReplacement).join('\n')
+              return diffPayloadOrFallback(fp, '', intent, 'modified')
+            }
+            const applied = applyBetterEdits(fileText, args.edits, hashes)
+            if (applied === null) {
+              // 锚点失效或 store 与磁盘不一致：退回补丁意图展示
+              const intent = args.edits.map(editReplacement).join('\n')
+              return diffPayloadOrFallback(fp, '', intent, 'modified')
+            }
+            // 分窗口 diff：把相距较远的 edits 分成多组（相邻间隔 ≤ 2W 同组），
+            // 每组独立生成一个小窗口 diff 再拼接——避免单个大窗口把中间大段未变内容
+            // 算成 +N/-N 假变更（如 +300 -300）。
+            // 关键：new 侧不从「整文件应用后按行号切片」——行数变化（如 1 行换 52 行）会让
+            // new 侧整体偏移，窗口尾部与 old 错位，把大量未变行误判为变更（+52/-52、+342/-342
+            // 等假象）。改为以 old 窗口行为基底、仅在该窗口内应用本组 edits（跟踪 offset），
+            // 使 old/new 覆盖同一内容区域、行号天然对齐。
+            const W = 200
+            const oldLines = splitDiffLines(String(fileText).replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+            // 每个 edit 的原始行区间（0 基）
+            const editRanges = args.edits.map((raw) => {
+              const e = editTuple(raw)
+              const a = betterEditAnchor(e && e.remove_from)
+              const b = betterEditAnchor(e && e.remove_to)
+              let s = -1, t = -1
+              if (a && hashes) { const i = hashes.indexOf(a); if (i >= 0) s = i }
+              if (b && hashes) { const i = hashes.indexOf(b); if (i >= 0) t = i }
+              if (s < 0 && t >= 0) s = t
+              if (t < 0 && s >= 0) t = s
+              return { s, t }
+            })
+            // 分组：按起始行排序，间隔 > 2W 开新组
+            const order = args.edits.map((_, i) => i).sort((x, y) => editRanges[x].s - editRanges[y].s)
+            const groups = []
+            let cur = null
+            for (const i of order) {
+              const line = editRanges[i].s
+              if (line < 0) continue
+              if (!cur || line - cur.max > 2 * W) {
+                cur = { min: line, max: line, indices: [i] }
+                groups.push(cur)
+              } else {
+                cur.max = Math.max(cur.max, line)
+                cur.indices.push(i)
+              }
+            }
+            const allOps = []
+            let totalAdded = 0
+            let totalRemoved = 0
+            for (const g of groups) {
+              let gMin0 = Infinity, gMax0 = -Infinity
+              for (const i of g.indices) {
+                const r = editRanges[i]
+                if (r.s < gMin0) gMin0 = r.s
+                if (r.t > gMax0) gMax0 = r.t
+              }
+              if (gMin0 === Infinity) continue
+              const gMin = Math.max(1, gMin0 + 1 - W)
+              const gOldEnd = Math.min(oldLines.length, gMax0 + 1 + W)
+              // 新侧：以 old 窗口为基底，仅应用本组 edits，跟踪 offset
+              const local = oldLines.slice(gMin - 1, gOldEnd)
+              let off = 0
+              let resolved = true
+              for (const i of g.indices) {
+                const r = editRanges[i]
+                const raw = args.edits[i]
+                const repl = editReplNorm(raw)
+                const ls = r.s - (gMin - 1) + off
+                const lt = r.t - (gMin - 1) + off
+                if (ls < 0 || lt < ls || lt > local.length) { resolved = false; break }
+                const replLines = repl === '' ? [] : repl.split('\n')
+                local.splice(ls, lt - ls + 1, ...replLines)
+                off += replLines.length - (lt - ls + 1)
+              }
+              if (!resolved) continue
+              const oldWin = oldLines.slice(gMin - 1, gOldEnd).join('\n')
+              const newWin = local.join('\n')
+              const p = diffPayloadOrFallback(fp, oldWin, newWin, 'modified', gMin)
+              if (!p || !p.ok) continue
+              if (p.fallback) return p
+              totalAdded += p.added || 0
+              totalRemoved += p.removed || 0
+              if (Array.isArray(p.ops)) {
+                for (const op of p.ops) allOps.push(op)
+              } else if (p.lines) {
+                return p
+              }
+            }
+            if (allOps.length === 0 && totalAdded === 0 && totalRemoved === 0) {
+              return diffPayloadOrFallback(fp, oldLines.join('\n'), splitDiffLines(applied.text).join('\n'), 'modified', 1)
+            }
+            return { ok: true, kind: 'modified', file: fp, added: totalAdded, removed: totalRemoved, ops: allOps, truncated: 0, grouped: true }
           }
           const oldText = typeof args.old_string === 'string' ? args.old_string : ''
           const newText = typeof args.new_string === 'string' ? args.new_string : ''
-          if (oldText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容过大，无法生成对比', 'Content too large to compare') }
+          if (overMaxChars(oldText, newText)) return { ok: false, error: bi('内容过大，无法生成对比', 'Content too large to compare') }
           // 关键：edit 是补丁式，仅对比 old_string/new_string 会丢失文件上下文（抽屉只会显示
           // 补丁那几行）。改为读取磁盘当前内容、应用补丁后，取改动前后各 W 行的窗口做 diff——
           // 行号从真实位置起算，payload 恒定小，大文件无需整文件对比（write 才是整文件语义）。
-          try {
-            const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
-            const info = await fsService.stat(target)
-            if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
-            if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
-            if (info.size !== undefined && info.size + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-            const fileText = await fsService.readText(target)
-            if (fileText.length + newText.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-            // 行尾处理：磁盘文件可能是 CRLF/CR 而工具参数为 LF。优先按原始文本字面匹配
-            // （预览与实际 edit 结果一致）；字面匹配失败且磁盘含 CR/CRLF 时，退而按 \n
-            // 归一化匹配构建预览窗口（与 splitDiffLines 同一归一化规则），并在 payload 上
-            // 标记 eolNormalized——此时预览仅为意图展示：实际 edit 按原始字节字面匹配
-            // 仍可能失败，由客户端提示，避免审批者基于"假成功"预览做决策。
-            const rawIdx = oldText ? fileText.indexOf(oldText) : -1
-            // oldNorm/newNorm 为补丁级小字符串，供行数统计与归一化预览共用；fileNorm
-            // 为全文件副本，仅在字面匹配失败且文件确实含 \r 时才构建（避免常见路径对
-            // 最多 1MB 文件做两趟全量 replace 扫描）。
-            const oldNorm = normEol(oldText)
-            const newNorm = normEol(newText)
-            let eolNormalized = false
-            let idx = rawIdx
-            let baseText = fileText
-            let oldLen = oldText.length
-            if (rawIdx === -1 && oldNorm && fileText.indexOf('\r') !== -1) {
-              const fileNorm = normEol(fileText)
-              const normIdx = fileNorm.indexOf(oldNorm)
-              if (normIdx !== -1) {
-                idx = normIdx
-                baseText = fileNorm
-                oldLen = oldNorm.length
-                eolNormalized = true
-              }
+          const rd = await readTargetChecked(fp, entry.projRoot, fsService, sreText)
+          if (!rd.ok) return rd
+          const fileText = rd.text
+          if (overMaxChars(fileText, newText)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          // 行尾处理：磁盘文件可能是 CRLF/CR 而工具参数为 LF。优先按原始文本字面匹配
+          // （预览与实际 edit 结果一致）；字面匹配失败且磁盘含 CR/CRLF 时，退而按 \n
+          // 归一化匹配构建预览窗口（与 splitDiffLines 同一归一化规则），并在 payload 上
+          // 标记 eolNormalized——此时预览仅为意图展示：实际 edit 按原始字节字面匹配
+          // 仍可能失败，由客户端提示，避免审批者基于"假成功"预览做决策。
+          const rawIdx = oldText ? fileText.indexOf(oldText) : -1
+          // oldNorm/newNorm 为补丁级小字符串，供行数统计与归一化预览共用；fileNorm
+          // 为全文件副本，仅在字面匹配失败且文件确实含 \r 时才构建（避免常见路径对
+          // 最多 1MB 文件做两趟全量 replace 扫描）。
+          const oldNorm = normEol(oldText)
+          const newNorm = normEol(newText)
+          let eolNormalized = false
+          let idx = rawIdx
+          let baseText = fileText
+          let oldLen = oldText.length
+          if (rawIdx === -1 && oldNorm && fileText.indexOf('\r') !== -1) {
+            const fileNorm = normEol(fileText)
+            const normIdx = fileNorm.indexOf(oldNorm)
+            if (normIdx !== -1) {
+              idx = normIdx
+              baseText = fileNorm
+              oldLen = oldNorm.length
+              eolNormalized = true
             }
-            if (idx === -1) {
-              // 磁盘内容已与提案脱节（旧文本未找到）：退回补丁级对比，至少展示改动意图
-              return diffPayloadOrFallback(fp, oldText, newText, 'modified')
-            }
-            const applied = baseText.slice(0, idx) + (eolNormalized ? newNorm : newText) + baseText.slice(idx + oldLen)
-            const W = 200
-            const oldLines = splitDiffLines(baseText)
-            const newLines = splitDiffLines(applied)
-            const lineStart = baseText.slice(0, idx).split('\n').length
-            const oldCnt = splitDiffLines(oldNorm).length
-            const newCnt = splitDiffLines(newNorm).length
-            const winStart = Math.max(1, lineStart - W)
-            const winOldEnd = Math.min(oldLines.length, lineStart + oldCnt - 1 + W)
-            const winNewEnd = Math.min(newLines.length, lineStart + newCnt - 1 + W)
-            const winOldText = oldLines.slice(winStart - 1, winOldEnd).join('\n')
-            const winNewText = newLines.slice(winStart - 1, winNewEnd).join('\n')
-            const payload = diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
-            // diffPayloadOrFallback 恒返回 ok:true 的 payload（失败时返回 fallback 视图而非 ok:false）
-            if (eolNormalized) payload.eolNormalized = true
-            return payload
-          } catch (e) {
-            const emsg = (e && e.message ? e.message : String(e))
-            return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
           }
+          if (idx === -1) {
+            // 磁盘内容已与提案脱节（旧文本未找到）：退回补丁级对比，至少展示改动意图
+            return diffPayloadOrFallback(fp, oldText, newText, 'modified')
+          }
+          const applied = baseText.slice(0, idx) + (eolNormalized ? newNorm : newText) + baseText.slice(idx + oldLen)
+          const oldLines = splitDiffLines(baseText)
+          const newLines = splitDiffLines(applied)
+          const lineStart = 1 + countNewlines(baseText, idx)
+          const oldCnt = splitDiffLines(oldNorm).length
+          const newCnt = splitDiffLines(newNorm).length
+          const payload = windowedDiffPayload(fp, oldLines, newLines, lineStart, oldCnt, newCnt, 200)
+          // diffPayloadOrFallback 恒返回 ok:true 的 payload（失败时返回 fallback 视图而非 ok:false）
+          if (eolNormalized) payload.eolNormalized = true
+          return payload
         }
         const content = typeof args.content === 'string' ? args.content : ''
         if (!content || content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('内容缺失或过大', 'Content missing or too large') }
@@ -1247,16 +1727,19 @@ export default {
           const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
           const info = await fsService.stat(target)
           if (info === undefined) return newFilePayload(fp, content)
+          // create 拒绝覆盖已存在文件：write 分支已 stat，此处特判（避免 create 分支重复 resolve+stat）
+          if (sreKind === 'create') {
+            return { ok: false, error: bi('create 不会覆盖已存在的文件（该命令将失败），无改动可预览', 'create will fail: file already exists; no change to preview') }
+          }
           if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
-          if (info.size !== undefined && info.size + content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           const oldText = await fsService.readText(target)
-          if (oldText.length + content.length > DIFF_MAX_CHARS) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          if (overMaxChars(oldText, content)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           return diffPayloadOrFallback(fp, oldText, content, 'modified')
         } catch (e) {
           // 注意：不能与字符串直接拼接（bi() 返回 {zh,en} 对象，+ 会得到 "[object Object]"）；
           // 返回双语对象，由路由侧 L(r.error, lang) 按语言取值。
-          const emsg = (e && e.message ? e.message : String(e))
-          return { ok: false, error: { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg } }
+          return { ok: false, error: readFail(e) }
         }
       }
       return null
@@ -1271,7 +1754,18 @@ export default {
       if (!r) return false
       const s = norm(p)
       const abs = (s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)) ? s : r + '/' + s
-      return abs.toLowerCase().indexOf(r.toLowerCase()) !== 0
+      // 盘根 'G:'（norm 剥掉尾斜杠）补回根斜杠：pathResolve('G:') 会落到 cwd 而非盘根；
+      // UNC 根 pathResolve 输出带尾部分隔符，前缀判断需按「rr 已以分隔符结尾」分支处理
+      const fixRoot = (v) => pathResolve(/^[a-zA-Z]:$/.test(v) ? v + '/' : v)
+      const ra = fixRoot(abs)
+      const rr = fixRoot(r)
+      const lowerRa = ra.toLowerCase()
+      const lowerRr = rr.toLowerCase()
+      // 根本身（含盘根/UNC 根，rr 可能以分隔符结尾）为区内；前缀比较带分隔符边界
+      if (lowerRa === lowerRr) return false
+      const rrEndSep = lowerRr.endsWith('/') || lowerRr.endsWith('\\')
+      if (rrEndSep) return lowerRa.indexOf(lowerRr) !== 0
+      return lowerRa.indexOf(lowerRr + '/') !== 0 && lowerRa.indexOf(lowerRr + '\\') !== 0
     }
 
     function callKey(name, args) {
@@ -1354,6 +1848,7 @@ export default {
       if (d.kind === 'path' && v) {
         if (d.cat === 'read') return bi('读取文件 ' + v, 'Read file ' + v)
         if (d.cat === 'edit') return bi('写入/修改文件 ' + v, 'Write/modify file ' + v)
+        if (d.cat === 'undo') return bi('撤销操作（恢复上次编辑前的内容）：' + v, 'Undo edit (revert last edit): ' + v)
         return bi('访问路径 ' + v, 'Access path ' + v)
       }
       if (d.cat === 'doomloop') return bi('重复操作拦截：' + t + ' 连续多次相同调用，疑似循环', 'Doom Loop: ' + t + ' repeated identically, possible loop')
@@ -1383,8 +1878,11 @@ export default {
       const t = (zh, en) => (lang === 'en' ? en : zh)
       try {
         if (!args || typeof args !== 'object') return lines
-        const fp = typeof args.file_path === 'string' ? args.file_path : null
-        if (FILE_READ_TOOLS[name]) {
+        const fp = pathArg(args)
+        if (isUndo(name)) {
+          push(t('撤销', 'Undo'), fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
+          if (fp) push(t('路径', 'Path'), fp, { path: fp })
+        } else if (isFileRead(name, args)) {
           const target = fp || args.path || ''
           // 图片无法按文本预览，路径不做可点击（其余 read 可点击打开内容预览）
           const clickable = name === 'read_image' ? undefined : { path: fp }
@@ -1392,10 +1890,19 @@ export default {
           if (fp) push(t('路径', 'Path'), fp, clickable)
           if (args.offset !== undefined) push(t('偏移', 'Offset'), args.offset)
           if (args.limit !== undefined) push(t('行数', 'Lines'), args.limit)
-        } else if (FILE_WRITE_TOOLS[name]) {
-          push(name === 'edit' ? t('修改', 'Edit') : t('写入', 'Write'), fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
+        } else if (isFileWrite(name, args)) {
+          const isSre = name === 'str_replace_editor'
+          const sreCmd = isSre ? sreCommand(args) : ''
+          const wLabel = isSre
+            ? (sreCmd === 'create' ? t('创建', 'Create') : t('编辑', 'Edit'))
+            : (name === 'edit' ? t('修改', 'Edit') : t('写入', 'Write'))
+          push(wLabel, fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
           if (fp) push(t('路径', 'Path'), fp, { path: fp })
-          const content = typeof args.content === 'string' ? args.content : (typeof args.new_string === 'string' ? args.new_string : '')
+          const content = typeof args.content === 'string'
+            ? args.content
+            : (typeof args.new_string === 'string'
+              ? args.new_string
+              : (typeof args.new_str === 'string' ? args.new_str : (typeof args.file_text === 'string' ? args.file_text : '')))
           if (content) push(t('内容', 'Content'), content.length > 140 ? content.slice(0, 140) + '…（共 ' + content.length + ' 字符）' : content)
         } else if (COMMAND_TOOLS[name]) {
           push(t('命令', 'Command'), args.command || '')
@@ -1416,12 +1923,12 @@ export default {
       const args = exec.arguments
       // deny 例外可携带自定义拒绝原因；有则用自定义文案，无则回退「（例外 id）」标注
       const exReason = (d) => {
-        if (d && d.action === 'deny' && d.reason) return d.reason
+        if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'
         if (d && d.ruleId) return '（例外 ' + d.ruleId + '）'
         return ''
       }
       const exReasonEn = (d) => {
-        if (d && d.action === 'deny' && d.reason) return d.reason
+        if (d && d.action === 'deny' && d.reason) return ' (' + d.reason + ')'
         if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
         return ''
       }
@@ -1446,7 +1953,7 @@ export default {
           return { action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' }
         }
       }
-      if (FILE_READ_TOOLS[name]) {
+      if (isFileRead(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           const d = resolveCategory('directory', fp, 'path')
@@ -1459,7 +1966,7 @@ export default {
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
       }
-      if (FILE_WRITE_TOOLS[name]) {
+      if (isFileWrite(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           // 双重审查：工作区外写入先过「目录访问」闸（能否触碰），directory 不拒绝时再过「编辑」闸。
@@ -1481,6 +1988,27 @@ export default {
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
       }
+      // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
+      // 与写类一致：工作区外仍先过「目录访问」闸（directory + undo 合并矩阵）。
+      if (isUndo(name)) {
+        const fp = pathArg(args)
+        if (fp && isOutside(fp, root)) {
+          const d = resolveCategory('directory', fp, 'path')
+          const e = resolveCategory('undo', fp, 'path')
+          if (d.action === 'deny' || e.action === 'deny') {
+            const src = d.action === 'deny' ? d : e
+            return { action: 'deny', reason: bi('目录权限：拒绝撤销工作区外 ' + fp + exReason(src), 'Directory permission: undo outside workspace denied ' + fp + exReasonEn(src)), ruleId: src.ruleId, cat: 'directory', value: fp, kind: 'path' }
+          }
+          if (d.action === 'ask' || e.action === 'ask') {
+            return { action: 'ask', reason: bi('撤销工作区外文件 ' + fp + '（需确认）', 'Undo outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: 'undo', value: fp, kind: 'path' }
+          }
+          return { action: 'allow', reason: bi('撤销工作区外文件 ' + fp, 'Undo outside workspace ' + fp), ruleId: null, cat: 'undo', value: fp, kind: 'path' }
+        }
+        const d = resolveCategory('undo', fp, 'path')
+        const exZh = exReason(d)
+        const exEn = exReasonEn(d)
+        return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
+      }
       if (COMMAND_TOOLS[name]) {
         const cmd = commandArg(args)
         // 命令的所有可识别命令 token 均已命中 allow 例外 → 视为已覆盖，直接放行（不再弹窗）
@@ -1498,7 +2026,9 @@ export default {
       }
       const q = quickAction(name)
       if (q) return { action: q.action, reason: bi('快捷设置：' + name + ' → ' + q.action, 'Quick setting: ' + name + ' → ' + q.action), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
-      return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
+      const fb = fallbackMode()
+      if (fb === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
+      return { action: fb, reason: bi('未匹配任何规则，按兜底策略处理：' + fb, 'No rule matched; handled by fallback policy: ' + fb), ruleId: null, cat: 'fallback', value: name, kind: 'tool' }
     }
 
     function recordDecision(d, exec) {
@@ -1677,7 +2207,6 @@ export default {
         let onAbort = null
         const id = 'p' + Math.random().toString(36).slice(2, 10)
         const argsJson = safeJson(exec.arguments)
-        const argsPreview = argsJson && argsJson.length > 160 ? argsJson.slice(0, 160) + '…' : (argsJson || '')
         const taskText = argDescription(exec.arguments) || recentUserText(exec)
         const entry = {
           id,
@@ -1694,8 +2223,12 @@ export default {
           // 审批发起时的项目根：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
           // 打相对路径/对比/打开文件必须用发起会话自己的根
           projRoot: root || null,
-          // 编辑/写入且有文件路径 → 弹窗「详情」默认展开、按需取对比数据
-          hasDiff: !!FILE_WRITE_TOOLS[exec.name] && !!pathArg(exec.arguments),
+          // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开、按需取数据
+          // （写类=diff，读类=窗口化内容；长度由服务端硬上限截断）
+          hasDiff: isPreviewableFileTool(exec.name, exec.arguments) && !!pathArg(exec.arguments),
+          // str_replace_editor 的内核在审批发起时定下（insert 的 insert_line 语义随内核相反），
+          // 详情预览按发起时的实际内核解释，避免中途判别漂移
+          editorKernel: resolveEditorKernel(exec).kernel,
           resolve,
           cleanup() {
             if (onAbort && exec.signal) { try { exec.signal.removeEventListener('abort', onAbort) } catch (e) {} }
@@ -1789,11 +2322,44 @@ export default {
 
     // 最近一次成功读取/写入的磁盘原文：persist 前与磁盘比对，防止覆盖外部手工编辑
     let lastDiskJson = null
+    // 加载失败哨兵：load 未能建立磁盘基线时置此值，persist 守卫据此拒绝保存，
+    // 防止「配置存在但读取失败」后下一次 persist 静默覆盖磁盘上的用户配置
+    const LOAD_FAILED_MARK = '\u0000__PERMGATE_LOAD_FAILED__'
 
     async function persist(exec) {
       try {
-        const t = await ensureTarget(exec)
+        let t = await ensureTarget(exec)
         await ensureConfigDir()
+        // 配置只应写到 home：home 不可用时会退到 <root>/.dsh/.permgate.json，而 DSH 的 writeText
+        // 会自动 mkdir 父目录——一旦落盘就在项目里留下 .dsh（home 恢复后这份配置还会成为孤儿）。
+        // 故此处直接拒绝，等 home 就绪后由 load() 重新落盘。
+        const homeNow = await resolveDshHome()
+        const pathOf = (v) => norm(pathString(v)).toLowerCase()
+        // home 归属判定两侧必须同口径：pathOf 取的是 realpath（processPath），故 home 前缀也要由
+        // 解析后的 home 目标派生——否则 home 含 junction/符号链接时前缀恒不匹配，保存会被永久拒绝
+        const homeTarget = homeNow ? await homeConfigTarget(homeNow) : null
+        const homePrefix = homeTarget ? pathOf(homeTarget).replace(/[\\/][^\\/]*$/, '/') : ''
+        const inHome = !!(homeTarget && homePrefix && pathOf(t).indexOf(homePrefix) === 0)
+        // home 已恢复但 target 仍停在回退路径时就地重算，省掉一次「重新加载配置文件」
+        if (!inHome && homeTarget) {
+          target = homeTarget
+          t = target
+          // 目标切换后旧基线不再属于该目标：基线为空却直接放行，会用内存里的（可能默认）配置
+          // 覆盖 home 上已存在的用户配置——故 home 已有文件时拒绝保存并要求先重新加载
+            if (lastDiskJson === null && await configExists(fs, t)) {
+              saveError = uiLang === 'en' ? 'Config target switched to DSH home; reload the config file before saving.' : '配置路径已切换到 DSH home，请先「重新加载配置文件」再保存'
+              broadcast({ type: 'status' })
+              return false
+            }
+        }
+        if (!homeTarget || !homePrefix || pathOf(t).indexOf(homePrefix) !== 0) {
+          // 区分「home 不可用」与「目标不在 home 下」：前者稍后重试即可，后者需要重新加载配置
+          saveError = homeTarget
+            ? (uiLang === 'en' ? 'Config target is outside the DSH home; reload the config file before saving.' : '配置目标不在 DSH home 下，请先「重新加载配置文件」再保存')
+            : (uiLang === 'en' ? 'DSH home is not ready; save skipped to avoid creating a stray .dsh in the project. Retry shortly.' : 'DSH home 未就绪，已跳过保存（避免在项目里产生 .dsh）；稍后重试即可')
+          broadcast({ type: 'status' })
+          return false
+        }
         // 防覆盖守卫：配置在加载后被外部修改（手工编辑、其他实例写入）时拒绝保存，
         // 避免静默覆盖用户规则；点击「重新加载配置文件」后守卫自动放行。
         try {
@@ -1803,7 +2369,16 @@ export default {
             broadcast({ type: 'status' })
             return false
           }
-        } catch (e) {}
+        } catch (e) {
+          // 读取失败：先用 stat 区分「目标不存在」与「存在但读不出」——
+          // 目标不存在（首次落盘 / 迁移到新路径）视为尚无磁盘内容，允许写入并重建基线；
+          // 已建立过基线却读不出（被占用、权限、IO 错误）时保守拒绝，避免静默覆盖用户手工编辑的规则
+          if (await configExists(fs, t) && lastDiskJson !== null) {
+            saveError = uiLang === 'en' ? 'Config file unreadable; save cancelled. Check the file (locked / permission / non-text encoding), then click "Reload config file".' : '配置文件无法读取，已取消保存；请检查该文件（被占用/权限/非文本编码）后再点击「重新加载配置文件」'
+            broadcast({ type: 'status' })
+            return false
+          }
+        }
         const writePolicy = { mode: 'danger-full-access', workspaceRoot: root }
         await fs.writeText(t, JSON.stringify(config, null, 2), undefined, undefined, writePolicy)
         lastDiskJson = JSON.stringify(config, null, 2)
@@ -1816,9 +2391,73 @@ export default {
       }
     }
 
+    // 项目残留配置并入（迁移用）：只采纳 projects 段——工作区内的 .dsh/.permgate.json 可能随
+    // 仓库分发或被 agent 写入（不可信），其 global 段一律忽略，避免 clone 即得的宽松「全局」
+    // 策略覆盖用户配置；源里若只有旧格式 global（无 projects）则不迁移，从而不会走 migrateOld
+    // （旧模式 permissive 会被映射成全 allow）。源不可解析或无可迁移内容时返回 null。
+    function projectsFromConfig(srcText) {
+      try {
+        const src = JSON.parse(String(srcText == null ? '' : srcText))
+        if (!src || typeof src !== 'object') return null
+        const projects = src.projects && typeof src.projects === 'object' ? src.projects : null
+        if (!projects) return null
+        // 只接纳当前工作区自己的条目：工作区文件可能随仓库分发或被 agent 写入（不可信），
+        // 其他 key 会被 cleanupStaleProjects 逐个 resolve/stat（UNC 会触发网络访问），
+        // 也会长期套用于别的项目，故一律丢弃
+        const rootKey = normPathKey(root)
+        const keep = {}
+        if (rootKey) {
+          for (const key of Object.keys(projects)) {
+            if (normPathKey(key) !== rootKey) continue
+            keep[key] = projects[key]
+          }
+        }
+        if (!Object.keys(keep).length) return null
+        return JSON.stringify({ projects: keep })
+      } catch (e) { return null }
+    }
+
+    // 迁移成功后清理项目残留配置文件（删除失败只影响清理，不影响已完成的落盘）
+    function removeMigratedSource(p) {
+      try {
+        const raw = pathString(p)
+        // 迁移源必须是工作区内那个字面文件：targetKey 为 realpath，符号链接会让删除落到
+        // 工作区外的真实文件，故以「父目录 realpath + 文件名」构造期望路径，再与文件 realpath 比较
+        if (!raw) return false
+        let want = ''
+        try { want = pathJoin(fsRealpathSync(pathResolve(root, '.dsh')), '.permgate.json') } catch (e2) { return false }
+        let st = null
+        try { st = fsLstatSync(raw) } catch (e2) { return false }
+        if (!st || !st.isFile()) return false
+        const real = fsRealpathSync(raw)
+        if (normPathKey(real) !== normPathKey(want)) return false
+        fsUnlinkSync(real)
+        return true
+      } catch (e) { return false }
+    }
+
+    // home 配置探测统一（missing 分支重试与非 missing 分支校验共用）：
+    // 返回 {target, text}（可读）、{target, missing:true}（不存在）、{target, readFailed:true}（存在但读失败）、null（home 不可用）
+    async function probeHomeConfig() {
+      const homeNow = await resolveDshHome()
+      if (!homeNow) return null
+      const target = await homeConfigTarget(homeNow)
+      if (!target) return null
+      const exists = await configExists(fs, target)
+      if (!exists) return { target, missing: true }
+      try {
+        const text = await fs.readText(target)
+        if (text === null) return { target, readFailed: true }
+        return { target, text }
+      } catch (e) { return { target, readFailed: true } }
+    }
+
     async function load(exec) {
       try {
         const t = await ensureTarget(exec)
+        let migratedFromProject = false
+        let migratedFromPath = null
+        let projReadFailed = false
         let text = null
         let missing = false
         try {
@@ -1832,13 +2471,80 @@ export default {
           // 文件不存在 → 首次运行，落盘默认配置；
           // 存在但读取失败 → 保留内存配置并提示，绝不静默覆盖磁盘（避免误删规则）
           if (missing) {
-            loadError = null
-            config = freshConfig()
-            await persist(exec)
+            // 初始化早期 subprocess 可能未就绪导致 home 解析失败、target 落到项目目录；
+            // 落盘默认配置前重试一次 home 定位，优先复用 home 配置（避免在项目内新建配置文件）
+            const hp = await probeHomeConfig()
+            if (hp) {
+              if (hp.text !== undefined) {
+                target = hp.target
+                text = hp.text
+              } else if (hp.readFailed) {
+                // home 配置存在但读取失败：保留内存配置并提示，绝不静默覆盖磁盘
+                lastDiskJson = LOAD_FAILED_MARK
+                loadError = uiLang === 'en' ? 'Cannot read config file: ' + hp.target : '无法读取配置文件: ' + hp.target
+                return
+              } else {
+                // home 配置不存在：检查项目目录残留配置（1.3.x 竞态期可能 persist 到项目
+                // .dsh/.permgate.json），存在且可读则迁移为初始配置（解析后落盘 homeT），避免用户规则静默丢失
+                const projCfg = root ? await fs.resolve(root + '/.dsh/.permgate.json') : null
+                if (projCfg) {
+                  const projExists = await configExists(fs, projCfg)
+                  if (projExists) {
+                    try {
+                      const projText = await fs.readText(projCfg)
+                      // 并入项目残留配置：只采纳 projects 段（工作区内文件不可信，其 global 一律忽略），
+                      // 迁移成功落盘后再删除源文件
+                      const mergedText = projectsFromConfig(projText)
+                      if (mergedText !== null) { target = hp.target; text = mergedText; migratedFromProject = true; migratedFromPath = projCfg }
+                    } catch (e) {
+                      // 残留存在但读不出（权限/占用/非 UTF-8）：与 home 的 readFailed 同口径——置哨兵并提示，
+                      // 且不落默认配置，避免项目残留里的用户规则被静默放弃（此前会永久跳过迁移）
+                      projReadFailed = true
+                    }
+                  }
+                }
+              }
+            }
+            if (text === null) {
+              // 项目残留配置存在却读不出：不落默认配置（否则 home 一旦写入就再也不迁移），
+              // 置哨兵并提示，修复该文件后重新加载即可继续迁移
+              if (projReadFailed) {
+                lastDiskJson = LOAD_FAILED_MARK
+                loadError = uiLang === 'en' ? 'Cannot read the project residual config; migration skipped. Fix that file and reload.' : '项目残留配置无法读取，已跳过迁移；修复该文件后重新加载即可'
+                return
+              }
+              loadError = null
+              config = freshConfig()
+              // 正常初始化路径：清除加载失败哨兵，允许创建默认配置
+              lastDiskJson = null
+              // home 可能在本次探测中已恢复：显式把 target 切回 home，避免默认配置
+              // 落到项目回退路径（DSH 的 writeText 会自动 mkdir，从而在项目里留下 .dsh）
+              const homeNow = await resolveDshHome()
+              if (homeNow) target = await homeConfigTarget(homeNow)
+              await persist(exec)
+              return
+            }
           } else {
+            // 配置存在但读取失败：置加载失败哨兵，阻止后续 persist 静默覆盖
+            lastDiskJson = LOAD_FAILED_MARK
             loadError = uiLang === 'en' ? 'Cannot read config file: ' + t : '无法读取配置文件: ' + t
+            return
           }
-          return
+        }
+        // home 配置优先：竞态期 target 可能落在项目目录且项目残留配置存在（missing=false 时
+        // 上面不会重试 home）。此时若 home 可解析且 home 配置存在，切回 home，避免永久使用项目旧配置。
+        // 只有当 target 不是 home 配置（竞态期落在项目回退路径）时才探测：否则会对同一份
+        // 文件重复 resolve+stat+readText（load 顶部已读过一次）
+        if (!missing && text !== null) {
+          const homeNow = await resolveDshHome()
+          const homeTarget = homeNow ? await homeConfigTarget(homeNow) : null
+          if (homeTarget && normPathKey(pathString(homeTarget)) !== normPathKey(pathString(target))) {
+            const hp = await probeHomeConfig()
+            if (hp && hp.text !== undefined && hp.target !== target) {
+              target = hp.target
+              text = hp.text
+            }
+          }
         }
         const parsed = JSON.parse(text)
         if (!parsed || typeof parsed !== 'object') throw new Error('根节点必须是对象')
@@ -1846,10 +2552,16 @@ export default {
         config = isOld ? migrateOld(parsed) : buildConfig(parsed)
         lastDiskJson = String(text).trim()
         loadError = null
-        if (isOld) await persist(exec)
+        saveError = null
+        if (isOld || migratedFromProject) {
+          const saved = await persist(exec)
+          // 迁移成功落盘后才删除项目残留文件，避免写盘失败导致配置丢失
+          if (saved && migratedFromPath) removeMigratedSource(migratedFromPath)
+        }
         broadcast({ type: 'status' })
       } catch (e) {
         loadError = '配置解析失败: ' + ((e && e.message) || String(e))
+        lastDiskJson = LOAD_FAILED_MARK
       }
     }
 
@@ -1858,7 +2570,7 @@ export default {
       const proj = projectBlock()
       const effective = {}
       for (const c of CATS) {
-        effective[c] = (proj && proj[c] && proj[c].mode && proj[c].mode !== 'inherit') ? proj[c].mode : (config.global[c] ? config.global[c].mode : 'allow')
+        effective[c] = firstEffective(proj && proj[c] && proj[c].mode, config.global[c] && config.global[c].mode, 'allow')
       }
       const stats = { deny: 0, ask: 0 }
       for (const d of decisions) {
@@ -1900,6 +2612,8 @@ export default {
         stats,
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
         cats: CATS,
+        editorKernel: { setting: editorKernelSetting(), ...resolveEditorKernel(exec) },
+        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode() },
         excCats: EXC_CATS,
         modes: MODES,
         allModes: ALL_MODES,
@@ -2042,10 +2756,24 @@ export default {
         }
         if (pathname === '/permgate/set-sandbox' && method === 'POST') {
           await init(exec)
-          const target = a.target === 'project' ? 'project' : 'global'
+          const target = normTarget(a)
           if (!setSandboxConfig(target, a.mode)) return json(res, { error: '非法沙箱参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           syncSandbox(exec)
+          return json(res, statusView(exec))
+        }
+        if (pathname === '/permgate/set-fallback' && method === 'POST') {
+          await init(exec)
+          const target = normTarget(a)
+          if (!setFallbackMode(target, a.mode)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
+          await persist(exec)
+          return json(res, statusView(exec))
+        }
+        if (pathname === '/permgate/set-editor-kernel' && method === 'POST') {
+          await init(exec)
+          const target = normTarget(a)
+          if (!setEditorKernel(target, a.mode)) return json(res, { error: '非法内核参数: target=' + target + ' mode=' + a.mode })
+          await persist(exec)
           return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-categories' && method === 'POST') {
@@ -2124,6 +2852,8 @@ export default {
           return json(res, { removed: true, rule: removed, status: statusView(exec) })
         }
         if (pathname === '/permgate/reload' && method === 'POST') {
+          // 重置 target 缓存：强制重新解析配置路径，保证竞态残留的项目路径配置可切回 home
+          target = null
           await load(exec)
           return json(res, statusView(exec))
         }
@@ -2156,8 +2886,8 @@ export default {
         if (pathname === '/permgate/open-file' && method === 'POST') {
           const entry = pendingApprovals.get(a.id)
           if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
-          if (!FILE_READ_TOOLS[entry.tool] && !FILE_WRITE_TOOLS[entry.tool]) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported tool for opening file' : '该审批不支持打开文件' })
           const args = parseEntryArgs(entry)
+          if (!isPreviewableFileTool(entry.tool, args)) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported tool for opening file' : '该审批不支持打开文件' })
           const fp = pathArg(args)
           if (!fp) return json(res, { ok: false, error: lang === 'en' ? 'Missing file path' : '缺少文件路径' })
           // 仅允许文本/文档类扩展名（点开头文件如 .gitignore 视为无扩展名，Windows 不会执行）
@@ -2250,10 +2980,10 @@ export default {
 
     registerTool({
       name: 'perm_set_category',
-      description: '设置一个权限分类的默认动作。分类: directory=目录访问(工作区外), command=执行命令, read=读取文件, edit=编辑文件, subagent=启动子代理, doomloop=重复操作。动作: ask=询问, allow=允许, deny=拒绝; 项目(target=project)还支持 inherit=继承全局。',
+      description: '设置一个权限分类的默认动作。分类: directory=目录访问(工作区外), command=执行命令, read=读取文件, edit=编辑文件, undo=撤销操作(恢复上次编辑前的内容), subagent=启动子代理, doomloop=重复操作。动作: ask=询问, allow=允许, deny=拒绝; 项目(target=project)还支持 inherit=继承全局。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop'] },
+        category: { type: 'string', required: true, enum: CATEGORY_ENUM },
         mode: { type: 'string', required: true, enum: ['ask', 'allow', 'deny', 'inherit'], description: '目标动作；inherit 仅适用于项目' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
@@ -2267,11 +2997,43 @@ export default {
     })
 
     registerTool({
-      name: 'perm_add_exception',
-      description: '给分类添加一条例外。directory/read/edit 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作，仅 allow/deny。',
+      name: 'perm_set_fallback',
+      description: '设置「未匹配任何规则」时的兜底动作（默认 ask=询问）：ask=每个未匹配的调用都弹审批；allow=直接放行；deny=直接拒绝。directory/command/read/edit/undo/subagent/doomloop 之外的所有工具调用都归兜底策略。项目(target=project)还支持 inherit=继承全局。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: ['directory', 'command', 'read', 'edit'] },
+        mode: { type: 'string', required: true, enum: ALL_MODES, description: '兜底动作；inherit 仅适用于项目' },
+      },
+      output: { schema: { type: 'json' }, render: renderer() },
+      async execute(args, exec) {
+        await init(exec)
+        if (!setFallbackMode(args.target, args.mode)) return { error: '非法的 target/mode 组合' }
+        await persist(exec)
+        return statusView(exec)
+      },
+    })
+
+    registerTool({
+      name: 'perm_set_editor_kernel',
+      description: '设置 str_replace_editor 的内核（默认 auto=自动判别）：auto=按当前实际注册的工具描述判别；builtin=DSH 内置（官方语义，insert_line 0 基、插入到该行之后）；shadow=dsh-better-edit 的覆盖实现（insert_line 1 基、插入到该行之前）。两者 insert 的 insert_line 语义相反，判别错误会让审批弹窗展示错误位置的改动。项目(target=project)还支持 inherit=继承全局。',
+      parameters: {
+        target: { type: 'string', required: true, enum: ['global', 'project'] },
+        mode: { type: 'string', required: true, enum: EDITOR_KERNEL_VALUES, description: '内核判别方式；inherit 仅适用于项目' },
+      },
+      output: { schema: { type: 'json' }, render: renderer() },
+      async execute(args, exec) {
+        await init(exec)
+        if (!setEditorKernel(args.target, args.mode)) return { error: '非法的 target/mode 组合' }
+        await persist(exec)
+        return statusView(exec)
+      },
+    })
+
+    registerTool({
+      name: 'perm_add_exception',
+      description: '给分类添加一条例外。directory/read/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作，仅 allow/deny。',
+      parameters: {
+        target: { type: 'string', required: true, enum: ['global', 'project'] },
+        category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
         match: { type: 'string', required: true, description: '路径 glob 或命令名/子串（* 匹配任意剩余）' },
         action: { type: 'string', required: true, enum: ['allow', 'deny'], description: '命中例外后的动作' },
         reason: { type: 'string', description: '自定义拒绝原因（仅 deny 例外生效；allow 例外忽略）' },
@@ -2297,7 +3059,7 @@ export default {
       description: '按 id 删除一条分类例外(id 见 perm_status 返回的 exceptions 或 perm_add_exception 返回)。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: ['directory', 'command', 'read', 'edit'] },
+        category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
         id: { type: 'string', required: true },
       },
       output: { schema: { type: 'json' }, render: renderer() },

@@ -12,16 +12,17 @@
 
 DSH ships only three permission levels — [Read only], [Workspace Write], [Full access] — which are too coarse. This plugin adds a **Custom Review** permission gateway that reviews tool calls one by one.
 
-Tool calls are reviewed per category (directory access / command execution / file read / file write-edit / subagent spawn / repeated actions), with global & per-project configuration, allow/deny exceptions, quick-tool defaults, custom rules, and a bilingual (Chinese/English) approval modal with a sandbox-upgrade flow.
+Tool calls are reviewed per category (directory access / command execution / file read / file write-edit / undo / subagent spawn / repeated actions), with global & per-project configuration, allow/deny exceptions, quick-tool defaults, custom rules, a fallback policy, and a bilingual (Chinese/English) approval modal with a sandbox-upgrade flow.
 
 ## Features
 
-- **Six permission categories**: outside-workspace directories, command execution, file read/write, subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
+- **Seven permission categories**: outside-workspace directories, command execution, file read/write, undo (revert the last edit), subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
+- **Fallback policy**: tool calls matching none of the categories above (MCP tools, `todo_write`, …) default to **Ask** instead of being silently allowed; you can switch the fallback to allow or deny, configured globally or per project.
 - **Global / project levels**: one set of global rules for every project, fine-tuned per project; anything unset in a project automatically follows global — no duplicate configuration.
 - **Exceptions (allow/deny lists)**: put paths or commands you "always allow" or "never allow" into exceptions — matched calls are allowed or denied outright, without prompting you every time.
 - **Quick tools**: tools that don't map to files or commands (`web_search`, `skill`, `grep`, `glob`, `web_fetch`, …) can also get their own default: ask, allow or deny.
 - **Custom rules**: combine tool name, file path and argument content into rules (e.g. "no tool may run `rm -rf`") — more flexible than category exceptions. Priority: custom rules > exceptions > defaults, so a few rules cover most situations.
-- **Approval modal**: one popup shows everything — what the AI wants to do, why, and the concrete arguments; edit/write approvals also display the diff inline (+N/-N lines) so you don't need to compare files yourself. If a type of operation no longer needs asking, add it to the project allow/deny list in one click.
+- **Approval modal**: one popup shows everything — what the AI wants to do, why, and the concrete arguments; edit/write approvals display the diff inline (+N/-N lines) and undo approvals show exactly what will be restored, so you don't need to compare files yourself. If a type of operation no longer needs asking, add it to the project allow/deny list in one click.
 - **Custom rejection reason**: when denying, you can tell the AI "why not, and what to do instead" — the AI gets a clear reason and adjusts its plan immediately, instead of retrying against a cold "User denied".
 - **Sandbox upgrade**: even after you allow a call, if DSH's underlying sandbox still blocks it (e.g. writing outside the workspace), the native sandbox-upgrade approval pops up — a one-shot grant that is automatically reverted afterwards, an extra layer of safety.
 - **Bilingual UI**: follows the DSH interface language automatically (missing/invalid language parameters default to Chinese).

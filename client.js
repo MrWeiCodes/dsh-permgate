@@ -261,6 +261,7 @@ window.__ModuleLoader__.load({
 			'permgate:reload': ['POST', '/permgate/reload'],
 			'permgate:open-config': ['POST', '/permgate/open-config'],
 			'permgate:open-file': ['POST', '/permgate/open-file'],
+			'permgate:set-fallback': ['POST', '/permgate/set-fallback'],
 		};
 		function call(method, args) {
 			const entry = ROUTES[method] || ['GET', '/permgate/status'];
@@ -659,15 +660,22 @@ window.__ModuleLoader__.load({
 			};
 		}
 
-		const CATS = ['directory', 'command', 'read', 'edit', 'subagent', 'doomloop'];
-		const EXC_CATS = ['directory', 'command', 'read', 'edit'];
+		// 分类清单默认值：以宿主下发为准（见 applyStatusLists），避免双端各存一份而漂移
+		let CATS = ['directory', 'command', 'read', 'edit', 'undo', 'subagent', 'doomloop'];
+		let EXC_CATS = ['directory', 'command', 'read', 'edit', 'undo'];
+		function applyStatusLists(s) {
+			if (s && Array.isArray(s.cats) && s.cats.length) CATS = s.cats;
+			if (s && Array.isArray(s.excCats) && s.excCats.length) EXC_CATS = s.excCats;
+			if (s && Array.isArray(s.modes) && s.modes.length) MODES = s.modes;
+			if (s && Array.isArray(s.allModes) && s.allModes.length) ALL_MODES = s.allModes;
+		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
 		// 文件对比缓存：按审批 id 缓存 /permgate/file-diff 结果（弹窗详情与右侧抽屉共用）
 		const diffCache = new Map();
 		const diffFetching = new Set();
-		const ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
-		const MODES = ['ask', 'allow', 'deny'];
+		let ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
+		let MODES = ['ask', 'allow', 'deny'];
 		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888' };
 		const QUICK_PRESET = ['web_search', 'skill', 'grep', 'glob', 'web_fetch'];
 
@@ -719,12 +727,14 @@ window.__ModuleLoader__.load({
 				'cat.command': '执行命令',
 				'cat.read': '读取文件',
 				'cat.edit': '编辑文件',
+				'cat.undo': '撤销操作（恢复上次编辑前的内容）',
 				'cat.subagent': '启动子代理',
 				'cat.doomloop': '重复操作(Doom Loop)',
 				'catS.directory': '目录',
 				'catS.command': '命令',
 				'catS.read': '读取',
 				'catS.edit': '编辑',
+				'catS.undo': '撤销',
 				'catS.subagent': '子代理',
 				'catS.doomloop': '循环',
 				'mode.ask': '询问',
@@ -784,6 +794,9 @@ window.__ModuleLoader__.load({
 				'panel.savedToProject': '已保存到当前项目',
 				'panel.all': '(全部)',
 				'panel.sandboxSaved': '底层沙箱已保存（{t}）：{v}',
+				'panel.fallbackSaved': '兜底策略已保存（{t}）：{v}',
+				'panel.fallback': '兜底策略（未匹配任何规则）',
+				'panel.fallbackHint': '以上各分类之外的工具调用（如 MCP、todo、cordis 等）如何处理。默认「询问」：每个未匹配的调用都会弹出审批。',
 				'panel.needValue': '请先输入例外匹配',
 				'panel.needTool': '请输入工具名',
 				'panel.excCount': '例外（{n}）',
@@ -850,12 +863,14 @@ window.__ModuleLoader__.load({
 				'cat.command': 'Run command',
 				'cat.read': 'Read file',
 				'cat.edit': 'Edit file',
+				'cat.undo': 'Undo edit (revert last edit)',
 				'cat.subagent': 'Spawn subagent',
 				'cat.doomloop': 'Doom Loop',
 				'catS.directory': 'Dir',
 				'catS.command': 'Cmd',
 				'catS.read': 'Read',
 				'catS.edit': 'Edit',
+				'catS.undo': 'Undo',
 				'catS.subagent': 'Sub',
 				'catS.doomloop': 'Loop',
 				'mode.ask': 'Ask',
@@ -912,6 +927,9 @@ window.__ModuleLoader__.load({
 				'panel.openConfigDone': 'Opened with default editor',
 				'panel.saved': 'Saved',
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
+				'panel.fallbackSaved': 'Fallback policy saved ({t}): {v}',
+				'panel.fallback': 'Fallback policy (no rule matched)',
+				'panel.fallbackHint': 'How calls matching none of the categories above (e.g. MCP, todo, cordis) are handled. Default Ask: every unmatched call prompts for approval.',
 				'panel.needValue': 'Enter a match value first',
 				'panel.needTool': 'Enter a tool name',
 				'panel.excCount': 'Exceptions ({n})',
@@ -1477,7 +1495,7 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'rgba(128,128,128,0.95)', padding: '2px 0' } },
 				React.createElement('span', { style: { fontWeight: 600 } }, T('dock.title')),
 				React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-					chip(catShort('directory'), eff.directory), chip(catShort('command'), eff.command), chip(catShort('read'), eff.read), chip(catShort('edit'), eff.edit), chip(catShort('subagent'), eff.subagent), chip(catShort('doomloop'), eff.doomloop),
+					chip(catShort('directory'), eff.directory), chip(catShort('command'), eff.command), chip(catShort('read'), eff.read), chip(catShort('edit'), eff.edit), chip(catShort('undo'), eff.undo), chip(catShort('subagent'), eff.subagent), chip(catShort('doomloop'), eff.doomloop),
 				),
 				React.createElement('span', { style: { cursor: 'pointer', padding: '0 4px' }, onClick: refresh, title: T('dock.refresh') }, '↻'),
 			);
@@ -1510,6 +1528,7 @@ window.__ModuleLoader__.load({
 
 			const applyStatus = (s) => {
 				if (!s) return;
+				applyStatusLists(s);
 				setStatus(s);
 				const cs = { global: {}, project: {} };
 				for (const t of ['global', 'project']) {
@@ -1687,6 +1706,11 @@ window.__ModuleLoader__.load({
 
 			const sandboxLabel = (m) => (m === 'workspace-write' ? T('sandbox.ww') : m === 'danger-full-access' ? T('sandbox.fa') : T('sandbox.inherit'));
 			const sandboxVal = tab === 'global' ? sandbox.global : sandbox.project;
+			const fbVal = status && status.fallback ? (tab === 'global' ? status.fallback.global : status.fallback.project) : (tab === 'global' ? 'ask' : 'inherit');
+			const changeFallback = (e) => {
+				const mode = e.target.value;
+				invoke('permgate:set-fallback', { target: tab, mode }, () => setMsg(T('panel.fallbackSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{v}', modeLabel(mode))));
+			};
 			const sandboxOptions = tab === 'global' ? ['workspace-write', 'danger-full-access'] : ['workspace-write', 'danger-full-access', 'inherit'];
 			const changeSandbox = (e) => {
 				const mode = e.target.value;
@@ -1739,6 +1763,13 @@ window.__ModuleLoader__.load({
 					),
 				),
 				CATS.map(catBlock),
+				React.createElement('div', { style: card },
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
+						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.fallback')),
+						sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
+					),
+					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
+				),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.quick')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)', marginBottom: 6 } }, T('panel.quickHint')),
