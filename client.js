@@ -668,6 +668,8 @@ window.__ModuleLoader__.load({
 			if (s && Array.isArray(s.excCats) && s.excCats.length) EXC_CATS = s.excCats;
 			if (s && Array.isArray(s.modes) && s.modes.length) MODES = s.modes;
 			if (s && Array.isArray(s.allModes) && s.allModes.length) ALL_MODES = s.allModes;
+			if (s && Array.isArray(s.quickPreset) && s.quickPreset.length) QUICK_PRESET = s.quickPreset;
+			if (s && s.quickDefaults && typeof s.quickDefaults === 'object') QUICK_DEFAULTS = s.quickDefaults;
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
@@ -677,7 +679,12 @@ window.__ModuleLoader__.load({
 		let ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
 		let MODES = ['ask', 'allow', 'deny'];
 		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888' };
-		const QUICK_PRESET = ['web_search', 'skill', 'grep', 'glob', 'web_fetch'];
+		// 快捷工具预设清单与默认动作都由宿主下发（permgate:status 的 quickPreset/quickDefaults），
+		// 与 CATS/MODES 同口径，避免宿主与浏览器各存一份清单、新增工具时漂移；
+		// 未显式配置的工具按「项目键 → 全局键 → 预设默认 → 会话兜底」显示，与服务端 quickAction 同链。
+		let QUICK_PRESET = [];
+		let QUICK_DEFAULTS = {};
+		let QUICK_FALLBACK = 'ask';
 
 		// ── 中英文适配：字典 + locale 绑定（跟随 dsh 语言设置自动切换）──────────
 		let LC = null; // apply 时注入的 ctx
@@ -768,11 +775,10 @@ window.__ModuleLoader__.load({
 				'sandbox.desc.fa': '文件操作不受工作区限制',
 				'sandbox.desc.inherit': '跟随全局设置（当前全局：{g}）',
 				'panel.quick': '快捷工具（其他工具快速设置）',
-				'panel.quickHint': '适用于网页搜索、技能加载、grep/glob 等未归类的工具；改动即时生效。',
+				'panel.quickHint': '无文件/命令语义的工具，按工具名设定默认动作；不在清单里的工具走兜底策略，改动即时生效。',
 				'panel.quickAdd': '新增工具名（如 todo_write，支持通配）',
 				'panel.quickAddBtn': '添加（默认允许）',
 				'panel.rules': '自定义规则（通用匹配）',
-				'panel.rulesHint': '优先级：自定义规则 > 分类例外 > 分类默认/快捷工具。',
 				'panel.actionDeny': 'deny 拒绝',
 				'panel.actionAsk': 'ask 审批',
 				'panel.actionAllow': 'allow 放行',
@@ -796,13 +802,35 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': '底层沙箱已保存（{t}）：{v}',
 				'panel.fallbackSaved': '兜底策略已保存（{t}）：{v}',
 				'panel.fallback': '兜底策略（未匹配任何规则）',
-				'panel.fallbackHint': '以上各分类之外的工具调用（如 MCP、todo、cordis 等）如何处理。默认「询问」：每个未匹配的调用都会弹出审批。',
+				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、cordis_run）如何处理。默认「询问」：每个未匹配的调用都会弹出审批。',
 				'panel.needValue': '请先输入例外匹配',
 				'panel.needTool': '请输入工具名',
 				'panel.excCount': '例外（{n}）',
 				'panel.excCmdHint': '：匹配命令子串/glob，优先于分类默认',
 				'panel.excPathHint': '：路径 glob，优先于分类默认',
 				'panel.excNone': '无例外',
+				'quick.web_search': '网页搜索',
+				'quick.skill': '加载技能',
+				'quick.grep': '内容检索',
+				'quick.glob': '按名查找文件',
+				'quick.web_fetch': '抓取网页内容',
+				'quick.ask_user_question': '向你提问',
+				'quick.todo_write': '任务清单',
+				'quick.list_agents': '列出子代理',
+				'quick.job_list': '后台任务列表',
+				'quick.job_output': '读取任务输出',
+				'quick.job_kill': '终止后台任务',
+				'quick.get_goal': '查看当前目标',
+				'quick.create_goal': '创建目标',
+				'quick.update_goal': '更新目标状态',
+				'quick.send_message': '给子代理发消息',
+				'quick.interrupt_agent': '打断子代理',
+				'quick.present': '声明交付文件',
+				'quick.exit_plan_mode': '退出计划模式',
+				'quick.cordis_define': '定义动态插件',
+				'quick.cordis_inspect_list': '检视能力清单',
+				'quick.cordis_inspect_query': '执行只读检视',
+				'quick.cordis_inspect_self': '检视本会话插件',
 				'panel.excExpand': '展开',
 				'panel.excCollapse': '折叠',
 				'panel.excListLink': '例外列表',
@@ -904,11 +932,10 @@ window.__ModuleLoader__.load({
 				'sandbox.desc.fa': 'File operations are not workspace-restricted',
 				'sandbox.desc.inherit': 'Follows global (currently: {g})',
 				'panel.quick': 'Quick tools (other tools)',
-				'panel.quickHint': 'For uncategorized tools like web search, skills, grep/glob; changes apply immediately.',
+				'panel.quickHint': 'Tools without file/command semantics: set a default per tool name; anything outside this list follows the fallback policy. Changes apply immediately.',
 				'panel.quickAdd': 'New tool name (e.g. todo_write, wildcards allowed)',
 				'panel.quickAddBtn': 'Add (allow by default)',
 				'panel.rules': 'Custom rules (generic matching)',
-				'panel.rulesHint': 'Priority: custom rules > category exceptions > category default / quick tools.',
 				'panel.actionDeny': 'deny Deny',
 				'panel.actionAsk': 'ask Ask',
 				'panel.actionAllow': 'allow Allow',
@@ -929,13 +956,35 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
 				'panel.fallbackSaved': 'Fallback policy saved ({t}): {v}',
 				'panel.fallback': 'Fallback policy (no rule matched)',
-				'panel.fallbackHint': 'How calls matching none of the categories above (e.g. MCP, todo, cordis) are handled. Default Ask: every unmatched call prompts for approval.',
+				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, cordis_run) are handled. Default Ask: every unmatched call prompts for approval.',
 				'panel.needValue': 'Enter a match value first',
 				'panel.needTool': 'Enter a tool name',
 				'panel.excCount': 'Exceptions ({n})',
 				'panel.excCmdHint': ': command substring/glob, overrides category default',
 				'panel.excPathHint': ': path glob, overrides category default',
 				'panel.excNone': 'No exceptions',
+				'quick.web_search': 'web search',
+				'quick.skill': 'load skill',
+				'quick.grep': 'content search',
+				'quick.glob': 'find files by name',
+				'quick.web_fetch': 'fetch page content',
+				'quick.ask_user_question': 'ask you a question',
+				'quick.todo_write': 'todo list',
+				'quick.list_agents': 'list subagents',
+				'quick.job_list': 'list background jobs',
+				'quick.job_output': 'read job output',
+				'quick.job_kill': 'kill a background job',
+				'quick.get_goal': 'view current goal',
+				'quick.create_goal': 'create a goal',
+				'quick.update_goal': 'update goal state',
+				'quick.send_message': 'message a subagent',
+				'quick.interrupt_agent': 'interrupt a subagent',
+				'quick.present': 'present deliverable files',
+				'quick.exit_plan_mode': 'exit plan mode',
+				'quick.cordis_define': 'define a dynamic plugin',
+				'quick.cordis_inspect_list': 'list inspect capabilities',
+				'quick.cordis_inspect_query': 'run a read-only inspect query',
+				'quick.cordis_inspect_self': 'inspect session plugins',
 				'panel.excExpand': 'Expand',
 				'panel.excCollapse': 'Collapse',
 				'panel.excListLink': 'Exception list',
@@ -964,6 +1013,23 @@ window.__ModuleLoader__.load({
 		function catLabel(c) { return T('cat.' + c); }
 		function catShort(c) { return T('catS.' + c); }
 		function modeLabel(m) { return T('mode.' + m); }
+		// 快捷工具的用途说明：仅当 i18n 有对应文案时显示（用户自加的工具名不显示说明）
+		function quickDesc(t) {
+			const k = 'quick.' + t;
+			const d = T(k);
+			return d && d !== k ? d : '';
+		}
+
+		// 只认「配置里自己写入的键」：不能用 o[k] !== undefined 判断，那会把 Object.prototype 的成员
+		// （constructor/toString 等）当成「该层已配置」，与服务端 hasOwnProperty 的口径分叉。
+		function hasOwnKey(o, k) { return !!(o && Object.prototype.hasOwnProperty.call(o, k)); }
+
+		// 未显式配置工具的全局列显示值：与服务端 quickAction 同一条链（全局键 → 预设默认 → 会话兜底）
+		function quickGlobalValue(t, gq) {
+			if (hasOwnKey(gq, t)) return gq[t];
+			if (hasOwnKey(QUICK_DEFAULTS, t)) return QUICK_DEFAULTS[t];
+			return QUICK_FALLBACK;
+		}
 		const FONT = 'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 		const card = { border: '1px solid rgba(128,128,128,0.35)', borderRadius: 8, padding: 12, marginBottom: 12 };
 		const rowStyle = { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid rgba(128,128,128,0.15)', flexWrap: 'wrap' };
@@ -1526,6 +1592,10 @@ window.__ModuleLoader__.load({
 				return () => clearTimeout(id);
 			}, [confirm]);
 
+			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
+			// 同一确认态，否则再点会删掉另一层。
+			React.useEffect(() => { setConfirm(null); }, [tab]);
+
 			const applyStatus = (s) => {
 				if (!s) return;
 				applyStatusLists(s);
@@ -1541,12 +1611,15 @@ window.__ModuleLoader__.load({
 				const qs = {};
 				const gq = s.quickTools ? s.quickTools.global : {};
 				const pq = s.quickTools ? s.quickTools.project : {};
+				// 会话兜底只作最后一级（预设之外、且未配置的工具）；宿主 statusView 恒下发合法的
+				// fallback.effective，下面的 `|| 'ask'` 只是协议异常兜底，不是决策链的一环。
+				QUICK_FALLBACK = (s.fallback && s.fallback.effective) || 'ask';
 				const names = {};
 				for (const t of QUICK_PRESET) names[t] = 1;
 				for (const k of Object.keys(gq)) names[k] = 1;
 				for (const k of Object.keys(pq)) names[k] = 1;
 				for (const t of Object.keys(names)) {
-					qs[t] = { g: gq[t] || 'allow', p: pq[t] && pq[t] !== 'inherit' ? pq[t] : 'inherit' };
+					qs[t] = { g: quickGlobalValue(t, gq), p: hasOwnKey(pq, t) && pq[t] !== 'inherit' ? pq[t] : 'inherit' };
 				}
 				setQuickSel(qs);
 			};
@@ -1597,6 +1670,13 @@ window.__ModuleLoader__.load({
 			const addQuick = () => {
 				if (!newTool || !String(newTool).trim()) { setMsg(T('panel.needTool')); return; }
 				invoke('permgate:set-quick', { target: tab, tool: String(newTool).trim(), action: 'allow' }, () => setNewTool(''));
+			};
+
+			// 删除该行在当前 tab 的快捷工具设置（服务端收到 action=inherit 即删除该键）；
+			// 只发请求、不做本地乐观删除：quickSel 完全由服务端返回的 status 收敛，请求失败时
+			// 不会留下「面板已删、服务端仍生效」的漂移（与例外/规则的删除入口一致）。
+			const removeQuick = (tool) => {
+				invoke('permgate:set-quick', { target: tab, tool, action: 'inherit' });
 			};
 
 			const addException = (c) => {
@@ -1670,13 +1750,31 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			const quickTools = Object.keys(quickSel);
+			// 行集合按 tab 区分：项目 tab 显示全集（预设 + 全局键 + 项目键），便于在项目里覆盖全局；
+			// 全局 tab 只显示「预设 + 全局配置里确实存在的键」，避免项目层专有的键在这里冒充全局设置。
+			const quickGq = status && status.quickTools ? status.quickTools.global : null;
+			const quickTools = Object.keys(quickSel).filter((t) => {
+				if (tab === 'project') return true;
+				if (QUICK_PRESET.indexOf(t) !== -1) return true;
+				return hasOwnKey(quickGq, t);
+			});
 			const quickRow = (t) => {
 				const key = tab === 'global' ? 'g' : 'p';
-				const mode = quickSel[t] ? (quickSel[t][key] || (tab === 'project' ? 'inherit' : 'allow')) : (tab === 'project' ? 'inherit' : 'allow');
+				const gqMap = status && status.quickTools ? status.quickTools.global : null;
+				const pqMap = status && status.quickTools ? status.quickTools.project : null;
+				const mode = quickSel[t] && quickSel[t][key] ? quickSel[t][key] : (tab === 'project' ? 'inherit' : quickGlobalValue(t, gqMap));
+				// 删除按钮只给「用户自己添加的名字」（不在 22 个预设清单里的行），且本行在当前 tab 的配置里
+				// 确实存在该键时才显示：预设行始终会列出，删掉配置键也只是回退默认值，容易被误读成「收紧」。
+				const isPreset = QUICK_PRESET.indexOf(t) !== -1;
+				const hasKey = key === 'g' ? hasOwnKey(gqMap, t) : hasOwnKey(pqMap, t);
+				const desc = quickDesc(t);
 				return React.createElement('div', { key: t, style: rowStyle },
-					React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13, width: 150 } }, t),
+					React.createElement('span', { style: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 260 } },
+						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13 } }, t),
+						desc ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, desc) : null,
+					),
 					sel(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES, busy),
+					(!isPreset && hasKey) ? React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'quick:' + tab + ':' + t ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('quick:' + tab + ':' + t, () => removeQuick(t)) }, confirm === 'quick:' + tab + ':' + t ? T('panel.confirmDel') : T('panel.del')) : null,
 				);
 			};
 
@@ -1764,13 +1862,6 @@ window.__ModuleLoader__.load({
 				),
 				CATS.map(catBlock),
 				React.createElement('div', { style: card },
-					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
-						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.fallback')),
-						sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
-					),
-					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
-				),
-				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.quick')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)', marginBottom: 6 } }, T('panel.quickHint')),
 					quickTools.map(quickRow),
@@ -1781,7 +1872,6 @@ window.__ModuleLoader__.load({
 				),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.rules')),
-					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)', marginBottom: 8 } }, T('panel.rulesHint')),
 					React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 } },
 						React.createElement('select', { value: form.action, onChange: setFormKey('action'), className: 'pg-field', disabled: busy },
 							React.createElement('option', { value: 'deny' }, T('panel.actionDeny')), React.createElement('option', { value: 'ask' }, T('panel.actionAsk')), React.createElement('option', { value: 'allow' }, T('panel.actionAllow')),
@@ -1796,6 +1886,13 @@ window.__ModuleLoader__.load({
 						React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 4 } }, T('panel.ruleList').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{n}', String(customList ? customList.length : 0))),
 						customList && customList.length ? customList.map(ruleRow) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noRules')),
 					),
+				),
+				React.createElement('div', { style: card },
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
+						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.fallback')),
+						sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
+					),
+					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
 				),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.decisions')),

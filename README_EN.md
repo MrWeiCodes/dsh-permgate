@@ -17,7 +17,6 @@ Tool calls are reviewed per category (directory access / command execution / fil
 ## Features
 
 - **Seven permission categories**: outside-workspace directories, command execution, file read/write, undo (revert the last edit), subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
-- **Fallback policy**: tool calls matching none of the categories above (MCP tools, `todo_write`, …) default to **Ask** instead of being silently allowed; you can switch the fallback to allow or deny, configured globally or per project.
 - **Global / project levels**: one set of global rules for every project, fine-tuned per project; anything unset in a project automatically follows global — no duplicate configuration.
 - **Exceptions (allow/deny lists)**: put paths or commands you "always allow" or "never allow" into exceptions — matched calls are allowed or denied outright, without prompting you every time.
 - **Quick tools**: tools that don't map to files or commands (`web_search`, `skill`, `grep`, `glob`, `web_fetch`, …) can also get their own default: ask, allow or deny.

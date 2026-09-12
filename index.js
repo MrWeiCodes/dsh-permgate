@@ -14,8 +14,21 @@ const EXC_CATEGORY_ENUM = EXC_CATS.slice()
 const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 const MAX_DECISIONS = 30
-const QUICK_PRESET = ['web_search', 'skill', 'grep', 'glob', 'web_fetch']
-const QUICK_DEFAULTS = { web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask' }
+// 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
+// 低风险观测/会话类工具默认放行，避免每次都弹窗；
+// cordis_run（宿主进程内执行代码）、cordis_stop/undefine（管理动态插件）与 mcp__*（外装 MCP）不在此列，走兜底策略（默认询问）
+const QUICK_DEFAULTS = {
+  web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
+  ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
+  job_list: 'allow', job_output: 'allow', job_kill: 'allow',
+  get_goal: 'allow', create_goal: 'allow', update_goal: 'allow',
+  send_message: 'allow', interrupt_agent: 'allow',
+  present: 'allow', exit_plan_mode: 'allow',
+  cordis_define: 'allow', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
+}
+// 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
+// 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
+const QUICK_PRESET = Object.keys(QUICK_DEFAULTS)
 // eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
@@ -1792,7 +1805,11 @@ export default {
       for (const k of Object.keys(gMap)) {
         if (matchGlob(k, name)) return { action: gMap[k] }
       }
-      return null
+      // 预设工具的默认动作同样是「决策默认」：配置里缺席（升级前生成的老配置不含新键）时按
+      // QUICK_DEFAULTS 裁决，与面板显示走同一条链（项目键 → 全局键 → 预设默认 → 兜底），
+      // 新老配置行为一致；显式配置项与 migrateOld 的 locked deny 仍优先于此。
+      const def = Object.prototype.hasOwnProperty.call(QUICK_DEFAULTS, name) ? QUICK_DEFAULTS[name] : null
+      return def ? { action: def, isDefault: true } : null
     }
 
     function textOfBlock(b) {
@@ -2025,7 +2042,12 @@ export default {
         return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
       }
       const q = quickAction(name)
-      if (q) return { action: q.action, reason: bi('快捷设置：' + name + ' → ' + q.action, 'Quick setting: ' + name + ' → ' + q.action), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
+      if (q) {
+        // 命中预设默认值时区分措辞，避免把「默认动作」说成用户显式设置
+        const label = q.isDefault ? '快捷默认' : '快捷设置'
+        const labelEn = q.isDefault ? 'Quick default' : 'Quick setting'
+        return { action: q.action, reason: bi(label + '：' + name + ' → ' + q.action, labelEn + ': ' + name + ' → ' + q.action), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
+      }
       const fb = fallbackMode()
       if (fb === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
       return { action: fb, reason: bi('未匹配任何规则，按兜底策略处理：' + fb, 'No rule matched; handled by fallback policy: ' + fb), ruleId: null, cat: 'fallback', value: name, kind: 'tool' }
@@ -2601,6 +2623,10 @@ export default {
           global: config.global.quickTools || {},
           project: (proj && proj.quickTools) || {},
         },
+        // 预设清单下发（单一来源为 QUICK_DEFAULTS）：浏览器半边不再硬编码工具名清单
+        quickPreset: QUICK_PRESET,
+        // 预设默认动作一并下发：面板未配置行按「项目键 → 全局键 → 预设默认 → 兜底」显示，与 quickAction 同链
+        quickDefaults: QUICK_DEFAULTS,
         custom: {
           global: config.global.custom || [],
           project: (proj && proj.custom) || [],

@@ -126,7 +126,26 @@ ok('client 无 editorKernel 残留（面板入口已移除）', !cli.includes('e
 ok('client set-fallback 通道在', cli.includes("'permgate:set-fallback'") && cli.includes("invoke('permgate:set-fallback'"))
 
 // ─────────────────────────────────────────────────────────────
-group('8. 行为复算（纯函数）')
+group('8. 快捷工具面板口径（修好的写法不得回潮）')
+ok('client 快捷清单与默认值初始为空、等宿主下发', cli.includes('let QUICK_PRESET = [];') && cli.includes('let QUICK_DEFAULTS = {};'))
+ok('client 主动读 status 的 quickPreset/quickDefaults', cli.includes('s.quickPreset') && cli.includes('s.quickDefaults'))
+ok('client 不再硬编码任何预设工具名', !cli.includes("'web_search', 'skill'") && !cli.includes("job_kill: 'allow'") && !cli.includes("todo_write: 'allow'"))
+ok('存在自有键判定 hasOwnKey', cli.includes('function hasOwnKey(o, k)'))
+ok('quick 存在性判断不用原型链写法', !cli.includes("pq[t] && pq[t] !== 'inherit'") && !cli.includes('gq[t] !== undefined'))
+ok('删除按钮只给「自加且本层有键」的行', cli.includes('(!isPreset && hasKey)'))
+ok('删除不做本地乐观删除', !cli.includes('delete next[tool]'))
+ok('确认态 key 含层级', cli.includes("'quick:' + tab + ':' + t"))
+ok('切 tab 清空确认态', cli.includes('setConfirm(null); }, [tab])'))
+ok('兜底文案不再以 todo/cordis 举例', !cli.includes('如 MCP、todo、cordis') && !cli.includes('(e.g. MCP, todo, cordis)'))
+ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'"))
+{
+  const readmeZh = readFileSync(pathJoin(ROOT, 'README.md'), 'utf8')
+  const readmeEn = readFileSync(pathJoin(ROOT, 'README_EN.md'), 'utf8')
+  ok('README 不再有兜底策略说明条目', !readmeZh.includes('**兜底策略**') && !readmeEn.includes('**Fallback policy**'))
+}
+
+// ─────────────────────────────────────────────────────────────
+group('9. 行为复算（纯函数）')
 function countNewlines(s, end) {
   const t = String(s == null ? '' : s)
   const n = Math.min(typeof end === 'number' ? end : t.length, t.length)

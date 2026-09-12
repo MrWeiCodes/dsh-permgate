@@ -245,6 +245,57 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
 }
 
 // ─────────────────────────────────────────────────────────────
+group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删除键回退、status 契约')
+{
+  // 用干净 home 写一份「老配置代际」：quickTools 只有旧 5 键，其余预设键缺席
+  const ws3 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws3-'))
+  const home3 = mkdtempSync(join(tmpdir(), 'pg-smoke-home3-'))
+  mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
+  writeFileSync(join(home3, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: { quickTools: { web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask' }, fallbackMode: 'ask' },
+    projects: {},
+  }, null, 2), 'utf8')
+  const host3 = createHost({ workspaceRoot: ws3, dshHome: home3 })
+  const pre3 = host3.hooks.get('tools/pre-execute')
+  ok('group5: tools/pre-execute 钩子已注册', typeof pre3 === 'function')
+
+  // 探测某个工具调用是否被直接放行（next 被调用）；未放行说明走了审批/拒绝
+  const probe = async (name) => {
+    let nexted = false
+    const pending = pre3(makeExec(ws3, name, {}), async () => { nexted = true; return { kind: 'allow' } })
+    pending.catch(() => {})
+    const out = await Promise.race([pending, new Promise((r) => setTimeout(() => r(null), 300))])
+    return { nexted, out }
+  }
+
+  const r1 = await probe('job_kill')
+  ok('group5: 配置里缺席的预设键按默认值放行（job_kill）', r1.nexted === true, JSON.stringify(r1.out))
+  const r2 = await probe('mcp__not-a-preset')
+  ok('group5: 非预设键仍走兜底、未被放行（mcp__*）', r2.nexted === false, JSON.stringify(r2.out))
+
+  const setQuick = host3.registered.get('perm_set_quick')
+  ok('group5: perm_set_quick 工具已注册', !!setQuick && typeof setQuick.execute === 'function')
+  await setQuick.execute({ target: 'global', tool: 'job_kill', action: 'deny' }, makeExec(ws3, 'perm_set_quick', {}))
+  const r3 = await probe('job_kill')
+  ok('group5: 显式 deny 优先于预设默认值', r3.nexted === false, JSON.stringify(r3.out))
+
+  // 面板「删除」按钮走的就是 action=inherit
+  const del = await callRoute(host3.routes, 'POST', '/permgate/set-quick', { target: 'global', tool: 'job_kill', action: 'inherit' })
+  const gAfter = (del.data && del.data.quickTools && del.data.quickTools.global) || {}
+  ok('group5: set-quick inherit 删除了该键', !Object.prototype.hasOwnProperty.call(gAfter, 'job_kill'), JSON.stringify(gAfter))
+  const r4 = await probe('job_kill')
+  ok('group5: 删除键后回退到预设默认值（放行）', r4.nexted === true, JSON.stringify(r4.out))
+
+  const st = await callRoute(host3.routes, 'GET', '/permgate/status')
+  const presetList = (st.data && st.data.quickPreset) || []
+  const defaults = (st.data && st.data.quickDefaults) || {}
+  ok('group5: status 下发 quickPreset（22 项）', presetList.length === 22, 'len=' + presetList.length)
+  ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
+
+  try { rmSync(ws3, { recursive: true, force: true }); rmSync(home3, { recursive: true, force: true }) } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
 try { rmSync(workspace, { recursive: true, force: true }); rmSync(dshHome, { recursive: true, force: true }) } catch (e) {}
 
 if (fail.length) {
