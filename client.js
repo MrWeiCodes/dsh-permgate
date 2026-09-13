@@ -263,7 +263,7 @@ window.__ModuleLoader__.load({
 			'permgate:remove-rule': ['POST', '/permgate/remove-rule'],
 			'permgate:reload': ['POST', '/permgate/reload'],
 			'permgate:open-config': ['POST', '/permgate/open-config'],
-			'permgate:open-file': ['POST', '/permgate/open-file'],
+			// permgate:open-file 通道已移除：打开文件改走客户端 ctx.sidebarRight，不再回宿主跑 cmd /c start
 			'permgate:set-fallback': ['POST', '/permgate/set-fallback'],
 		};
 		function call(method, args) {
@@ -689,6 +689,43 @@ window.__ModuleLoader__.load({
 		let QUICK_DEFAULTS = {};
 		let QUICK_FALLBACK = 'ask';
 
+		// ── 打开文件/图片到 DSH 右侧栏 ──────────────────────────────────────
+		// ctx.sidebarRight.openResource 是 DSH 右侧栏的导航入口（会话的文件链接、文件树行都走它）。
+		// 地址形如 dsh-resource://file/session/<sessionId>/<path>，文本与图片共用同一个 file 地址，
+		// DSH 自己按 media type 选渲染器（文档预览 / 图片）。地址口径与上游 fileAddressFor 一致：
+		// 工作区内的绝对路径折算成相对路径，工作区外的绝对路径原样放进地址段。
+		const FILE_ADDR_PREFIX = 'dsh-resource://file/session/';
+		const encSeg = (s) => encodeURIComponent(String(s)).replace(/%3A/gi, ':'); // 盘符冒号保持字面量
+		const localFileAddress = (sid, cwd, path) => {
+			// 上游 sessionFileAddress 会剥掉前导 ./（JSDoc: "leading ./ prefixes are dropped"），
+			// DSH parseFileAddress 不解析 . 段，fallback 必须同口径，否则 ./ 开头的路径打不开
+			const n = String(path || '').replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+			const root = cwd ? String(cwd).replace(/\\/g, '/').replace(/\/+$/, '') : '';
+			const rel = root && n.indexOf(root + '/') === 0 ? n.slice(root.length + 1) : n;
+			return FILE_ADDR_PREFIX + encSeg(sid) + '/' + rel.split('/').map(encSeg).join('/');
+		};
+		// 优先用上游 helper（口径唯一）；取不到就退回上面的等价实现，避免多一条 client 依赖。
+		let fileAddrHelper;
+		const fileAddressOf = (sid, cwd, path) => {
+			try {
+				if (fileAddrHelper === undefined) fileAddrHelper = require('@deepseek-ai/dsh-util-workspace-path');
+				if (fileAddrHelper && typeof fileAddrHelper.fileAddressFor === 'function') return fileAddrHelper.fileAddressFor(sid, cwd, path);
+			} catch (e) { fileAddrHelper = null; }
+			return localFileAddress(sid, cwd, path);
+		};
+		// 打开一个文件/图片到右侧栏；不可用时返回 false（调用方据此提示或维持原行为）
+		const openInSidebar = (file, sid, cwd) => {
+			try {
+				const sr = LC && typeof LC.get === 'function' ? LC.get('sidebarRight') : null;
+				if (!sr || typeof sr.openResource !== 'function' || !file) return false;
+				sr.openResource(fileAddressOf(sid, cwd, file));
+				return true;
+			} catch (e) {
+				console.error('[permgate] open in sidebar failed:', e);
+				return false;
+			}
+		};
+
 		// ── 中英文适配：字典 + locale 绑定（跟随 dsh 语言设置自动切换）──────────
 		let LC = null; // apply 时注入的 ctx
 		const I18N = {
@@ -730,8 +767,8 @@ window.__ModuleLoader__.load({
 				'app.diffTopMore': '… 上方还有 {n} 行',
 				'app.diffBottomMore': '… 下方还有更多行',
 				'app.diffClose': '关闭',
-				'app.openFile': '打开文件',
-				'app.editOpened': '已用默认编辑器打开',
+				'app.openFile': '在侧栏打开',
+				'app.openFileFailed': '无法在侧栏打开（当前 DSH 未提供右侧栏服务）',
 				'app.diffResize': '拖动调整宽度',
 				'dock.title': '● 权限网关',
 				'settings.title': '权限网关',
@@ -908,8 +945,8 @@ window.__ModuleLoader__.load({
 				'app.diffTopMore': '… {n} more lines above',
 				'app.diffBottomMore': '… more lines below',
 				'app.diffClose': 'Close',
-				'app.openFile': 'Open File',
-				'app.editOpened': 'Opened with default editor',
+				'app.openFile': 'Open in sidebar',
+				'app.openFileFailed': 'Cannot open in the sidebar (this DSH build has no right-sidebar service)',
 				'app.diffResize': 'Drag to resize',
 				'dock.title': '● Permission Gate',
 				'settings.title': 'Permissions',
@@ -1188,16 +1225,21 @@ window.__ModuleLoader__.load({
 			const detailOpen = (p) => (openDetail[p.id] === undefined ? !!p.hasDiff : openDetail[p.id]);
 			const argsOpen = (p) => (openArgs[p.id] === undefined ? !p.hasDiff : openArgs[p.id]);
 			const toggle = (map, setMap, p, v) => setMap(Object.assign({}, map, { [p.id]: v }));
-			// 点击文件名 → 打开右侧对比抽屉（父组件 OverlayRoot 持有 pin 状态）
+			// 点文件名 → 打开 permgate 的对比抽屉（父组件 OverlayRoot 持有 pin 状态）；「展开」按钮仍走这里
 			const openFile = (p, file) => {
-				if (props && typeof props.onOpenFile === 'function') props.onOpenFile(p.id, file);
+				if (props && typeof props.onOpenFile === 'function') props.onOpenFile(p, file);
 			};
+			// 点路径/文件名 → 交给 DSH 右侧栏的 file tab（文本与图片同一地址，DSH 按 media type 选渲染器）。
+			// 服务不可用（旧版 DSH 没有 sidebarRight）时返回 false，调用方保持原样不误导用户。
+			// 会话身份优先用宿主注入的「当前 GUI 会话 id」（props.sessionId，OverlayRoot 从 useSessions 取），
+			// 回退才是 entry 自带的 exec.session.id —— 后者不是 DSH 侧边栏认的身份，会导致 workspaceFileScope 解析失败
+			const openSidebarFor = (p, file) => openInSidebar(file, (props && props.sessionId) || (p && p.sessionId), p && p.projRoot);
 			const argsBox = (p) => React.createElement('div', { className: 'pg-args' },
 				React.createElement('span', { className: 'pg-args-tag' }, T('app.args')),
 				(p.argLines && p.argLines.length)
 					? p.argLines.map((l, i) => React.createElement('div', { key: i, className: 'pg-args-row' },
 						React.createElement('span', { className: 'pg-args-label' }, l.label + '：'),
-						l.path ? React.createElement('span', { className: 'pg-path-link', title: l.path, onClick: () => openFile(p, l.path) }, l.value)
+						l.path ? React.createElement('span', { className: 'pg-path-link', title: l.path, onClick: () => openSidebarFor(p, l.path) }, l.value)
 							: React.createElement('span', { className: 'pg-args-val' }, l.value),
 					))
 					: React.createElement('span', null, p.args),
@@ -1227,7 +1269,7 @@ window.__ModuleLoader__.load({
 							const c = diffCache.get(p.id)
 							if (!c) return React.createElement('div', { className: 'pg2-load' }, T('app.diffLoading'))
 							if (!c.ok) return React.createElement('div', { className: 'pg2-err' }, (c.error || T('app.diffErr')))
-							return detailBody(c, { onOpenFile: (f) => openFile(p, f), changesOnly: true, resetKey: payloadKey(c) })
+							return detailBody(c, { onOpenFile: (f) => openFile(p, f), onOpenSidebar: (f) => openSidebarFor(p, f), changesOnly: true, resetKey: payloadKey(c) })
 						})() : null,
 					) : null,
 					(p.candidates || []).length ? React.createElement('div', null,
@@ -1278,7 +1320,7 @@ window.__ModuleLoader__.load({
 			}
 			return out.join('\n');
 		}
-		function DiffBlock({ data, onOpenFile, onCollapse, changesOnly }) {
+		function DiffBlock({ data, onOpenFile, onOpenSidebar, onCollapse, changesOnly }) {
 			const [copied, setCopied] = React.useState(false);
 			const [gaps, setGaps] = React.useState({});
 			useLocaleTick();
@@ -1357,7 +1399,7 @@ window.__ModuleLoader__.load({
 				return React.createElement('div', { className: 'pg2-block' },
 					React.createElement('div', { className: 'pg2-header' },
 						React.createElement('span', { className: 'pg2-status', title: kindLabel }, badge),
-						React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+						React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 						React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
 						React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
 						copyBtn,
@@ -1411,7 +1453,7 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { className: 'pg2-block' },
 				React.createElement('div', { className: 'pg2-header' },
 					React.createElement('span', { className: 'pg2-status', title: kindLabel }, badge),
-					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 					React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
 					React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
 					copyBtn,
@@ -1422,7 +1464,7 @@ window.__ModuleLoader__.load({
 				React.createElement('div', { className: 'pg2-body' }, rows),
 			);
 		}
-		function ReadBlock({ data, onOpenFile, onCollapse }) {
+		function ReadBlock({ data, onOpenFile, onOpenSidebar, onCollapse }) {
 			const [copied, setCopied] = React.useState(false);
 			useLocaleTick();
 			const text = data.text || '';
@@ -1468,7 +1510,7 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { className: 'pg2-block' },
 				React.createElement('div', { className: 'pg2-header' },
 					React.createElement('span', { className: 'pg2-status-read', title: T('app.diffRead') }, 'R'),
-					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenFile && onOpenFile(data.file) }, data.file),
+					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 					React.createElement('span', { className: 'pg2-added' }, T('app.diffLines').replace('{n}', String(lines.length) + (topOmitted || bottomOmitted ? '+' : ''))),
 					React.createElement('button', { className: 'pg2-copy', onClick: onCopy }, copied ? T('app.diffCopied') : T('app.diffCopy')),
 					(typeof onOpenFile === 'function')
@@ -1493,14 +1535,15 @@ window.__ModuleLoader__.load({
 			const o = opts || {};
 			const fb = T('app.diffErr');
 			const boundaryProps = o.resetKey !== undefined ? { resetKey: o.resetKey, fallback: fb } : { fallback: fb };
-			if (data.kind === 'image') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ImageBlock, { data }));
-			if (data.kind === 'read') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ReadBlockMemo, { data, onOpenFile: o.onOpenFile || null, onCollapse: o.onCollapse }));
-			return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(DiffBlockMemo, { data, onOpenFile: o.onOpenFile || null, onCollapse: o.onCollapse, changesOnly: o.changesOnly }));
+			// onOpenFile → permgate 的对比抽屉（「展开」用）；onOpenSidebar → DSH 右侧栏的 file tab（点路径/文件名用）
+			if (data.kind === 'image') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ImageBlock, { data, onOpenSidebar: o.onOpenSidebar || null }));
+			if (data.kind === 'read') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ReadBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse }));
+			return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(DiffBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse, changesOnly: o.changesOnly }));
 		}
 
 		// 图片详情块：头部显示 格式 · 像素尺寸 · 体积，下面给缩略图；
 		// 超过上限或读取失败时不给图片本体，改显示说明文本（宿主下发的 error 由外层按 .pg2-err 渲染）。
-		function ImageBlock({ data }) {
+		function ImageBlock({ data, onOpenSidebar }) {
 			const fmtBytes = (n) => {
 				const v = Number(n) || 0;
 				if (v < 1024) return v + ' B';
@@ -1520,7 +1563,8 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { className: 'pg2-block' },
 				React.createElement('div', { className: 'pg2-header' },
 					React.createElement('span', { className: 'pg2-status pg2-status-read' }, T('app.imageTag')),
-					React.createElement('span', { className: 'pg2-path', title: data.file }, data.file),
+					// 图片标题也可点：同一个 file 地址交给 DSH 右侧栏，由它按 media type 渲染图片
+					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 					meta ? React.createElement('span', { style: { marginLeft: 'auto', color: 'rgba(128,128,128,0.9)' } }, meta) : null,
 				),
 				data.dataUrl
@@ -1582,19 +1626,17 @@ window.__ModuleLoader__.load({
 					document.addEventListener('mouseup', onUp);
 				}
 			};
+			// 「打开文件」→ DSH 右侧栏的 file tab（不再唤起系统关联程序；图片同一入口）
 			const onEdit = () => {
 				setEditMsg(null);
-				call('permgate:open-file', { id: pin.id }).then((r) => {
-					setEditMsg(r && r.ok ? { ok: true, text: T('app.editOpened') } : { ok: false, text: (r && r.error) || T('app.diffErr') });
-					setTimeout(() => setEditMsg(null), 2500);
-				}).catch(() => {
-					setEditMsg({ ok: false, text: T('app.diffErr') });
-					setTimeout(() => setEditMsg(null), 2500);
-				});
+				if (openInSidebar(pin.file, pin.sid, pin.projRoot)) return;
+				setEditMsg({ ok: false, text: T('app.openFileFailed') });
+				setTimeout(() => setEditMsg(null), 2500);
 			};
 			let body;
 			if (data) {
-				body = detailBody(data, { onCollapse: onClose })
+				// 抽屉里也要能点文件名/图片标题去开侧栏（pin 里带着会话 id 与项目根）
+				body = detailBody(data, { onCollapse: onClose, onOpenSidebar: (f) => openInSidebar(f, pin.sid, pin.projRoot) })
 			} else if (err) {
 				body = React.createElement('div', { className: 'pg2-err' }, err);
 			} else {
@@ -1648,11 +1690,19 @@ window.__ModuleLoader__.load({
 				return this.props.children;
 			}
 		}
-		function OverlayRoot() {
+		function OverlayRoot(props) {
 			const [pin, setPin] = React.useState(null);
+			// shell.overlay 是 root 作用域槽：不直接给 sessionId，但注入 useSessions（与 settings.section 同款）。
+			// 打开 DSH 右侧栏必须用「当前 GUI 会话」身份 —— 宿主下发的 exec.session.id 不是它，
+			// 用它会让 DSH 的 workspaceFileScope 解析不到工作区（readAll 报 did not resolve identity）。
+			const sessionId = (props && typeof props.useSessions === 'function')
+				? props.useSessions((st) => (st ? st.current : undefined))
+				: undefined;
+			const sidOf = (p) => sessionId || (p && p.sessionId) || null;
 			return React.createElement('div', null,
 				React.createElement(PGErrorBoundary, { fallback: T('app.uiErr') },
-					React.createElement(ApprovalOverlay, { onOpenFile: (id, file) => setPin({ id, file }) }),
+					// pin 里带齐打开侧栏所需的三样：文件路径、会话 id、项目根（构造 file 地址要用后两者）
+					React.createElement(ApprovalOverlay, { sessionId, onOpenFile: (p, file) => setPin({ id: p.id, file, sid: sidOf(p), projRoot: p.projRoot || null }) }),
 				),
 				pin ? React.createElement(PGErrorBoundary, { resetKey: pin.id, fallback: T('app.uiErr') },
 					React.createElement(CompareDrawer, { pin, onClose: () => setPin(null) }),

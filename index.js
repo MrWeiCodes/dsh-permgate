@@ -917,14 +917,6 @@ export default {
       return b ? norm(b + '/' + s) : s
     }
 
-    // open-file 允许打开的扩展名白名单（文本/文档类）。`cmd /c start` 对 Windows 上"运行"关联的
-    // 可执行/脚本类（exe/bat/cmd/ps1/vbs/js/py/msi/jar/lnk/svg 等）执行的是运行而非编辑，
-    // 白名单之外的扩展名一律拒绝，防止点击「打开文件」执行 agent 可控路径的脚本。
-    const OPEN_TEXT_EXTS = new Set([
-      'txt', 'md', 'markdown', 'json', 'jsonc', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'log',
-      'csv', 'tsv', 'xml', 'html', 'htm', 'css', 'ts', 'tsx', 'jsx', 'c', 'h', 'cpp', 'hpp', 'cc',
-      'cxx', 'cs', 'java', 'go', 'rs', 'sql', 'gradle', 'properties',
-    ])
 
     // ── 文件对比数据（按需路由 /permgate/file-diff 生成）───────────────
     // 弹窗「详情」与右侧对比抽屉共用：edit/write 生成行级 Myers diff 操作流，
@@ -2078,10 +2070,11 @@ export default {
           if (args.offset !== undefined) push(t('偏移', 'Offset'), args.offset)
           if (args.limit !== undefined) push(t('行数', 'Lines'), args.limit)
         } else if (isFileImage(name)) {
-          // 图片不做文本预览，路径也不可点击（「打开文件」白名单只含文本/文档类，点了也打不开）
+          // 图片与文本走同一个 file 地址（DSH 按 media type 选渲染器），所以路径同样可点：
+          // 交给 DSH 右侧栏展示，不再受原「打开文件」白名单（只收文本/文档类）的限制。
           const target = fp || args.path || ''
-          push(t('读取图片', 'Read image'), target ? baseName(target) : '', undefined)
-          if (fp) push(t('路径', 'Path'), fp, undefined)
+          push(t('读取图片', 'Read image'), target ? baseName(target) : '', fp ? { path: fp } : undefined)
+          if (fp) push(t('路径', 'Path'), fp, { path: fp })
         } else if (isFileWrite(name, args)) {
           const isSre = name === 'str_replace_editor'
           const sreCmd = isSre ? sreCommand(args) : ''
@@ -2514,8 +2507,10 @@ export default {
           candidates: [],
           argLines: humanArgsPreview(exec.name, exec.arguments),
           // 审批发起时的项目根：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
-          // 打相对路径/对比/打开文件必须用发起会话自己的根
+          // 审批发起时的项目根与会话 id：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
+          // 打相对路径/对比/打开侧栏必须用发起会话自己的这两样（会话 id 用来构造 file 地址）。
           projRoot: root || null,
+          sessionId: (exec.session && exec.session.id) || null,
           // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开并自动取数据
           // （写类=diff，读类=窗口化内容；图片是整图 data URL，受 IMAGE_MAX_BYTES/像素上限约束）
           hasDiff: isPreviewableFileTool(exec.name, exec.arguments) && !!pathArg(exec.arguments),
@@ -3043,7 +3038,11 @@ export default {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
             const reason = typeof e.reason === 'string' ? e.reason : L(e.reason, lang)
             const intent = typeof e.intent === 'string' ? e.intent : L(e.intent, lang)
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true })
+            // projRoot 下发给客户端：打开 DSH 右侧栏的 file tab 需要它来把工作区内的绝对路径
+            // 折算成工作区相对路径（工作区外的绝对路径则原样进地址），与上游 fileAddressFor 同口径
+            // projRoot/sessionId 下发给客户端：打开 DSH 右侧栏的 file tab 需要它们来构造
+            // dsh-resource://file/session/<sessionId>/<path> 地址（工作区内的绝对路径还依赖 projRoot 折算）
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null })
           }
           return json(res, out)
         }
@@ -3247,38 +3246,12 @@ export default {
             return json(res, { error: '打开配置文件失败: ' + ((e && e.message) || String(e)) })
           }
         }
-        // 打开被对比的文件：用系统默认关联的编辑器打开（同 open-config 的做法）。
-        // 安全约束：仅文件读写工具（read/write/edit）的待审批 entry 可触发，且仅允许
-        // 文本/文档类扩展名——`cmd /c start` 对 .exe/.bat/.ps1 等执行的是"运行"而非"编辑"。
-        if (pathname === '/permgate/open-file' && method === 'POST') {
-          const entry = pendingApprovals.get(a.id)
-          if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
-          const args = parseEntryArgs(entry)
-          if (!isPreviewableFileTool(entry.tool, args)) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported tool for opening file' : '该审批不支持打开文件' })
-          const fp = pathArg(args)
-          if (!fp) return json(res, { ok: false, error: lang === 'en' ? 'Missing file path' : '缺少文件路径' })
-          // 仅允许文本/文档类扩展名（点开头文件如 .gitignore 视为无扩展名，Windows 不会执行）
-          const openBase = String(fp).split(/[\\/]/).pop() || ''
-          const openExt = openBase.indexOf('.') > 0 ? openBase.slice(openBase.lastIndexOf('.') + 1).toLowerCase() : ''
-          if (openExt && !OPEN_TEXT_EXTS.has(openExt)) return json(res, { ok: false, error: lang === 'en' ? 'Unsupported file type: ' + openExt : '不支持打开该文件类型: ' + openExt })
-          const sub = ctx.get('subprocess')
-          if (!sub) return json(res, { ok: false, error: 'subprocess 服务不可用' })
-          try {
-            const t = await fs.resolve(resolveArgPath(fp, entry.projRoot))
-            const winPath = fs.processPath ? fs.processPath(t) : String(t).replace(/\//g, '\\')
-            const exe = await sub.resolveExecutable('cmd')
-            const handle = sub.spawn({
-              argv: [exe, '/c', 'start', '', winPath],
-              cwd: String(root || 'C:\\').replace(/\//g, '\\'),
-              stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
-              graceMs: 5000,
-            })
-            await handle.done
-            return json(res, { ok: true, path: winPath })
-          } catch (e) {
-            return json(res, { ok: false, error: lang === 'en' ? 'Cannot open file: ' + ((e && e.message) || String(e)) : '打开文件失败: ' + ((e && e.message) || String(e)) })
-          }
-        }
+        // 打开被对比的文件：入口已从「系统关联程序打开」改为客户端打开 DSH 右侧栏的 file tab。
+        // 说明：原先的 /permgate/open-file（`cmd /c start` 系统打开 + OPEN_TEXT_EXTS 白名单）
+        // 已移除 —— 文件和图片现在由客户端交给 DSH 右侧栏的 file tab 展示
+        // （ctx.sidebarRight.openResource，同一地址由 DSH 按 media type 选渲染器）。
+        // 那份白名单当初只是为了挡住「打开」退化成「运行」关联脚本（exe/bat/ps1 等），
+        // 现在不再唤起系统程序，这条约束连同路由一起退场。
         return json(res, { error: 'not found: ' + pathname }, 404)
       } catch (e) {
         console.error('[permgate] route error:', e)

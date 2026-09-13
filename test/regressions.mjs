@@ -70,7 +70,8 @@ ok('isFileWrite 走 sreCommand', src.includes('return !!SRE_WRITE_CMDS[sreComman
 ok('isFileRead 走 sreCommand', src.includes("return sreCommand(args) === 'view'"))
 ok('isPreviewableFileTool 定义并组合四类（含图片）', src.includes('function isPreviewableFileTool(name, args) {') && src.includes('return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name))'))
 ok('hasDiff 使用 isPreviewableFileTool', src.includes('hasDiff: isPreviewableFileTool(exec.name, exec.arguments)'))
-ok('open-file 守卫使用 isPreviewableFileTool', src.includes('if (!isPreviewableFileTool(entry.tool, args)) return json'))
+ok('系统打开入口已移除（改走 DSH 右侧栏的 file tab）', !src.includes("pathname === '/permgate/open-file'") && !src.includes('const OPEN_TEXT_EXTS') && cli.includes("'permgate:open-file'") === false && cli.includes('openInSidebar(file,'))
+ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id）', cli.includes('props.useSessions((st) => (st ? st.current : undefined))') && cli.includes('(props && props.sessionId) || (p && p.sessionId)'))
 ok('normTarget 定义 + 三处路由使用', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 3)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
@@ -297,7 +298,7 @@ ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /i
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
 ok('缩略图有体积上限', src.includes('const IMAGE_MAX_BYTES = 2 * 1024 * 1024'))
 ok('读图的文本预览分支已移除', !src.includes('图片内容不在此预览'))
-ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ data })') && cli.includes("'app.imageTooLarge'") && cli.includes('catS.image'))
+ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ data, onOpenSidebar })') && cli.includes("'app.imageTooLarge'") && cli.includes('catS.image'))
 ok('面板 chips 含 image', cli.includes("chip(catShort('image'), eff.image)"))
 // 防回退：image 不套用老模式迁移（off/permissive→ask、locked→deny），不能变回 allow
 ok('迁移不把老模式套到 image 上', src.includes("c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask')") && !src.includes('for (const c of CATS) cfg.global[c].mode = map[oldMode] || \'allow\''))
