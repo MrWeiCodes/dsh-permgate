@@ -7,6 +7,9 @@ window.__ModuleLoader__.load({
 		let React = require("react");
 
 		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
+		// radio 禁用态的视觉提示：主 CSS 里 .pg-radio 没有 :disabled 规则，
+		// 原先靠内联 style 兜底，去掉后禁用按钮看起来仍可点。
+		const RADIO_DISABLED_CSS = '.pg-radio:disabled { opacity: 0.5; cursor: not-allowed; }';
 
 		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; }';
 
@@ -695,7 +698,7 @@ window.__ModuleLoader__.load({
 				'app.intent': '意图说明',
 				'app.args': '参数',
 				'app.cand.head': '添加项目规则（当前项目）',
-				'app.cand.hint': '点亮条目后点击「允许 / 拒绝」，选中的条目自动加入当前项目例外，之后不再询问。',
+				'app.cand.hint': '点亮条目后点「允许 / 拒绝」即写入当前项目例外。',
 				'app.allow': '允许',
 				'app.deny': '拒绝',
 				'app.allowOne': '√ 允许',
@@ -873,7 +876,7 @@ window.__ModuleLoader__.load({
 				'app.intent': 'Intent',
 				'app.args': 'Arguments',
 				'app.cand.head': 'Add project rule (current project)',
-				'app.cand.hint': 'Toggle items, then click Allow / Deny to add them to the current project exceptions permanently.',
+				'app.cand.hint': 'Toggle items then click Allow / Deny to write them into the current project exceptions.',
 				'app.allow': 'Allow',
 				'app.deny': 'Deny',
 				'app.allowOne': '√ Allow',
@@ -1086,6 +1089,8 @@ window.__ModuleLoader__.load({
 			const [openArgs, setOpenArgs] = React.useState({});
 			const [denyText, setDenyText] = React.useState({});
 			const [denyMode, setDenyMode] = React.useState({});
+			// 进入拒绝态时被临时收起的「允许此项」勾选（按审批 id 存），点「取消」时原样恢复
+			const [denySaved, setDenySaved] = React.useState({});
 			const [, setTick] = React.useState(0);
 			useLocaleTick();
 			const poll = () => {
@@ -1107,11 +1112,9 @@ window.__ModuleLoader__.load({
 				for (const key of diffFetching) if (!aliveIds.has(key)) diffFetching.delete(key);
 				for (const p of pending) {
 					if (!p.hasDiff || diffCache.has(p.id) || diffFetching.has(p.id)) continue
-					const userOpened = openDetail[p.id] === true
-					const open = openDetail[p.id] === undefined ? true : userOpened
+					// 详情默认展开（含图片：读图时用户最想看的就是那张图），展开即预取
+					const open = openDetail[p.id] === undefined ? true : openDetail[p.id] === true
 					if (!open) continue
-					// 图片详情是整图 data URL（体积大）：不做自动预取，只有用户主动展开该条时才拉取
-					if (p.imagePreview && !userOpened) continue
 					diffFetching.add(p.id)
 					schedulePrismIdle()
 					call('permgate:file-diff', { id: p.id }).then((r) => {
@@ -1146,26 +1149,43 @@ window.__ModuleLoader__.load({
 			const confirmDeny = (p) => {
 				const reason = (denyText[p.id] || '').trim();
 				setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
+				const rest = Object.assign({}, denySaved);
+				delete rest[p.id];
+				setDenySaved(rest);
 				decide(p.id, 'deny', pickedDenyRules(p), reason || undefined);
 			};
-			const cancelDeny = (p) => setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
-			// 进入拒绝态：只切状态，不动用户已勾选的内容。拒绝语义下「允许此项」由 radio 置灰，
-			// 确认拒绝时也只提交 deny 方向（pickedDenyRules），因此点「取消」能原样回到进入前的勾选。
-			const enterDeny = (p) => setDenyMode(Object.assign({}, denyMode, { [p.id]: true }));
+			// 取消拒绝：把进入前收起的「允许此项」勾选原样放回去
+			const cancelDeny = (p) => {
+				const snap = denySaved[p.id];
+				if (snap && Object.keys(snap).length) setSel(Object.assign({}, sel, snap));
+				const rest = Object.assign({}, denySaved);
+				delete rest[p.id];
+				setDenySaved(rest);
+				setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
+			};
+			// 进入拒绝态：立刻把「允许此项」的勾选收起来（视觉上就是取消了），并记下原选择供「取消」恢复。
+			// 之前是「保留勾选 + 置灰变浅」，看起来仍像选中了允许，容易误读成「一边选允许一边提交拒绝」。
+			const enterDeny = (p) => {
+				const snap = {};
+				for (const c of (p.candidates || [])) if (sel[c.id] === 'allow') snap[c.id] = 'allow';
+				const next = Object.assign({}, sel);
+				for (const id of Object.keys(snap)) delete next[id];
+				setDenySaved(Object.assign({}, denySaved, { [p.id]: snap }));
+				setSel(next);
+				setDenyMode(Object.assign({}, denyMode, { [p.id]: true }));
+			};
 			const radio = (p, c, v, label, cls) => {
-				// 拒绝态下「允许此项」不生效（confirmDeny 只提交 deny 方向）：置灰禁用而不是清除勾选，
-				// 这样点「取消」保留进入前选择，点「确认拒绝」也不会把 allow 方向写进配置。
-				const muted = v === 'allow' && !!denyMode[p.id];
+				// 拒绝态下「允许此项」已被收起，这里只做禁止再点（避免又勾回来和拒绝态自相矛盾）
+				const blocked = v === 'allow' && !!denyMode[p.id];
 				return React.createElement('button', {
 					className: 'pg-radio' + (sel[c.id] === v ? ' ' + cls : ''),
-					disabled: busyId === p.id || muted,
-					style: muted ? { opacity: 0.45, cursor: 'not-allowed' } : undefined,
+					disabled: busyId === p.id || blocked,
 					onClick: () => pick(c.id, v),
 				}, label);
 			};
 			// 编辑/写入审批（有 diff）：详情默认展开、参数默认收起；无 diff 时参数照常显示
-			// 图片详情是整图 data URL（体积大）：默认收起，用户点开该条时才拉取
-			const detailOpen = (p) => (openDetail[p.id] === undefined ? (!!p.hasDiff && !p.imagePreview) : openDetail[p.id]);
+			// 有 diff 的审批（含图片）详情默认展开：读图时那张缩略图就是用户最想看的东西
+			const detailOpen = (p) => (openDetail[p.id] === undefined ? !!p.hasDiff : openDetail[p.id]);
 			const argsOpen = (p) => (openArgs[p.id] === undefined ? !p.hasDiff : openArgs[p.id]);
 			const toggle = (map, setMap, p, v) => setMap(Object.assign({}, map, { [p.id]: v }));
 			// 点击文件名 → 打开右侧对比抽屉（父组件 OverlayRoot 持有 pin 状态）
@@ -1213,8 +1233,12 @@ window.__ModuleLoader__.load({
 					(p.candidates || []).length ? React.createElement('div', null,
 						React.createElement('div', { className: 'pg-cand-head' }, T('app.cand.head')),
 						React.createElement('div', { className: 'pg-cand-hint' }, T('app.cand.hint')),
-						(p.candidates || []).map((c) => React.createElement('div', { key: c.id, className: 'pg-cand' },
-							React.createElement('span', { className: 'pg-cand-label' }, c.label),
+						(p.candidates || []).map((c) => React.createElement('div', { key: c.id, className: 'pg-cand', style: { alignItems: 'flex-start' } },
+							// 主行是路径本身，范围说明降级成下面的灰色小字（按钮与主行对齐）
+							React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+								React.createElement('div', { className: 'pg-cand-label' }, c.label),
+								c.hint ? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)', marginTop: 2, lineHeight: 1.4 } }, c.hint) : null,
+							),
 							radio(p, c, 'allow', T('app.allowOne'), 'pg-radio-allow'),
 							radio(p, c, 'deny', T('app.denyOne'), 'pg-radio-deny'),
 						)),
@@ -2034,7 +2058,7 @@ window.__ModuleLoader__.load({
 				const tag = document.createElement('style');
 				tag.dataset.plugin = 'dsh-permgate';
 				tag.dataset.pluginCss = 'dsh-permgate';
-				tag.textContent = CSS;
+				tag.textContent = CSS + RADIO_DISABLED_CSS;
 				document.head.appendChild(tag);
 				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
 			}

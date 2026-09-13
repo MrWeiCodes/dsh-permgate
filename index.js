@@ -244,6 +244,30 @@ export default {
       return String(p).replace(/\\/g, '/').replace(/\/+$/, '')
     }
 
+    // 路径规范化单点：相对路径先按 root 绝对化，再折叠 .. 与重复分隔符。
+    // glob/norm/globToRegExp 都不折叠 ..，仅规范化写入侧会让例外永不命中参数原文。
+    function normAbsPath(p) {
+      const s = norm(p)
+      if (!s) return s
+      // glob 不是文件路径：绝对化会改变匹配范围（`**/*.env` 会被拼成 `G:/MCP/**/*.env`，
+      // 从「任意目录」缩成「仅工作区内」），故只做斜杠归一，不绝对化也不折叠 ..。
+      // 与 hasGlobMeta 同口径：只认 * 与 ?（[ ] 在 globToRegExp 里是字面量，不是通配符）。
+      if (/[*?]/.test(s)) return s
+      // file:// 等 URL 形态不是文件系统路径，原样返回（与 resolveArgPath 同口径）
+      if (s.indexOf('://') !== -1) return s
+      const isAbs = s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)
+      const abs = isAbs ? s : (root ? norm(root + '/' + s) : '')
+      if (!abs) return s
+      return norm(pathResolve(/^[a-zA-Z]:$/.test(abs) ? abs + '/' : abs))
+    }
+
+    // 路径同一性键：判重、写入去重、匹配三处共用同一口径，保证「同一条例外」在三处同答案。
+    // 必须基于 normAbsPath（绝对化 + 折叠 ..）而非裸 normPathKey，否则候选写入的规范值
+    // 与面板/工具入口写入的相对路径或含 .. 原文会被当成两条不同例外。
+    function pathKey(p) {
+      return normPathKey(normAbsPath(p))
+    }
+
     function safeJson(v) {
       try { return JSON.stringify(v) } catch (e) { return '' }
     }
@@ -847,7 +871,9 @@ export default {
     }
 
     function matchException(r, value, kind) {
-      if (kind === 'path') return matchGlob(r.path, value)
+      // 路径两侧统一走 normAbsPath：写入值可能来自候选（规范绝对路径），而 value 是
+      // 工具参数原文（可能是相对路径或含 ..）——只规范化写入侧会让例外永不命中。
+      if (kind === 'path') return matchGlob(normAbsPath(r.path), normAbsPath(value))
       return matchCommand(r.match, value)
     }
 
@@ -2271,7 +2297,8 @@ export default {
       }
       if (kind === 'path' && catKey && EXC_CATS.indexOf(catKey) !== -1) {
         const cat = proj[catKey]
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => r.path === value))
+        // 与 pathKey 同口径：相对路径、含 .. 、斜杠与大小写写法都归一到同一条
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => pathKey(r.path) === pathKey(value)))
       }
       if (kind === 'tool') {
         return !!(Array.isArray(proj.custom) && proj.custom.some((r) => r.tool === value))
@@ -2393,7 +2420,9 @@ export default {
 
     function buildCandidates(entry) {
       const out = []
-      const push = (label, value, kind, writes) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind, writes: Array.isArray(writes) ? writes : [{ cat: entry.cat, kind, value }] })
+      // hint：候选行下方的灰色小字（说明这条会放开什么），与 label（主文案，通常就是路径）分开下发，
+      // 由客户端排版成「路径 + 小字 + 按钮」，避免把说明塞进 label 里挤成一大段
+      const push = (label, value, kind, writes, hint) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind, writes: Array.isArray(writes) ? writes : [{ cat: entry.cat, kind, value }], ...(hint ? { hint } : {}) })
       const t = (zh, en) => (uiLang === 'en' ? en : zh)
       if (entry.kind === 'command' && entry.value) {
         const parts = splitCommandSegments(String(entry.value))
@@ -2420,25 +2449,44 @@ export default {
         const catKey = entry.toolCat && EXC_CATS.indexOf(entry.toolCat) !== -1 ? entry.toolCat : entry.cat
         const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))
         // 候选文案用的分类名：说明这条候选会放开「哪一类操作」，避免文案与落盘的例外分类不符
-        const KIND_LABEL = { read: ['读取文件', 'file reads'], image: ['读取图片', 'image reads'], edit: ['写入/编辑', 'write/edits'], undo: ['撤销操作', 'undo actions'] }
+        // 标签与设置面板的分类名保持一致（edit 就叫「编辑文件」，不再写「写入/编辑」）
+        const KIND_LABEL = { read: ['读取文件', 'file reads'], image: ['读取图片', 'image reads'], edit: ['编辑文件', 'file edits'], undo: ['撤销操作', 'undo actions'] }
         const kindLabel = KIND_LABEL[catKey] || ['此类操作', 'this kind of operation']
         if (outsideHere) {
           // 工作区外路径：两道闸各给一条候选。「整个目录」写 directory 与该分类的目录 glob ——
           // 点一次后该类操作在该目录下都不再询问；「仅此文件」写自身分类例外 + directory 的精确路径例外。
-          // 目录 glob 只对普通路径生成：路径自身含通配符或 .. 段时，拼出的 glob 会匹配到该目录之外
-          // 的路径（dirGlob / norm / globToRegExp 都不折叠 ..），授权面会超过「整个目录」的文案。
+          // 路径先规范化为绝对路径（折叠 .. 与重复分隔符）：判重与落盘值统一基于它。
+          // 含通配符的原文不做折叠——pathResolve 会把 `*` 当普通目录名、被其后的 .. 吃掉
+          // （实测 C:/x/*/../y.txt → C:/x/y.txt），使通配路径被误当成精确路径生成候选。
+          const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value)
+          // 守卫按**原始值**判定：absVal 已折叠 ..，对它判 hasParentSeg 恒为 false，等于没有守卫。
+          // 含 .. 的原文不给目录 glob——dirGlob 取父目录，`..` 可拼出覆盖整个盘根的 `G:/*`。
           const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)
-          const glob = globSafe ? dirGlob(entry.value) : ''
+          const glob = globSafe ? dirGlob(absVal) : ''
           const hasDirGlob = globSafe && alreadyInProject(glob, 'path', 'directory')
           const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey)
           if (globSafe && (!hasDirGlob || !hasKindGlob)) {
-            push(t('整个目录：' + kindLabel[0] + '（允许时同时写入「' + kindLabel[0] + '」与「目录访问」两条例外；拒绝时只写入「' + kindLabel[0] + '」，不连带封禁该目录的其它类型操作）：', 'Whole directory: ' + kindLabel[1] + ' (an allow writes both the ' + kindLabel[1] + ' rule and the directory-access rule; a deny writes only the ' + kindLabel[1] + ' rule and does not block other kinds of operations in that directory): ') + glob, glob, 'path', [{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }])
+            // label 就是路径本身（弹窗里最该被看清的东西），范围说明走 hint 小字
+            push(glob, glob, 'path', [{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }], t('工作区外访问目录 + ' + kindLabel[0] + '权限', 'Outside workspace · directory + ' + kindLabel[1]))
           }
-          if (!hasGlobMeta(entry.value) && !alreadyInProject(entry.value, 'path', catKey)) {
-            push(t('仅此文件：' + kindLabel[0] + '（允许时同时写入「' + kindLabel[0] + '」与「目录访问」的精确路径例外；拒绝时只写入「' + kindLabel[0] + '」，不连带封禁该路径的其它类型操作）：', 'Only this file: ' + kindLabel[1] + ' (an allow writes exact-path rules for both the ' + kindLabel[1] + ' and directory access; a deny writes only the ' + kindLabel[1] + ' rule and does not block other kinds of operations on that path): ') + entry.value, entry.value, 'path', [{ cat: catKey, kind: 'path', value: entry.value }, { cat: 'directory', kind: 'path', value: entry.value }])
+          const fileVal = absVal
+          // 判重按该候选实际要写的**全部分类**判定：它同时写 catKey 与 directory 两条例外，
+          // 只要其中一道闸还没有等价例外就得给出候选——否则用户补不上那道闸，只能改选
+          // 「整个目录」，精确授权被迫放大为目录级授权。
+          const fileWrites = [{ cat: catKey, kind: 'path', value: fileVal }, { cat: 'directory', kind: 'path', value: fileVal }]
+          // 按候选实际要写的两个分类（catKey + directory）各自判重：任一道闸缺等价例外即给候选。
+          // 注：能走到这里就说明至少一道闸没命中等价例外（两道都命中时 resolveCategory 直接
+          // 返回 allow/deny、不会弹窗），因此 covered 当前恒为 false——保留它是防御性冗余，
+          // 用来表达「两条写入目标各自判重」的语义，避免未来弹窗流程变更后候选被误隐藏。
+          const covered = fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat))
+          // 文件候选只要求原文无通配符：含 .. 的原文已被规范化成精确绝对路径，可以安全给候选
+          if (!hasGlobMeta(entry.value) && !covered) {
+            push(fileVal, fileVal, 'path', fileWrites, t('工作区外访问文件 + ' + kindLabel[0] + '权限', 'Outside workspace · file + ' + kindLabel[1]))
           }
         } else if (!hasGlobMeta(entry.value)) {
-          if (!alreadyInProject(entry.value, 'path', entry.cat)) push(entry.value, entry.value, 'path')
+          // 工作区内同样走规范化单点，避免同一份配置里两种路径写法并存
+          const absVal = normAbsPath(entry.value)
+          if (!alreadyInProject(absVal, 'path', entry.cat)) push(absVal, absVal, 'path')
         }
       }
       // 其余分类无「例外」候选：快捷工具（web_search/skill 等）走 quickTools 设置；
@@ -2468,10 +2516,9 @@ export default {
           // 审批发起时的项目根：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
           // 打相对路径/对比/打开文件必须用发起会话自己的根
           projRoot: root || null,
-          // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开、按需取数据
-          // （写类=diff，读类=窗口化内容；图片是整图 data URL，改由客户端默认收起、点开才拉取）
+          // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开并自动取数据
+          // （写类=diff，读类=窗口化内容；图片是整图 data URL，受 IMAGE_MAX_BYTES/像素上限约束）
           hasDiff: isPreviewableFileTool(exec.name, exec.arguments) && !!pathArg(exec.arguments),
-          imagePreview: isFileImage(exec.name) === true,
           toolCat: pathToolCat(exec.name, exec.arguments),
           // str_replace_editor 的内核在审批发起时定下（insert 的 insert_line 语义随内核相反），
           // 详情预览按发起时的实际内核解释，避免中途判别漂移
@@ -2518,7 +2565,9 @@ export default {
         if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1) {
           const c = block[cat] || freshCategory(cat, target === 'project')
           if (!c.exceptions) c.exceptions = []
-          const idx = c.exceptions.findIndex((r) => r.path === value && r.action === decision)
+          // 去重与 alreadyInProject / matchException 同口径（pathKey：绝对化 + 折叠 .. + 大小写/斜杠归一）：
+          // 否则候选写规范绝对路径、面板写相对或含 .. 原文时会各存一条指向同一路径的例外。
+          const idx = c.exceptions.findIndex((r) => pathKey(r.path) === pathKey(value) && r.action === decision)
           if (idx !== -1) {
             // 命中既有同向条目：提到数组头部，否则它会被前面的反向旧条目遮蔽（resolveCategory 只取首个匹配），
             // 用户的决定等于被静默丢弃；带新理由时一并回写（reason 已在入口按 deny + trim + 200 规范化）。
@@ -2528,7 +2577,8 @@ export default {
             block[cat] = c
             return hit
           }
-          const item = build({ path: value })
+          // 落盘统一存规范化路径，与判重/匹配口径一致
+          const item = build({ path: normAbsPath(value) })
           c.exceptions.unshift(item)
           block[cat] = c
           return item
@@ -2993,7 +3043,7 @@ export default {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
             const reason = typeof e.reason === 'string' ? e.reason : L(e.reason, lang)
             const intent = typeof e.intent === 'string' ? e.intent : L(e.intent, lang)
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, imagePreview: e.imagePreview === true })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true })
           }
           return json(res, out)
         }

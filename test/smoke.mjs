@@ -554,6 +554,73 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   try { rmSync(ws9, { recursive: true, force: true }); rmSync(home9, { recursive: true, force: true }) } catch (e) {}
 }
 
+// ─────────────────────────────────────────────────────────────
+group('13. 复合权限（工作区外 + 各自分类）的候选：四种都带分类自适应的灰色小字')
+{
+  const outDir = mkdtempSync(join(tmpdir(), 'pg-cand-out-'))
+  const ws5 = mkdtempSync(join(tmpdir(), 'pg-cand-ws-'))
+  const home5 = mkdtempSync(join(tmpdir(), 'pg-cand-home-'))
+  mkdirSync(join(home5, 'dsh-permgate'), { recursive: true })
+  const h5 = createHost({ workspaceRoot: ws5, dshHome: home5 })
+  const pre5 = h5.hooks.get('tools/pre-execute')
+  const setCat5 = (cat, mode) => callRoute(h5.routes, 'POST', '/permgate/set-category', { target: 'project', category: cat, mode, lang: 'zh', sessionId: 'sess-1' })
+  // read 默认 allow，需显式改 ask 才会进审批；image/edit/undo 默认已是 ask
+  await setCat5('read', 'ask')
+  const preview = async (name, args) => {
+    const p = pre5(makeExec(ws5, name, args), async () => ({ kind: 'allow' }))
+    p.catch(() => {})
+    await new Promise((r) => setTimeout(r, 40))
+    const pr = await callRoute(h5.routes, 'GET', '/permgate/pending')
+    const list = Array.isArray(pr.data) ? pr.data : ((pr.data && pr.data.pending) || [])
+    const item = list[0]
+    if (item) await callRoute(h5.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    return item
+  }
+  const CASES = [
+    ['read', 'read', '读取文件', { file_path: join(outDir, 'r.txt') }],
+    ['read_image', 'image', '读取图片', { file_path: join(outDir, 'i.png') }],
+    ['write', 'edit', '编辑文件', { file_path: join(outDir, 'w.txt'), content: 'x' }],
+    ['undo_last_edit', 'undo', '撤销操作', { path: join(outDir, 'u.txt') }],
+  ]
+  for (const [tool, cat, label, args] of CASES) {
+    const item = await preview(tool, args)
+    const cands = (item && item.candidates) || []
+    ok('group13: ' + cat + ' 工作区外给出两条复合候选', cands.length === 2, JSON.stringify(cands.map((c) => c.label)))
+    ok('group13: ' + cat + ' 候选主文案是纯路径、小字含「' + label + '」', cands.length === 2 && cands.every((c) => c.label === c.value && typeof c.hint === 'string' && c.hint.indexOf(label) !== -1), JSON.stringify(cands.map((c) => c.hint)))
+    ok('group13: ' + cat + ' 小字同时点出目录闸', cands.length === 2 && cands.every((c) => c.hint.indexOf('工作区外访问') === 0), JSON.stringify(cands.map((c) => c.hint)))
+  }
+  try { rmSync(outDir, { recursive: true, force: true }); rmSync(ws5, { recursive: true, force: true }); rmSync(home5, { recursive: true, force: true }) } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
+group('14. 相对 glob 例外不被绝对化（`**/*.env` 仍匹配任意目录）')
+{
+  const wsG = mkdtempSync(join(tmpdir(), 'pg-glob-ws-'))
+  const homeG = mkdtempSync(join(tmpdir(), 'pg-glob-home-'))
+  const outG = mkdtempSync(join(tmpdir(), 'pg-glob-out-'))
+  mkdirSync(join(homeG, 'dsh-permgate'), { recursive: true })
+  const hG = createHost({ workspaceRoot: wsG, dshHome: homeG })
+  const preG = hG.hooks.get('tools/pre-execute')
+  // read 默认 allow：先设 ask，这样才能靠「例外命中即放行」判定 glob 是否真的生效；
+  // directory 默认 ask：工作区外访问会先被目录闸拦住（cat=目录权限），必须放开它才测得到 read 的例外
+  await callRoute(hG.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'directory', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  await callRoute(hG.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'read', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+  const add = await callRoute(hG.routes, 'POST', '/permgate/add-exception', { target: 'global', category: 'read', action: 'allow', match: '**/*.env' })
+  const addedPath = add.data && add.data.added && add.data.added.path
+  ok('group14: 相对 glob 原样落盘（不被拼成绝对路径）', addedPath === '**/*.env', JSON.stringify(addedPath))
+  const probeG = async (file) => {
+    let nexted = false
+    const p = preG(makeExec(wsG, 'read', { file_path: file }), async () => { nexted = true; return { kind: 'allow' } })
+    p.catch(() => {})
+    const out = await Promise.race([p, new Promise((r) => setTimeout(() => r(null), 400))])
+    return { nexted, out }
+  }
+  const hitG = await probeG(join(outG, '.env'))
+  ok('group14: 工作区外的 .env 被该例外放行（未被绝对化收窄）', hitG.nexted === true, JSON.stringify(hitG.out))
+  const missG = await probeG(join(outG, 'plain.txt'))
+  ok('group14: 非匹配文件仍走审批（例外没被放宽）', missG.nexted === false, JSON.stringify(missG.out))
+  try { rmSync(wsG, { recursive: true, force: true }); rmSync(homeG, { recursive: true, force: true }); rmSync(outG, { recursive: true, force: true }) } catch (e) {}
+}
 try { rmSync(workspace, { recursive: true, force: true }); rmSync(dshHome, { recursive: true, force: true }) } catch (e) {}
 
 if (fail.length) {
