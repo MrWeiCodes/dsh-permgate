@@ -341,6 +341,19 @@ ok('客户端删除用返回 promise 的 call 并反馈结果', cli.includes("ca
 ok('同向去重命中后把条目提到头部并回写 reason', src.includes('const hit = c.exceptions.splice(idx, 1)[0]') && (src.match(/c\.exceptions\.unshift\(hit\)/g) || []).length === 2 && src.includes('if (reason) hit.reason = reason'))
 ok('choice 路径不再套用候选的 deny-directory 过滤', !src.includes("if (!(action === 'deny' && entry.cat === 'directory'))"))
 // ─────────────────────────────────────────────────────────────
+group('11. 权限元操作纳入管控（issue #3：perm_* 曾无条件放行）')
+ok('decide 不再硬编码放行 perm_*', !src.includes("name.indexOf('perm_') === 0) {") && !src.includes('permgate management tool, always allowed'))
+{
+  // 少一个都会让「AI 自我提权」重新变成静默操作，故按清单整体校验
+  const ASK_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set_editor_kernel', 'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule', 'perm_remove_rule', 'perm_reload', 'cordis_run', 'cordis_stop', 'cordis_undefine']
+  const missing = ASK_TOOLS.filter((t) => !new RegExp('\\b' + t + ": 'ask'").test(src))
+  ok('改权限/管插件的元操作全部纳入快捷预设且默认 ask', missing.length === 0, JSON.stringify(missing))
+  // perm_status 只读查询：明确放宽为 allow，防止被顺手改回 ask
+  ok('perm_status 默认 allow（只读查询不弹窗）', src.includes("perm_status: 'allow'"))
+}
+ok('面板为新工具补了用途说明（中英）', cli.includes("'quick.perm_add_exception': '添加例外'") && cli.includes("'quick.cordis_run': '运行动态插件'") && cli.includes("'quick.perm_add_exception': 'add an exception'"))
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)

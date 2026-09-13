@@ -16,7 +16,10 @@ const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 const MAX_DECISIONS = 30
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
-// cordis_run（宿主进程内执行代码）、cordis_stop/undefine（管理动态插件）与 mcp__*（外装 MCP）不在此列，走兜底策略（默认询问）
+// 其余工具默认询问（ask）：mcp__*（外装 MCP）、改权限配置的 perm_*（只读的 perm_status 除外）、
+// 以及管理动态插件的 cordis_run/stop/undefine —— perm_* 曾经被 decide 无条件放行，等于
+// 「AI 可自我提权、且全程无弹窗」；纳入本清单后统一按 ask 裁决，只有用户在设置页显式改成 allow
+// 才会静默放行（预设默认优先于兜底策略，改兜底也不会漏）。
 const QUICK_DEFAULTS = {
   web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
   ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
@@ -25,6 +28,12 @@ const QUICK_DEFAULTS = {
   send_message: 'allow', interrupt_agent: 'allow',
   present: 'allow', exit_plan_mode: 'allow',
   cordis_define: 'allow', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
+  // 改权限配置 = 元操作，一律先问；只有 perm_status 是只读查询，默认放行（想看随时能看）
+  perm_status: 'allow', perm_set_category: 'ask', perm_set_fallback: 'ask', perm_set_editor_kernel: 'ask',
+  perm_add_exception: 'ask', perm_remove_exception: 'ask', perm_set_quick: 'ask',
+  perm_add_rule: 'ask', perm_remove_rule: 'ask', perm_reload: 'ask',
+  // cordis_run 在宿主进程里执行代码、stop/undefine 管理（可移除）动态插件 —— 同属元操作，一律先问
+  cordis_run: 'ask', cordis_stop: 'ask', cordis_undefine: 'ask',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
@@ -2127,9 +2136,10 @@ export default {
         if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
         return ''
       }
-      if (typeof name === 'string' && name.indexOf('perm_') === 0) {
-        return { action: 'allow', reason: bi('permgate 自身管理工具，始终放行', 'permgate management tool, always allowed'), cat: null, value: null, kind: null }
-      }
+      // 注意：perm_* 曾在此被无条件放行，等于给 AI 留了一条「自我提权且无弹窗」的后门
+      // （perm_set_category / perm_set_fallback / perm_add_exception … 改动即生效）。
+      // 现在不再特判，统一走下面的正常判定链（自定义规则 → 分类 → 快捷工具 → 兜底），
+      // 其默认动作由 QUICK_DEFAULTS 钉成 ask；设置面板走 /permgate/* HTTP 路由、不经这里，不受影响。
       if (sessionPresetName(exec) !== 'custom-review') {
         return { action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null }
       }

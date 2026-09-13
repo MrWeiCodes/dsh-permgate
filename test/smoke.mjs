@@ -289,8 +289,15 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   const st = await callRoute(host3.routes, 'GET', '/permgate/status')
   const presetList = (st.data && st.data.quickPreset) || []
   const defaults = (st.data && st.data.quickDefaults) || {}
-  ok('group5: status 下发 quickPreset（22 项）', presetList.length === 22, 'len=' + presetList.length)
+  ok('group5: status 下发 quickPreset（35 项：22 常规 + 10 个 perm_* + cordis_run/stop/undefine）', presetList.length === 35, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
+  // issue #3：perm_* 曾在 decide 里被无条件放行（AI 可自我提权且无弹窗）；纳入快捷预设后必须走 ask
+  const rp1 = await probe('perm_add_exception')
+  ok('group5: perm_add_exception 默认不被静默放行', rp1.nexted === false, JSON.stringify(rp1.out))
+  const rp2 = await probe('perm_set_category')
+  ok('group5: perm_set_category 默认不被静默放行', rp2.nexted === false, JSON.stringify(rp2.out))
+  const rp3 = await probe('cordis_run')
+  ok('group5: cordis_run 默认不被静默放行', rp3.nexted === false, JSON.stringify(rp3.out))
 
   try { rmSync(ws3, { recursive: true, force: true }); rmSync(home3, { recursive: true, force: true }) } catch (e) {}
 }
