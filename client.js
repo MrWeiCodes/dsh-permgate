@@ -661,8 +661,8 @@ window.__ModuleLoader__.load({
 		}
 
 		// 分类清单默认值：以宿主下发为准（见 applyStatusLists），避免双端各存一份而漂移
-		let CATS = ['directory', 'command', 'read', 'edit', 'undo', 'subagent', 'doomloop'];
-		let EXC_CATS = ['directory', 'command', 'read', 'edit', 'undo'];
+		let CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'];
+		let EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo'];
 		function applyStatusLists(s) {
 			if (s && Array.isArray(s.cats) && s.cats.length) CATS = s.cats;
 			if (s && Array.isArray(s.excCats) && s.excCats.length) EXC_CATS = s.excCats;
@@ -709,6 +709,10 @@ window.__ModuleLoader__.load({
 				'app.diffMore': '其余 {n} 行',
 				'app.diffLoading': '加载中…',
 				'app.diffErr': '无法生成对比',
+				'app.imageTag': '图片',
+				'app.imageTooLarge': '图片过大，未生成缩略图',
+				'app.imageSizeUnknown': '无法确认图片尺寸，未生成缩略图',
+				'app.imageNoPreview': '暂无可用的缩略图',
 				'app.uiErr': '界面渲染出错',
 				'app.eolNote': '行尾已按 LF 归一化匹配（磁盘为 CRLF/CR 而参数为 LF）：预览仅为意图展示，实际编辑可能因行尾不一致失败',
 				'app.diffGapShow': '显示 {n} 行未更改',
@@ -733,6 +737,7 @@ window.__ModuleLoader__.load({
 				'cat.directory': '目录访问（工作区外）',
 				'cat.command': '执行命令',
 				'cat.read': '读取文件',
+				'cat.image': '读取图片',
 				'cat.edit': '编辑文件',
 				'cat.undo': '撤销操作（恢复上次编辑前的内容）',
 				'cat.subagent': '启动子代理',
@@ -740,6 +745,7 @@ window.__ModuleLoader__.load({
 				'catS.directory': '目录',
 				'catS.command': '命令',
 				'catS.read': '读取',
+				'catS.image': '图片',
 				'catS.edit': '编辑',
 				'catS.undo': '撤销',
 				'catS.subagent': '子代理',
@@ -804,6 +810,8 @@ window.__ModuleLoader__.load({
 				'panel.fallback': '兜底策略（未匹配任何规则）',
 				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、cordis_run）如何处理。默认「询问」：每个未匹配的调用都会弹出审批。',
 				'panel.needValue': '请先输入例外匹配',
+				'panel.excRemaining': '该路径仍有 {n} 条同值例外，可继续逐条删除',
+				'panel.delFailed': '删除失败',
 				'panel.needTool': '请输入工具名',
 				'panel.excCount': '例外（{n}）',
 				'panel.excCmdHint': '：匹配命令子串/glob，优先于分类默认',
@@ -866,6 +874,10 @@ window.__ModuleLoader__.load({
 				'app.diffMore': '{n} more lines',
 				'app.diffLoading': 'Loading…',
 				'app.diffErr': 'Cannot build comparison',
+				'app.imageTag': 'Image',
+				'app.imageTooLarge': 'Image too large; thumbnail not generated',
+				'app.imageSizeUnknown': 'Image size could not be determined; thumbnail not generated',
+				'app.imageNoPreview': 'No thumbnail available',
 				'app.uiErr': 'UI render error',
 				'app.eolNote': 'Line endings normalized to LF for matching (CRLF/CR file with LF args): preview is indicative only; the actual edit may fail on line-ending mismatch',
 				'app.diffGapShow': 'Show {n} unchanged lines',
@@ -890,6 +902,7 @@ window.__ModuleLoader__.load({
 				'cat.directory': 'Directory access (outside workspace)',
 				'cat.command': 'Run command',
 				'cat.read': 'Read file',
+				'cat.image': 'Read image',
 				'cat.edit': 'Edit file',
 				'cat.undo': 'Undo edit (revert last edit)',
 				'cat.subagent': 'Spawn subagent',
@@ -897,6 +910,7 @@ window.__ModuleLoader__.load({
 				'catS.directory': 'Dir',
 				'catS.command': 'Cmd',
 				'catS.read': 'Read',
+				'catS.image': 'Image',
 				'catS.edit': 'Edit',
 				'catS.undo': 'Undo',
 				'catS.subagent': 'Sub',
@@ -958,6 +972,8 @@ window.__ModuleLoader__.load({
 				'panel.fallback': 'Fallback policy (no rule matched)',
 				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, cordis_run) are handled. Default Ask: every unmatched call prompts for approval.',
 				'panel.needValue': 'Enter a match value first',
+				'panel.excRemaining': '{n} exception(s) with the same value remain on this path; delete them individually if not wanted',
+				'panel.delFailed': 'Delete failed',
 				'panel.needTool': 'Enter a tool name',
 				'panel.excCount': 'Exceptions ({n})',
 				'panel.excCmdHint': ': command substring/glob, overrides category default',
@@ -1065,8 +1081,11 @@ window.__ModuleLoader__.load({
 				for (const key of diffFetching) if (!aliveIds.has(key)) diffFetching.delete(key);
 				for (const p of pending) {
 					if (!p.hasDiff || diffCache.has(p.id) || diffFetching.has(p.id)) continue
-					const open = openDetail[p.id] === undefined ? true : openDetail[p.id] === true
+					const userOpened = openDetail[p.id] === true
+					const open = openDetail[p.id] === undefined ? true : userOpened
 					if (!open) continue
+					// 图片详情是整图 data URL（体积大）：不做自动预取，只有用户主动展开该条时才拉取
+					if (p.imagePreview && !userOpened) continue
 					diffFetching.add(p.id)
 					schedulePrismIdle()
 					call('permgate:file-diff', { id: p.id }).then((r) => {
@@ -1091,24 +1110,36 @@ window.__ModuleLoader__.load({
 				else next[candId] = v;
 				setSel(next);
 			};
+			const pickedRules = (p) => (p.candidates || []).filter((c) => sel[c.id]).map((c) => ({ id: c.id, value: c.value, kind: c.kind, decision: sel[c.id] }));
+			// 拒绝语义下只接受 deny 方向的规则：候选行残留的「允许此项」勾选绝不能变成持久 allow
+			const pickedDenyRules = (p) => pickedRules(p).filter((r) => r.decision === 'deny');
 			const submit = (p, action) => {
-				const rules = (p.candidates || []).filter((c) => sel[c.id]).map((c) => ({ value: c.value, kind: c.kind, decision: sel[c.id] }));
-				decide(p.id, action, rules);
+				decide(p.id, action, pickedRules(p));
 			};
 			// 两段式拒绝：确认阶段提交（携带意见）或取消返回
 			const confirmDeny = (p) => {
 				const reason = (denyText[p.id] || '').trim();
 				setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
-				decide(p.id, 'deny', [], reason || undefined);
+				decide(p.id, 'deny', pickedDenyRules(p), reason || undefined);
 			};
 			const cancelDeny = (p) => setDenyMode(Object.assign({}, denyMode, { [p.id]: false }));
-			const radio = (p, c, v, label, cls) => React.createElement('button', {
-				className: 'pg-radio' + (sel[c.id] === v ? ' ' + cls : ''),
-				disabled: busyId === p.id,
-				onClick: () => pick(c.id, v),
-			}, label);
+			// 进入拒绝态：只切状态，不动用户已勾选的内容。拒绝语义下「允许此项」由 radio 置灰，
+			// 确认拒绝时也只提交 deny 方向（pickedDenyRules），因此点「取消」能原样回到进入前的勾选。
+			const enterDeny = (p) => setDenyMode(Object.assign({}, denyMode, { [p.id]: true }));
+			const radio = (p, c, v, label, cls) => {
+				// 拒绝态下「允许此项」不生效（confirmDeny 只提交 deny 方向）：置灰禁用而不是清除勾选，
+				// 这样点「取消」保留进入前选择，点「确认拒绝」也不会把 allow 方向写进配置。
+				const muted = v === 'allow' && !!denyMode[p.id];
+				return React.createElement('button', {
+					className: 'pg-radio' + (sel[c.id] === v ? ' ' + cls : ''),
+					disabled: busyId === p.id || muted,
+					style: muted ? { opacity: 0.45, cursor: 'not-allowed' } : undefined,
+					onClick: () => pick(c.id, v),
+				}, label);
+			};
 			// 编辑/写入审批（有 diff）：详情默认展开、参数默认收起；无 diff 时参数照常显示
-			const detailOpen = (p) => (openDetail[p.id] === undefined ? !!p.hasDiff : openDetail[p.id]);
+			// 图片详情是整图 data URL（体积大）：默认收起，用户点开该条时才拉取
+			const detailOpen = (p) => (openDetail[p.id] === undefined ? (!!p.hasDiff && !p.imagePreview) : openDetail[p.id]);
 			const argsOpen = (p) => (openArgs[p.id] === undefined ? !p.hasDiff : openArgs[p.id]);
 			const toggle = (map, setMap, p, v) => setMap(Object.assign({}, map, { [p.id]: v }));
 			// 点击文件名 → 打开右侧对比抽屉（父组件 OverlayRoot 持有 pin 状态）
@@ -1150,9 +1181,7 @@ window.__ModuleLoader__.load({
 							const c = diffCache.get(p.id)
 							if (!c) return React.createElement('div', { className: 'pg2-load' }, T('app.diffLoading'))
 							if (!c.ok) return React.createElement('div', { className: 'pg2-err' }, (c.error || T('app.diffErr')))
-							return c.kind === 'read'
-								? React.createElement(PGErrorBoundary, { resetKey: payloadKey(c), fallback: T('app.diffErr') }, React.createElement(ReadBlockMemo, { data: c, onOpenFile: (f) => openFile(p, f) }))
-								: React.createElement(PGErrorBoundary, { resetKey: payloadKey(c), fallback: T('app.diffErr') }, React.createElement(DiffBlockMemo, { data: c, onOpenFile: (f) => openFile(p, f), changesOnly: true }))
+							return detailBody(c, { onOpenFile: (f) => openFile(p, f), changesOnly: true, resetKey: payloadKey(c) })
 						})() : null,
 					) : null,
 					(p.candidates || []).length ? React.createElement('div', null,
@@ -1177,7 +1206,7 @@ window.__ModuleLoader__.load({
 							React.createElement('button', { className: 'pg-action', disabled: busyId === p.id, onClick: () => cancelDeny(p) }, T('panel.cancel')),
 						),
 					) : React.createElement('div', { className: 'pg-footer' },
-						React.createElement('button', { className: 'pg-action pg-action-deny', disabled: busyId === p.id, onClick: () => setDenyMode(Object.assign({}, denyMode, { [p.id]: true })) }, T('app.deny')),
+						React.createElement('button', { className: 'pg-action pg-action-deny', disabled: busyId === p.id, onClick: () => enterDeny(p) }, T('app.deny')),
 						React.createElement('button', { className: 'pg-action pg-action-allow', disabled: busyId === p.id, onClick: () => submit(p, 'allow') }, T('app.allow')),
 					),
 				)),
@@ -1407,6 +1436,49 @@ window.__ModuleLoader__.load({
 		const diffPropsEqual = (a, b) => a.data === b.data && a.changesOnly === b.changesOnly;
 		const DiffBlockMemo = React.memo(DiffBlock, diffPropsEqual);
 		const ReadBlockMemo = React.memo(ReadBlock, diffPropsEqual);
+
+		// kind → 详情组件 分派单点：待审批内联详情与右侧对比抽屉共用，新增 kind（如 image）只改这一处，
+		// 避免两处漏改导致某处把数据落到 DiffBlock，被错误边界兜成「无法生成对比」。
+		function detailBody(data, opts) {
+			const o = opts || {};
+			const fb = T('app.diffErr');
+			const boundaryProps = o.resetKey !== undefined ? { resetKey: o.resetKey, fallback: fb } : { fallback: fb };
+			if (data.kind === 'image') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ImageBlock, { data }));
+			if (data.kind === 'read') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ReadBlockMemo, { data, onOpenFile: o.onOpenFile || null, onCollapse: o.onCollapse }));
+			return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(DiffBlockMemo, { data, onOpenFile: o.onOpenFile || null, onCollapse: o.onCollapse, changesOnly: o.changesOnly }));
+		}
+
+		// 图片详情块：头部显示 格式 · 像素尺寸 · 体积，下面给缩略图；
+		// 超过上限或读取失败时不给图片本体，改显示说明文本（宿主下发的 error 由外层按 .pg2-err 渲染）。
+		function ImageBlock({ data }) {
+			const fmtBytes = (n) => {
+				const v = Number(n) || 0;
+				if (v < 1024) return v + ' B';
+				if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+				return (v / (1024 * 1024)).toFixed(2) + ' MB';
+			};
+			const meta = [
+				String(data.format || '').toUpperCase(),
+				data.width && data.height ? data.width + '×' + data.height : '',
+				data.size ? fmtBytes(data.size) : '',
+			].filter(Boolean).join(' · ');
+			const note = data.sizeUnknown
+				? T('app.imageSizeUnknown')
+				: data.tooLarge
+					? T('app.imageTooLarge') + (data.limit ? '（' + fmtBytes(data.limit) + '）' : '')
+					: T('app.imageNoPreview');
+			return React.createElement('div', { className: 'pg2-block' },
+				React.createElement('div', { className: 'pg2-header' },
+					React.createElement('span', { className: 'pg2-status pg2-status-read' }, T('app.imageTag')),
+					React.createElement('span', { className: 'pg2-path', title: data.file }, data.file),
+					meta ? React.createElement('span', { style: { marginLeft: 'auto', color: 'rgba(128,128,128,0.9)' } }, meta) : null,
+				),
+				data.dataUrl
+					? React.createElement('div', { style: { padding: 10, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'auto', background: 'rgba(128,128,128,0.06)' } },
+						React.createElement('img', { src: data.dataUrl, alt: data.file, style: { maxWidth: '100%', maxHeight: 320, objectFit: 'contain', borderRadius: 4, display: 'block' } }))
+					: React.createElement('div', { className: 'pg2-foot' }, note),
+			);
+		}
 		function CompareDrawer({ pin, onClose }) {
 			const [data, setData] = React.useState(null);
 			const [err, setErr] = React.useState('');
@@ -1472,9 +1544,7 @@ window.__ModuleLoader__.load({
 			};
 			let body;
 			if (data) {
-				body = data.kind === 'read'
-					? React.createElement(PGErrorBoundary, { fallback: T('app.diffErr') }, React.createElement(ReadBlockMemo, { data, onOpenFile: null, onCollapse: onClose }))
-					: React.createElement(PGErrorBoundary, { fallback: T('app.diffErr') }, React.createElement(DiffBlockMemo, { data, onOpenFile: null, onCollapse: onClose }));
+				body = detailBody(data, { onCollapse: onClose })
 			} else if (err) {
 				body = React.createElement('div', { className: 'pg2-err' }, err);
 			} else {
@@ -1561,7 +1631,7 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'rgba(128,128,128,0.95)', padding: '2px 0' } },
 				React.createElement('span', { style: { fontWeight: 600 } }, T('dock.title')),
 				React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-					chip(catShort('directory'), eff.directory), chip(catShort('command'), eff.command), chip(catShort('read'), eff.read), chip(catShort('edit'), eff.edit), chip(catShort('undo'), eff.undo), chip(catShort('subagent'), eff.subagent), chip(catShort('doomloop'), eff.doomloop),
+					chip(catShort('directory'), eff.directory), chip(catShort('command'), eff.command), chip(catShort('read'), eff.read), chip(catShort('image'), eff.image), chip(catShort('edit'), eff.edit), chip(catShort('undo'), eff.undo), chip(catShort('subagent'), eff.subagent), chip(catShort('doomloop'), eff.doomloop),
 				),
 				React.createElement('span', { style: { cursor: 'pointer', padding: '0 4px' }, onClick: refresh, title: T('dock.refresh') }, '↻'),
 			);
@@ -1688,7 +1758,18 @@ window.__ModuleLoader__.load({
 				invoke('permgate:add-exception', { target: tab, category: c, match: v, action: exAction, reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined });
 			};
 
-			const removeException = (c, id) => invoke('permgate:remove-exception', { target: tab, category: c, id });
+			const removeException = (c, id) => {
+				setBusy(true);
+				setMsg('');
+				// 注意：invoke 是无返回值的回调式封装，这里必须用返回 promise 的 call
+				call('permgate:remove-exception', { target: tab, category: c, id }).then((r) => {
+					if (r && r.error) { setMsg(String(r.error)); return; }
+					applyStatus(r && r.status ? r.status : r);
+					// 删除只作用于选中行：明确反馈结果；同路径若仍有例外则提示剩余条数，否则清掉旧提示
+					if (r && r.removed === false) setMsg(r.reason ? String(r.reason) : T('panel.delFailed'));
+					else setMsg(r && r.remaining > 0 ? T('panel.excRemaining').replace('{n}', String(r.remaining)) : '');
+				}).catch((e) => setMsg(String((e && e.message) || e))).then(() => setBusy(false));
+			};
 
 			const setFormKey = (key) => (e) => setForm(Object.assign({}, form, { [key]: e.target.value }));
 			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });

@@ -6,8 +6,8 @@ import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
-const CATS = ['directory', 'command', 'read', 'edit', 'undo', 'subagent', 'doomloop']
-const EXC_CATS = ['directory', 'command', 'read', 'edit', 'undo']
+const CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop']
+const EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo']
 // 分类枚举清单派生：三处工具 schema 的 enum 直接引用，避免新增分类时逐处漏改
 const CATEGORY_ENUM = CATS.slice()
 const EXC_CATEGORY_ENUM = EXC_CATS.slice()
@@ -37,7 +37,11 @@ const PS_KEYWORDS = { foreach: 1, if: 1, else: 1, elseif: 1, for: 1, while: 1, d
 // 子命令路由器命令族：候选细化到「git status *」这一粒度，而不是一放全放「git *」
 const ROUTER_CMDS = { git: 1, npm: 1, pnpm: 1, yarn: 1, docker: 1, kubectl: 1, dotnet: 1, cargo: 1, go: 1, gh: 1, pip: 1, uv: 1, conda: 1 }
 
-const FILE_READ_TOOLS = { read: 1, read_image: 1 }
+const FILE_READ_TOOLS = { read: 1 }
+// 图片读取单列一类：判定链与 read 完全同构（工作区外先过「目录访问」闸，再过本分类 + 路径例外），
+// 但配置与默认值都独立 —— 「读文件」的设置不管读图，且 image 默认 ask（read 默认 allow），
+// 老配置升级后读图会先询问（v1 的 locked 配置保持 deny），是否放宽由用户自己决定。
+const FILE_IMAGE_TOOLS = { read_image: 1 }
 const FILE_WRITE_TOOLS = { write: 1, edit: 1 }
 const COMMAND_TOOLS = { pwsh: 1, bash: 1 }
 const SUBAGENT_TOOLS = { subagent: 1, subagent_fork: 1, workflow: 1, ralph: 1 }
@@ -64,11 +68,16 @@ function isFileWrite(name, args) {
   return !!SRE_WRITE_CMDS[sreCommand(args)]
 }
 
-// 文件读工具判定：read/read_image，或 str_replace_editor 的 view
+// 文件读（文本）工具判定：read，或 str_replace_editor 的 view
 function isFileRead(name, args) {
   if (FILE_READ_TOOLS[name]) return true
   if (name !== 'str_replace_editor') return false
   return sreCommand(args) === 'view'
+}
+
+// 图片读工具判定：read_image（参数同样取 file_path，路径解析复用 pathArg）
+function isFileImage(name) {
+  return !!FILE_IMAGE_TOOLS[name]
 }
 
 // 撤销类工具（dsh-better-edit 的 undo_last_edit）：会写盘但不是「编辑」——它恢复既有内容、
@@ -76,10 +85,80 @@ function isFileRead(name, args) {
 const UNDO_TOOLS = { undo_last_edit: 1 }
 function isUndo(name) { return !!UNDO_TOOLS[name] }
 
-// 「可预览文件内容」判定：详情 diff 与「打开文件」路由共用同一口径（写类/读类/撤销类），
+// 工具自身所属的路径类分类（不含 directory 闸）：工作区外审批的「仅此文件」候选要写哪个分类，
+// 不能靠 entry.cat —— 它只记录「作出决定的那道闸」，directory 处于 ask 时反映不出工具本身属于哪类。
+function pathToolCat(name, args) {
+  if (isFileWrite(name, args)) return 'edit'
+  if (isFileImage(name)) return 'image'
+  if (isUndo(name)) return 'undo'
+  if (isFileRead(name, args)) return 'read'
+  return null
+}
+
+// 「可预览文件内容」判定：详情 diff 与「打开文件」路由共用同一口径（写类/文本读类/图片类/撤销类），
 // 避免两处判据分叉导致「面板有对比但打开文件报不支持」
 function isPreviewableFileTool(name, args) {
-  return !!(isFileWrite(name, args) || isFileRead(name, args) || isUndo(name))
+  return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name))
+}
+
+// ── 图片嗅探（详情缩略图用）────────────────────────────────────────
+// read_image 支持 PNG/JPEG/WebP/GIF。这里不引图像库，直接按各格式文件头取格式与像素尺寸；
+// 只在「详情」预览通道里用，嗅探失败即视为不可预览，不影响权限判定本身。
+const IMAGE_MIME = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+// 缩略图体积上限：data URL 比原字节还要大 1/3，超过就只给格式/尺寸、不返回图片本体
+const IMAGE_MAX_BYTES = 2 * 1024 * 1024
+// 像素/边长上限：服务端不做降采样，原图直接内联给浏览器解码，故这里等于「弹窗解码预算」——
+// 16 MP ≈ 4096×4096 ≈ 64MB RGBA；边长闸与像素闸同量级，避免小体积超大清屏图（解压炸弹）。
+const IMAGE_MAX_PIXELS = 16 * 1000 * 1000
+const IMAGE_MAX_DIM = 4096
+// 头部读取上限：JPEG 的 SOF 段可能落在较后面，64KB 足以覆盖常规图片
+const IMAGE_HEAD_BYTES = 64 * 1024
+
+function be32(b, o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0 }
+function le16(b, o) { return b[o] | (b[o + 1] << 8) }
+function le24(b, o) { return b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) }
+
+// 返回 { format, width, height }；无法识别返回 null；尺寸取不到时宽高为 null
+function sniffImage(b) {
+  if (!b || b.length < 16) return null
+  // PNG：89 50 4E 47 0D 0A 1A 0A，IHDR 宽高在固定偏移（大端 32 位）
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    if (b.length < 24) return { format: 'png', width: null, height: null }
+    return { format: 'png', width: be32(b, 16), height: be32(b, 20) }
+  }
+  // GIF87a / GIF89a：逻辑屏幕宽高（小端 16 位）
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) {
+    return { format: 'gif', width: le16(b, 6), height: le16(b, 8) }
+  }
+  // JPEG：FF D8 之后逐段跳过，遇 SOFn 帧头取高宽（大端）
+  if (b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) { i++; continue }
+      const m = b[i + 1]
+      if (m === 0xff) { i++; continue } // 段间填充字节
+      if (m === 0x01 || (m >= 0xd0 && m <= 0xd8)) { i += 2; continue } // 无长度字段的段
+      const len = (b[i + 2] << 8) | b[i + 3]
+      if (len < 2) break
+      const isSof = (m >= 0xc0 && m <= 0xc3) || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcb) || (m >= 0xcd && m <= 0xcf)
+      if (isSof) return { format: 'jpeg', height: (b[i + 5] << 8) | b[i + 6], width: (b[i + 7] << 8) | b[i + 8] }
+      if (m === 0xda) break // SOS：之后是压缩数据，不会再有尺寸段
+      i += 2 + len
+    }
+    return { format: 'jpeg', width: null, height: null }
+  }
+  // WebP：RIFF....WEBP + 变体块
+  if (b.length >= 30 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) {
+    const cc = String.fromCharCode(b[12], b[13], b[14], b[15])
+    if (cc === 'VP8X') return { format: 'webp', width: le24(b, 24) + 1, height: le24(b, 27) + 1 }
+    if (cc === 'VP8 ') return { format: 'webp', width: (b[26] | (b[27] << 8)) & 0x3fff, height: (b[28] | (b[29] << 8)) & 0x3fff }
+    if (cc === 'VP8L') {
+      const bits = (b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24)) >>> 0
+      return { format: 'webp', width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 }
+    }
+    return { format: 'webp', width: null, height: null }
+  }
+  return null
 }
 
 // target 归一化统一：缺失/非法一律落到 global（三个设置路由共用，避免漏改某处把项目设置写进全局）
@@ -174,7 +253,8 @@ export default {
     }
 
     function freshCategory(key, inheritDefault) {
-      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'undo' || key === 'doomloop' ? 'ask' : 'allow') }
+      // 默认 ask：不可逆/越界/涉及外部执行或输入的分类（含读图）从严；read/subagent 这类只读或可回收的默认放行
+      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'undo' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow') }
       if (EXC_CATS.indexOf(key) !== -1) cat.exceptions = []
       return cat
     }
@@ -244,7 +324,9 @@ export default {
       const oldMode = ['off', 'permissive', 'locked'].indexOf(g.mode) !== -1 ? g.mode : 'off'
       const cfg = freshConfig()
       const map = { off: 'allow', permissive: 'allow', locked: 'deny' }
-      for (const c of CATS) cfg.global[c].mode = map[oldMode] || 'allow'
+      // image 是本版新增的从严分类，不套用老模式映射：off/permissive 老配置按新默认 ask
+      // （升级后读图先询问，由用户决定是否放宽），locked 仍保持 deny，避免比旧行为更松。
+      for (const c of CATS) cfg.global[c].mode = c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask') : (map[oldMode] || 'allow')
       cfg.global.fallbackMode = map[oldMode]
       cfg.global.doomloop.mode = oldMode === 'off' ? 'allow' : 'ask'
       if (oldMode === 'locked') {
@@ -259,6 +341,8 @@ export default {
         const pb = { quickTools: {}, custom: Array.isArray(p.rules) ? p.rules.map(normalizeRule).filter(Boolean) : [] }
         for (const c of CATS) {
           pb[c] = freshCategory(c, true)
+          // 同上：image 不套用老模式 —— 未显式配置的项目保持 inherit（跟随全局 ask），locked 仍 deny
+          if (c === 'image') { if (pm === 'locked') pb[c].mode = 'deny'; continue }
           pb[c].mode = pm === 'off' ? 'allow' : (map[pm] || 'allow')
         }
         pb.doomloop.mode = pm === 'off' ? 'allow' : 'ask'
@@ -611,6 +695,8 @@ export default {
     function matchCommand(pat, hay) {
       const p = String(pat || '')
       const h = String(hay || '')
+      // 空 pattern 不匹配任何命令（否则 indexOf('') === 0 恒真，等于放行所有命令）
+      if (!p) return false
       if (p.indexOf('*') === -1 && p.indexOf('?') === -1) return h.toLowerCase().indexOf(p.toLowerCase()) !== -1
       let body = p
       let tail = '.*'
@@ -1374,7 +1460,8 @@ export default {
     }
 
 
-    // 统一「resolve→stat→存在/类型/size」预检（不 readText）：readTargetChecked 与 undo 预检共用，
+    // 统一「resolve→stat→存在/类型/size」预检（不 readText）：readTargetChecked、undo 预检与
+    // 图片详情（skipSizeCheck + 自定义「不存在」文案）共用，
     // 避免预检检查与文案多份独立演化（曾因此出现 size 预检形式漂移）
     // 配置目标存在性判定（守卫方向敏感）：stat 失败按「存在」处理——
     // 宁可拒绝写入并提示，也不静默覆盖已有配置
@@ -1382,13 +1469,16 @@ export default {
       try { return (await fsService.stat(p)) !== undefined } catch (e) { return true }
     }
 
-    async function statTargetChecked(fp, projRoot, fsService) {
+    // opts.skipSizeCheck：图片详情另有自己的体积上限（IMAGE_MAX_BYTES），不套用 DIFF_MAX_CHARS 预检
+    // opts.notFoundZh/notFoundEn：调用方覆盖「文件不存在」文案（图片详情用「图片不存在」）
+    async function statTargetChecked(fp, projRoot, fsService, opts) {
+      const o = opts || {}
       try {
         const target = await fsService.resolve(resolveArgPath(fp, projRoot))
         const info = await fsService.stat(target)
-        if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
+        if (info === undefined) return { ok: false, error: bi(o.notFoundZh || '文件不存在', o.notFoundEn || 'File not found') }
         if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
-        if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+        if (!o.skipSizeCheck && fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
         return { ok: true, target, info }
       } catch (e) {
         return { ok: false, error: readFail(e) }
@@ -1410,20 +1500,66 @@ export default {
     }
 
     // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
+    // 图片详情数据：格式/尺寸 + 缩略图（data URL）。失败一律 {ok:false,error}，客户端显示错误文本；
+    // 超过体积上限则只给格式/尺寸并标记 tooLarge，不返回图片本体。
+    async function buildImageDiffData(entry, fsService, fp) {
+      if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
+      // 预检复用 statTargetChecked：跳过文本 diff 的字符数上限（图片另有 IMAGE_MAX_BYTES）
+      const st = await statTargetChecked(fp, entry.projRoot, fsService, { skipSizeCheck: true, notFoundZh: '图片不存在', notFoundEn: 'Image not found' })
+      if (!st.ok) return { ok: false, error: st.error }
+      const target = st.target
+      const size = Number(st.info.size) || 0
+      let head = null
+      let whole = null
+      try {
+        // 体积在预览预算内：一次性整读，既用于嗅探也直接用于内联，避免同一文件被读两遍
+        // （照片常见的 64KB~2MB 区间原本会读两次）；体积超预算或读不到 size 时只读头部窗口，
+        // 先确认格式与尺寸，再决定要不要整读。
+        if (size > 0 && size <= IMAGE_MAX_BYTES) {
+          whole = await fsService.readBytes(target, undefined, IMAGE_MAX_BYTES)
+          head = whole.subarray(0, Math.min(whole.length, IMAGE_HEAD_BYTES))
+        } else {
+          const len = Math.max(16, Math.min(size || IMAGE_HEAD_BYTES, IMAGE_HEAD_BYTES))
+          head = await fsService.readByteRange(target, { offset: 0, length: len }, undefined)
+        }
+      } catch (e) {
+        return { ok: false, error: readFail(e) }
+      }
+      // 已整读时直接用整份缓冲嗅探：JPEG 的 SOF 段可能落在 64KB 头部窗口之外，
+      // 而已持有全部字节（≤ IMAGE_MAX_BYTES），不必因为窗口取不到尺寸就放弃预览。
+      const meta = sniffImage(whole || head)
+      if (!meta) return { ok: false, error: bi('无法预览：不是可识别的图片（仅支持 PNG/JPEG/WebP/GIF）', 'Cannot preview: not a recognized image (PNG/JPEG/WebP/GIF)') }
+      const out = { ok: true, kind: 'image', file: fp, format: meta.format, mime: IMAGE_MIME[meta.format] || '', width: meta.width, height: meta.height, size }
+      // 尺寸未知（JPEG 的 SOF 段被 >64KB 的元数据段推到头部窗口之外、畸形段、WebP 未知 chunk 等）时，
+      // 像素与边长闸无从判断，一律不内联本体，否则「弹窗解码预算」会被 2MB 以内的高压缩比图绕过。
+      const sizeKnown = !!(meta.width && meta.height)
+      const pixelOver = !!(sizeKnown && (meta.width * meta.height > IMAGE_MAX_PIXELS || meta.width > IMAGE_MAX_DIM || meta.height > IMAGE_MAX_DIM))
+      if (!sizeKnown) { out.sizeUnknown = true; return out }
+      if (size > IMAGE_MAX_BYTES || pixelOver) { out.tooLarge = true; if (size > IMAGE_MAX_BYTES) out.limit = IMAGE_MAX_BYTES; return out }
+      try {
+        // 预算内已整读过就直接复用；否则（头部窗口内已判合规而 size 未知）再整读一次
+        const bytes = whole || await fsService.readBytes(target, undefined, IMAGE_MAX_BYTES)
+        out.dataUrl = 'data:' + (out.mime || 'application/octet-stream') + ';base64,' + Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
+      } catch (e) {
+        // 不带图片本体，客户端按「暂无可用的缩略图」提示；记录真实错误，避免失败原因不可见
+        console.error('[permgate] image preview error:', e)
+      }
+      return out
+    }
+
     async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
       const fp = pathArg(args)
       if (isUndo(name)) return await buildUndoDiffData(entry, fsService, fp)
+      if (isFileImage(name)) return await buildImageDiffData(entry, fsService, fp)
       if (isFileRead(name, args)) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
-        // read_image 读的是二进制：不做文本预览（否则乱码占满详情区）
-        if (name === 'read_image') return { ok: false, error: bi('图片内容不在此预览', 'Image content is not previewed here') }
+        // 与图片/撤销详情共用预检单点；read 走窗口化读取，不需要 DIFF_MAX_CHARS 体积闸
+        const st = await statTargetChecked(fp, entry.projRoot, fsService, { skipSizeCheck: true })
+        if (!st.ok) return st
         try {
-          const target = await fsService.resolve(resolveArgPath(fp, entry.projRoot))
-          const info = await fsService.stat(target)
-          if (info === undefined) return { ok: false, error: bi('文件不存在', 'File not found') }
-          if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
+          const target = st.target
           // 窗口化读取：只取 offset/limit 附近（前后各 W 行）的内容，流式消费到窗口末尾即停，
           // 不整读大文件；末尾省略行数未知，由客户端显示通用提示。
           // 资源上限：offset/limit 来自 agent 工具参数（不可信），且文件中可能存在无换行的
@@ -1864,6 +2000,7 @@ export default {
       }
       if (d.kind === 'path' && v) {
         if (d.cat === 'read') return bi('读取文件 ' + v, 'Read file ' + v)
+        if (d.cat === 'image') return bi('读取图片 ' + v, 'Read image ' + v)
         if (d.cat === 'edit') return bi('写入/修改文件 ' + v, 'Write/modify file ' + v)
         if (d.cat === 'undo') return bi('撤销操作（恢复上次编辑前的内容）：' + v, 'Undo edit (revert last edit): ' + v)
         return bi('访问路径 ' + v, 'Access path ' + v)
@@ -1901,12 +2038,15 @@ export default {
           if (fp) push(t('路径', 'Path'), fp, { path: fp })
         } else if (isFileRead(name, args)) {
           const target = fp || args.path || ''
-          // 图片无法按文本预览，路径不做可点击（其余 read 可点击打开内容预览）
-          const clickable = name === 'read_image' ? undefined : { path: fp }
-          push(name === 'read_image' ? t('读取图片', 'Read image') : t('读取', 'Read'), target ? baseName(target) : '', fp ? clickable : undefined)
-          if (fp) push(t('路径', 'Path'), fp, clickable)
+          push(t('读取', 'Read'), target ? baseName(target) : '', fp ? { path: fp } : undefined)
+          if (fp) push(t('路径', 'Path'), fp, { path: fp })
           if (args.offset !== undefined) push(t('偏移', 'Offset'), args.offset)
           if (args.limit !== undefined) push(t('行数', 'Lines'), args.limit)
+        } else if (isFileImage(name)) {
+          // 图片不做文本预览，路径也不可点击（「打开文件」白名单只含文本/文档类，点了也打不开）
+          const target = fp || args.path || ''
+          push(t('读取图片', 'Read image'), target ? baseName(target) : '', undefined)
+          if (fp) push(t('路径', 'Path'), fp, undefined)
         } else if (isFileWrite(name, args)) {
           const isSre = name === 'str_replace_editor'
           const sreCmd = isSre ? sreCommand(args) : ''
@@ -1933,6 +2073,44 @@ export default {
         }
       } catch (e) {}
       return lines
+    }
+
+    // 工作区外路径类工具的合并矩阵单点（read / image / edit / undo 共用）：
+    // 先过「目录访问」闸，再过工具自身分类闸；任一 deny → 拒绝，任一 ask → 询问，否则放行。
+    // cat 取「真正作出决定的那道闸」：它决定弹窗候选（加入例外）写到哪个分类的例外里——
+    // 若只写自身分类而目录闸仍是 ask，用户点「允许」后同一个文件会反复弹窗、且候选会因已存在而消失。
+    // 分类名文案：决定由哪道闸作出，reason 就用哪道闸的名字（否则 cat 已是自身分类、
+    // ruleId 也指向自身分类的例外，文案却写「目录权限」，用户会去改错分类的配置）
+    // deny / ask / allow 三个分支都遵循这一条：cat、前缀、ruleId 三者必须同源。
+    const OUTSIDE_PREFIX = {
+      directory: ['目录权限：', 'Directory permission: '],
+      read: ['读取权限：', 'Read permission: '],
+      image: ['读取图片权限：', 'Read image permission: '],
+      edit: ['编辑权限：', 'Edit permission: '],
+      undo: ['撤销权限：', 'Undo permission: '],
+    }
+
+    function outsideMatrix(catKey, fp) {
+      const d = resolveCategory('directory', fp, 'path')
+      const e = resolveCategory(catKey, fp, 'path')
+      if (d.action === 'deny' || e.action === 'deny') {
+        const src = d.action === 'deny' ? d : e
+        const cat = src === d ? 'directory' : catKey
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+        return { action: 'deny', src, cat, pz: p[0], pe: p[1] }
+      }
+      if (d.action === 'ask' || e.action === 'ask') {
+        const cat = d.action === 'ask' ? 'directory' : catKey
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+        return { action: 'ask', src: null, cat, pz: p[0], pe: p[1] }
+      }
+      // allow：与 deny/ask 同口径——由哪道闸的例外实际放行，cat 就跟随哪道闸，
+      // 保证 reason 前缀、ruleId、cat 三者同源（否则文案写「读取图片权限：」
+      // 而括号里的例外 id 属于目录闸，用户会去错分类找一条不存在的规则）。
+      const src = d.ruleId ? d : (e.ruleId ? e : null)
+      const cat = src === d ? 'directory' : catKey
+      const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+      return { action: 'allow', src, cat, pz: p[0], pe: p[1] }
     }
 
     function decide(exec) {
@@ -1973,32 +2151,43 @@ export default {
       if (isFileRead(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          const d = resolveCategory('directory', fp, 'path')
-          const exZh = exReason(d)
-          const exEn = exReasonEn(d)
-          return { action: d.action, reason: bi('目录权限：访问工作区外 ' + fp + exZh, 'Directory permission: access outside workspace ' + fp + exEn), ruleId: d.ruleId, cat: 'directory', value: fp, kind: 'path' }
+          // 与 image/edit/undo 同口径：工作区外先过「目录访问」闸，再过「读取文件」闸。
+          // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
+          const m = outsideMatrix('read', fp)
+          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + '（需确认）', m.pe + 'read outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          return { action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('read', fp, 'path')
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
       }
+      // 读图与读文件同一条判定链（工作区外先过「目录访问」闸，再落本分类 + 路径例外），
+      // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
+      if (isFileImage(name)) {
+        const fp = pathArg(args)
+        if (fp && isOutside(fp, root)) {
+          // 工作区外读图：directory + image 合并矩阵（不能用 directory 的动作短路，
+          // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
+          const m = outsideMatrix('image', fp)
+          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + '（需确认）', m.pe + 'read image outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          return { action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+        }
+        const d = resolveCategory('image', fp, 'path')
+        const exZh = exReason(d)
+        const exEn = exReasonEn(d)
+        return { action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' }
+      }
       if (isFileWrite(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          // 双重审查：工作区外写入先过「目录访问」闸（能否触碰），directory 不拒绝时再过「编辑」闸。
-          // 合并矩阵：任一 deny → 拒绝；否则任一 ask → 弹窗一次；否则放行。
-          const d = resolveCategory('directory', fp, 'path')
-          const e = resolveCategory('edit', fp, 'path')
-          if (d.action === 'deny' || e.action === 'deny') {
-            const src = d.action === 'deny' ? d : e
-            return { action: 'deny', reason: bi('目录权限：拒绝写入工作区外 ' + fp + exReason(src), 'Directory permission: write to outside workspace denied ' + fp + exReasonEn(src)), ruleId: src.ruleId, cat: 'directory', value: fp, kind: 'path' }
-          }
-          if (d.action === 'ask' || e.action === 'ask') {
-            return { action: 'ask', reason: bi('目录权限：访问工作区外 ' + fp + '（写入需确认）', 'Directory permission: access outside workspace ' + fp + ' (write requires confirmation)'), ruleId: null, cat: 'directory', value: fp, kind: 'path' }
-          }
-          const src = d.ruleId ? d : (e.ruleId ? e : null)
-          return { action: 'allow', reason: bi('目录权限：访问工作区外 ' + fp + (src ? exReason(src) : ''), 'Directory permission: access outside workspace ' + fp + (src ? exReasonEn(src) : '')), ruleId: src ? src.ruleId : null, cat: 'directory', value: fp, kind: 'path' }
+          // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
+          const m = outsideMatrix('edit', fp)
+          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + '（写入需确认）', m.pe + 'access outside workspace ' + fp + ' (write requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          return { action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('edit', fp, 'path')
         const exZh = exReason(d)
@@ -2010,16 +2199,10 @@ export default {
       if (isUndo(name)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          const d = resolveCategory('directory', fp, 'path')
-          const e = resolveCategory('undo', fp, 'path')
-          if (d.action === 'deny' || e.action === 'deny') {
-            const src = d.action === 'deny' ? d : e
-            return { action: 'deny', reason: bi('目录权限：拒绝撤销工作区外 ' + fp + exReason(src), 'Directory permission: undo outside workspace denied ' + fp + exReasonEn(src)), ruleId: src.ruleId, cat: 'directory', value: fp, kind: 'path' }
-          }
-          if (d.action === 'ask' || e.action === 'ask') {
-            return { action: 'ask', reason: bi('撤销工作区外文件 ' + fp + '（需确认）', 'Undo outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: 'undo', value: fp, kind: 'path' }
-          }
-          return { action: 'allow', reason: bi('撤销工作区外文件 ' + fp, 'Undo outside workspace ' + fp), ruleId: null, cat: 'undo', value: fp, kind: 'path' }
+          const m = outsideMatrix('undo', fp)
+          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + '（需确认）', m.pe + 'undo outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          return { action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('undo', fp, 'path')
         const exZh = exReason(d)
@@ -2062,7 +2245,9 @@ export default {
       const s = String(p).replace(/\\/g, '/').replace(/\/+$/, '')
       const idx = s.lastIndexOf('/')
       let dir = idx >= 0 ? s.slice(0, idx) : s
-      if (/^[a-zA-Z]:$/.test(dir)) dir += '/'
+      // 盘根（G:）本身就是父目录，直接拼 /*；若补分隔符会得到 G://*，而 norm 不折叠中间双斜杠，
+      // 该 glob 匹配不到任何真实路径，会让「整个目录」候选写出的例外永不生效
+      if (/^[a-zA-Z]:$/.test(dir)) return dir + '/*'
       if (!dir) dir = '/'
       return dir + '/*'
     }
@@ -2198,7 +2383,8 @@ export default {
 
     function buildCandidates(entry) {
       const out = []
-      const push = (label, value, kind) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind })
+      const push = (label, value, kind, writes) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind, writes: Array.isArray(writes) ? writes : [{ cat: entry.cat, kind, value }] })
+      const t = (zh, en) => (uiLang === 'en' ? en : zh)
       if (entry.kind === 'command' && entry.value) {
         const parts = splitCommandSegments(String(entry.value))
         const seen = {}
@@ -2214,9 +2400,36 @@ export default {
           push(label, val, 'command')
         }
       } else if (entry.kind === 'path' && entry.value) {
-        let val = entry.value
-        if (entry.cat === 'directory') val = dirGlob(entry.value)
-        if (!alreadyInProject(val, 'path', entry.cat)) push(val, val, 'path')
+        // 例外按 glob 匹配：文件路径若含 * 或 ?，写成的例外会比「仅此路径」宽得多
+        // （例如 ** 会匹配整个子树）——这类路径不生成以「文件」为粒度的候选，避免文案与授权范围不符。
+        // 注意：[ ] 在 globToRegExp 里被转义成字面量、不是通配符，故不拦（否则含 [1] 的合法文件名会被误伤）。
+        const hasGlobMeta = (p) => /[*?]/.test(String(p || ''))
+        // 含 .. 段的路径同样不能用来拼目录 glob：glob 只做字符串匹配、不折叠 ..，
+        // 写出的模式会命中解析后与「整个目录」文案完全不同的路径（授权面更大）。
+        const hasParentSeg = (p) => /(^|[\\/])\.\.([\\/]|$)/.test(String(p || ''))
+        const catKey = entry.toolCat && EXC_CATS.indexOf(entry.toolCat) !== -1 ? entry.toolCat : entry.cat
+        const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))
+        // 候选文案用的分类名：说明这条候选会放开「哪一类操作」，避免文案与落盘的例外分类不符
+        const KIND_LABEL = { read: ['读取文件', 'file reads'], image: ['读取图片', 'image reads'], edit: ['写入/编辑', 'write/edits'], undo: ['撤销操作', 'undo actions'] }
+        const kindLabel = KIND_LABEL[catKey] || ['此类操作', 'this kind of operation']
+        if (outsideHere) {
+          // 工作区外路径：两道闸各给一条候选。「整个目录」写 directory 与该分类的目录 glob ——
+          // 点一次后该类操作在该目录下都不再询问；「仅此文件」写自身分类例外 + directory 的精确路径例外。
+          // 目录 glob 只对普通路径生成：路径自身含通配符或 .. 段时，拼出的 glob 会匹配到该目录之外
+          // 的路径（dirGlob / norm / globToRegExp 都不折叠 ..），授权面会超过「整个目录」的文案。
+          const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)
+          const glob = globSafe ? dirGlob(entry.value) : ''
+          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', 'directory')
+          const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey)
+          if (globSafe && (!hasDirGlob || !hasKindGlob)) {
+            push(t('整个目录：' + kindLabel[0] + '（允许时同时写入「' + kindLabel[0] + '」与「目录访问」两条例外；拒绝时只写入「' + kindLabel[0] + '」，不连带封禁该目录的其它类型操作）：', 'Whole directory: ' + kindLabel[1] + ' (an allow writes both the ' + kindLabel[1] + ' rule and the directory-access rule; a deny writes only the ' + kindLabel[1] + ' rule and does not block other kinds of operations in that directory): ') + glob, glob, 'path', [{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }])
+          }
+          if (!hasGlobMeta(entry.value) && !alreadyInProject(entry.value, 'path', catKey)) {
+            push(t('仅此文件：' + kindLabel[0] + '（允许时同时写入「' + kindLabel[0] + '」与「目录访问」的精确路径例外；拒绝时只写入「' + kindLabel[0] + '」，不连带封禁该路径的其它类型操作）：', 'Only this file: ' + kindLabel[1] + ' (an allow writes exact-path rules for both the ' + kindLabel[1] + ' and directory access; a deny writes only the ' + kindLabel[1] + ' rule and does not block other kinds of operations on that path): ') + entry.value, entry.value, 'path', [{ cat: catKey, kind: 'path', value: entry.value }, { cat: 'directory', kind: 'path', value: entry.value }])
+          }
+        } else if (!hasGlobMeta(entry.value)) {
+          if (!alreadyInProject(entry.value, 'path', entry.cat)) push(entry.value, entry.value, 'path')
+        }
       }
       // 其余分类无「例外」候选：快捷工具（web_search/skill 等）走 quickTools 设置；
       // 子代理/重复操作只有模式默认值 —— 均不生成候选
@@ -2246,8 +2459,10 @@ export default {
           // 打相对路径/对比/打开文件必须用发起会话自己的根
           projRoot: root || null,
           // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开、按需取数据
-          // （写类=diff，读类=窗口化内容；长度由服务端硬上限截断）
+          // （写类=diff，读类=窗口化内容；图片是整图 data URL，改由客户端默认收起、点开才拉取）
           hasDiff: isPreviewableFileTool(exec.name, exec.arguments) && !!pathArg(exec.arguments),
+          imagePreview: isFileImage(exec.name) === true,
+          toolCat: pathToolCat(exec.name, exec.arguments),
           // str_replace_editor 的内核在审批发起时定下（insert 的 insert_line 语义随内核相反），
           // 详情预览按发起时的实际内核解释，避免中途判别漂移
           editorKernel: resolveEditorKernel(exec).kernel,
@@ -2275,34 +2490,87 @@ export default {
       })
     }
 
-    function addProjectRule(entry, kind, value, decision) {
+    // 例外落盘单点：按「分类 + 类型（path/command/custom）+ 值」写入目标块（缺省全局，
+    // 候选写入由调用方显式指定项目块）。
+    // 候选各自携带目标分类（buildCandidates 的 writes），不再由 entry.cat 统一决定——
+    // 否则「仅允许此文件」这类要写两条例外（自身分类 + 目录闸）的候选会写错分类。
+    function addProjectException(cat, kind, value, decision, opts) {
+      const o = opts || {}
+      const target = o.target === 'project' ? 'project' : 'global'
+      // reason 仅用于 deny，且与 normalizeException 同口径（trim + 截断 200）：
+      // 否则「写入当下」与「重新加载后」的条目字段会不一致（allow 的 reason 会被丢弃）。
+      const reason = decision === 'deny' && o.reason ? String(o.reason).trim().slice(0, 200) : undefined
+      // 新条目一律插到数组头部：resolveCategory 只取首个匹配，即「最新决定先生效」；
+      // 同方向重复写入直接跳过并返回既有条目，避免同一决定在列表里堆积。
+      const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {})
       try {
-        const block = ensureProject()
-        if (kind === 'path' && entry.cat && EXC_CATS.indexOf(entry.cat) !== -1) {
-          const cat = block[entry.cat] || freshCategory(entry.cat, true)
-          if (!cat.exceptions) cat.exceptions = []
-          const idx = cat.exceptions.findIndex((r) => r.path === value)
-          if (idx !== -1) { cat.exceptions[idx].action = decision; block[entry.cat] = cat; return }
-          cat.exceptions.unshift({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision, path: value })
-          block[entry.cat] = cat
-          return
+        const block = target === 'global' ? config.global : ensureProject()
+        if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1) {
+          const c = block[cat] || freshCategory(cat, target === 'project')
+          if (!c.exceptions) c.exceptions = []
+          const idx = c.exceptions.findIndex((r) => r.path === value && r.action === decision)
+          if (idx !== -1) {
+            // 命中既有同向条目：提到数组头部，否则它会被前面的反向旧条目遮蔽（resolveCategory 只取首个匹配），
+            // 用户的决定等于被静默丢弃；带新理由时一并回写（reason 已在入口按 deny + trim + 200 规范化）。
+            const hit = c.exceptions.splice(idx, 1)[0]
+            if (reason) hit.reason = reason
+            c.exceptions.unshift(hit)
+            block[cat] = c
+            return hit
+          }
+          const item = build({ path: value })
+          c.exceptions.unshift(item)
+          block[cat] = c
+          return item
         }
-        if (kind === 'command') {
-          const cat = block.command || freshCategory('command', true)
-          if (!cat.exceptions) cat.exceptions = []
-          const idx = cat.exceptions.findIndex((r) => r.match === value)
-          if (idx !== -1) { cat.exceptions[idx].action = decision; block.command = cat; return }
-          cat.exceptions.unshift({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision, match: value })
-          block.command = cat
-          return
+        if (kind === 'path') return null
+        if (kind === 'command' && cat === 'command') {
+          const c = block.command || freshCategory('command', target === 'project')
+          if (!c.exceptions) c.exceptions = []
+          const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)
+          if (idx !== -1) {
+            const hit = c.exceptions.splice(idx, 1)[0]
+            if (reason) hit.reason = reason
+            c.exceptions.unshift(hit)
+            block.command = c
+            return hit
+          }
+          const item = build({ match: value })
+          c.exceptions.unshift(item)
+          block.command = c
+          return item
         }
+        if (kind === 'command') return null
         if (!block.custom) block.custom = []
         const idx = block.custom.findIndex((r) => r.tool === value)
-        if (idx !== -1) { block.custom[idx].action = decision; return }
-        block.custom.unshift({ id: 'r' + Math.random().toString(36).slice(2, 8), action: decision, tool: value })
+        if (idx !== -1) { block.custom[idx].action = decision; return block.custom[idx] }
+        const item = { id: 'r' + Math.random().toString(36).slice(2, 8), action: decision, tool: value }
+        block.custom.unshift(item)
+        return item
       } catch (e) {
-        console.error('[permgate] addProjectRule error:', e)
+        console.error('[permgate] addProjectException error:', e)
+        return null
       }
+    }
+
+    // 例外删除单点（/permgate/remove-exception 路由与 perm_remove_exception 工具共用）：
+    // 判定只取数组首个匹配，故同一 path 上可能并存方向相反的多条（最新在前生效）。
+    // 删除严格按 id：只删用户点的那一行。同值同向的其它条目（方向交替写入可能累积）留给用户
+    // 自行逐条清理，否则删一条历史行会连带删掉正在生效的那条，权限会静默变化。
+    function removeExceptionEntries(block, catKey, id) {
+      if (EXC_CATS.indexOf(catKey) === -1) return { removed: false, reason: '该分类不支持例外' }
+      const c = block && block[catKey]
+      if (!c || !Array.isArray(c.exceptions)) return { removed: false, reason: '例外列表不存在' }
+      const target = c.exceptions.find((r) => r.id === id)
+      if (!target) return { removed: false, reason: '未找到 id=' + id }
+      const key = catKey === 'command' ? 'match' : 'path'
+      const value = target[key]
+      const kept = c.exceptions.filter((r) => r.id !== id)
+      const count = c.exceptions.length - kept.length
+      c.exceptions = kept
+      // 同值、方向相反的条目可能仍然留在列表里并继续生效：回传给 UI 提示，避免用户以为已彻底清除
+      const remaining = kept.filter((r) => r[key] === value).length
+      return { removed: true, count, remaining, exception: target }
     }
 
     function addRememberedRule(entry, action, target) {
@@ -2314,21 +2582,13 @@ export default {
           return
         }
         if (entry.kind === 'path' && entry.cat && EXC_CATS.indexOf(entry.cat) !== -1 && entry.value) {
-          const cat = block[entry.cat] || freshCategory(entry.cat, target === 'project')
-          if (!cat.exceptions) cat.exceptions = []
-          const idx = cat.exceptions.findIndex((r) => r.path === entry.value)
-          if (idx !== -1) { cat.exceptions[idx].action = action; block[entry.cat] = cat; return }
-          cat.exceptions.unshift({ id: 'e' + Math.random().toString(36).slice(2, 8), action, path: entry.value })
-          block[entry.cat] = cat
+          // 复用例外写入单点。注意：choice 是用户在弹窗上的显式选择（「拒绝并加入项目黑名单」），
+          // 不能套用候选双写场景的「deny 不写 directory 例外」过滤，否则显式决定会被静默丢弃。
+          addProjectException(entry.cat, 'path', String(entry.value), action, { target })
           return
         }
         if (entry.kind === 'command' && entry.cat === 'command' && entry.value) {
-          const cat = block.command || freshCategory('command', target === 'project')
-          if (!cat.exceptions) cat.exceptions = []
-          const idx = cat.exceptions.findIndex((r) => r.match === entry.value)
-          if (idx !== -1) { cat.exceptions[idx].action = action; block.command = cat; return }
-          cat.exceptions.unshift({ id: 'e' + Math.random().toString(36).slice(2, 8), action, match: entry.value })
-          block.command = cat
+          addProjectException('command', 'command', String(entry.value), action, { target })
           return
         }
         if (!block.custom) block.custom = []
@@ -2723,7 +2983,7 @@ export default {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
             const reason = typeof e.reason === 'string' ? e.reason : L(e.reason, lang)
             const intent = typeof e.intent === 'string' ? e.intent : L(e.intent, lang)
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, imagePreview: e.imagePreview === true })
           }
           return json(res, out)
         }
@@ -2752,13 +3012,37 @@ export default {
           if (!entry) return json(res, { error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
           let allow = false
           let ruleCount = 0
+          // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
+          // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
+          const writeException = (cat, kind, value, decision) => {
+            if (decision === 'deny' && cat === 'directory') return
+            addProjectException(cat, kind, value, decision, { target: 'project' })
+            ruleCount++
+          }
+          const writeCandidate = (cand, decision) => {
+            for (const w of cand.writes) writeException(w.cat, w.kind || 'path', String(w.value), decision)
+          }
           if (typeof a.action === 'string' && (a.action === 'allow' || a.action === 'deny')) {
             allow = a.action === 'allow'
             if (Array.isArray(a.rules)) {
               for (const r of a.rules) {
-                if (r && r.value && (r.decision === 'allow' || r.decision === 'deny')) {
-                  addProjectRule(entry, r.kind || null, String(r.value), r.decision)
-                  ruleCount++
+                if (!r || (r.decision !== 'allow' && r.decision !== 'deny')) continue
+                // 整体为拒绝时不接受 allow 方向的规则：前端可能残留「允许此项」的勾选，
+                // 若不拦就会变成「本次拒绝 + 持久化一条 allow 例外」，与用户显式拒绝的意图相反。
+                if (!allow && r.decision === 'allow') continue
+                const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null
+                if (cand && Array.isArray(cand.writes) && cand.writes.length) {
+                  writeCandidate(cand, r.decision)
+                  continue
+                }
+                if (r.value) {
+                  // 旧形态（无候选 id）：按 value 反查候选，复用它的 writes，避免只落一条例外而导致同一文件反复弹窗
+                  const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))
+                  if (byValue && Array.isArray(byValue.writes) && byValue.writes.length) {
+                    writeCandidate(byValue, r.decision)
+                    continue
+                  }
+                  writeException(entry.cat, r.kind || null, String(r.value), r.decision)
                 }
               }
             }
@@ -2838,23 +3122,20 @@ export default {
           if (!a.match || !String(a.match)) return json(res, { error: 'match 不能为空' })
           const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, reason: a.reason, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
           if (!e) return json(res, { error: '非法的例外参数' })
-          const block = a.target === 'project' ? ensureProject() : config.global
-          if (!block[a.category]) block[a.category] = freshCategory(a.category, a.target === 'project')
-          if (!block[a.category].exceptions) block[a.category].exceptions = []
-          block[a.category].exceptions.push(e)
+          // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新决定插头部」的语义，
+          // 否则面板新加的例外会排在历史条目之后，被 resolveCategory 的首个匹配静默屏蔽。
+          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, { target: a.target, reason: a.reason })
+          if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)
-          return json(res, { added: e, status: statusView(exec) })
+          return json(res, { added: written, status: statusView(exec) })
         }
         if (pathname === '/permgate/remove-exception' && method === 'POST') {
           await init(exec)
           const block = a.target === 'project' ? ensureProject() : config.global
-          const cat = block[a.category]
-          if (!cat || !Array.isArray(cat.exceptions)) return json(res, { removed: false, reason: '例外列表不存在' })
-          const idx = cat.exceptions.findIndex((r) => r.id === a.id)
-          if (idx === -1) return json(res, { removed: false, reason: '未找到 id=' + a.id })
-          const removed = cat.exceptions.splice(idx, 1)[0]
+          const del = removeExceptionEntries(block, a.category, a.id)
+          if (!del.removed) return json(res, { removed: false, reason: del.reason })
           await persist(exec)
-          return json(res, { removed: true, exception: removed, status: statusView(exec) })
+          return json(res, { removed: true, exception: del.exception, removedCount: del.count, remaining: del.remaining, status: statusView(exec) })
         }
         if (pathname === '/permgate/add-rule' && method === 'POST') {
           await init(exec)
@@ -2998,7 +3279,7 @@ export default {
 
     registerTool({
       name: 'perm_status',
-      description: '查看权限网关(permgate)当前生效的分类默认(目录/命令/读取/编辑/子代理/重复操作)、例外、快捷工具、自定义规则、最近决策与配置路径。',
+      description: '查看权限网关(permgate)当前生效的分类默认(目录/命令/读取/读取图片/编辑/撤销操作/子代理/重复操作)、例外、快捷工具、自定义规则、最近决策与配置路径。',
       parameters: {},
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(_args, exec) { await init(exec); return statusView(exec) },
@@ -3006,7 +3287,7 @@ export default {
 
     registerTool({
       name: 'perm_set_category',
-      description: '设置一个权限分类的默认动作。分类: directory=目录访问(工作区外), command=执行命令, read=读取文件, edit=编辑文件, undo=撤销操作(恢复上次编辑前的内容), subagent=启动子代理, doomloop=重复操作。动作: ask=询问, allow=允许, deny=拒绝; 项目(target=project)还支持 inherit=继承全局。',
+      description: '设置一个权限分类的默认动作。分类: directory=目录访问(工作区外), command=执行命令, read=读取文件, image=读取图片, edit=编辑文件, undo=撤销操作(恢复上次编辑前的内容), subagent=启动子代理, doomloop=重复操作。动作: ask=询问, allow=允许, deny=拒绝; 项目(target=project)还支持 inherit=继承全局。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         category: { type: 'string', required: true, enum: CATEGORY_ENUM },
@@ -3024,7 +3305,7 @@ export default {
 
     registerTool({
       name: 'perm_set_fallback',
-      description: '设置「未匹配任何规则」时的兜底动作（默认 ask=询问）：ask=每个未匹配的调用都弹审批；allow=直接放行；deny=直接拒绝。directory/command/read/edit/undo/subagent/doomloop 之外的所有工具调用都归兜底策略。项目(target=project)还支持 inherit=继承全局。',
+      description: '设置「未匹配任何规则」时的兜底动作（默认 ask=询问）：ask=每个未匹配的调用都弹审批；allow=直接放行；deny=直接拒绝。directory/command/read/image/edit/undo/subagent/doomloop 之外的所有工具调用都归兜底策略。项目(target=project)还支持 inherit=继承全局。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         mode: { type: 'string', required: true, enum: ALL_MODES, description: '兜底动作；inherit 仅适用于项目' },
@@ -3056,7 +3337,7 @@ export default {
 
     registerTool({
       name: 'perm_add_exception',
-      description: '给分类添加一条例外。directory/read/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作，仅 allow/deny。',
+      description: '给分类添加一条例外。directory/read/image/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作，仅 allow/deny。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
@@ -3071,12 +3352,11 @@ export default {
         if (!args.match || !String(args.match)) return { error: 'match 不能为空' }
         const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
         if (!e) return { error: '非法的例外参数' }
-        const block = args.target === 'project' ? ensureProject() : config.global
-        if (!block[args.category]) block[args.category] = freshCategory(args.category, args.target === 'project')
-        if (!block[args.category].exceptions) block[args.category].exceptions = []
-        block[args.category].exceptions.push(e)
+        // 与面板路由共用同一写入点：同方向不重复、新决定插到数组头部，避免被历史条目遮蔽。
+        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, { target: args.target, reason: args.reason })
+        if (!written) return { error: '例外未写入：分类/参数不支持' }
         await persist(exec)
-        return { added: e, status: statusView(exec) }
+        return { added: written, status: statusView(exec) }
       },
     })
 
@@ -3092,13 +3372,10 @@ export default {
       async execute(args, exec) {
         await init(exec)
         const block = args.target === 'project' ? ensureProject() : config.global
-        const cat = block[args.category]
-        if (!cat || !Array.isArray(cat.exceptions)) return { removed: false, reason: '例外列表不存在', status: statusView(exec) }
-        const idx = cat.exceptions.findIndex((r) => r.id === args.id)
-        if (idx === -1) return { removed: false, reason: '未找到 id=' + args.id, status: statusView(exec) }
-        const removed = cat.exceptions.splice(idx, 1)[0]
+        const del = removeExceptionEntries(block, args.category, args.id)
+        if (!del.removed) return { removed: false, reason: del.reason, status: statusView(exec) }
         await persist(exec)
-        return { removed: true, exception: removed, status: statusView(exec) }
+        return { removed: true, exception: del.exception, removedCount: del.count, remaining: del.remaining, status: statusView(exec) }
       },
     })
 

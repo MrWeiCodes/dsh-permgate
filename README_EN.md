@@ -12,11 +12,11 @@
 
 DSH ships only three permission levels — [Read only], [Workspace Write], [Full access] — which are too coarse. This plugin adds a **Custom Review** permission gateway that reviews tool calls one by one.
 
-Tool calls are reviewed per category (directory access / command execution / file read / file write-edit / undo / subagent spawn / repeated actions), with global & per-project configuration, allow/deny exceptions, quick-tool defaults, custom rules, a fallback policy, and a bilingual (Chinese/English) approval modal with a sandbox-upgrade flow.
+Tool calls are reviewed per category (directory access / command execution / file read / image read / file write-edit / undo / subagent spawn / repeated actions), with global & per-project configuration, allow/deny exceptions, quick-tool defaults, custom rules, a fallback policy, and a bilingual (Chinese/English) approval modal with a sandbox-upgrade flow.
 
 ## Features
 
-- **Seven permission categories**: outside-workspace directories, command execution, file read/write, undo (revert the last edit), subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
+- **Eight permission categories**: outside-workspace directories, command execution, file read, image read (`read_image`), file write-edit, undo (revert the last edit), subagents and repeated actions are governed separately — each category has its own `ask / allow / deny` (projects can also `inherit global`), so you can be strict about sensitive actions and relaxed about routine ones, shaping the AI's boundaries to your habits.
 - **Global / project levels**: one set of global rules for every project, fine-tuned per project; anything unset in a project automatically follows global — no duplicate configuration.
 - **Exceptions (allow/deny lists)**: put paths or commands you "always allow" or "never allow" into exceptions — matched calls are allowed or denied outright, without prompting you every time.
 - **Quick tools**: tools that don't map to files or commands (`web_search`, `skill`, `grep`, `glob`, `web_fetch`, …) can also get their own default: ask, allow or deny.
