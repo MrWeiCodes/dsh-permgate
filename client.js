@@ -899,13 +899,15 @@ window.__ModuleLoader__.load({
 				'panel.excPh': '命令子串/glob',
 				'panel.excPathPh': '路径 glob',
 				'panel.excReason': '拒绝原因',
-				'panel.excReasonPh': '选填：拒绝时显示的提示',
+				'panel.excReasonPh': '选填：会告知 AI 为什么被拒',
+				'panel.excNote': '备注',
+				'panel.excNotePh': '选填：命中时显示在弹窗上，勿写敏感信息',
+				'panel.denyReason': '拒绝原因',
+				'panel.denyReasonPh': '选填：拒绝时告知 AI 原因',
 				'panel.addExc': '添加例外',
 				'panel.confirmDel': '确认删除？',
 				'panel.cancel': '取消',
 				'panel.del': '删除',
-				'panel.allow': '允许',
-				'panel.deny': '拒绝',
 			},
 			en: {
 				'app.title': 'Permission Review',
@@ -1074,13 +1076,15 @@ window.__ModuleLoader__.load({
 				'panel.excPh': 'command substring/glob',
 				'panel.excPathPh': 'path glob',
 				'panel.excReason': 'Deny reason',
-				'panel.excReasonPh': 'optional: shown when denied',
+				'panel.excReasonPh': 'optional: tells the AI why it was denied',
+				'panel.excNote': 'Note',
+				'panel.excNotePh': 'optional: shown in the dialog; no secrets',
+				'panel.denyReason': 'Deny reason',
+				'panel.denyReasonPh': 'optional: tells the AI why',
 				'panel.addExc': 'Add exception',
 				'panel.confirmDel': 'Confirm delete?',
 				'panel.cancel': 'Cancel',
 				'panel.del': 'Delete',
-				'panel.allow': 'Allow',
-				'panel.deny': 'Deny',
 			},
 		};
 		let T = (key) => (I18N.zh[key] !== undefined ? I18N.zh[key] : key);
@@ -1106,9 +1110,20 @@ window.__ModuleLoader__.load({
 		// （constructor/toString 等）当成「该层已配置」，与服务端 hasOwnProperty 的口径分叉。
 		function hasOwnKey(o, k) { return !!(o && Object.prototype.hasOwnProperty.call(o, k)); }
 
+		// 快捷工具配置项的取值：宿主下发的恒为 { action, reason? } 对象——老配置的裸字符串在宿主
+		// normalizeQuickEntry 里就已收敛成对象，预设默认值则由 quickGlobalValue 以裸字符串直接返回、
+		// 不经过这两个函数。所以下面的字符串分支当前不可达，它是纯防御：万一拿到非对象形态，
+		// 按裸动作字符串取值，而不是返回 undefined 把面板显示成空。
+		// 名字带 Of 后缀：组件内的 quickReason 状态变量会遮蔽同名标识符，不能重名。
+		function quickMode(v) { return v && typeof v === 'object' ? v.action : v; }
+		function quickReasonOf(v) { return v && typeof v === 'object' ? v.reason : undefined; }
+
 		// 未显式配置工具的全局列显示值：与服务端 quickAction 同一条链（全局键 → 预设默认 → 会话兜底）
 		function quickGlobalValue(t, gq) {
-			if (hasOwnKey(gq, t)) return gq[t];
+			// 与服务端同径：全局层的 inherit 视为「该键不生效」，继续下落。宿主 setQuickAction 对
+			// global+inherit 走 delete，但手工编辑 config.json 可以塞进来，服务端 quickAction 会跳过它——
+			// 面板只有同样跳过，显示值才等于实际裁决结果（否则 select 会拿到不在选项内的 'inherit'）。
+			if (hasOwnKey(gq, t) && quickMode(gq[t]) !== 'inherit') return quickMode(gq[t]);
 			if (hasOwnKey(QUICK_DEFAULTS, t)) return QUICK_DEFAULTS[t];
 			return QUICK_FALLBACK;
 		}
@@ -1748,14 +1763,29 @@ window.__ModuleLoader__.load({
 			const [tab, setTab] = React.useState('global');
 			const [cats, setCats] = React.useState({ global: {}, project: {} });
 			const [quickSel, setQuickSel] = React.useState({});
+			// 快捷工具的拒绝原因：{ [tool]: { g, p } }，与 quickSel 平行但独立编辑
+			const [quickReason, setQuickReason] = React.useState({});
+			// 分类默认值与兜底的拒绝原因输入框：{ [tab]: { [cat]: '' } } / { [tab]: '' }
+			const [catReasons, setCatReasons] = React.useState({ global: {}, project: {} });
+			const [fbReason, setFbReason] = React.useState({ global: '', project: '' });
 			const [exVals, setExVals] = React.useState({ directory: '', command: '', read: '', edit: '' });
 			const [exAction, setExAction] = React.useState('allow');
 			const [exReasonVal, setExReasonVal] = React.useState('');
+			// deny 的 reason 与 ask 的 note 是两个字段、两种用途，不能共用一个输入框：
+			// reason 会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」），note 只存在配置里、
+			// 命中时显示在审批弹窗上，方便日后回看（「当初为什么特意拦它」）。allow 两者都不用。
+			const [exNoteVal, setExNoteVal] = React.useState('');
 			const [newTool, setNewTool] = React.useState('');
 			const [newToolAction, setNewToolAction] = React.useState('allow');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
+			// 当前正在编辑（聚焦中）的拒绝原因输入框：{ kind: 'cat'|'quick'|'fb', tab, key }。
+			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
+			// 面板自身的 invoke 回调触发，还由 SSE 的 status/refresh 事件触发——宿主在 init()、
+			// AI 侧 perm_* 写入、配置重载、会话事件时都会 broadcast status。若不保留草稿，
+			// 用户「已输入但未失焦」的文字会被后台推送静默清空。
+			const reasonFocus = React.useRef(null);
 
 			React.useEffect(() => {
 				if (confirm === null) return undefined;
@@ -1764,21 +1794,51 @@ window.__ModuleLoader__.load({
 			}, [confirm]);
 
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
-			// 同一确认态，否则再点会删掉另一层。
-			React.useEffect(() => { setConfirm(null); }, [tab]);
+			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点标记（换层后它指向的行已不在渲染中）。
+			React.useEffect(() => { setConfirm(null); reasonFocus.current = null; }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
 				applyStatusLists(s);
 				setStatus(s);
 				const cs = { global: {}, project: {} };
+				const crs = { global: {}, project: {} };
 				for (const t of ['global', 'project']) {
 					const block = s.categories && s.categories[t] ? s.categories[t] : null;
 					for (const c of CATS) {
 						cs[t][c] = block && block[c] ? block[c].mode : (t === 'project' ? 'inherit' : 'ask');
+						crs[t][c] = (block && block[c] && block[c].reason) || '';
 					}
 				}
 				setCats(cs);
+				// 聚焦中的那一行保留本地草稿（见 reasonFocus 注释），但仅限「本行此刻仍渲染出输入框」
+				// （即新数据里 mode 仍为 deny）：输入框被卸载时浏览器不保证派发 blur，焦点会残留；
+				// 若继续兜住旧值，该行再变回 deny 时会显示、并可能写回陈旧草稿。
+				// focusNow 在此快照：updater 由 React 在渲染阶段执行，届时 reasonFocus.current 可能已变。
+				const focusNow = reasonFocus.current;
+				setCatReasons((prev) => {
+					if (focusNow && focusNow.kind === 'cat' && prev && prev[focusNow.tab]
+						&& cs[focusNow.tab] && cs[focusNow.tab][focusNow.key] === 'deny') {
+						return Object.assign({}, crs, { [focusNow.tab]: Object.assign({}, crs[focusNow.tab], { [focusNow.key]: prev[focusNow.tab][focusNow.key] }) });
+					}
+					return crs;
+				});
+				const fbNext = {
+					global: (s.fallback && s.fallback.globalReason) || '',
+					project: (s.fallback && s.fallback.projectReason) || '',
+				};
+				// 兜底输入框的可见性取决于该层 fallbackMode 是否为 deny（与渲染处的 fbVal 同源）；
+				// 注意不能用 fbNext（那是原因文本）与 'deny' 比较。
+				const fbShow = {
+					global: (s.fallback && s.fallback.global) || 'ask',
+					project: (s.fallback && s.fallback.project) || 'inherit',
+				};
+				setFbReason((prev) => {
+					if (focusNow && focusNow.kind === 'fb' && prev && fbShow[focusNow.tab] === 'deny') {
+						return Object.assign({}, fbNext, { [focusNow.tab]: prev[focusNow.tab] });
+					}
+					return fbNext;
+				});
 				const qs = {};
 				const gq = s.quickTools ? s.quickTools.global : {};
 				const pq = s.quickTools ? s.quickTools.project : {};
@@ -1790,9 +1850,25 @@ window.__ModuleLoader__.load({
 				for (const k of Object.keys(gq)) names[k] = 1;
 				for (const k of Object.keys(pq)) names[k] = 1;
 				for (const t of Object.keys(names)) {
-					qs[t] = { g: quickGlobalValue(t, gq), p: hasOwnKey(pq, t) && pq[t] !== 'inherit' ? pq[t] : 'inherit' };
+					qs[t] = { g: quickGlobalValue(t, gq), p: hasOwnKey(pq, t) && quickMode(pq[t]) !== 'inherit' ? quickMode(pq[t]) : 'inherit' };
 				}
 				setQuickSel(qs);
+				// 快捷工具的拒绝原因（仅 deny 行用）：与动作分开存，输入框才能在「改了还没保存」时
+				// 独立编辑——聚焦期间由 reasonFocus 兜住，不被服务端值覆盖回去（见上方 ref 注释）。
+				const qr = {};
+				for (const t of Object.keys(names)) {
+					qr[t] = { g: quickReasonOf(gq[t]) || '', p: quickReasonOf(pq[t]) || '' };
+				}
+				// 快捷工具拒绝原因：同样只保留「仍为 deny（输入框可见）」的聚焦行草稿
+				setQuickReason((prev) => {
+					if (focusNow && focusNow.kind === 'quick' && prev && prev[focusNow.key]) {
+						const sub = focusNow.tab === 'global' ? 'g' : 'p';
+						if (qs[focusNow.key] && qs[focusNow.key][sub] === 'deny') {
+							return Object.assign({}, qr, { [focusNow.key]: Object.assign({}, qr[focusNow.key], { [sub]: prev[focusNow.key][sub] }) });
+						}
+					}
+					return qr;
+				});
 			};
 
 			const refresh = () => {
@@ -1825,10 +1901,22 @@ window.__ModuleLoader__.load({
 				else setConfirm(key);
 			};
 
+			// 分类默认值的动作切换：只改 mode。拒绝原因由下方 commitCatReason 走单数端点
+			// （permgate:set-category）单独提交；宿主在 mode 切离 deny 时会清掉 reason。
 			const changeCat = (c) => (e) => {
 				const mode = e.target.value;
 				setCats(Object.assign({}, cats, { [tab]: Object.assign({}, cats[tab], { [c]: mode }) }));
 				invoke('permgate:set-categories', { [tab]: { [c]: mode } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+			};
+
+			// 拒绝原因输入框的失焦提交：只在当前动作是 deny 时才写（其它动作下输入框根本不显示）。
+			// 用失焦而不是 onChange 逐字符提交，避免每敲一个字打一次盘。
+			// 空串必须原样下发：宿主把「空串」定义为显式清除、「undefined」定义为保留原值，
+			// 若这里用 `|| undefined` 把清空折叠成 undefined，用户就再也删不掉写错的原因
+			// （旧文字会被 applyStatus 回填）。仅当该键确实缺失时才传 undefined。
+			const commitCatReason = (c) => () => {
+				if ((cats[tab] ? cats[tab][c] : null) !== 'deny') return;
+				invoke('permgate:set-category', { target: tab, category: c, mode: 'deny', reason: catReasons[tab] ? catReasons[tab][c] : undefined });
 			};
 
 			const changeQuick = (tool) => (e) => {
@@ -1836,6 +1924,14 @@ window.__ModuleLoader__.load({
 				const key = tab === 'global' ? 'g' : 'p';
 				setQuickSel(Object.assign({}, quickSel, { [tool]: Object.assign({}, quickSel[tool], { [key]: mode }) }));
 				invoke('permgate:set-quick', { target: tab, tool, action: mode });
+			};
+
+			// 快捷工具拒绝原因的失焦提交（同上：仅 deny 行可见）
+			const commitQuickReason = (tool) => () => {
+				const key = tab === 'global' ? 'g' : 'p';
+				const cur = quickSel[tool] ? quickSel[tool][key] : null;
+				if (cur !== 'deny') return;
+				invoke('permgate:set-quick', { target: tab, tool, action: 'deny', reason: quickReason[tool] ? quickReason[tool][key] : undefined });
 			};
 
 			const addQuick = () => {
@@ -1855,7 +1951,16 @@ window.__ModuleLoader__.load({
 				if (!v) { setMsg(T('panel.needValue')); return; }
 				setExVals(Object.assign({}, exVals, { [c]: '' }));
 				setExReasonVal('');
-				invoke('permgate:add-exception', { target: tab, category: c, match: v, action: exAction, reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined });
+				setExNoteVal('');
+				invoke('permgate:add-exception', {
+					target: tab,
+					category: c,
+					match: v,
+					action: exAction,
+					// 只有 deny 会带拒绝原因（回给 AI），只有 ask 会带备注（显示在弹窗上供日后回看）
+					reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined,
+					note: exAction === 'ask' ? (String(exNoteVal || '').trim() || undefined) : undefined,
+				});
 			};
 
 			const removeException = (c, id) => {
@@ -1885,6 +1990,23 @@ window.__ModuleLoader__.load({
 
 			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 
+			// 拒绝原因输入框：三处（分类默认值 / 快捷工具 / 兜底）共用一个渲染函数，
+			// 保证占位文案、宽度与提交时机一致；只有当前动作是 deny 时才显示。
+			// focus 描述「本输入框属于哪一行」，聚焦期间 applyStatus 会保留该行的本地草稿。
+			const reasonInput = (value, onChange, onCommit, show, focus) => (show
+				? React.createElement('input', {
+					className: 'pg-field',
+					style: { maxWidth: 220 },
+					placeholder: T('panel.denyReasonPh'),
+					title: T('panel.denyReason'),
+					value: value || '',
+					onChange,
+					onFocus: () => { reasonFocus.current = focus; },
+					onBlur: () => { reasonFocus.current = null; onCommit(); },
+					disabled: busy,
+				})
+				: null);
+
 			const catBlock = (c) => {
 				const mode = cats[tab] ? (cats[tab][c] || (tab === 'project' ? 'inherit' : 'ask')) : (tab === 'project' ? 'inherit' : 'ask');
 				const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
@@ -1895,7 +2017,17 @@ window.__ModuleLoader__.load({
 				return React.createElement('div', { key: c, style: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: 8, padding: 10, marginBottom: 10 } },
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, catLabel(c)),
-						sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+							// 分类默认值为「拒绝」时才有拒绝原因：该分类被拒时它会回给 AI
+							reasonInput(
+								catReasons[tab] ? catReasons[tab][c] : '',
+								(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: e.target.value }) })),
+								commitCatReason(c),
+								mode === 'deny',
+								{ kind: 'cat', tab: tab, key: c },
+							),
+							sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
+						),
 					),
 					EXC_CATS.indexOf(c) !== -1 ? React.createElement('div', { style: { marginTop: 2 } },
 						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } },
@@ -1913,7 +2045,9 @@ window.__ModuleLoader__.load({
 								excList.map((r) => React.createElement('div', { key: r.id, style: rowStyle },
 									badge(r.action),
 									React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
-									r.action === 'deny' && r.reason ? React.createElement('span', { style: { fontSize: 12, color: '#c62828', marginLeft: 6 } }, '「' + r.reason + '」') : null,
+									// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
+									r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny, marginLeft: 6 } }, '「' + r.reason + '」') : null,
+									r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', marginLeft: 6 } }, '(' + r.note + ')') : null,
 									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
 										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
 										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
@@ -1922,10 +2056,10 @@ window.__ModuleLoader__.load({
 							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 							React.createElement('input', { className: 'pg-field', placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'), value: exVals[c] || '', onChange: (e) => setExVals(Object.assign({}, exVals, { [c]: e.target.value })), disabled: busy }),
-							React.createElement('select', { className: 'pg-field', style: { padding: '2px 6px' }, value: exAction, onChange: (e) => setExAction(e.target.value), disabled: busy },
-								React.createElement('option', { value: 'allow' }, T('panel.allow')), React.createElement('option', { value: 'deny' }, T('panel.deny')),
-							),
+							sel(exAction, (e) => setExAction(e.target.value), MODES, busy),
+							// 两个输入框按动作二选一：拒绝时填「拒绝原因」（回给 AI），询问时填「备注」（方便日后回看）
 							exAction === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exReasonVal, onChange: (e) => setExReasonVal(e.target.value), disabled: busy }) : null,
+							exAction === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exNoteVal, onChange: (e) => setExNoteVal(e.target.value), disabled: busy }) : null,
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => addException(c) }, T('panel.addExc')),
 						),
 					) : null,
@@ -1954,6 +2088,14 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { style: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 260 } },
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13 } }, t),
 						desc ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, desc) : null,
+					),
+					// 该工具被显式设为「拒绝」时才有拒绝原因：被拒时它会回给 AI
+					reasonInput(
+						quickReason[t] ? quickReason[t][key] : '',
+						(e) => setQuickReason(Object.assign({}, quickReason, { [t]: Object.assign({}, quickReason[t], { [key]: e.target.value }) })),
+						commitQuickReason(t),
+						mode === 'deny',
+						{ kind: 'quick', tab: tab, key: t },
 					),
 					sel(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES, busy),
 					(!isPreset && hasKey) ? React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'quick:' + tab + ':' + t ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('quick:' + tab + ':' + t, () => removeQuick(t)) }, confirm === 'quick:' + tab + ':' + t ? T('panel.confirmDel') : T('panel.del')) : null,
@@ -1990,6 +2132,12 @@ window.__ModuleLoader__.load({
 			const changeFallback = (e) => {
 				const mode = e.target.value;
 				invoke('permgate:set-fallback', { target: tab, mode }, () => setMsg(T('panel.fallbackSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{v}', modeLabel(mode))));
+			};
+			// 兜底拒绝原因的失焦提交（仅兜底为 deny 时该输入框可见）
+			// 同 commitCatReason：空串是「显式清除」，不可折叠成 undefined（那会变成「保留原值」）
+			const commitFbReason = () => {
+				if (fbVal !== 'deny') return;
+				invoke('permgate:set-fallback', { target: tab, mode: 'deny', reason: fbReason[tab] });
 			};
 			const sandboxOptions = tab === 'global' ? ['workspace-write', 'danger-full-access'] : ['workspace-write', 'danger-full-access', 'inherit'];
 			const changeSandbox = (e) => {
@@ -2073,7 +2221,17 @@ window.__ModuleLoader__.load({
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.fallback')),
-						sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+							// 兜底为「拒绝」时才有拒绝原因：未匹配任何规则的调用被拒时回给 AI
+							reasonInput(
+								fbReason[tab],
+								(e) => setFbReason(Object.assign({}, fbReason, { [tab]: e.target.value })),
+								commitFbReason,
+								fbVal === 'deny',
+								{ kind: 'fb', tab: tab, key: null },
+							),
+							sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
+						),
 					),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
 				),

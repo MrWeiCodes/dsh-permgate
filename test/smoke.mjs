@@ -621,7 +621,200 @@ group('14. 相对 glob 例外不被绝对化（`**/*.env` 仍匹配任意目录�
   ok('group14: 非匹配文件仍走审批（例外没被放宽）', missG.nexted === false, JSON.stringify(missG.out))
   try { rmSync(wsG, { recursive: true, force: true }); rmSync(homeG, { recursive: true, force: true }); rmSync(outG, { recursive: true, force: true }) } catch (e) {}
 }
+
+// ─────────────────────────────────────────────────────────────
+group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携带自己的备注')
+{
+  const wsA = mkdtempSync(join(tmpdir(), 'pg-excask-ws-'))
+  const homeA = mkdtempSync(join(tmpdir(), 'pg-excask-home-'))
+  const outA = mkdtempSync(join(tmpdir(), 'pg-excask-out-'))
+  mkdirSync(join(homeA, 'dsh-permgate'), { recursive: true })
+  const hA = createHost({ workspaceRoot: wsA, dshHome: homeA })
+  const preA = hA.hooks.get('tools/pre-execute')
+  const addA = (cat, action, match, extra) => callRoute(hA.routes, 'POST', '/permgate/add-exception', Object.assign({ target: 'project', category: cat, action, match }, extra || {}))
+  const setCatA = (cat, mode) => callRoute(hA.routes, 'POST', '/permgate/set-category', { target: 'project', category: cat, mode, lang: 'zh', sessionId: 'sess-1' })
+
+  // (a) 面板可写入 ask 例外，并保留自己的备注（note），且不会串到 deny 的 reason 上
+  const rA = await addA('read', 'ask', join(outA, '*.txt'), { note: '这个目录的文本需人工确认' })
+  ok('group15: ask 例外可写入', !!(rA.data && rA.data.added && rA.data.added.action === 'ask'), JSON.stringify(rA.data && (rA.data.error || rA.data.added)))
+  ok('group15: ask 例外把备注存进 note 字段', !!(rA.data && rA.data.added && rA.data.added.note === '这个目录的文本需人工确认'), JSON.stringify(rA.data && rA.data.added))
+  ok('group15: ask 例外不占用 deny 的 reason 字段', !!(rA.data && rA.data.added && rA.data.added.reason === undefined), JSON.stringify(rA.data && rA.data.added))
+  // 反向：给 ask 例外传 reason 也不该被收下（两个字段各归其位）
+  const rA0 = await addA('undo', 'ask', join(outA, '*.bak'), { reason: '不该出现在 ask 上' })
+  ok('group15: 传给 ask 例外的 reason 被忽略（不串字段）', !!(rA0.data && rA0.data.added && rA0.data.added.reason === undefined && rA0.data.added.note === undefined), JSON.stringify(rA0.data && rA0.data.added))
+
+  // (b) ask 例外命中 → 仍走审批（不静默放行、也不静默拒绝），且弹窗 reason 带出自己的备注
+  await setCatA('directory', 'allow')   // 排除目录闸干扰：只看 read 分类这一条
+  await setCatA('read', 'allow')        // 分类默认 allow，若例外不生效就会被静默放行
+  const pA = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => ({ kind: 'allow' }))
+  pA.catch(() => {})
+  await new Promise((r) => setTimeout(r, 60))
+  const listA = await callRoute(hA.routes, 'GET', '/permgate/pending')
+  const itemA = (Array.isArray(listA.data) ? listA.data : []).filter((x) => x.tool === 'read').pop()
+  ok('group15: ask 例外命中 → 仍进审批（分类默认 allow 也拦得住）', !!itemA, JSON.stringify(listA.data))
+  ok('group15: 弹窗文案带出该例外的备注', !!itemA && String(itemA.reason).indexOf('这个目录的文本需人工确认') !== -1, String(itemA && itemA.reason))
+  if (itemA) await callRoute(hA.routes, 'POST', '/permgate/decide', { id: itemA.id, action: 'deny', lang: 'zh' })
+  await Promise.race([pA, new Promise((r) => setTimeout(r, 200))])
+
+  // (c) ask 例外同样能盖过 deny 分类默认值（三态优先级一致：例外 > 分类默认）
+  await setCatA('read', 'deny')
+  const pA2 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note2.txt') }), async () => ({ kind: 'allow' }))
+  pA2.catch(() => {})
+  await new Promise((r) => setTimeout(r, 60))
+  const listA2 = await callRoute(hA.routes, 'GET', '/permgate/pending')
+  const itemA2 = (Array.isArray(listA2.data) ? listA2.data : []).filter((x) => x.tool === 'read').pop()
+  ok('group15: ask 例外盖过 deny 分类默认值（仍弹窗而非直接拒）', !!itemA2, JSON.stringify(listA2.data))
+  if (itemA2) await callRoute(hA.routes, 'POST', '/permgate/decide', { id: itemA2.id, action: 'deny', lang: 'zh' })
+  await Promise.race([pA2, new Promise((r) => setTimeout(r, 200))])
+
+  // (d) 未命中该例外的路径仍按分类默认值拒绝（例外没有放宽范围）
+  let nextedA = false
+  const pA3 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'other.log') }), async () => { nextedA = true; return { kind: 'allow' } })
+  pA3.catch(() => {})
+  const outA3 = await Promise.race([pA3, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 400))])
+  ok('group15: 非匹配路径仍按 deny 分类默认值拒绝', nextedA === false && !!outA3 && outA3.kind === 'deny', JSON.stringify(outA3))
+
+  // (e) ask 例外不算「已表态」：弹窗里仍给出「允许此项」候选，点一次即可改成永久放行
+  // （若 alreadyInProject 把 ask 也算作已覆盖，用户就只能去设置面板手工编辑）
+  await setCatA('read', 'ask')
+  const pA5 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => ({ kind: 'allow' }))
+  pA5.catch(() => {})
+  await new Promise((r) => setTimeout(r, 60))
+  const listA5 = await callRoute(hA.routes, 'GET', '/permgate/pending')
+  const itemA5 = (Array.isArray(listA5.data) ? listA5.data : []).filter((x) => x.tool === 'read').pop()
+  const candA5 = (itemA5 && itemA5.candidates) || []
+  ok('group15: 已有 ask 例外时仍给出「允许此项」候选（ask 不算已表态）', candA5.length >= 1 && candA5.some((c) => String(c.value).indexOf('note.txt') !== -1), JSON.stringify(candA5.map((c) => c.value)))
+  if (itemA5) {
+    const pick = candA5.find((c) => String(c.value).indexOf('note.txt') !== -1)
+    await callRoute(hA.routes, 'POST', '/permgate/decide', { id: itemA5.id, action: 'allow', rules: pick ? [{ id: pick.id, decision: 'allow' }] : [], lang: 'zh' })
+  }
+  const outA5 = await Promise.race([pA5, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 400))])
+  ok('group15: 从 ask 例外一键改为永久放行后本次即放行', !!outA5 && outA5.kind === 'allow', JSON.stringify(outA5))
+  const stA5 = await callRoute(hA.routes, 'GET', '/permgate/status')
+  const rowsA5 = ((((stA5.data || {}).categories || {}).project || {}).read || {}).exceptions || []
+  ok('group15: 新 allow 例外插到 ask 例外之前（最新决定先生效）', rowsA5.length === 2 && rowsA5[0].action === 'allow' && rowsA5[1].action === 'ask', JSON.stringify(rowsA5.map((e) => e.action)))
+  let nextedA5 = false
+  const pA6 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => { nextedA5 = true; return { kind: 'allow' } })
+  pA6.catch(() => {})
+  await Promise.race([pA6, new Promise((r) => setTimeout(r, 300))])
+  ok('group15: 之后的同类读取被 allow 例外静默放行（ask 例外已被盖过）', nextedA5 === true)
+
+  // (f) 工作区外的 ask 例外：cat / ruleId 同源，说明随弹窗展示
+  const wsA2 = mkdtempSync(join(tmpdir(), 'pg-excask2-ws-'))
+  const homeA2 = mkdtempSync(join(tmpdir(), 'pg-excask2-home-'))
+  mkdirSync(join(homeA2, 'dsh-permgate'), { recursive: true })
+  const hA2 = createHost({ workspaceRoot: wsA2, dshHome: homeA2 })
+  const preA2 = hA2.hooks.get('tools/pre-execute')
+  const addA2 = (cat, action, match, extra) => callRoute(hA2.routes, 'POST', '/permgate/add-exception', Object.assign({ target: 'project', category: cat, action, match }, extra || {}))
+  await callRoute(hA2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'directory', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  await callRoute(hA2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'image', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  const rA2 = await addA2('image', 'ask', join(outA, '*.png'), { note: '外部图片需确认' })
+  const idA2 = rA2.data && rA2.data.added && rA2.data.added.id
+  const pA4 = preA2(makeExec(wsA2, 'read_image', { file_path: join(outA, 'z.png') }), async () => ({ kind: 'allow' }))
+  pA4.catch(() => {})
+  await new Promise((r) => setTimeout(r, 60))
+  const listA4 = await callRoute(hA2.routes, 'GET', '/permgate/pending')
+  const itemA4 = (Array.isArray(listA4.data) ? listA4.data : []).filter((x) => x.tool === 'read_image').pop()
+  // cat 不下发给客户端，但 reason 前缀与 ruleId 同源于 cat：前缀是「读取图片权限」即证明
+  // 例外触发时 cat 跟随例外所在闸（image），而不是回落成目录闸
+  ok('group15: 工作区外 ask 例外 → 进审批且文案前缀跟随例外所在闸', !!itemA4 && String(itemA4.reason).indexOf('读取图片权限：') === 0, JSON.stringify(itemA4 && { reason: itemA4.reason }))
+  ok('group15: 工作区外 ask 例外的文案带自己的备注', !!itemA4 && String(itemA4.reason).indexOf('外部图片需确认') !== -1, String(itemA4 && itemA4.reason))
+  const stA4 = await callRoute(hA2.routes, 'GET', '/permgate/status')
+  const decA4 = ((stA4.data && stA4.data.recentDecisions) || []).filter((d) => d.tool === 'read_image').pop()
+  ok('group15: 工作区外 ask 例外的 ruleId 与文案同源', !!decA4 && decA4.ruleId === idA2, JSON.stringify({ got: decA4 && decA4.ruleId, want: idA2 }))
+  if (itemA4) await callRoute(hA2.routes, 'POST', '/permgate/decide', { id: itemA4.id, action: 'deny', lang: 'zh' })
+  await Promise.race([pA4, new Promise((r) => setTimeout(r, 200))])
+
+  try {
+    rmSync(wsA, { recursive: true, force: true }); rmSync(homeA, { recursive: true, force: true })
+    rmSync(wsA2, { recursive: true, force: true }); rmSync(homeA2, { recursive: true, force: true })
+    rmSync(outA, { recursive: true, force: true })
+  } catch (e) {}
+}
 try { rmSync(workspace, { recursive: true, force: true }); rmSync(dshHome, { recursive: true, force: true }) } catch (e) {}
+
+// ─────────────────────────────────────────────────────────────
+group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三处都能写，且只随 deny 回给 AI')
+{
+  const wsR = mkdtempSync(join(tmpdir(), 'pg-reason-ws-'))
+  const homeR = mkdtempSync(join(tmpdir(), 'pg-reason-home-'))
+  mkdirSync(join(homeR, 'dsh-permgate'), { recursive: true })
+  const hR = createHost({ workspaceRoot: wsR, dshHome: homeR })
+  const preR = hR.hooks.get('tools/pre-execute')
+  const post = (url, body) => callRoute(hR.routes, 'POST', url, Object.assign({ lang: 'zh', sessionId: 'sess-1' }, body))
+  const lastDecision = async (tool) => {
+    const st = await callRoute(hR.routes, 'GET', '/permgate/status')
+    return ((st.data && st.data.recentDecisions) || []).filter((d) => d.tool === tool).pop()
+  }
+  // 直接问宿主要判定结果：deny 时 pre-execute 返回的 reason 就是回给 AI 的文本
+  const runTool = async (name, args) => {
+    let out = null
+    const p = preR(makeExec(wsR, name, args || {}), async () => { out = { kind: 'allow' }; return out })
+    p.catch(() => {})
+    const raced = await Promise.race([p, new Promise((r) => setTimeout(() => r(null), 400))])
+    return raced || out
+  }
+
+  // (a) 分类默认值：deny + reason → 该分类的调用被拒时带上原因
+  const sc = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '这个项目不许执行命令' })
+  ok('group16: 分类默认值可写入拒绝原因', !!(sc.data && sc.data.categories.project.command.reason === '这个项目不许执行命令'), JSON.stringify(sc.data && sc.data.categories.project.command))
+  const outCmd = await runTool('pwsh', { command: 'echo hi' })
+  ok('group16: 分类默认值拒绝时把原因回给 AI', !!outCmd && outCmd.kind === 'deny' && String(outCmd.reason).indexOf('这个项目不许执行命令') !== -1, JSON.stringify(outCmd))
+  const decCmd = await lastDecision('pwsh')
+  ok('group16: 决策记录里也带该原因', !!decCmd && String(decCmd.reason).indexOf('这个项目不许执行命令') !== -1, JSON.stringify(decCmd && decCmd.reason))
+
+  // (b) 切成别的动作时原因被清掉（不留僵尸文字），切回 deny 也不会自己冒出来
+  const sc2 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'ask' })
+  ok('group16: 切离 deny 时分类拒绝原因被清除', !!(sc2.data && sc2.data.categories.project.command.reason === undefined), JSON.stringify(sc2.data && sc2.data.categories.project.command))
+
+  // (c) 兜底：deny + reason → 未匹配任何规则的调用被拒时带上原因
+  const sf = await post('/permgate/set-fallback', { target: 'project', mode: 'deny', reason: '兜底：未知工具一律拒绝' })
+  ok('group16: 兜底可写入拒绝原因', !!(sf.data && sf.data.fallback.projectReason === '兜底：未知工具一律拒绝'), JSON.stringify(sf.data && sf.data.fallback))
+  const outUnk = await runTool('mcp__not-a-preset', {})
+  ok('group16: 兜底拒绝时把原因回给 AI', !!outUnk && outUnk.kind === 'deny' && String(outUnk.reason).indexOf('兜底：未知工具一律拒绝') !== -1, JSON.stringify(outUnk))
+
+  // (d) 快捷工具：deny + reason（对象形态落盘）→ 该工具被拒时带上原因
+  const sq = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'deny', reason: '联网检索需走人工' })
+  ok('group16: 快捷工具按对象形态落盘（action + reason）', !!(sq.data && sq.data.quickTools.global.web_search && sq.data.quickTools.global.web_search.action === 'deny' && sq.data.quickTools.global.web_search.reason === '联网检索需走人工'), JSON.stringify(sq.data && sq.data.quickTools.global.web_search))
+  const outWs = await runTool('web_search', {})
+  ok('group16: 快捷工具拒绝时把原因回给 AI', !!outWs && outWs.kind === 'deny' && String(outWs.reason).indexOf('联网检索需走人工') !== -1, JSON.stringify(outWs))
+
+  // (e) 老配置（裸字符串）仍被正常读入，且 reason 只在 deny 时保留
+  const sq2 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'allow', reason: '不该被存下' })
+  ok('group16: 非 deny 动作不保留快捷工具原因', !!(sq2.data && sq2.data.quickTools.global.web_search && sq2.data.quickTools.global.web_search.reason === undefined && sq2.data.quickTools.global.web_search.action === 'allow'), JSON.stringify(sq2.data && sq2.data.quickTools.global.web_search))
+
+  // (f) 未提供 reason 的写入必须保留原值：perm_*/HTTP 只想重设动作或确认当前值时，
+  // 不得把用户写好的拒绝原因静默删掉（曾经「不传 reason」被当成「清除 reason」）
+  const keep1 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '保留测试' })
+  ok('group16: 分类原因已写入（前置）', !!(keep1.data && keep1.data.categories.project.command.reason === '保留测试'), JSON.stringify(keep1.data && keep1.data.categories.project.command))
+  const keep2 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny' })
+  ok('group16: 分类同动作重设且不传 reason 时保留原原因', !!(keep2.data && keep2.data.categories.project.command.reason === '保留测试'), JSON.stringify(keep2.data && keep2.data.categories.project.command))
+  const keep3 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '' })
+  ok('group16: 显式传空串才清除分类原因', !!(keep3.data && keep3.data.categories.project.command.reason === undefined), JSON.stringify(keep3.data && keep3.data.categories.project.command))
+
+  const keepF1 = await post('/permgate/set-fallback', { target: 'project', mode: 'deny', reason: '兜底保留测试' })
+  const keepF2 = await post('/permgate/set-fallback', { target: 'project', mode: 'deny' })
+  ok('group16: 兜底同动作重设且不传 reason 时保留原原因', !!(keepF1.data && keepF2.data && keepF2.data.fallback.projectReason === '兜底保留测试'), JSON.stringify(keepF2.data && keepF2.data.fallback))
+
+  const keepQ1 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'deny', reason: '快捷保留测试' })
+  const keepQ2 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'deny' })
+  ok('group16: 快捷工具同动作重设且不传 reason 时保留原原因', !!(keepQ1.data && keepQ2.data && keepQ2.data.quickTools.global.web_search.reason === '快捷保留测试'), JSON.stringify(keepQ2.data && keepQ2.data.quickTools.global.web_search))
+  const keepQ3 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'allow' })
+  ok('group16: 快捷工具切离 deny 时原因被清除', !!(keepQ3.data && keepQ3.data.quickTools.global.web_search.reason === undefined && keepQ3.data.quickTools.global.web_search.action === 'allow'), JSON.stringify(keepQ3.data && keepQ3.data.quickTools.global.web_search))
+
+  // (g) 面板清空输入框的等价请求：必须真的清除，而不是被当成「未提供」保留原值。
+  // 回归背景：面板曾用 `|| undefined` 把空串折叠掉，于是清空后 reason 键根本不发出，
+  // 服务端走「保留原值」分支 → 旧文字被 statusView 回填，用户永远删不掉写错的原因。
+  // 注意必须先写入非空原因，否则前置值本就是 undefined，断言会空转（不能区分「清除」与「保留」）。
+  const clearCat0 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '待清空' })
+  ok('group16: 清空前先写入非空分类原因（前置，避免断言空转）', !!(clearCat0.data && clearCat0.data.categories.project.command.reason === '待清空'), JSON.stringify(clearCat0.data && clearCat0.data.categories.project.command))
+  const clearCat = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '' })
+  ok('group16: 面板清空分类原因（reason=""）真的清除', !!(clearCat.data && clearCat.data.categories.project.command.reason === undefined), JSON.stringify(clearCat.data && clearCat.data.categories.project.command))
+  const clearFb = await post('/permgate/set-fallback', { target: 'project', mode: 'deny', reason: '' })
+  ok('group16: 面板清空兜底原因（reason=""）真的清除', !!(clearFb.data && clearFb.data.fallback.projectReason === null), JSON.stringify(clearFb.data && clearFb.data.fallback))
+
+  try { rmSync(wsR, { recursive: true, force: true }); rmSync(homeR, { recursive: true, force: true }) } catch (e) {}
+}
 
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')

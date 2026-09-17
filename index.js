@@ -275,7 +275,7 @@ export default {
     function freshConfig() {
       const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask', editorKernel: 'auto' }
       for (const c of CATS) g[c] = freshCategory(c, false)
-      for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = QUICK_DEFAULTS[k]
+      for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = { action: QUICK_DEFAULTS[k] }
       return { global: g, projects: {} }
     }
 
@@ -292,16 +292,26 @@ export default {
       return cat
     }
 
+    // 文本类字段（拒绝原因 / 备注）的统一口径：trim + 截断 200，空串视为未填。
+    // 例外、分类默认值、兜底、快捷工具四处共用，避免「写入当下」与「重新加载后」口径不一致。
+    function normalizeText(v) {
+      return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined
+    }
+
     function normalizeException(r, key) {
       if (!r || typeof r !== 'object') return null
       if (MODES.indexOf(r.action) === -1) return null
       const value = key === 'command' ? r.match : r.path
       if (typeof value !== 'string' || !value) return null
       const e = { id: r.id || 'e' + Math.random().toString(36).slice(2, 8), action: r.action }
-      // 仅 deny 例外支持自定义拒绝原因（allow 例外存了也用不上）
-      if (r.action === 'deny' && typeof r.reason === 'string' && r.reason.trim()) {
-        e.reason = r.reason.trim().slice(0, 200)
-      }
+      // reason 与 note 是两种东西，按动作各归其位，互不串用：
+      //   reason —— deny 专属，拒绝时随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
+      //   note   —— ask 专属，命中时显示在审批弹窗上（「当初为什么特意拦它」），方便日后回看。
+      // allow 两者都不存：放行的调用不再弹窗，reason 也用不上。
+      // 注意：note 是给人看的备注，不是保密字段——它会随配置一起被 perm_status 等读取权限的调用读到，
+      // 故 UI/文档只说「备注」，不承诺「AI 看不到」，也提示用户不要写入敏感信息。
+      if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }
+      if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }
       if (key === 'command') e.match = value
       else e.path = value
       return e
@@ -311,17 +321,35 @@ export default {
       const def = freshCategory(key, inheritDefault)
       const c = raw && typeof raw === 'object' ? raw : {}
       const cat = { mode: (inheritDefault ? ALL_MODES : MODES).indexOf(c.mode) !== -1 ? c.mode : def.mode }
+      // 分类默认值的拒绝原因：只在 deny 时有用（allow 不弹窗、ask 用自己的 note），
+      // 与例外同口径存一个 reason，供 decide() 拼进拒绝文案回给 AI。
+      if (cat.mode === 'deny') { const t = normalizeText(c.reason); if (t) cat.reason = t }
       if (EXC_CATS.indexOf(key) !== -1) {
         cat.exceptions = Array.isArray(c.exceptions) ? c.exceptions.map((r) => normalizeException(r, key)).filter(Boolean) : []
       }
       return cat
     }
 
+    // 快捷工具条目：老配置是裸动作字符串（'allow'），本版起是 { action, reason? }。
+    // 两种形态都在这一个入口收敛成对象，之后全链路只认对象——以后要给每个工具再加属性时
+    // 不必把所有读法再改一遍，也不会出现「动作在一张表、文字在另一张表」的双份真相
+    // （那种结构在删除/改名时漏改一张就漂移，正是要避免的堆叠）。
+    function normalizeQuickEntry(v) {
+      const raw = typeof v === 'string' ? { action: v } : (v && typeof v === 'object' ? v : null)
+      if (!raw) return null
+      if (ALL_MODES.indexOf(raw.action) === -1) return null
+      const out = { action: raw.action }
+      // 拒绝原因只在 deny 时有意义：allow 不弹窗、ask 有自己的备注，存了也不会被读到
+      if (raw.action === 'deny') { const t = normalizeText(raw.reason); if (t) out.reason = t }
+      return out
+    }
+
     function normalizeQuick(q) {
       const out = {}
       if (!q || typeof q !== 'object') return out
       for (const k of Object.keys(q)) {
-        if (ALL_MODES.indexOf(q[k]) !== -1) out[k] = q[k]
+        const e = normalizeQuickEntry(q[k])
+        if (e) out[k] = e
       }
       return out
     }
@@ -339,13 +367,18 @@ export default {
 
     function buildConfig(parsed) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
-      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask', editorKernel: EDITOR_KERNELS.indexOf(g.editorKernel) !== -1 ? g.editorKernel : 'auto' }
+      const gFb = MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask'
+      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb, editorKernel: EDITOR_KERNELS.indexOf(g.editorKernel) !== -1 ? g.editorKernel : 'auto' }
+      // 兜底拒绝原因：与分类同口径，只在 deny 时保留
+      if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
       const projects = {}
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
-        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit', editorKernel: EDITOR_KERNEL_VALUES.indexOf(p.editorKernel) !== -1 ? p.editorKernel : 'inherit' }
+        const pFb = ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit'
+        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb, editorKernel: EDITOR_KERNEL_VALUES.indexOf(p.editorKernel) !== -1 ? p.editorKernel : 'inherit' }
+        if (pFb === 'deny') { const t = normalizeText(p.fallbackReason); if (t) pb.fallbackReason = t }
         for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
         projects[key] = pb
       }
@@ -363,7 +396,7 @@ export default {
       cfg.global.fallbackMode = map[oldMode]
       cfg.global.doomloop.mode = oldMode === 'off' ? 'allow' : 'ask'
       if (oldMode === 'locked') {
-        for (const k of Object.keys(cfg.global.quickTools)) cfg.global.quickTools[k] = 'deny'
+        for (const k of Object.keys(cfg.global.quickTools)) cfg.global.quickTools[k] = { action: 'deny' }
       }
       cfg.global.custom = Array.isArray(g.rules) ? g.rules.map(normalizeRule).filter(Boolean) : []
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
@@ -383,7 +416,7 @@ export default {
         // 否则之后全局收紧兜底时这些老项目仍按 allow 静默放行
         pb.fallbackMode = explicitMode ? (pm === 'off' ? 'allow' : map[pm]) : 'inherit'
         if (pm === 'locked') {
-          for (const k of QUICK_PRESET) pb.quickTools[k] = 'deny'
+          for (const k of QUICK_PRESET) pb.quickTools[k] = { action: 'deny' }
         }
         cfg.projects[key] = pb
       }
@@ -792,12 +825,40 @@ export default {
       return config.projects[root]
     }
 
-    function setCategoryMode(targetKey, cat, mode) {
+    // 分类默认值写入单点（面板路由与 perm_set_category 共用）。
+    // reason 是「拒绝原因」：只在 mode=deny 时有意义，切成别的动作时一并清掉——
+    // 否则配置里会留着一条对当前动作无效的僵尸文字，面板再切回 deny 时又冒出来，看着像没保存成功。
+    // 但「没传 reason」不等于「要清掉」：perm_set_category 与 HTTP 直连可能只想重设动作或确认当前值，
+    // 一律删除会让用户写好的原因在一次无关写入后静默消失。故 reason 的三种语义分开：
+    //   未提供（undefined）—— 保留原值；空串/纯空白 —— 显式清除；有内容 —— 覆盖。
+    function setCategoryMode(targetKey, cat, mode, reason) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
       const block = targetKey === 'global' ? config.global : ensureProject()
       if (!block[cat]) block[cat] = freshCategory(cat, targetKey !== 'global')
       block[cat].mode = mode
+      if (mode !== 'deny') { delete block[cat].reason; return true }
+      if (reason === undefined) return true
+      const t = normalizeText(reason)
+      if (t) block[cat].reason = t
+      else delete block[cat].reason
+      return true
+    }
+
+    // 快捷工具写入单点（面板路由、perm_set_quick 与弹窗「记住此决定」共用）。
+    // action=inherit 表示删除该键（回落到下一级：全局键 → 预设默认 → 兜底）。
+    // reason 语义与 setCategoryMode 一致：未提供（undefined）保留该键原有原因、空串显式清除、有内容覆盖。
+    function setQuickAction(targetKey, tool, action, reason) {
+      if (ALL_MODES.indexOf(action) === -1) return false
+      const block = targetKey === 'project' ? ensureProject() : config.global
+      if (!block.quickTools) block.quickTools = {}
+      if (action === 'inherit') { delete block.quickTools[tool]; return true }
+      // 与 normalizeQuickEntry 同构：只存 { action } / { action, reason }，deny 才带原因
+      if (action !== 'deny') { block.quickTools[tool] = { action }; return true }
+      const prev = block.quickTools[tool]
+      const prevReason = prev && typeof prev === 'object' && prev.action === 'deny' ? prev.reason : undefined
+      const t = reason === undefined ? prevReason : normalizeText(reason)
+      block.quickTools[tool] = t ? { action, reason: t } : { action }
       return true
     }
 
@@ -856,17 +917,32 @@ export default {
       return true
     }
 
-    // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）
-    function fallbackMode() {
+    // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）。
+    // 与分类默认值同构：mode 与它自己的拒绝原因同源取用——项目显式配置就取项目的，
+    // 项目是 inherit 才穿透到全局的（否则会出现「动作来自项目、文字来自全局」的错配）。
+    function fallbackSetting() {
       const proj = projectBlock()
-      return firstEffective(proj && proj.fallbackMode, config.global.fallbackMode, 'ask')
+      const pv = proj && proj.fallbackMode
+      if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }
+      return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }
     }
 
-    function setFallbackMode(targetKey, mode) {
+    function fallbackMode() {
+      return fallbackSetting().mode
+    }
+
+    function setFallbackMode(targetKey, mode, reason) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
       const block = targetKey === 'global' ? config.global : ensureProject()
       block.fallbackMode = mode
+      // 与分类同口径：拒绝原因只在 deny 时保留，切走时清掉；
+      // 未提供 reason（undefined）保留原值，避免无关写入静默清空用户写好的原因。
+      if (mode !== 'deny') { delete block.fallbackReason; return true }
+      if (reason === undefined) return true
+      const t = normalizeText(reason)
+      if (t) block.fallbackReason = t
+      else delete block.fallbackReason
       return true
     }
 
@@ -883,12 +959,17 @@ export default {
       const gCat = config.global[catKey] || freshCategory(catKey, false)
       if (value !== null && value !== undefined && EXC_CATS.indexOf(catKey) !== -1) {
         const pl = pCat && Array.isArray(pCat.exceptions) ? pCat.exceptions : []
-        for (const r of pl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined }
+        for (const r of pl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
-        for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined }
+        for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
       }
-      const mode = firstEffective(pCat && pCat.mode, gCat.mode, 'allow')
-      return { action: mode, ruleId: null }
+      // 没命中例外 → 落分类默认值：它的拒绝原因与 mode 同源取用（项目显式配置就取项目的，
+      // 项目 inherit 才穿透全局），避免「动作来自项目、文字来自全局」的错配。
+      const pv = pCat && pCat.mode
+      if (pv && pv !== 'inherit') return { action: pv, ruleId: null, reason: normalizeText(pCat.reason) }
+      // 项目未显式配置（缺失或 inherit）才穿透全局：此处 pv 已确定不生效，
+      // 故直接取全局值，不再经 firstEffective 传一个恒不命中的 projVal（与 fallbackSetting 同形）。
+      return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }
     }
 
     function pathArg(args) {
@@ -1961,12 +2042,22 @@ export default {
     function quickAction(name) {
       const proj = projectBlock()
       const pMap = proj && proj.quickTools ? proj.quickTools : {}
+      // 取值函数：正常路径下配置项恒为对象（normalizeQuick 已在加载时收敛，freshConfig/migrateOld/
+      // setQuickAction 也都只写对象），所以下面的字符串回退当前不可达，它是纯防御——万一有路径让
+      // 非对象形态进入内存（绕过 normalizeQuick），按裸动作字符串取值，而不是产出 undefined 让
+      // decide() 返回非法 action（pre-execute 会把非 ask/deny 一律当放行）。
+      // 注意与下面的 inherit 守卫不同：normalizeQuickEntry 用 ALL_MODES 校验，'inherit' 能存活。
+      const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)
+      const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)
       for (const k of Object.keys(pMap)) {
-        if (pMap[k] !== 'inherit' && matchGlob(k, name)) return { action: pMap[k] }
+        if (modeOf(pMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]) }
       }
       const gMap = config.global.quickTools || {}
       for (const k of Object.keys(gMap)) {
-        if (matchGlob(k, name)) return { action: gMap[k] }
+        // 与项目分支同口径：全局层本不该出现 inherit（写入侧 setQuickAction 对 global+inherit
+        // 走 delete），但手工编辑 config.json 可以塞进来。若不跳过，decide() 拿到的 action 既不是
+        // ask 也不是 deny，pre-execute 会直接 next() —— 等于静默放行。
+        if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(gMap[k]), reason: reasonOf(gMap[k]) }
       }
       // 预设工具的默认动作同样是「决策默认」：配置里缺席（升级前生成的老配置不含新键）时按
       // QUICK_DEFAULTS 裁决，与面板显示走同一条链（项目键 → 全局键 → 预设默认 → 兜底），
@@ -2128,9 +2219,12 @@ export default {
         return { action: 'deny', src, cat, pz: p[0], pe: p[1] }
       }
       if (d.action === 'ask' || e.action === 'ask') {
-        const cat = d.action === 'ask' ? 'directory' : catKey
+        // 与 deny/allow 同口径：由**例外**触发的 ask 让 cat 跟随该例外所在闸，前缀与 ruleId 同源；
+        // 纯模式默认值触发的 ask 沿用「目录闸优先」的既有取法（此时无 ruleId，文案回落「（需确认）」）。
+        const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)
+        const cat = src ? (src === d ? 'directory' : catKey) : (d.action === 'ask' ? 'directory' : catKey)
         const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
-        return { action: 'ask', src: null, cat, pz: p[0], pe: p[1] }
+        return { action: 'ask', src, cat, pz: p[0], pe: p[1] }
       }
       // allow：与 deny/ask 同口径——由哪道闸的例外实际放行，cat 就跟随哪道闸，
       // 保证 reason 前缀、ruleId、cat 三者同源（否则文案写「读取图片权限：」
@@ -2144,14 +2238,21 @@ export default {
     function decide(exec) {
       const name = exec.name
       const args = exec.arguments
-      // deny 例外可携带自定义拒绝原因；有则用自定义文案，无则回退「（例外 id）」标注
+      // 自定义文字分两种，用途不同、不可互换：
+      //   reason —— 拒绝理由，会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
+      //             例外的 reason、分类默认值的 reason、兜底/快捷工具拒绝时的 reason 都走它。
+      //   note   —— 给人看的备注，出现在审批弹窗文案与决策记录里（「当初为什么特意拦它」）。
+      //             它只是「给人看」，不是保密字段：决策记录会随 perm_status 下发，故不承诺 AI 看不到。
+      // 无自定义文字时回退「（例外 id）」标注，方便去设置页定位是哪一条。
       const exReason = (d) => {
         if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'
+        if (d && d.action === 'ask' && d.note) return '（' + d.note + '）'
         if (d && d.ruleId) return '（例外 ' + d.ruleId + '）'
         return ''
       }
       const exReasonEn = (d) => {
         if (d && d.action === 'deny' && d.reason) return ' (' + d.reason + ')'
+        if (d && d.action === 'ask' && d.note) return ' (' + d.note + ')'
         if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
         return ''
       }
@@ -2165,7 +2266,8 @@ export default {
       if (repeatStreak(name, args) >= REPEAT_STREAK) {
         const d = resolveCategory('doomloop', null, null)
         if (d.action !== 'allow') {
-          return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用', 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls'), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
+          // 分类默认值的拒绝原因同样带上（doomloop 无例外，d.reason 只可能来自分类默认值）
+          return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls' + exReasonEn(d)), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
         }
       }
       const proj = projectBlock()
@@ -2184,7 +2286,7 @@ export default {
           // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
           const m = outsideMatrix('read', fp)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + '（需确认）', m.pe + 'read outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('read', fp, 'path')
@@ -2201,7 +2303,7 @@ export default {
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
           const m = outsideMatrix('image', fp)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + '（需确认）', m.pe + 'read image outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('image', fp, 'path')
@@ -2215,7 +2317,7 @@ export default {
           // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
           const m = outsideMatrix('edit', fp)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + '（写入需确认）', m.pe + 'access outside workspace ' + fp + ' (write requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('edit', fp, 'path')
@@ -2230,7 +2332,7 @@ export default {
         if (fp && isOutside(fp, root)) {
           const m = outsideMatrix('undo', fp)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + '（需确认）', m.pe + 'undo outside workspace ' + fp + ' (requires confirmation)'), ruleId: null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('undo', fp, 'path')
@@ -2258,11 +2360,17 @@ export default {
         // 命中预设默认值时区分措辞，避免把「默认动作」说成用户显式设置
         const label = q.isDefault ? '快捷默认' : '快捷设置'
         const labelEn = q.isDefault ? 'Quick default' : 'Quick setting'
-        return { action: q.action, reason: bi(label + '：' + name + ' → ' + q.action, labelEn + ': ' + name + ' → ' + q.action), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
+        // 该工具被显式设成 deny 且写了拒绝原因时带上它（回给 AI）；预设默认值没有原因
+        const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''
+        const qrEn = q.action === 'deny' && q.reason ? ' (' + q.reason + ')' : ''
+        return { action: q.action, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
       }
-      const fb = fallbackMode()
-      if (fb === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
-      return { action: fb, reason: bi('未匹配任何规则，按兜底策略处理：' + fb, 'No rule matched; handled by fallback policy: ' + fb), ruleId: null, cat: 'fallback', value: name, kind: 'tool' }
+      const fb = fallbackSetting()
+      if (fb.mode === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
+      // 兜底的拒绝原因同样回给 AI（ask 时它只是弹窗文案的一部分，不参与回传）
+      const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
+      const frEn = fb.mode === 'deny' && fb.reason ? ' (' + fb.reason + ')' : ''
+      return { action: fb.mode, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' }
     }
 
     function recordDecision(d, exec) {
@@ -2284,14 +2392,19 @@ export default {
     function alreadyInProject(value, kind, catKey) {
       const proj = projectBlock()
       if (!proj) return false
+      // 只有「方向明确」的例外（allow / deny）才算已表态，ask 例外不算：
+      // ask 例外表达的是「这个值每次都问我」，不是「用户已决定放行或拒绝」。
+      // 若把 ask 也算作已覆盖，用户加了 ask 例外后弹窗里就再也不给「允许此项」候选，
+      // 想改成永久放行只能去设置面板手工编辑 —— 与候选「一键记住这个决定」的用途相反。
+      const decided = (r) => r.action !== 'ask'
       if (kind === 'command') {
         const cat = proj.command
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => r.match === value))
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && r.match === value))
       }
       if (kind === 'path' && catKey && EXC_CATS.indexOf(catKey) !== -1) {
         const cat = proj[catKey]
         // 与 pathKey 同口径：相对路径、含 .. 、斜杠与大小写写法都归一到同一条
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => pathKey(r.path) === pathKey(value)))
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && pathKey(r.path) === pathKey(value)))
       }
       if (kind === 'tool') {
         return !!(Array.isArray(proj.custom) && proj.custom.some((r) => r.tool === value))
@@ -2549,12 +2662,21 @@ export default {
     function addProjectException(cat, kind, value, decision, opts) {
       const o = opts || {}
       const target = o.target === 'project' ? 'project' : 'global'
-      // reason 仅用于 deny，且与 normalizeException 同口径（trim + 截断 200）：
-      // 否则「写入当下」与「重新加载后」的条目字段会不一致（allow 的 reason 会被丢弃）。
-      const reason = decision === 'deny' && o.reason ? String(o.reason).trim().slice(0, 200) : undefined
+      // reason / note 直接复用 normalizeText（trim + 截断 200 + 非字符串丢弃），与 normalizeException
+      // 同一份实现：否则同一请求会先经 normalizeException 校验、再经这里落盘，两份口径一旦分叉，
+      // 就会出现「校验认为没有 reason、落盘却写了 reason」的不一致。
+      // 两者按动作各归其位：reason 只随 deny、note 只随 ask（allow 放行后不再弹窗，都存不下）。
+      const reason = decision === 'deny' ? normalizeText(o.reason) : undefined
+      const note = decision === 'ask' ? normalizeText(o.note) : undefined
+      // 回写既有条目时用的字段补丁（同向去重命中后要把新文字写回去）
+      const textPatch = (hit) => {
+        if (reason) hit.reason = reason
+        if (note) hit.note = note
+        return hit
+      }
       // 新条目一律插到数组头部：resolveCategory 只取首个匹配，即「最新决定先生效」；
       // 同方向重复写入直接跳过并返回既有条目，避免同一决定在列表里堆积。
-      const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {})
+      const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {}, note ? { note } : {})
       try {
         const block = target === 'global' ? config.global : ensureProject()
         if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1) {
@@ -2567,7 +2689,7 @@ export default {
             // 命中既有同向条目：提到数组头部，否则它会被前面的反向旧条目遮蔽（resolveCategory 只取首个匹配），
             // 用户的决定等于被静默丢弃；带新理由时一并回写（reason 已在入口按 deny + trim + 200 规范化）。
             const hit = c.exceptions.splice(idx, 1)[0]
-            if (reason) hit.reason = reason
+            textPatch(hit)
             c.exceptions.unshift(hit)
             block[cat] = c
             return hit
@@ -2585,7 +2707,7 @@ export default {
           const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)
           if (idx !== -1) {
             const hit = c.exceptions.splice(idx, 1)[0]
-            if (reason) hit.reason = reason
+            textPatch(hit)
             c.exceptions.unshift(hit)
             block.command = c
             return hit
@@ -2632,8 +2754,7 @@ export default {
       try {
         const block = target === 'project' ? ensureProject() : config.global
         if (entry.cat === 'quick') {
-          if (!block.quickTools) block.quickTools = {}
-          block.quickTools[entry.tool] = action
+          setQuickAction(target, entry.tool, action)
           return
         }
         if (entry.kind === 'path' && entry.cat && EXC_CATS.indexOf(entry.cat) !== -1 && entry.value) {
@@ -2954,7 +3075,7 @@ export default {
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
         cats: CATS,
         editorKernel: { setting: editorKernelSetting(), ...resolveEditorKernel(exec) },
-        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode() },
+        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
         excCats: EXC_CATS,
         modes: MODES,
         allModes: ALL_MODES,
@@ -3134,7 +3255,7 @@ export default {
         if (pathname === '/permgate/set-fallback' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
-          if (!setFallbackMode(target, a.mode)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
+          if (!setFallbackMode(target, a.mode, a.reason)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -3159,19 +3280,19 @@ export default {
         }
         if (pathname === '/permgate/set-category' && method === 'POST') {
           await init(exec)
+          // target 与其它设置路由同口径归一（缺失/非法一律 global）：若直接把 a.target 传进
+          // setCategoryMode，非 'global' 的值会落到 project 并 ensureProject() 凭空建块写盘。
+          const target = normTarget(a)
           if (CATS.indexOf(a.category) === -1) return json(res, { error: '未知分类: ' + a.category })
-          if (!setCategoryMode(a.target, a.category, a.mode)) return json(res, { error: '非法的 target/mode 组合' })
+          if (!setCategoryMode(target, a.category, a.mode, a.reason)) return json(res, { error: '非法的 target/mode 组合' })
           await persist(exec)
           return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-quick' && method === 'POST') {
           await init(exec)
+          const target = normTarget(a)
           if (!a.tool || !String(a.tool)) return json(res, { error: 'tool 不能为空' })
-          if (ALL_MODES.indexOf(a.action) === -1) return json(res, { error: '非法动作' })
-          const block = a.target === 'project' ? ensureProject() : config.global
-          if (!block.quickTools) block.quickTools = {}
-          if (a.action === 'inherit') delete block.quickTools[a.tool]
-          else block.quickTools[a.tool] = a.action
+          if (!setQuickAction(target, a.tool, a.action, a.reason)) return json(res, { error: '非法动作' })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -3179,11 +3300,11 @@ export default {
           await init(exec)
           if (EXC_CATS.indexOf(a.category) === -1) return json(res, { error: '该分类不支持例外' })
           if (!a.match || !String(a.match)) return json(res, { error: 'match 不能为空' })
-          const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, reason: a.reason, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
+          const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, reason: a.reason, note: a.note, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
           if (!e) return json(res, { error: '非法的例外参数' })
           // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新决定插头部」的语义，
           // 否则面板新加的例外会排在历史条目之后，被 resolveCategory 的首个匹配静默屏蔽。
-          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, { target: a.target, reason: a.reason })
+          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, { target: a.target, reason: a.reason, note: a.note })
           if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)
           return json(res, { added: written, status: statusView(exec) })
@@ -3325,12 +3446,13 @@ export default {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         category: { type: 'string', required: true, enum: CATEGORY_ENUM },
         mode: { type: 'string', required: true, enum: ['ask', 'allow', 'deny', 'inherit'], description: '目标动作；inherit 仅适用于项目' },
+        reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：该分类被拒时回给 AI（为什么被拒、该怎么改）' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
         if (CATS.indexOf(args.category) === -1) return { error: '未知分类: ' + args.category }
-        if (!setCategoryMode(args.target, args.category, args.mode)) return { error: '非法的 target/mode 组合' }
+        if (!setCategoryMode(args.target, args.category, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
         await persist(exec)
         return statusView(exec)
       },
@@ -3342,11 +3464,12 @@ export default {
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         mode: { type: 'string', required: true, enum: ALL_MODES, description: '兜底动作；inherit 仅适用于项目' },
+        reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：被兜底拒绝时回给 AI（为什么被拒、该怎么改）' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
-        if (!setFallbackMode(args.target, args.mode)) return { error: '非法的 target/mode 组合' }
+        if (!setFallbackMode(args.target, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
         await persist(exec)
         return statusView(exec)
       },
@@ -3370,23 +3493,24 @@ export default {
 
     registerTool({
       name: 'perm_add_exception',
-      description: '给分类添加一条例外。directory/read/image/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作，仅 allow/deny。',
+      description: '给分类添加一条例外。directory/read/image/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作；action: allow=命中即放行，ask=命中即弹审批，deny=命中即拒绝。',
       parameters: {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
         match: { type: 'string', required: true, description: '路径 glob 或命令名/子串（* 匹配任意剩余）' },
-        action: { type: 'string', required: true, enum: ['allow', 'deny'], description: '命中例外后的动作' },
-        reason: { type: 'string', description: '自定义拒绝原因（仅 deny 例外生效；allow 例外忽略）' },
+        action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny'], description: '命中例外后的动作' },
+        reason: { type: 'string', description: '拒绝原因，仅 deny 例外生效：拒绝时会回给 AI（为什么被拒、该怎么改）' },
+        note: { type: 'string', description: '备注，仅 ask 例外生效：命中时显示在审批弹窗上，方便日后回看当初为什么特意拦它。注意这是给人看的备注、不是保密字段，请勿写入敏感信息' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
         if (EXC_CATS.indexOf(args.category) === -1) return { error: '该分类不支持例外' }
         if (!args.match || !String(args.match)) return { error: 'match 不能为空' }
-        const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
+        const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, note: args.note, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
         if (!e) return { error: '非法的例外参数' }
         // 与面板路由共用同一写入点：同方向不重复、新决定插到数组头部，避免被历史条目遮蔽。
-        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, { target: args.target, reason: args.reason })
+        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, { target: args.target, reason: args.reason, note: args.note })
         if (!written) return { error: '例外未写入：分类/参数不支持' }
         await persist(exec)
         return { added: written, status: statusView(exec) }
@@ -3419,16 +3543,13 @@ export default {
         target: { type: 'string', required: true, enum: ['global', 'project'] },
         tool: { type: 'string', required: true, description: '工具名，支持通配如 cordis_*' },
         action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny', 'inherit'], description: '动作；inherit 移除' },
+        reason: { type: 'string', description: '拒绝原因，仅 action=deny 生效：该工具被拒时回给 AI（为什么被拒、该怎么改）' },
       },
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
         if (!args.tool || !String(args.tool)) return { error: 'tool 不能为空' }
-        if (ALL_MODES.indexOf(args.action) === -1) return { error: '非法动作' }
-        const block = args.target === 'project' ? ensureProject() : config.global
-        if (!block.quickTools) block.quickTools = {}
-        if (args.action === 'inherit') delete block.quickTools[args.tool]
-        else block.quickTools[args.tool] = args.action
+        if (!setQuickAction(args.target, args.tool, args.action, args.reason)) return { error: '非法动作' }
         await persist(exec)
         return statusView(exec)
       },
