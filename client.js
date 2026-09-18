@@ -904,6 +904,11 @@ window.__ModuleLoader__.load({
 				'panel.excNotePh': '选填：命中时显示在弹窗上，勿写敏感信息',
 				'panel.denyReason': '拒绝原因',
 				'panel.denyReasonPh': '选填：拒绝时告知 AI 原因',
+				'panel.denyReasonHint': '填写后按回车或点「保存」生效',
+				'panel.denyReasonNone': '未设置拒绝原因，将用默认原因',
+				'panel.reasonEdit': '编辑',
+				'panel.reasonSave': '保存',
+				'panel.reasonSaved': '已保存',
 				'panel.addExc': '添加例外',
 				'panel.confirmDel': '确认删除？',
 				'panel.cancel': '取消',
@@ -1081,6 +1086,11 @@ window.__ModuleLoader__.load({
 				'panel.excNotePh': 'optional: shown in the dialog; no secrets',
 				'panel.denyReason': 'Deny reason',
 				'panel.denyReasonPh': 'optional: tells the AI why',
+				'panel.denyReasonHint': 'press Enter or click Save to apply',
+				'panel.denyReasonNone': 'no reason set; default is used',
+				'panel.reasonEdit': 'Edit',
+				'panel.reasonSave': 'Save',
+				'panel.reasonSaved': 'saved',
 				'panel.addExc': 'Add exception',
 				'panel.confirmDel': 'Confirm delete?',
 				'panel.cancel': 'Cancel',
@@ -1768,6 +1778,25 @@ window.__ModuleLoader__.load({
 			// 分类默认值与兜底的拒绝原因输入框：{ [tab]: { [cat]: '' } } / { [tab]: '' }
 			const [catReasons, setCatReasons] = React.useState({ global: {}, project: {} });
 			const [fbReason, setFbReason] = React.useState({ global: '', project: '' });
+			// 拒绝原因刚保存成功的那一格：{ key: 'kind:tab:key', seq }，显示短暂的对勾反馈。
+			const [reasonSaved, setReasonSaved] = React.useState(null);
+			React.useEffect(() => {
+				if (!reasonSaved) return undefined;
+				const id = setTimeout(() => setReasonSaved(null), 1800);
+				return () => clearTimeout(id);
+			}, [reasonSaved]);
+			// 正在编辑中的拒绝原因格（'kind:tab:key'）：非编辑态一律只读展示，避免「看起来能打字、
+			// 但不知道什么时候生效」——只读值 + 明确的「编辑 / 保存」按钮才是可预期的交互。
+			const [reasonEditing, setReasonEditing] = React.useState(null);
+			// 焦点描述 → 稳定字符串键，用于比对「这一格是否在编辑 / 是否刚保存」
+			const reasonKeyOf = (f) => (f ? f.kind + ':' + f.tab + ':' + (f.key === null || f.key === undefined ? '' : f.key) : '');
+			// 对勾的写入单点。刻意定义在 reasonKeyOf 之后：它体内要调 reasonKeyOf，
+			// 若写在前面就只能靠「箭头函数体延迟求值」侥幸不报 TDZ，属隐性顺序依赖。
+			// 带 seq 是为了「同一格连续保存两次」也能产生新的 state 身份：若只存稳定字符串键，
+			// 第二次 setState 与当前值相同，React 会 bail out、不重跑上面的 effect，
+			// 旧定时器既不清理也不重新计时，对勾会按第一次保存的时间点提前消失。
+			const reasonSavedSeq = React.useRef(0);
+			const markReasonSaved = (f) => { reasonSavedSeq.current += 1; setReasonSaved({ key: reasonKeyOf(f), seq: reasonSavedSeq.current }); };
 			const [exVals, setExVals] = React.useState({ directory: '', command: '', read: '', edit: '' });
 			const [exAction, setExAction] = React.useState('allow');
 			const [exReasonVal, setExReasonVal] = React.useState('');
@@ -1777,14 +1806,17 @@ window.__ModuleLoader__.load({
 			const [exNoteVal, setExNoteVal] = React.useState('');
 			const [newTool, setNewTool] = React.useState('');
 			const [newToolAction, setNewToolAction] = React.useState('allow');
+			// 新增快捷工具行的拒绝原因：与例外的新增行同构（选「拒绝」才出现输入框），
+			// 否则用户为新增行选了拒绝却无处填写原因，只能先添加、再到该行上补填。
+			const [newToolReason, setNewToolReason] = React.useState('');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
-			// 当前正在编辑（聚焦中）的拒绝原因输入框：{ kind: 'cat'|'quick'|'fb', tab, key }。
+			// 当前正在编辑（尚未保存）的拒绝原因格：{ kind: 'cat'|'quick'|'fb', tab, key }。
 			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
 			// 面板自身的 invoke 回调触发，还由 SSE 的 status/refresh 事件触发——宿主在 init()、
 			// AI 侧 perm_* 写入、配置重载、会话事件时都会 broadcast status。若不保留草稿，
-			// 用户「已输入但未失焦」的文字会被后台推送静默清空。
+			// 用户「已输入但还没点保存」的文字会被后台推送静默清空。
 			const reasonFocus = React.useRef(null);
 
 			React.useEffect(() => {
@@ -1794,8 +1826,9 @@ window.__ModuleLoader__.load({
 			}, [confirm]);
 
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
-			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点标记（换层后它指向的行已不在渲染中）。
-			React.useEffect(() => { setConfirm(null); reasonFocus.current = null; }, [tab]);
+			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点与编辑态（换层后它们指向的行已不在渲染中，
+			// 编辑态若残留，切回来时同一格会莫名其妙还处于可输入状态）。
+			React.useEffect(() => { setConfirm(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -1869,6 +1902,30 @@ window.__ModuleLoader__.load({
 					}
 					return qr;
 				});
+				// 编辑态收敛：上面三条清理路径（endEdit / exitEditOf / 切 tab）都只在「用户主动操作」
+				// 时触发，而 AI 侧 perm_* 写入、配置重载、删行、换会话都是服务端驱动的，不经过它们——
+				// 编辑态字符串会残留，格子重新出现时就成了「没点编辑却可输入」。故在整表重建后按
+				// **新的** mode 收敛一次：本格若不再渲染输入框（mode 不再是 deny，或键已不存在），
+				// 就一并丢弃编辑态与焦点标记。
+				const stillEditable = (fk) => {
+					if (!fk) return false;
+					// 键只可能含 kind / tab / key 三段，其中 key（分类名或工具名）本身可能含冒号，
+					// 故按前两个冒号切分，剩余整体作为 key。
+					const i = fk.indexOf(':');
+					const j = fk.indexOf(':', i + 1);
+					if (i < 0 || j < 0) return false;
+					const kind = fk.slice(0, i);
+					const t = fk.slice(i + 1, j);
+					const key = fk.slice(j + 1);
+					if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');
+					if (kind === 'quick') {
+						const sub = t === 'global' ? 'g' : 'p';
+						return !!(qs[key] && qs[key][sub] === 'deny');
+					}
+					return fbShow[t] === 'deny';
+				};
+				setReasonEditing((cur) => (stillEditable(cur) ? cur : null));
+				if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;
 			};
 
 			const refresh = () => {
@@ -1884,11 +1941,35 @@ window.__ModuleLoader__.load({
 				return () => off();
 			}, [sessionId]);
 
+			// 会写盘的端点：只有它们的 saveError 才代表「这次操作没落盘」。
+			// 不能对所有调用一视同仁：status.saveError 是**宿主侧的粘滞状态**（上一次写盘失败后
+			// 一直保留，直到某次 persist 成功或 load 重置），而 reload / open-config 这类只读调用
+			// 也会回带 status。若不加区分，用户成功打开配置文件后，面板反而会显示上一次的写盘错误、
+			// 并吞掉「已打开」提示（已实测复现）。
+			// 清单须与面板真正会调用的写盘端点一致（不多不少）：少一个则该端点的假成功漏网，
+			// 多一个则只读调用被误拦。regressions 里有一条断言会现场比对两边集合，防止各自漂移。
+			// 注意：面板已移除编辑器内核入口（有一条断言钉住 client 不得出现该残留），故此处也不列它。
+			const WRITE_METHODS = [
+				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
+				'permgate:set-fallback', 'permgate:set-sandbox',
+				'permgate:add-exception', 'permgate:remove-exception',
+				'permgate:add-rule', 'permgate:remove-rule',
+			];
 			const invoke = (method, args, done) => {
 				setBusy(true);
 				setMsg('');
 				call(method, Object.assign({}, args || {}, { sessionId: sessionId || undefined })).then((r) => {
 					if (r && r.error) { setMsg(String(r.error)); return; }
+					// 写盘失败不会回 error：宿主 persist() 的各个失败分支（配置被外部修改、home 未就绪、
+					// 目标不在 home 下、文件读不出、写入抛错）都只设 status.saveError 并 return false，
+					// 路由层又忽略返回值、照常回 200。若只看 r.error，就会出现「磁盘没写、界面却显示
+					// 已保存」的假成功。故对写盘端点，saveError 与 error 同等对待：报错、照常回填
+					// status（让面板显示磁盘上的真实值），且**不调用 done**（不点亮对勾、不做后续动作）。
+					// 注意 status 的位置不统一：多数路由平铺返回 statusView，而例外/规则的增删返回
+					// `{ added|removed, status: statusView }` —— 两处都要取，否则后者的假成功仍会漏网。
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr && WRITE_METHODS.indexOf(method) !== -1) { setMsg(String(saveErr)); applyStatus(st); return; }
 					setMsg(T('panel.saved'));
 					applyStatus(r && r.status ? r.status : r);
 					if (done) done(r);
@@ -1901,42 +1982,102 @@ window.__ModuleLoader__.load({
 				else setConfirm(key);
 			};
 
+			// 把某一格的草稿还原成服务端当前值（取消编辑、以及编辑态被外部关闭时用）。
+			// 三处（分类 / 快捷工具 / 兜底）取值口径必须与各自 commit 的去重基准同源。
+			const revertReason = (kind, key) => {
+				if (kind === 'cat') {
+					const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
+					const cur = (block && block[key] && block[key].reason) || '';
+					setCatReasons((prev) => Object.assign({}, prev, { [tab]: Object.assign({}, prev[tab], { [key]: cur }) }));
+					return;
+				}
+				if (kind === 'quick') {
+					const map = tab === 'global' ? (status && status.quickTools && status.quickTools.global) : (status && status.quickTools && status.quickTools.project);
+					const cur = map && map[key] && typeof map[key] === 'object' ? (map[key].reason || '') : '';
+					const sub = tab === 'global' ? 'g' : 'p';
+					setQuickReason((prev) => Object.assign({}, prev, { [key]: Object.assign({}, prev[key], { [sub]: cur }) }));
+					return;
+				}
+				const cur = (status && status.fallback && (tab === 'global' ? status.fallback.globalReason : status.fallback.projectReason)) || '';
+				setFbReason((prev) => Object.assign({}, prev, { [tab]: cur }));
+			};
+
+			// 退出某一格的编辑态：**只作废这一格**，并在它正是当前编辑格时清掉焦点标记。
+			// 早先三处 change* 内联写的是 setReasonEditing(null)（不分格地清掉全部格），
+			// 且不清 reasonFocus.current——用户改 A 行的下拉会把 B 行的编辑态一并关掉，
+			// B 行退回只读态却仍被 applyStatus 的草稿保护兜住，于是长期显示一份没落盘的草稿。
+			const exitEditOf = (kind, key) => {
+				const fk = reasonKeyOf({ kind: kind, tab: tab, key: key });
+				setReasonEditing((cur) => (cur === fk ? null : cur));
+				if (reasonKeyOf(reasonFocus.current) === fk) {
+					reasonFocus.current = null;
+					// 焦点标记一撤，applyStatus 就不会再用草稿覆盖服务端值；此处主动还原，
+					// 避免只读态在下一次 status 推送前继续显示未保存的草稿。
+					revertReason(kind, key);
+				}
+			};
+
 			// 分类默认值的动作切换：只改 mode。拒绝原因由下方 commitCatReason 走单数端点
 			// （permgate:set-category）单独提交；宿主在 mode 切离 deny 时会清掉 reason。
 			const changeCat = (c) => (e) => {
 				const mode = e.target.value;
 				setCats(Object.assign({}, cats, { [tab]: Object.assign({}, cats[tab], { [c]: mode }) }));
+				// 切离 deny 时作废该格的编辑态：控件会被卸载，若留着，切回 deny 时同一格会
+				// 莫名其妙又处于可输入状态（用户并没有点「编辑」）。
+				if (mode !== 'deny') exitEditOf('cat', c);
 				invoke('permgate:set-categories', { [tab]: { [c]: mode } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 			};
 
-			// 拒绝原因输入框的失焦提交：只在当前动作是 deny 时才写（其它动作下输入框根本不显示）。
-			// 用失焦而不是 onChange 逐字符提交，避免每敲一个字打一次盘。
+			// 拒绝原因保存单点：只在当前动作是 deny 时才写（其它动作下控件根本不显示）。
 			// 空串必须原样下发：宿主把「空串」定义为显式清除、「undefined」定义为保留原值，
 			// 若这里用 `|| undefined` 把清空折叠成 undefined，用户就再也删不掉写错的原因
 			// （旧文字会被 applyStatus 回填）。仅当该键确实缺失时才传 undefined。
-			const commitCatReason = (c) => () => {
+			const commitCatReason = (c) => (focus) => {
 				if ((cats[tab] ? cats[tab][c] : null) !== 'deny') return;
-				invoke('permgate:set-category', { target: tab, category: c, mode: 'deny', reason: catReasons[tab] ? catReasons[tab][c] : undefined });
+				const v = catReasons[tab] ? catReasons[tab][c] : undefined;
+				const cur = (status && status.categories && status.categories[tab] && status.categories[tab][c] && status.categories[tab][c].reason) || '';
+				// 与已落盘值相同就不写盘：回车与按钮可能各触发一次，避免无谓的重复请求
+				if ((v || '') === cur) return;
+				// 对勾只在**写盘成功**后才亮：invoke 在 r.error / catch 分支只 setMsg 报错、
+				// 不回滚标记，若在这里先亮，失败时界面会同时显示「✓ 已保存」和错误信息。
+				invoke('permgate:set-category', { target: tab, category: c, mode: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 
 			const changeQuick = (tool) => (e) => {
 				const mode = e.target.value;
 				const key = tab === 'global' ? 'g' : 'p';
 				setQuickSel(Object.assign({}, quickSel, { [tool]: Object.assign({}, quickSel[tool], { [key]: mode }) }));
+				// 同 changeCat：切离 deny 时作废该格的编辑态（只作废这一格，不动别的行）
+				if (mode !== 'deny') exitEditOf('quick', tool);
 				invoke('permgate:set-quick', { target: tab, tool, action: mode });
 			};
 
-			// 快捷工具拒绝原因的失焦提交（同上：仅 deny 行可见）
-			const commitQuickReason = (tool) => () => {
+			// 快捷工具拒绝原因保存（同上：仅 deny 行可见）
+			const commitQuickReason = (tool) => (focus) => {
 				const key = tab === 'global' ? 'g' : 'p';
 				const cur = quickSel[tool] ? quickSel[tool][key] : null;
 				if (cur !== 'deny') return;
-				invoke('permgate:set-quick', { target: tab, tool, action: 'deny', reason: quickReason[tool] ? quickReason[tool][key] : undefined });
+				const v = quickReason[tool] ? quickReason[tool][key] : undefined;
+				// 同 commitCatReason：与已落盘值相同就不写盘
+				const map = tab === 'global' ? (status && status.quickTools && status.quickTools.global) : (status && status.quickTools && status.quickTools.project);
+				const prev = map && map[tool] && typeof map[tool] === 'object' ? map[tool].reason : undefined;
+				if ((v || '') === (prev || '')) return;
+				// 同 commitCatReason：对勾只在写盘成功后亮
+				invoke('permgate:set-quick', { target: tab, tool, action: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 
 			const addQuick = () => {
 				if (!newTool || !String(newTool).trim()) { setMsg(T('panel.needTool')); return; }
-				invoke('permgate:set-quick', { target: tab, tool: String(newTool).trim(), action: newToolAction }, () => setNewTool(''));
+				// reason 只在选「拒绝」时下发（与面板其余入口同口径），且空值必须折叠成 undefined：
+				// 新增行允许输入本层已存在的工具名，而宿主把「空串」定义为显式清除——用户没填原因
+				// 就点「添加」，会静默删掉该键已保存的拒绝原因（旧文字再也回不来）。
+				// 此处不存在「用户想清空既有原因」的诉求，那是已存在行编辑/保存路径才有的语义。
+				invoke('permgate:set-quick', {
+					target: tab,
+					tool: String(newTool).trim(),
+					action: newToolAction,
+					reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
+				}, () => { setNewTool(''); setNewToolReason(''); });
 			};
 
 			// 删除该行在当前 tab 的快捷工具设置（服务端收到 action=inherit 即删除该键）；
@@ -1966,9 +2107,14 @@ window.__ModuleLoader__.load({
 			const removeException = (c, id) => {
 				setBusy(true);
 				setMsg('');
-				// 注意：invoke 是无返回值的回调式封装，这里必须用返回 promise 的 call
+				// 注意：这里必须用返回 promise 的 call（invoke 是无返回值的回调式封装），
+				// 但它同样会写盘，所以必须自己判 saveError —— 否则删除例外的写盘失败会被当成成功，
+				// 界面提示「已删除」而磁盘仍是旧配置，下次 reload 该例外会「复活」（已实测复现）。
 				call('permgate:remove-exception', { target: tab, category: c, id }).then((r) => {
 					if (r && r.error) { setMsg(String(r.error)); return; }
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr) { setMsg(String(saveErr)); applyStatus(st); return; }
 					applyStatus(r && r.status ? r.status : r);
 					// 删除只作用于选中行：明确反馈结果；同路径若仍有例外则提示剩余条数，否则清掉旧提示
 					if (r && r.removed === false) setMsg(r.reason ? String(r.reason) : T('panel.delFailed'));
@@ -1990,22 +2136,83 @@ window.__ModuleLoader__.load({
 
 			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 
-			// 拒绝原因输入框：三处（分类默认值 / 快捷工具 / 兜底）共用一个渲染函数，
-			// 保证占位文案、宽度与提交时机一致；只有当前动作是 deny 时才显示。
-			// focus 描述「本输入框属于哪一行」，聚焦期间 applyStatus 会保留该行的本地草稿。
-			const reasonInput = (value, onChange, onCommit, show, focus) => (show
-				? React.createElement('input', {
-					className: 'pg-field',
-					style: { maxWidth: 220 },
-					placeholder: T('panel.denyReasonPh'),
-					title: T('panel.denyReason'),
-					value: value || '',
-					onChange,
-					onFocus: () => { reasonFocus.current = focus; },
-					onBlur: () => { reasonFocus.current = null; onCommit(); },
+			// 拒绝原因控件：四处（分类默认值 / 快捷工具 / 兜底 / 快捷工具新增行）共用一个渲染函数，
+			// 保证文案、宽度与交互一致；只有当前动作是 deny 时才显示。
+			// 已存在的行：默认只读展示当前原因（未填时灰色占位），点「编辑」才可输入、按钮变「保存」，
+			// 保存或取消后回到只读 —— 这样「当前值是什么」「改了算不算数」都有确定答案。
+			// 新增行（focus 为 null）：它就是「新增工具」表单的一部分，始终可直接输入，
+			// 由旁边的「添加」按钮连同工具名一起提交，不套编辑/保存两态。
+			// focus 描述「本控件属于哪一行」，键形如 {kind, tab, key}；onCancel 把草稿还原成服务端值。
+			const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {
+				if (!show) return null;
+				const txt = String(value || '');
+				// 新增行没有「既有值」概念，不进入两态；它随「添加」按钮一起提交，
+				// 没有回车/保存动作，故 title 用字段名（panel.denyReason），
+				// 而不是已存在行那种「按回车或点保存生效」的提示。
+				if (focus === null) {
+					return React.createElement('input', {
+						className: 'pg-field',
+						style: { maxWidth: 220 },
+						placeholder: T('panel.denyReasonPh'),
+						title: T('panel.denyReason'),
+						value: txt,
+						onChange,
+						disabled: busy,
+					});
+				}
+				const fk = reasonKeyOf(focus);
+				const editing = reasonEditing === fk;
+				const saved = !!reasonSaved && reasonSaved.key === fk;
+				const btn = (label, onClick) => React.createElement('button', {
+					className: 'pg-btn',
+					style: { padding: '2px 8px', fontSize: 12 },
 					disabled: busy,
-				})
-				: null);
+					onClick,
+				}, label);
+				const endEdit = () => { reasonFocus.current = null; setReasonEditing(null); };
+				// 点「编辑」进入本格：若上一格还在编辑中，它的草稿既不提交也不该被静默丢弃，
+				// 先按「取消」口径还原成服务端值，再切到本格（与点「取消」按钮同语义）。
+				const beginEdit = () => {
+					const prevF = reasonFocus.current;
+					if (prevF && reasonKeyOf(prevF) !== fk) revertReason(prevF.kind, prevF.key);
+					reasonFocus.current = focus;
+					setReasonEditing(fk);
+				};
+				return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+					editing
+						? React.createElement('input', {
+							className: 'pg-field',
+							style: { maxWidth: 220 },
+							placeholder: T('panel.denyReasonPh'),
+							title: T('panel.denyReasonHint'),
+							value: txt,
+							onChange,
+							autoFocus: true,
+							// 回车 = 保存。不接管 Esc：取消走按钮，语义明确（Esc 不保存）。
+							// 必须排除输入法组合态：中文用户按回车确认候选词时同样会派发 Enter，
+							// 若直接提交，会把尚未上屏的拼音串当原因写盘并强制退出编辑态。
+							onKeyDown: (e) => {
+								if (e.nativeEvent && (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return;
+								if (e.key === 'Enter') { e.preventDefault(); onCommit(focus); endEdit(); }
+							},
+							disabled: busy,
+						})
+						// 只读态：有值显示原因本身，无值显示灰色占位（点明「未设置拒绝原因」而不是留空）。
+						// 占位文案较长，故给比输入框更宽的 240px；仍超长时靠 title 悬浮看全文。
+						: React.createElement('span', {
+							style: { maxWidth: 240, fontSize: 12, color: txt ? 'inherit' : 'rgba(128,128,128,0.8)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+							title: txt || T('panel.denyReasonNone'),
+						}, txt || T('panel.denyReasonNone')),
+					editing
+						? React.createElement(React.Fragment, null,
+							btn(T('panel.reasonSave'), () => { onCommit(focus); endEdit(); }),
+							btn(T('panel.cancel'), () => { onCancel(); endEdit(); }),
+						)
+						// 进入编辑态时登记焦点：编辑期间的 SSE status 推送不会用服务端值覆盖草稿
+						: btn(T('panel.reasonEdit'), beginEdit),
+					saved ? React.createElement('span', { style: { fontSize: 12, color: '#2e7d32', whiteSpace: 'nowrap' } }, '✓ ' + T('panel.reasonSaved')) : null,
+				);
+			};
 
 			const catBlock = (c) => {
 				const mode = cats[tab] ? (cats[tab][c] || (tab === 'project' ? 'inherit' : 'ask')) : (tab === 'project' ? 'inherit' : 'ask');
@@ -2025,6 +2232,8 @@ window.__ModuleLoader__.load({
 								commitCatReason(c),
 								mode === 'deny',
 								{ kind: 'cat', tab: tab, key: c },
+								// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
+								() => revertReason('cat', c),
 							),
 							sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 						),
@@ -2089,15 +2298,19 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13 } }, t),
 						desc ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, desc) : null,
 					),
-					// 该工具被显式设为「拒绝」时才有拒绝原因：被拒时它会回给 AI
+					sel(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES, busy),
+					// 拒绝原因排在动作下拉**之后**：工具名 span 的 minWidth 撑出了固定的下拉列宽，
+					// 输入框插在它前面会把该行的下拉整体右推（窄面板下直接换行到下一行），
+					// 看起来就是「位置漂移」——只有选「拒绝」的行会漂，其它行不动。
 					reasonInput(
 						quickReason[t] ? quickReason[t][key] : '',
 						(e) => setQuickReason(Object.assign({}, quickReason, { [t]: Object.assign({}, quickReason[t], { [key]: e.target.value }) })),
 						commitQuickReason(t),
 						mode === 'deny',
 						{ kind: 'quick', tab: tab, key: t },
+						// 取消：还原成服务端当前值
+						() => revertReason('quick', t),
 					),
-					sel(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES, busy),
 					(!isPreset && hasKey) ? React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'quick:' + tab + ':' + t ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('quick:' + tab + ':' + t, () => removeQuick(t)) }, confirm === 'quick:' + tab + ':' + t ? T('panel.confirmDel') : T('panel.del')) : null,
 				);
 			};
@@ -2131,13 +2344,19 @@ window.__ModuleLoader__.load({
 			const fbVal = status && status.fallback ? (tab === 'global' ? status.fallback.global : status.fallback.project) : (tab === 'global' ? 'ask' : 'inherit');
 			const changeFallback = (e) => {
 				const mode = e.target.value;
+				// 同 changeCat：切离 deny 时作废该格的编辑态（兜底每层只有一个键，按格等价于按 tab）
+				if (mode !== 'deny') exitEditOf('fb', null);
 				invoke('permgate:set-fallback', { target: tab, mode }, () => setMsg(T('panel.fallbackSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{v}', modeLabel(mode))));
 			};
-			// 兜底拒绝原因的失焦提交（仅兜底为 deny 时该输入框可见）
+			// 兜底拒绝原因保存（仅兜底为 deny 时该控件可见）
 			// 同 commitCatReason：空串是「显式清除」，不可折叠成 undefined（那会变成「保留原值」）
-			const commitFbReason = () => {
+			const commitFbReason = (focus) => {
 				if (fbVal !== 'deny') return;
-				invoke('permgate:set-fallback', { target: tab, mode: 'deny', reason: fbReason[tab] });
+				const v = fbReason[tab];
+				const prev = tab === 'global' ? (status && status.fallback && status.fallback.globalReason) : (status && status.fallback && status.fallback.projectReason);
+				if ((v || '') === (prev || '')) return;
+				// 同 commitCatReason：对勾只在写盘成功后亮
+				invoke('permgate:set-fallback', { target: tab, mode: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 			const sandboxOptions = tab === 'global' ? ['workspace-write', 'danger-full-access'] : ['workspace-write', 'danger-full-access', 'inherit'];
 			const changeSandbox = (e) => {
@@ -2198,6 +2417,15 @@ window.__ModuleLoader__.load({
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 						React.createElement('input', { className: 'pg-field', placeholder: T('panel.quickAdd'), value: newTool, onChange: (e) => setNewTool(e.target.value), disabled: busy }),
 						sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy),
+						// 新增行选「拒绝」时同样给原因输入框，与已存在的行保持一致。
+						// 提交回调传 null：新增行没有独立的保存动作，原因随「添加」按钮一并下发。
+						reasonInput(
+							newToolReason,
+							(e) => setNewToolReason(e.target.value),
+							null,
+							newToolAction === 'deny',
+							null,
+						),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: addQuick }, T('panel.quickAddBtn')),
 					),
 				),
@@ -2229,6 +2457,8 @@ window.__ModuleLoader__.load({
 								commitFbReason,
 								fbVal === 'deny',
 								{ kind: 'fb', tab: tab, key: null },
+								// 取消：还原成服务端当前值
+								() => revertReason('fb', null),
 							),
 							sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
 						),

@@ -802,6 +802,25 @@ group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三
   const keepQ3 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'allow' })
   ok('group16: 快捷工具切离 deny 时原因被清除', !!(keepQ3.data && keepQ3.data.quickTools.global.web_search.reason === undefined && keepQ3.data.quickTools.global.web_search.action === 'allow'), JSON.stringify(keepQ3.data && keepQ3.data.quickTools.global.web_search))
 
+  // (h) 面板「新增工具名」行：选拒绝时原因必须一并写入（否则用户只能先添加、再到该行补填）
+  const addQ = await post('/permgate/set-quick', { target: 'global', tool: 'todo_write', action: 'deny', reason: '新增行的原因' })
+  ok('group16: 新增行带 reason 一次写入成功', !!(addQ.data && addQ.data.quickTools.global.todo_write && addQ.data.quickTools.global.todo_write.action === 'deny' && addQ.data.quickTools.global.todo_write.reason === '新增行的原因'), JSON.stringify(addQ.data && addQ.data.quickTools.global.todo_write))
+  const outAdd = await runTool('todo_write', {})
+  ok('group16: 新增行的原因同样回给 AI', !!outAdd && outAdd.kind === 'deny' && String(outAdd.reason).indexOf('新增行的原因') !== -1, JSON.stringify(outAdd))
+
+  // (i) 宿主 reason 三态契约的固定：undefined=保留原值、''=显式清除。
+  // 注意本文件只加载宿主 index.js，**不加载面板 client.js**，所以这一段固定的是宿主侧语义，
+  // 不是面板行为。它之所以值得钉住：面板「新增工具名」行允许输入本层已存在的工具名，
+  // 面板侧必须把「没填原因」折叠成 undefined（见 regressions.mjs 的对应守卫），
+  // 否则一旦原样下发空串，宿主就会走「显式清除」分支，把该键已保存的拒绝原因静默删掉。
+  // 面板侧的回归守卫在 test/regressions.mjs（字符串断言），此处只保证宿主契约不被改坏。
+  const seedKeep = await post('/permgate/set-quick', { target: 'global', tool: 'todo_write', action: 'deny', reason: '既有的原因' })
+  ok('group16: 重名新增前先写入非空原因（前置，避免断言空转）', !!(seedKeep.data && seedKeep.data.quickTools.global.todo_write.reason === '既有的原因'), JSON.stringify(seedKeep.data && seedKeep.data.quickTools.global.todo_write))
+  const blankAdd = await post('/permgate/set-quick', { target: 'global', tool: 'todo_write', action: 'deny' })
+  ok('group16: 宿主契约——不下发 reason（undefined）保留既有原因', !!(blankAdd.data && blankAdd.data.quickTools.global.todo_write.reason === '既有的原因'), JSON.stringify(blankAdd.data && blankAdd.data.quickTools.global.todo_write))
+  const emptyAdd = await post('/permgate/set-quick', { target: 'global', tool: 'todo_write', action: 'deny', reason: '' })
+  ok('group16: 宿主契约——显式空串仍按「清除」处理', !!(emptyAdd.data && emptyAdd.data.quickTools.global.todo_write.reason === undefined), JSON.stringify(emptyAdd.data && emptyAdd.data.quickTools.global.todo_write))
+
   // (g) 面板清空输入框的等价请求：必须真的清除，而不是被当成「未提供」保留原值。
   // 回归背景：面板曾用 `|| undefined` 把空串折叠掉，于是清空后 reason 键根本不发出，
   // 服务端走「保留原值」分支 → 旧文字被 statusView 回填，用户永远删不掉写错的原因。

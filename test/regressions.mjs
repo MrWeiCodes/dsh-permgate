@@ -13,7 +13,9 @@ const src = readFileSync(pathJoin(ROOT, 'index.js'), 'utf8')
 const cli = readFileSync(pathJoin(ROOT, 'client.js'), 'utf8')
 
 const fail = []
-const ok = (name, cond) => { if (!cond) fail.push(name) }
+// extra：失败时附带的诊断信息（与 smoke.mjs 的 ok 同签名）。golden 比对类断言必须给，
+// 否则失败时只报「某条断言不通过」，改的人看不出期望与实际的差异在哪。
+const ok = (name, cond, extra) => { if (!cond) fail.push(name + (extra ? ' — ' + extra : '')) }
 const group = (t) => console.log('\n— ' + t)
 
 // ─────────────────────────────────────────────────────────────
@@ -137,7 +139,7 @@ ok('quick 存在性判断不用原型链写法', !cli.includes("pq[t] && pq[t] !
 ok('删除按钮只给「自加且本层有键」的行', cli.includes('(!isPreset && hasKey)'))
 ok('删除不做本地乐观删除', !cli.includes('delete next[tool]'))
 ok('确认态 key 含层级', cli.includes("'quick:' + tab + ':' + t"))
-ok('切 tab 清空确认态（并丢弃草稿焦点标记）', cli.includes('React.useEffect(() => { setConfirm(null); reasonFocus.current = null; }, [tab]);'))
+ok('切 tab 清空确认态（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);'))
 ok('兜底文案不再以 todo/cordis 举例', !cli.includes('如 MCP、todo、cordis') && !cli.includes('(e.g. MCP, todo, cordis)'))
 ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'"))
 {
@@ -402,8 +404,33 @@ ok('quickAction 用取值函数取值，并保留防御性字符串回退（防�
 ok('三处 reason 都拼进回给 AI 的拒绝文案', src.includes("const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''") && src.includes("const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''") && src.includes("' 次相同调用' + exReason(d)"))
 ok('perm_set_category / set_fallback / set_quick 都收 reason 参数', src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：该分类被拒时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：被兜底拒绝时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 action=deny 生效：该工具被拒时回给 AI"))
 ok('status 下发三处的 reason（面板回填用）', src.includes('globalReason: normalizeText(config.global.fallbackReason) || null') && src.includes('projectReason: normalizeText(proj && proj.fallbackReason) || null'))
-ok('面板三处共用同一个 reasonInput 渲染函数（占位与提交时机一致）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus) => (show') && (cli.match(/reasonInput\(/g) || []).length === 3)
-ok('面板拒绝原因用失焦提交（不逐字符打盘）', cli.includes('const commitCatReason = (c) => () => {') && cli.includes('const commitQuickReason = (tool) => () => {') && cli.includes('const commitFbReason = () => {') && cli.includes('onBlur: () => { reasonFocus.current = null; onCommit(); }'))
+ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/兜底/快捷工具新增行）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {') && (cli.match(/reasonInput\(/g) || []).length === 4)
+// 防回退：快捷工具行的原因输入框必须在动作下拉**之后**——该行工具名 span 有 minWidth 撑出固定
+// 列宽，输入框插在它前面会把下拉右推（窄面板下换行），只有选「拒绝」的行会漂移。
+ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r) =>'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('sel(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
+// 防回退：新增行选了拒绝却无处填原因，只能先添加再补填。
+// 注意空值必须折叠成 undefined：新增行可以输入本层已存在的工具名，而宿主把「空串」定义为
+// 显式清除——用户没填原因就点「添加」，会静默删掉该键已保存的拒绝原因（改动前不传 reason 则保留）。
+ok('快捷工具新增行也带拒绝原因输入框并下发 reason（空值折叠为未提供）', cli.includes('const [newToolReason, setNewToolReason] = React.useState') && cli.includes("reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined") && cli.includes("() => { setNewTool(''); setNewToolReason(''); }"))
+// 防回退：输入框曾「永远可编辑 + 只在失焦时保存」，界面没有任何状态提示，用户填完不知道算不算数。
+// 现在改为只读展示 + 编辑/保存两态按钮：当前值可见、「改了有没有生效」有确定答案。
+ok('拒绝原因默认只读，点「编辑」才可输入（按钮变保存/取消）', cli.includes('const [reasonEditing, setReasonEditing] = React.useState(null)') && cli.includes("btn(T('panel.reasonEdit'), beginEdit)") && cli.includes("btn(T('panel.reasonSave'), () => { onCommit(focus); endEdit(); })") && cli.includes("btn(T('panel.cancel'), () => { onCancel(); endEdit(); })"))
+ok('只读态显示当前原因、未设置时给灰色占位（不留空）', cli.includes("}, txt || T('panel.denyReasonNone')),") && cli.includes("color: txt ? 'inherit' : 'rgba(128,128,128,0.8)'"))
+// 防回退：占位文案必须说清「未设置的是什么」——只写「未设置」时用户不知道指哪个字段
+ok('未设置占位文案点明字段与后果', cli.includes("'panel.denyReasonNone': '未设置拒绝原因，将用默认原因'") && cli.includes("'panel.denyReasonNone': 'no reason set; default is used'"))
+ok('回车即保存并给出「已保存」反馈', cli.includes("if (e.key === 'Enter') { e.preventDefault(); onCommit(focus); endEdit(); }") && cli.includes("'✓ ' + T('panel.reasonSaved')") && cli.includes("'panel.denyReasonHint'") && cli.includes('const [reasonSaved, setReasonSaved] = React.useState(null)'))
+// 防回退：取消必须还原成服务端当前值，而不是清空——用户可能只是改错了想放弃，清空等于误删。
+// 三处（cat / quick / fb）都要断言取值表达式，且必须**限定在 revertReason 函数体内**：
+// `commitQuickReason` 里存在一模一样的 map 表达式、`commitCatReason` 里也有同形的 categories 取值，
+// 若只做全文 cli.includes(...)，改坏 revertReason 那一份时另一份仍会让断言为真（实测空转）。
+ok('取消编辑还原服务端当前值（不是清空）——三处取值口径齐全', (function () {
+  const body = cli.slice(cli.indexOf('const revertReason = (kind, key) =>'), cli.indexOf('const exitEditOf = (kind, key) =>'));
+  return body.includes("const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;")
+    && body.includes("const cur = (block && block[key] && block[key].reason) || ''")
+    && body.includes("const map = tab === 'global' ? (status && status.quickTools && status.quickTools.global) : (status && status.quickTools && status.quickTools.project);")
+    && body.includes("const cur = map && map[key] && typeof map[key] === 'object' ? (map[key].reason || '') : ''")
+    && body.includes("const cur = (status && status.fallback && (tab === 'global' ? status.fallback.globalReason : status.fallback.projectReason)) || ''");
+})())
 // 防回退：后台 status 推送（AI 改权限 / 配置重载 / 会话事件）会用服务端值整表重建三份 reason state，
 // 若不保留聚焦中的草稿，用户「已输入未失焦」的文字会被静默清空（注释曾宣称不会，实际会）。
 ok('聚焦中的拒绝原因草稿不被 status 回填覆盖（且仅在输入框仍可见时兜住）', cli.includes('const reasonFocus = React.useRef(null)') && cli.includes('const focusNow = reasonFocus.current') && cli.includes("focusNow.kind === 'cat'") && cli.includes("focusNow.kind === 'quick'") && cli.includes("focusNow.kind === 'fb'") && cli.includes("cs[focusNow.tab][focusNow.key] === 'deny'") && cli.includes("qs[focusNow.key][sub] === 'deny'") && cli.includes("fbShow[focusNow.tab] === 'deny'") && cli.includes('reasonFocus.current = focus'))
@@ -414,7 +441,182 @@ ok('面板全局列与服务端同径跳过 inherit', cli.includes("hasOwnKey(gq
 // 防回退：面板曾用 `|| undefined` 把清空产生的空串折叠成 undefined，而宿主把 undefined 解释为
 // 「保留原值」——用户于是永远删不掉写错的拒绝原因（旧文字还会被 applyStatus 回填）。
 // 空串必须原样下发才能命中宿主的「显式清除」分支。
-ok('面板清空拒绝原因时透传空串（不折叠成 undefined）', cli.includes('reason: catReasons[tab] ? catReasons[tab][c] : undefined') && cli.includes('reason: fbReason[tab] }') && cli.includes('reason: quickReason[tool] ? quickReason[tool][key] : undefined') && !cli.includes('catReasons[tab][c] || undefined') && !cli.includes('fbReason[tab] || undefined') && !cli.includes('quickReason[tool][key] || undefined'))
+ok('面板清空拒绝原因时透传空串（不折叠成 undefined）', cli.includes('const v = catReasons[tab] ? catReasons[tab][c] : undefined') && cli.includes('const v = fbReason[tab]') && cli.includes('const v = quickReason[tool] ? quickReason[tool][key] : undefined') && cli.includes("mode: 'deny', reason: v }") && cli.includes("action: 'deny', reason: v }") && !cli.includes('catReasons[tab][c] || undefined') && !cli.includes('fbReason[tab] || undefined') && !cli.includes('quickReason[tool][key] || undefined'))
+// 防回退：只固定中间变量声明是不够的——把下发字段改成 `reason: v || undefined` 时，
+// 上面的 `const v = ...` 仍在，断言会空转。故必须同时校验真正下发的三个字段。
+ok('三处下发字段确实原样透传 v（不是只声明了 v）', (cli.match(/reason: v \}/g) || []).length === 3)
+// 防回退：对勾曾在 invoke 之前无条件点亮，写盘失败（r.error / catch 只 setMsg）时界面
+// 仍显示「✓ 已保存」，与错误信息并存。必须由成功回调点亮。
+ok('「已保存」对勾只在写盘成功回调里点亮', (cli.match(/\(\) => markReasonSaved\(focus\)/g) || []).length === 3 && !cli.includes('setReasonSaved(reasonKeyOf(focus));'))
+// 防回退：同一格连续保存两次时，若 reasonSaved 只存稳定字符串键，第二次 setState 会 bail out，
+// 旧定时器不重置、对勾按第一次的时间点提前消失。带 seq 才能每次产生新身份。
+ok('对勾状态带 seq，避免同格二次保存被 React bail out', cli.includes('const reasonSavedSeq = React.useRef(0)') && cli.includes('setReasonSaved({ key: reasonKeyOf(f), seq: reasonSavedSeq.current })') && cli.includes('reasonSaved.key === fk'))
+// 防回退：回车保存必须排除输入法组合态，否则中文用户按回车确认候选词会提交未上屏的拼音串。
+// 必须断言**完整语句含 return**：只匹配 isComposing 子串时，把 `return;` 换成 `;` 就能让守卫
+// 彻底失效而断言仍通过（守卫形同虚设，但测试全绿）。
+ok('回车保存排除输入法组合态（isComposing / keyCode 229，且确实 return）', cli.includes('if (e.nativeEvent && (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return;'))
+// 防回退：退出编辑态曾用 setReasonEditing(null) 不分格地清掉全部格，且不清 reasonFocus，
+// 于是别的行退回只读态却仍被草稿保护兜住，长期显示未落盘的草稿。必须按格退出并同步清焦点。
+// 注意要断言**函数体**：只固定函数名与调用点时，保留外壳、把函数体掏回旧的全局语义即可绕过
+// （实测该变异会让「改 A 行下拉误关 B 行编辑态」回归，而断言仍全绿）。
+ok('退出编辑态按格进行并同步清焦点（exitEditOf）', cli.includes('const exitEditOf = (kind, key) => {') && cli.includes('setReasonEditing((cur) => (cur === fk ? null : cur));') && cli.includes('if (reasonKeyOf(reasonFocus.current) === fk) {') && cli.includes('revertReason(kind, key);') && cli.includes("if (mode !== 'deny') exitEditOf('cat', c);") && cli.includes("if (mode !== 'deny') exitEditOf('quick', tool);") && cli.includes("if (mode !== 'deny') exitEditOf('fb', null);") && !cli.includes("if (mode !== 'deny') setReasonEditing(null);"))
+// 防回退：点另一格「编辑」时，前一格未保存的草稿既不提交也不该被静默丢弃（旧版是失焦即保存，
+// 用户会以为已写入）。必须按「取消」口径还原成服务端值。
+ok('切到另一格编辑前先还原前一格草稿', cli.includes('const beginEdit = () => {') && cli.includes('if (prevF && reasonKeyOf(prevF) !== fk) revertReason(prevF.kind, prevF.key);'))
+// 防回退：三处「取消」与 exitEditOf 共用同一份还原逻辑，取值口径须与服务端同源
+// （1 处定义 + 4 处调用：三处取消 + exitEditOf 内部）
+ok('取消/退出编辑共用单一还原入口（revertReason）', cli.includes('const revertReason = (kind, key) => {') && (cli.match(/revertReason\(/g) || []).length === 5 && !cli.includes('setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: (block'))
+// 防回退：只数调用次数是不够的——quick 分支的三要素（tab→global/project 表选择、legacy 对象守卫、
+// 写回 setQuickReason 的 sub 桶）必须逐项固定。同样必须限定在 revertReason 函数体内：
+// 这三要素里的 map 表达式在 commitQuickReason 中重复出现，全文匹配会空转（实测漏网）。
+ok('revertReason 的 quick 分支：表选择 / 对象守卫 / 写回 sub 桶三要素齐全', (function () {
+  const body = cli.slice(cli.indexOf('const revertReason = (kind, key) =>'), cli.indexOf('const exitEditOf = (kind, key) =>'));
+  return body.includes("const map = tab === 'global' ? (status && status.quickTools && status.quickTools.global) : (status && status.quickTools && status.quickTools.project);")
+    && body.includes("typeof map[key] === 'object' ? (map[key].reason || '') : ''")
+    && body.includes("const sub = tab === 'global' ? 'g' : 'p';")
+    && body.includes('setQuickReason((prev) => Object.assign({}, prev, { [key]: Object.assign({}, prev[key], { [sub]: cur }) }))');
+})())
+// 防回退：写盘失败不能算成功。宿主 persist() 失败时只设 status.saveError（HTTP 仍 200、无 error），
+// 若 invoke 只看 r.error，就会出现「磁盘没写、界面显示已保存」的假成功（已实测复现）。
+// 三处细节必须同时守住：① status 的位置不统一——多数路由平铺返回 statusView，例外/规则增删返回
+// `{ added|removed, status: statusView }`，只读顶层会漏掉后者；② 判据必须 return 收尾，
+// 否则删掉 return 会继续执行 setMsg('已保存')；③ 只对**会写盘的端点**生效——status.saveError 是
+// 宿主侧粘滞状态，reload/open-config 这类只读调用也会回带它，不加区分会把「成功打开配置文件」
+// 误报成上一次的写盘错误（已实测复现）。
+ok('invoke 把 saveError 与 error 同等对待（写盘失败不报「已保存」）', (function () {
+  const body = cli.slice(cli.indexOf('const invoke = (method, args, done) =>'), cli.indexOf('const confirmDelete = (key, fn) =>'));
+  const assign = 'const saveErr = (r && r.saveError) || (st && st.saveError);';
+  const guard = "if (saveErr && WRITE_METHODS.indexOf(method) !== -1) { setMsg(String(saveErr)); applyStatus(st); return; }";
+  return body.includes('const st = r && r.status ? r.status : r;')
+    && body.includes(assign)
+    && body.includes(guard)
+    // 顺序必须比较**整条赋值语句**与「已保存」的位置：只比较变量名 `saveErr` 的首次出现会空转
+    // ——把声明连同 if 一起搬到 setMsg 之后时，变量名位置也随之后移，比较结果依然为真（实测漏网）。
+    && body.indexOf(assign) < body.indexOf("setMsg(T('panel.saved'))")
+    && body.indexOf(guard) < body.indexOf("setMsg(T('panel.saved'))");
+})())
+// 防回退：WRITE_METHODS 必须与「面板实际调用的写盘端点」集合一致。
+// 少一个 -> 该端点的假成功漏网；多一个 -> 只读调用被误拦（两者都已实测复现过）。
+// 比对范围限定为**面板调用过的端点**：宿主还有面板已移除入口的写盘路由（如 set-editor-kernel），
+// 那些不该出现在面板清单里（另有断言钉住「client 无 set-editor-kernel 残留」）。
+ok('WRITE_METHODS 与面板调用的写盘端点一致（不多不少）', (function () {
+  const canon = (s) => s.replace(/^\/?permgate[\/:]/, '').replace(/^\/+/, '');
+  // 宿主侧：真正调用 persist() 的路由
+  const hostWrites = new Set();
+  for (const b of src.split(/if \(pathname === '/).slice(1)) {
+    const raw = (b.match(/^([^']+)'/) || [])[1];
+    if (raw && /await persist\(exec\)/.test(b.slice(0, 1500))) hostWrites.add(canon(raw));
+  }
+  // 面板侧：invoke(...) 调用过的端点
+  const called = new Set();
+  for (const mm of cli.matchAll(/invoke\('permgate:([^']+)'/g)) called.add(mm[1]);
+  // 契约一：面板经 invoke 调用的每个写盘端点都必须列出；列出的每个端点都必须是写盘端点
+  const shouldList = [...called].filter((c) => hostWrites.has(c)).sort();
+  const m = cli.match(/const WRITE_METHODS = \[([\s\S]*?)\];/);
+  if (!m || !shouldList.length) return false;
+  const listed = m[1].split(',').map((s) => canon(s.trim().replace(/^'|'$/g, ''))).filter(Boolean).sort();
+  const missing = shouldList.filter((w) => listed.indexOf(w) === -1);
+  const extra = listed.filter((w) => hostWrites.has(w) === false);
+  if (missing.length || extra.length) {
+    ok('WRITE_METHODS 与面板调用的写盘端点一致（不多不少）', false,
+      '未列出: [' + missing.join(', ') + '] 列了非写盘端点: [' + extra.join(', ') + ']');
+    return false;
+  }
+  return true;
+})())
+// 防回退：白名单只覆盖 invoke 路径。若有写盘端点绕开 invoke、直接用 call(...)，它**不会**被
+// WRITE_METHODS 保护，必须在该调用点自查 saveError —— 否则那条路径的假成功照样漏网。
+// 实测背景：remove-exception 走 call()，删除例外的写盘失败曾显示「已删除」而磁盘未写，
+// 下次 reload 该例外「复活」。
+// 断言方式：对「走 call 的写盘调用点」逐字比对**整段判定链**。
+// 之所以不查「附近是否出现 saveErr 字样」：删掉拦截语句后赋值行仍在，那种写法会空转
+// （实测 4/6 变异漏网）；逐字比对才能同时守住「赋值在」「拦截在」「顺序对」。
+ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖的那条路）', (function () {
+  const canon = (s) => s.replace(/^\/?permgate[\/:]/, '').replace(/^\/+/, '');
+  const hostWrites = new Set();
+  for (const b of src.split(/if \(pathname === '/).slice(1)) {
+    const raw = (b.match(/^([^']+)'/) || [])[1];
+    if (raw && /await persist\(exec\)/.test(b.slice(0, 1500))) hostWrites.add(canon(raw));
+  }
+  const lines = cli.split('\n');
+  const problems = [];
+  lines.forEach((l, i) => {
+    const mm = l.match(/\bcall\('permgate:([^']+)'/);
+    if (!mm || !hostWrites.has(canon(mm[1]))) return;
+    // 该调用点起、到本语句块结束（连续缩进段落）为止，取判定链
+    const seg = [];
+    for (let k = i; k < Math.min(lines.length, i + 14); k++) seg.push(lines[k].trim());
+    const chain = seg.join('\n');
+    const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim();
+    // 必须按顺序出现：error 分支 -> saveErr 赋值 -> saveErr 拦截+return -> 再 applyStatus
+    const needError = /if \(r && r\.error\) \{ setMsg\(String\(r\.error\)\); return; \}/;
+    const needAssign = /const saveErr = \(r && r\.saveError\) \|\| \(st && st\.saveError\);/;
+    const needGuard = /if \(saveErr\) \{ setMsg\(String\(saveErr\)\); applyStatus\(st\); return; \}/;
+    const cn = norm(chain);
+    const mErr = cn.match(needError);
+    const mAsg = cn.match(needAssign);
+    const mGrd = cn.match(needGuard);
+    if (!mErr || !mAsg || !mGrd) { problems.push(canon(mm[1]) + ' @' + (i + 1)); return; }
+    const iErr = cn.indexOf(mErr[0]);
+    const iAsg = cn.indexOf(mAsg[0]);
+    const iGrd = cn.indexOf(mGrd[0]);
+    // 拦截必须**紧跟在赋值之后**（中间不得出现 applyStatus / removed / remaining）：
+    // 只检查「拦截在成功提示之前」不够——把拦截挪到 applyStatus 与 removed 判定之间时，
+    // 它仍在成功提示之前，会漏网（实测）。
+    // 注意用 mAsg[0].length（实际匹配文本）而非正则 source 长度：source 含 `\(` 等转义，
+    // 长度比实际匹配串长，会让切片起点偏移、between 取空从而恒真（已踩过）。
+    const between = cn.slice(iAsg + mAsg[0].length, iGrd);
+    const adjacencyOk = !/applyStatus|removed === false|remaining > 0/.test(between);
+    if (!(iErr < iAsg && iAsg < iGrd) || !adjacencyOk) {
+      problems.push(canon(mm[1]) + ' @' + (i + 1));
+    }
+  });
+  if (problems.length) {
+    ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖的那条路）', false,
+      '判定链不完整或顺序不对: ' + problems.join(', '));
+    return false;
+  }
+  return true;
+})())
+// 防回退：编辑态只在「用户主动操作」时清理是不够的——AI 侧 perm_* 写入、配置重载、删行、换会话
+// 都是服务端驱动的，编辑态会残留成「没点编辑却可输入」。applyStatus 必须按新的 mode 收敛一次。
+// 注意必须断言**函数体内部判据**：只固定函数名与两处调用时，把判据 `=== 'deny'` 改成 `=== 'ask'`、
+// 或在函数体开头加 `return true/false`、或让冒号切分退化，都能绕过（实测 5/8 变异漏网）。
+// 行首的 `;` 是**必需的**，不是笔误：上一条语句以 `})())` 结尾，若去掉它，ASI 会把两者连成
+// `ok(...)(function(){...})`，运行时报 `TypeError: ok(...) is not a function`（已实测）。
+;(function () {
+  const body = cli.slice(cli.indexOf('const stillEditable = (fk) =>'), cli.indexOf('setReasonEditing((cur) => (stillEditable(cur)'));
+  // 去注释、折叠空白后与**期望实现逐字比对**。
+  // 之所以不用逐条 includes：插入式变异（在函数体开头加一句 `return false;`）不会破坏任何
+  // 既有子串，却能改变行为（误清正在编辑的格）——逐条 includes 对它完全无感（实测漏网）。
+  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim();
+  const expected = [
+    'const stillEditable = (fk) => {',
+    'if (!fk) return false;',
+    // 键解析：按**前两个**冒号切分（key 本身可能含冒号，工具名允许）
+    "const i = fk.indexOf(':');",
+    "const j = fk.indexOf(':', i + 1);",
+    'if (i < 0 || j < 0) return false;',
+    'const kind = fk.slice(0, i);',
+    'const t = fk.slice(i + 1, j);',
+    'const key = fk.slice(j + 1);',
+    // 三处判据都必须以 deny 为准（写反成 ask / 恒真 / 恒假都会失败）
+    "if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');",
+    "if (kind === 'quick') { const sub = t === 'global' ? 'g' : 'p';",
+    "return !!(qs[key] && qs[key][sub] === 'deny'); }",
+    "return fbShow[t] === 'deny'; };",
+  ].join(' ');
+  // 两处收敛调用必须在
+  const callOk = cli.includes('setReasonEditing((cur) => (stillEditable(cur) ? cur : null));')
+    && cli.includes('if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;');
+  const bodyOk = norm(body) === expected;
+  // 逐字比对失败时给出期望/实际：等价改写也会走到这里（该断言刻意偏严格，宁可误报不可漏报）
+  ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', bodyOk && callOk,
+    bodyOk ? '收敛调用缺失' : ('stillEditable 函数体与期望不符\n      期望: ' + expected + '\n      实际: ' + norm(body)));
+})()
+// 防回退：回车与「保存」按钮会各触发一次提交，必须按「与已落盘值相同就跳过」去重，
+// 否则每次点开又保存都写一次盘。
+ok('回车/保存按钮双触发按值去重（同值不重复写盘）', (cli.match(/if \(\(v \|\| ''\) === (cur|\(prev \|\| ''\))\) return;/g) || []).length === 3)
 ok('面板读快捷工具值时兼容对象/字符串两种形态', cli.includes('function quickMode(v) { return v && typeof v === \'object\' ? v.action : v; }') && cli.includes('function quickReasonOf(v) { return v && typeof v === \'object\' ? v.reason : undefined; }'))
 // 防回退：ask 例外不能算「已表态」，否则弹窗里再不给「允许此项」候选，用户只能去面板手工改
 ok('alreadyInProject 只认方向明确的例外（ask 不算已表态）', src.includes("const decided = (r) => r.action !== 'ask'") && (src.match(/exceptions\.some\(\(r\) => decided\(r\) && /g) || []).length === 2)
