@@ -1798,12 +1798,25 @@ window.__ModuleLoader__.load({
 			const reasonSavedSeq = React.useRef(0);
 			const markReasonSaved = (f) => { reasonSavedSeq.current += 1; setReasonSaved({ key: reasonKeyOf(f), seq: reasonSavedSeq.current }); };
 			const [exVals, setExVals] = React.useState({ directory: '', command: '', read: '', edit: '' });
-			const [exAction, setExAction] = React.useState('allow');
-			const [exReasonVal, setExReasonVal] = React.useState('');
-			// deny 的 reason 与 ask 的 note 是两个字段、两种用途，不能共用一个输入框：
-			// reason 会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」），note 只存在配置里、
-			// 命中时显示在审批弹窗上，方便日后回看（「当初为什么特意拦它」）。allow 两者都不用。
-			const [exNoteVal, setExNoteVal] = React.useState('');
+			// 例外添加行的动作与文字也必须**按分类**存，不能是全局单值：
+			// 每个分类各有一行添加控件，共用一份状态时在任一分类选「拒绝」或输入原因，
+			// 其余分类的添加行会一起联动（值被同步改写），用户看到的就是「一改全变」。
+			// 键为分类名，取值 { action, reason, note }：
+			//   reason —— deny 例外用，拒绝时回给 AI；
+			//   note   —— ask 例外用，命中时显示在审批弹窗上供日后回看。
+			// 两者不可互换（详见 addException 处的说明）。
+			const [exForm, setExForm] = React.useState({});
+			// 默认值单点：exOf 与 setExField 各写一份同样的字面量时，两处一旦漂移（例如只把
+			// setExField 那份的 action 改成 ask），点「添加」会先按 exOf 的 allow 落盘、紧接着
+			// 下拉跳成 ask，界面显示与刚写入的权限动作分叉，且回归断言覆盖不到该分支。
+			// 用工厂函数而非共享常量：未设置过的分类必须各拿到**独立对象**，共享引用会让改一处连带改另一处。
+			// #region ex-form-state —— 例外添加行的取值/写入单点。test/regressions.mjs 按这对标记
+			// 抠出下面三行做行为复算（按分类改一处、别处不得被连带改写；两处默认值必须同源）。
+			// 改动请保持在区块内：标记被删或代码移出区块，该测试会直接报出可读的失败。
+			const exDefault = () => ({ action: 'allow', reason: '', note: '' });
+			const exOf = (c) => exForm[c] || exDefault();
+			const setExField = (c, patch) => setExForm((prev) => Object.assign({}, prev, { [c]: Object.assign({}, prev[c] || exDefault(), patch) }));
+			// #endregion ex-form-state
 			const [newTool, setNewTool] = React.useState('');
 			const [newToolAction, setNewToolAction] = React.useState('allow');
 			// 新增快捷工具行的拒绝原因：与例外的新增行同构（选「拒绝」才出现输入框），
@@ -2090,17 +2103,18 @@ window.__ModuleLoader__.load({
 			const addException = (c) => {
 				const v = String(exVals[c] || '').trim();
 				if (!v) { setMsg(T('panel.needValue')); return; }
+				const f = exOf(c);
+				// 只清本分类那一行：清全部会把用户在别的分类填了一半的内容一并抹掉
 				setExVals(Object.assign({}, exVals, { [c]: '' }));
-				setExReasonVal('');
-				setExNoteVal('');
+				setExField(c, { reason: '', note: '' });
 				invoke('permgate:add-exception', {
 					target: tab,
 					category: c,
 					match: v,
-					action: exAction,
+					action: f.action,
 					// 只有 deny 会带拒绝原因（回给 AI），只有 ask 会带备注（显示在弹窗上供日后回看）
-					reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined,
-					note: exAction === 'ask' ? (String(exNoteVal || '').trim() || undefined) : undefined,
+					reason: f.action === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined,
+					note: f.action === 'ask' ? (String(f.note || '').trim() || undefined) : undefined,
 				});
 			};
 
@@ -2265,10 +2279,11 @@ window.__ModuleLoader__.load({
 							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 							React.createElement('input', { className: 'pg-field', placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'), value: exVals[c] || '', onChange: (e) => setExVals(Object.assign({}, exVals, { [c]: e.target.value })), disabled: busy }),
-							sel(exAction, (e) => setExAction(e.target.value), MODES, busy),
+							// 动作与文字都按本分类（c）取值：共用一份状态会让所有分类的添加行联动
+							sel(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES, busy),
 							// 两个输入框按动作二选一：拒绝时填「拒绝原因」（回给 AI），询问时填「备注」（方便日后回看）
-							exAction === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exReasonVal, onChange: (e) => setExReasonVal(e.target.value), disabled: busy }) : null,
-							exAction === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exNoteVal, onChange: (e) => setExNoteVal(e.target.value), disabled: busy }) : null,
+							exOf(c).action === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exOf(c).reason || '', onChange: (e) => setExField(c, { reason: e.target.value }), disabled: busy }) : null,
+							exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exOf(c).note || '', onChange: (e) => setExField(c, { note: e.target.value }), disabled: busy }) : null,
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => addException(c) }, T('panel.addExc')),
 						),
 					) : null,

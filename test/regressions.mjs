@@ -377,9 +377,90 @@ ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有�
 ok('同向去重命中后用 textPatch 回写（reason/note 各写各的）', src.includes('const textPatch = (hit) => {') && (src.match(/textPatch\(hit\)/g) || []).length === 2 && (src.match(/if \(reason\) hit\.reason = reason/g) || []).length === 1 && (src.match(/if \(note\) hit\.note = note/g) || []).length === 1)
 ok('工作区外 ask 分支回传例外来源（cat/ruleId 与文案同源）', src.includes("const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)") && (src.match(/m\.src \? m\.src\.ruleId : null/g) || []).length === 8)
 ok('工作区外 ask 的文案在有例外时用例外备注、无例外时回落「需确认」', (src.match(/m\.src \? exReason\(m\.src\) : '（需确认）'/g) || []).length === 3 && src.includes("m.src ? exReason(m.src) : '（写入需确认）'"))
-ok('面板例外动作下拉复用宿主下发的 MODES（三态，不再硬编码两项）', cli.includes('sel(exAction, (e) => setExAction(e.target.value), MODES, busy)') && !cli.includes("React.createElement('option', { value: 'allow' }, T('panel.allow'))"))
-ok('面板两个输入框按动作二选一（deny→拒绝原因，ask→说明）', cli.includes("exAction === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh')") && cli.includes("exAction === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh')"))
-ok('面板按动作分派 reason / note 两个字段', cli.includes("reason: exAction === 'deny' ? (String(exReasonVal || '').trim() || undefined) : undefined") && cli.includes("note: exAction === 'ask' ? (String(exNoteVal || '').trim() || undefined) : undefined") && cli.includes('const [exNoteVal, setExNoteVal] = React.useState'))
+ok('面板例外动作下拉复用宿主下发的 MODES（三态，不再硬编码两项）', cli.includes('sel(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES, busy)') && !cli.includes("React.createElement('option', { value: 'allow' }, T('panel.allow'))"))
+ok('面板两个输入框按动作二选一（deny→拒绝原因，ask→备注）', cli.includes("exOf(c).action === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh')") && cli.includes("exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh')"))
+ok('面板按动作分派 reason / note 两个字段', cli.includes("reason: f.action === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined") && cli.includes("note: f.action === 'ask' ? (String(f.note || '').trim() || undefined) : undefined"))
+// 防回退：例外添加行的动作/原因/备注曾经是**全局单值**（exAction / exReasonVal / exNoteVal），
+// 于是任一分类改了动作或输入文字，其余分类的添加行会一起联动（实测：一输入全变）。
+// 这里只查「旧写法没有回潮」＋「按分类存的状态确实存在」，都用宽松匹配：
+// 精确文本断言会对等价重构误报（`||` 换成 `??`、参数改名、加类型注释都属合法改动），
+// 而「按分类独立」这一语义由紧邻的行为复算实跑来验，不靠文本。
+ok('例外添加行不再用全局单值状态（exAction / exReasonVal / exNoteVal 无回潮）',
+  !cli.includes('const [exAction, setExAction]')
+  && !cli.includes('const [exReasonVal, setExReasonVal]')
+  && !cli.includes('const [exNoteVal, setExNoteVal]')
+  // 按分类存的状态存在（\s* 容忍格式差异，不锁死具体写法）
+  && /const \[exForm, setExForm\] = React\.useState\(/.test(cli)
+  && /\bconst exOf\s*=\s*\(/.test(cli)
+  && /\bconst setExField\s*=\s*\(/.test(cli))
+// 行为复算：把面板里真实的 exOf / setExField 抠出来实跑。
+// 抠取走 client.js 里的**显式区块标记**（// #region ex-form-state … // #endregion ex-form-state），
+// 而不是「搜索声明文本」那类启发式：后者会被注释里的同文本、字符串里的片段、重复声明带偏，
+// 历轮加固中反复造成误报与假通过（假通过最危险——注释里的旧实现能替真实代码背书）。
+// 区块标记是测试与实现之间的显式契约：标记被删或代码移出区块，本测试立刻报出可读的失败。
+// 断言本身只验行为，不锁写法：
+//   1) 按分类改一处，别处不得被连带改写（原 bug 的等价形态）；
+//   2) exOf 与 setExField 必须共用同一份默认值，否则「下拉显示的动作」与「落盘的动作」会分叉。
+{
+  // 成对匹配：取第一个 #region 与**紧随其后**的第一个 #endregion，二者必须严格配对。
+  // 不用 indexOf + lastIndexOf 那种不对称写法：那样 #region 取最前、#endregion 取最后，
+  // 一旦注释里出现多余的标记就会跨出真实区块（切片范围被拉大或跨越注释边界），
+  // 只能靠「拼出来的代码恰好跑不过」侥幸拦住，而不是真正检测到标记异常。
+  // 判定顺序按「数量异常 → 内容为空」排：先数标记个数，多对/缺失都能直接定性；
+  // 若先判内容，则「第一对标记之间恰好为空」会掩盖「存在多对标记」这一更根本的问题。
+  const nRegion = (cli.match(/\/\/ #region ex-form-state/g) || []).length
+  const nEnd = (cli.match(/\/\/ #endregion ex-form-state/g) || []).length
+  const rs = cli.indexOf('// #region ex-form-state')
+  const re = rs < 0 ? -1 : cli.indexOf('// #endregion ex-form-state', rs + 1)
+  const body = rs >= 0 && re > rs
+    ? cli.slice(cli.indexOf('\n', rs) + 1, cli.lastIndexOf('\n', re)).trim()
+    : ''
+  let behavOk = false
+  let detail = ''
+  if (nRegion === 0) detail = 'client.js 里找不到 #region ex-form-state 标记（本测试依赖它抠取 exDefault/exOf/setExField）'
+  else if (nEnd === 0) detail = 'client.js 里找不到 #endregion ex-form-state 标记'
+  else if (nRegion > 1 || nEnd > 1) detail = 'client.js 里出现了多对 ex-form-state 标记（#region ' + nRegion + ' 个 / #endregion ' + nEnd + ' 个），无法判断哪一对是真实代码（请删除重复的标记）'
+  else if (!body) detail = 'client.js 的 #region ex-form-state 区块是空的（exDefault/exOf/setExField 被移出了区块？）'
+  if (body && !detail) {
+    try {
+      const api = new Function(
+        'return (function () { let exForm = {};' +
+        ' const setExForm = (u) => { exForm = typeof u === \'function\' ? u(exForm) : u };' +
+        body +
+        '; return { exOf: exOf, setExField: setExField }; })()'
+      )()
+      // 只改 directory：command 必须保持默认
+      api.setExField('directory', { action: 'deny', reason: 'R1' })
+      const d = api.exOf('directory')
+      const c = api.exOf('command')
+      // 再改 command：directory 不受影响
+      api.setExField('command', { action: 'ask', note: 'N2' })
+      const d2 = api.exOf('directory')
+      const c2 = api.exOf('command')
+      // 默认值单点：setExField 首次写入某分类时的合并基底，必须与 exOf 对未设置分类的回落值同源。
+      // 用空 patch 把该基底原样落进状态再比对——两处若各自内联字面量，只要有一处被改动即不等。
+      api.setExField('undo', {})
+      const baseSet = api.exOf('undo')
+      const baseGet = api.exOf('image')
+      const sameDefault = baseSet.action === baseGet.action
+        && baseSet.reason === baseGet.reason
+        && baseSet.note === baseGet.note
+      behavOk = d.action === 'deny' && d.reason === 'R1' && d.note === ''
+        && c.action === 'allow' && c.reason === '' && c.note === ''
+        && d2.action === 'deny' && d2.reason === 'R1' && d2.note === ''
+        && c2.action === 'ask' && c2.note === 'N2' && c2.reason === ''
+        // 未设置过的分类返回默认值，且**不是同一个对象**（共享引用会让改一处连带改另一处）
+        && api.exOf('read') !== api.exOf('image')
+        && sameDefault
+      if (!behavOk) detail = JSON.stringify({ d, c, d2, c2, baseSet, baseGet, sameDefault })
+    } catch (e) {
+      detail = String((e && e.message) || e)
+    }
+  }
+  ok('行为复算：改一个分类的例外添加行不联动其它分类', behavOk, detail)
+}
+// 防回退：添加成功后只清本分类那一行——清全部会把别的分类填了一半的内容一并抹掉
+ok('添加例外后只清本分类的添加行', cli.includes('setExVals(Object.assign({}, exVals, { [c]: \'\' }));') && cli.includes('setExField(c, { reason: \'\', note: \'\' });'))
 ok('例外列表把 reason 与 note 分开显示（拒绝红 / 备注灰）', cli.includes("r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny") && cli.includes("r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)'"))
 ok('perm_add_exception 的 action 枚举含 ask（工具与文档同口径）', src.includes("action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny'], description: '命中例外后的动作' }") && src.includes('ask=命中即弹审批') && !src.includes('例外优先于分类默认动作，仅 allow/deny'))
 ok('perm_add_exception 的 reason/note 参数说明各自讲清用途', src.includes('拒绝原因，仅 deny 例外生效：拒绝时会回给 AI') && src.includes('备注，仅 ask 例外生效：命中时显示在审批弹窗上') && src.includes('不是保密字段'))
