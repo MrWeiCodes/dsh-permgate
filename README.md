@@ -194,7 +194,7 @@ dsh plugin --profile web remove @mrweicodes/dsh-permgate
 - **同类权限插件**：若同时安装其它 pre-execute 审查插件，两个审查链都会生效、可能重复弹窗——建议只保留一个。
 - **原生 approval 服务**：permgate 的前置审查使用自己的弹窗（不经 DSH approval 服务）；沙箱升级审批使用原生 `approval.request`，互不冲突。
 - **显示层**：预设名语言化与徽标是 best-effort DOM 层，仅影响显示；与其他操作同一 DOM 的插件可能视觉叠加，不影响审查功能。
-- **已兼容 [dsh-better-edit](https://github.com/Rianico/dsh-better-edit)**：其 `edit` 工具使用按行 hash 锚点（`{path, edits:[[remove_from,remove_to,replacement_text],…]}`）；permgate 的审批弹窗与文件对比面板能直接解析该格式并渲染改动预览（复刻 better-edit 的行 hash 定位算法，读取其 `hash-store.sqlite` 快照、快照过期时从磁盘重算），两者可同时安装、互不冲突。
+- **已兼容 [dsh-fs-encoding](https://github.com/MrWeiCodes/dsh-fs-encoding)**：DSH 的文件系统契约是 UTF-8-only，非 UTF-8 文件（GBK/Big5/Shift-JIS 等）的审批预览会读不出来。该插件提供 `ctx.fsEncoding` 解码服务后，permgate 的审批弹窗与对比面板（含写类 diff 与撤销预览）会**复用它**判定编码并渲染内容，并标注解出的编码；若编码是按内容**猜测**的（而非 BOM 确定的），预览上会带问号提示，避免把猜测当成文件真实编码。解出的文本若仍含 NUL 字符则按二进制处理、不预览（维持「读不出」的提示而非展示乱码）——这条判据不区分编码来源：二进制在猜测路径下会被单字节编码兜底映射成「看似成功」的文本，同样要拦下；而合法的 UTF-16/32（带 BOM）文本解出后不含 NUL，不受影响。该依赖是**可选**的：未安装时预览维持原有行为（对非 UTF-8 文件提示读不出），不自行猜测——同一份字节在两处各自猜会导致显示分歧，判定权统一归该插件。（二进制判定沿用 DSH 的既有口径：只采样文件前 8KB，NUL 出现在采样窗口之后的文件仍可能被当作文本，这是上游 `ctx.fs` 的行为。）
 
 ## 自定义功能开发
 
