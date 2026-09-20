@@ -51,7 +51,7 @@ function makeRes() {
   }
 }
 
-function createHost({ workspaceRoot, dshHome }) {
+function createHost({ workspaceRoot, dshHome, fsEncoding }) {
   const registered = new Map()
   const routes = []
   const hooks = new Map()
@@ -73,7 +73,8 @@ function createHost({ workspaceRoot, dshHome }) {
     sessions: { list: () => [], get: () => null },
     effect: (fn) => { let d = null; try { d = fn && fn() } catch (e) {} return () => { try { d && d() } catch (e) {} } },
     on: (evt, fn) => { hooks.set(evt, fn); return () => {} },
-    get: (k) => (k === 'subprocess' ? null : undefined),
+    // fsEncoding 可选：不传时 ctx.get('fsEncoding') 返回 undefined，即「未安装该插件」的部署
+    get: (k) => (k === 'subprocess' ? null : (k === 'fsEncoding' ? fsEncoding : undefined)),
   }
   process.env.DSH_HOME = dshHome
   plugin.apply(ctx)
@@ -833,6 +834,190 @@ group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三
   ok('group16: 面板清空兜底原因（reason=""）真的清除', !!(clearFb.data && clearFb.data.fallback.projectReason === null), JSON.stringify(clearFb.data && clearFb.data.fallback))
 
   try { rmSync(wsR, { recursive: true, force: true }); rmSync(homeR, { recursive: true, force: true }) } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
+group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不出问题')
+{
+  // 用真实的 LocalFileSystem（UTF-8-only 契约），验证两种部署：
+  //   ① 未安装 dsh-fs-encoding（ctx.get('fsEncoding') 为 undefined）→ 维持原报错，不崩；
+  //   ② 已安装（注入一个符合服务契约的桩）→ 预览出内容，并如实透传 decided。
+  // 服务契约取自 dsh-fs-encoding/src/service.ts：
+  //   tryDecode(bytes, opts) → { ok:true, result:{ text, encoding, decided, hasBOM, lineEnding } }
+  //                          | { ok:false, refusal:{ message, code, candidates, ranked, adoptable, autoGuessEnabled } }
+  const GBK = Buffer.from([0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0xCA, 0xC0, 0xBD, 0xE7, 0x0A, 0x68, 0x69, 0x0A])
+
+  // opts: { bytes 自定义样本, tool/args/category 自定义审批目标 }
+  // 默认是 read 审批（group17 早期用例的形态）；写类路径（write/edit）需显式传入，
+  // 否则「非 UTF-8 + 服务在场的写类预览标注」永远没有行为覆盖。
+  const mk = async (label, fsEncoding, opts) => {
+    const o = opts || {}
+    const tool = o.tool || 'read'
+    const category = o.category || (tool === 'read' ? 'read' : 'edit')
+    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-svc-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding })
+    const pre = h.hooks.get('tools/pre-execute')
+    const p = join(ws, 'gbk.txt')
+    const sample = o.bytes || GBK
+    writeFileSync(p, sample)
+    // 前置：确认这份字节确实非法 UTF-8，否则后面的断言会空转
+    let strictFails = false
+    try { new TextDecoder('utf-8', { fatal: true }).decode(sample) } catch (e) { strictFails = true }
+    ok('group17: [' + label + '] 前置——样本确实非法 UTF-8', strictFails)
+    // 默认 allow，需改 ask 才会进审批。用 project 层，避免碰 global
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category, mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const args = o.args ? o.args(p) : { file_path: p }
+    const pending = pre(makeExec(ws, tool, args), async () => ({ kind: 'allow' }))
+    pending.catch(() => {})
+    await new Promise((r) => setTimeout(r, 80))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    const item = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === tool).pop()
+    ok('group17: [' + label + '] GBK 文件进入审批', !!item)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    return diff.data
+  }
+
+  // ① 未安装该插件：维持原报错（不得崩、不得自己猜）
+  const d1 = await mk('无服务', undefined)
+  ok('group17: 无服务时返回 ok:false（维持原行为）', !!(d1 && d1.ok === false), JSON.stringify(d1 && d1.ok))
+  ok('group17: 无服务时报错仍是 invalid UTF-8 text', !!(d1 && /invalid UTF-8 text/.test(String((d1.error && d1.error.zh) || d1.error))), JSON.stringify(d1 && d1.error))
+
+  // ② 已安装（桩）：预览出内容，decided 如实透传
+  const svc = {
+    tryDecode: async () => ({ ok: true, result: { text: '你好，世界\nhi\n', encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' } }),
+  }
+  const d2 = await mk('有服务', svc)
+  ok('group17: 有服务时预览成功', !!(d2 && d2.ok === true), JSON.stringify(d2 && d2.error))
+  ok('group17: 解出正确内容', !!(d2 && d2.ok && String(d2.text).indexOf('你好，世界') === 0), JSON.stringify(d2 && d2.text))
+  ok('group17: 透传 encoding=gbk 与 decided=guessed', !!(d2 && d2.encoding === 'gbk' && d2.decided === 'guessed'), JSON.stringify(d2 && { enc: d2.encoding, decided: d2.decided }))
+
+  // ③ 服务拒绝（猜测关闭 / 二进制）：带出服务的说明，而非 ctx.fs 的泛化报错
+  const refuseSvc = { tryDecode: async () => ({ ok: false, refusal: { message: 'E_NOT_TEXT: not decodable text; enable autoGuessEncoding or re-read with an explicit encoding', code: 'E_NOT_TEXT' } }) }
+  const d3 = await mk('服务拒绝', refuseSvc)
+  ok('group17: 服务拒绝时带出服务自己的说明', !!(d3 && d3.ok === false && /E_NOT_TEXT/.test(String((d3.error && d3.error.zh) || d3.error))), JSON.stringify(d3 && d3.error))
+
+  // ④ 服务抛异常（契约说不会，消费方仍须兜住）：退回原报错，不崩
+  const throwSvc = { tryDecode: async () => { throw new Error('boom') } }
+  const d4 = await mk('服务抛异常', throwSvc)
+  ok('group17: 服务抛异常时退回原报错（不崩）', !!(d4 && d4.ok === false && /invalid UTF-8 text/.test(String((d4.error && d4.error.zh) || d4.error))), JSON.stringify(d4 && d4.error))
+
+  // ⑤ 回归：UTF-8 文件在两种部署下都必须正常（服务不该被调用）
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-utf8-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-svc-utf8h-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    let called = false
+    const spy = { tryDecode: async () => { called = true; return { ok: true, result: { text: 'x', encoding: 'gbk', decided: 'guessed' } } } }
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: spy })
+    const pre = h.hooks.get('tools/pre-execute')
+    const p = join(ws, 'utf8.txt')
+    writeFileSync(p, '你好，世界\nhi\n', 'utf8')
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'read', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const pending = pre(makeExec(ws, 'read', { file_path: p }), async () => ({ kind: 'allow' }))
+    pending.catch(() => {})
+    await new Promise((r) => setTimeout(r, 80))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    const item = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === 'read').pop()
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    const d = diff.data
+    ok('group17: UTF-8 文件预览正常且未调用解码服务', !!(d && d.ok === true && String(d.text).indexOf('你好，世界') === 0 && called === false), JSON.stringify(d && { ok: d.ok, called: called }))
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ⑥ 大文件必须仍可预览：交给解码服务的字节上限曾误取 DIFF_MAX_CHARS(1MiB)，
+  // 把服务本来能解码的 1~10MiB 非 UTF-8 文件提前拦成 FS_TOO_LARGE。该上限只作
+  // 本插件的内存硬保护（服务自己的 maxFileBytes 可配置且未暴露读取接口，无法对齐），
+  // 故须取得远高于服务的默认业务上限，业务判定交给服务的 E_TOO_LARGE。
+  {
+    const unit = Buffer.from([0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC]) // 「你好，」
+    const twoMB = Buffer.concat(Array.from({ length: Math.floor((2 * 1024 * 1024) / unit.length) }, () => unit))
+    let sawBytes = 0
+    const bigSvc = {
+      tryDecode: async (bytes) => {
+        sawBytes = bytes.length
+        return { ok: true, result: { text: '你好，世界\nhi\n', encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' } }
+      },
+    }
+    const d6 = await mk('2MB 大文件', bigSvc, { bytes: twoMB })
+    ok('group17: 2MB 非 UTF-8 文件仍能交给服务解码（上限未误收紧）',
+      !!(d6 && d6.ok === true && sawBytes > 1024 * 1024), JSON.stringify(d6 && { ok: d6.ok, sawBytes: sawBytes, err: d6.error }))
+  }
+
+  // ⑦ 混合编码文件（前段合法 UTF-8 + 尾部 GBK 字节）：streamText 会先 yield 出
+  // 若干块、之后才抛，回退分支若不复位 out/outBytes 就会把窗口再追加一遍，
+  // 预览出现大段重复行与行号错位（实测曾把 400 行文件渲染成 729 行）。
+  {
+    const head = Array.from({ length: 400 }, (_, i) => 'ROW' + String(i + 1).padStart(4, '0') + ' ' + 'x'.repeat(190)).join('\n') + '\n'
+    const mixed = Buffer.concat([Buffer.from(head, 'utf8'), Buffer.from([0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0x0A])])
+    const mixedSvc = {
+      tryDecode: async (bytes) => ({
+        ok: true,
+        result: { text: Buffer.from(bytes).toString('latin1').replace(/\xC4\xE3\xBA\xC3\xA3\xAC/g, '你好，'), encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' },
+      }),
+    }
+    const d7 = await mk('混合编码大文件', mixedSvc, { bytes: mixed })
+    const rows = d7 && d7.ok === true ? String(d7.text).split('\n') : []
+    const first = rows[0] || ''
+    const dupCount = rows.filter((r) => r === first).length
+    ok('group17: 混合编码大文件预览不重复、行数正确（回退分支已复位流式残留状态）',
+      !!(d7 && d7.ok === true && rows.length === 400 && dupCount === 1 && first.indexOf('ROW0001') === 0),
+      JSON.stringify({ ok: d7 && d7.ok, rows: rows.length, dupOfFirstRow: dupCount, first: first.slice(0, 12) }))
+  }
+
+  // ⑧ 写类预览（edit）的编码标注必须有**行为覆盖**：group17 此前只触发 read 审批，
+  // 而「写类 diff / 撤销预览曾整块漏挂编码标注」正是本轮要防的事——纯文本断言
+  // （源码里出现 encoding/decided 字样）证明不了数据真的流到 payload。
+  {
+    const svc = { tryDecode: async () => ({ ok: true, result: { text: '你好世界\n第二行\n', encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' } }) }
+    const d8 = await mk('写类 edit 预览', svc, {
+      tool: 'edit',
+      args: (p) => ({ file_path: p, old_string: '你好世界', new_string: '再见世界' }),
+    })
+    ok('group17: 写类 edit 预览带 encoding/decided（透传到 payload）',
+      !!(d8 && d8.ok === true && d8.encoding === 'gbk' && d8.decided === 'guessed'),
+      JSON.stringify(d8 && { ok: d8.ok, encoding: d8.encoding, decided: d8.decided, err: d8.error }))
+  }
+
+  // ⑨ 并发两次 file-diff 必须各自拿到自己的编码：编码来源曾挂在 entry 上（跨请求
+  // 共享可变状态），而 file-diff 路由无按 id 串行化——两个并发请求会交错读写同一
+  // 字段，先完成的那次会丢掉标注、或拿到另一次请求的编码（实测复现）。
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-race-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-svc-raceh-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    let seq = 0
+    // 交替返回两种可区分的编码，便于识别「拿到别人的值」
+    const svc = { tryDecode: async () => { seq++; const n = seq; return { ok: true, result: { text: '你好世界\n', encoding: n % 2 ? 'gbk' : 'big5', decided: n % 2 ? 'guessed' : 'bom', hasBOM: false, lineEnding: '\n' } } } }
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: svc })
+    const pre = h.hooks.get('tools/pre-execute')
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, GBK)
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'edit', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const pending = pre(makeExec(ws, 'edit', { file_path: p, old_string: '你好世界', new_string: '再见世界' }), async () => ({ kind: 'allow' }))
+    pending.catch(() => {})
+    await new Promise((r) => setTimeout(r, 80))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    const item = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === 'edit').pop()
+    const [ra, rb] = await Promise.all([
+      callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' }),
+      callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' }),
+    ])
+    const da = ra && ra.data
+    const db = rb && rb.data
+    ok('group17: 并发两次 file-diff 都带标注（编码来源不挂 entry）',
+      !!(da && db && da.ok === true && db.ok === true && da.encoding && da.decided && db.encoding && db.decided),
+      JSON.stringify({ a: da && { enc: da.encoding, dec: da.decided }, b: db && { enc: db.encoding, dec: db.decided } }))
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
 }
 
 if (fail.length) {

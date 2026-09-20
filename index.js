@@ -207,6 +207,198 @@ const readFail = (e) => {
   return { zh: '读取失败: ' + emsg, en: 'Read failed: ' + emsg }
 }
 
+// ── 非 UTF-8 文本预览：复用 dsh-fs-encoding 的解码服务 ──────────────────────
+// 背景：ctx.fs 的文件系统契约是 UTF-8-only（严格 TextDecoder，非 UTF-8 直接抛
+// invalid UTF-8 text）。dsh-fs-encoding 在**工具层** shadow read/write/edit 解决
+// 编码问题，但不替换 ctx.fs——所以绕过工具层、直接读 ctx.fs 的调用方（本插件的
+// 审批预览）拿不到它的能力，非 UTF-8 文件的预览会直接报错。
+//
+// 该插件现已提供 `ctx.fsEncoding` 服务（其 service.ts 明确定位就是「给渲染型消费者
+// 用」：不读文件、不记录、refusal 是返回值而非异常）。本插件**可选**复用它：
+//   有服务  → 把字节交给它判定，连「这是猜的还是确定的」一起拿到，如实展示；
+//   没服务  → 完全不猜，维持原有报错行为（多用户环境里它可能根本没装）。
+// 这条可选性是硬要求：permgate 不能依赖另一个插件存在。
+//
+// 刻意不做的事：**不自己实现猜测**。同一份字节在两处各自猜，正是服务注释里点名的
+// 「一个部署的两半对同一个文件的内容产生分歧」。判定权归它，本插件只负责展示。
+const FS_ENCODING_SERVICE = 'fsEncoding'
+
+// 交给解码服务的字节上限（readBytes 的 maxBytes）。
+// 这是**本插件的内存硬保护**，不是业务上限：必须显式传（漏传即无界整读，dsh-fs-local
+// 的 `info.size > undefined` 恒为 false 且 createReadStream({end: undefined}) 读到 EOF），
+// 但也不能取小值去替服务做业务判定——服务的 maxFileBytes 可配置（默认 10MiB，
+// 支持配置文件与 DSH_FS_ENCODING_MAX_FILE_BYTES），且 service.ts 未暴露读取它的接口，
+// 因此无法真正对齐；取小了会把「服务本来能解码」的文件提前拦成 FS_TOO_LARGE。
+// 故取一个明显高于任何合理服务配置的值，业务上限交给服务用自己的 E_TOO_LARGE 判定
+// （文案准确），这里只挡住 GB 级文件被整读进内存的真实内存风险。
+const ENC_READ_MAX_BYTES = 64 * 1024 * 1024
+
+// 取解码服务：拿不到或不是本服务（同名被别的插件占了）时返回 null。
+// 不写进 inject——那是硬依赖，会让本插件在没装 dsh-fs-encoding 时一直等待服务出现。
+function getFsEncodingService(ctx) {
+  try {
+    const svc = ctx.get(FS_ENCODING_SERVICE)
+    if (!svc || typeof svc !== 'object') return null
+    // 能力判定而非 instanceof：同名服务可能由别的插件提供，直接调它的方法会抛
+    if (typeof svc.tryDecode !== 'function') return null
+    return svc
+  } catch (e) { return null }
+}
+
+// 预览用文本读取：UTF-8 优先（走原有 fsService.readText，快且不依赖服务）；
+// 失败时若解码服务在场，则改走「字节读 + 交给服务判定」。
+//
+// target 必须是**已解析的 target 对象**（statTargetChecked 或 fsService.resolve 的返回值）：
+// ctx.fs 的字节/文本接口都要求已解析的 target，传路径字符串会抛
+// "path argument must be of type string"。
+//
+// size 可选：调用方已 stat 过时传入 info.size，用于在整读前先做体积预检——
+// 避免为一个注定超限的文件先付出一次完整读盘（readText 的失败判定本身已整读一次，
+// 不预检则 readBytes 会再整读一次，峰值达文件大小的两倍）。
+//
+// 返回 { ok:true, text, encoding, decided } 或 { ok:false, error }。
+// decided 取值：'utf8'（本就 UTF-8）/ 'bom'|'hint'|'guessed'（服务给出）/ null（未经服务）。
+async function readPreviewText(fsService, target, encService, size) {
+  const readText = async (t) => {
+    try { return { ok: true, text: await fsService.readText(t) } } catch (e) { return { ok: false, error: e } }
+  }
+  // ① UTF-8 正常路径：绝大多数文件走这里，且不需要任何服务。
+  // 这里也要查 NUL：ctx.fs 的 readText 只对**前 8192 字节**采样判二进制
+  // （dsh-fs-local 的 BINARY_SAMPLE_BYTES），NUL 落在采样窗口之后时它会成功返回一段
+  // 含 U+0000 的文本。若不在这里查，同一份含 NUL 的内容会因 NUL 的位置不同而行为不同
+  // （窗口内→被 readText 拒→走服务路径→被下面的检查拦下；窗口外→直接放行并渲染）。
+  // 两条路径口径统一，判据也一致：解出的文本含 U+0000 即按二进制处理。
+  const direct = await readText(target)
+  if (direct.ok) {
+    const t0 = String(direct.text == null ? '' : direct.text)
+    // 文案与 ctx.fs 的二进制拒绝保持一致（用户看到的语义是「这是二进制，不预览」）
+    if (t0.indexOf('\u0000') !== -1) {
+      const dp0 = (target && typeof target.displayPath === 'string' && target.displayPath) || 'file'
+      return { ok: false, error: readFail(new Error('cannot read "' + dp0 + '": binary file')) }
+    }
+    return { ok: true, text: t0, encoding: 'utf-8', decided: 'utf8' }
+  }
+  // ② 非 UTF-8：只有解码服务在场时才继续。没有就维持原报错（不猜）
+  if (!encService) return { ok: false, error: readFail(direct.error) }
+  // 已知体积且已超本插件的硬保护上限：直接给「文件过大」文案，不再整读一次
+  // （readBytes 也会以 FS_TOO_LARGE 拒绝，这里只是省掉那次无用的整读）
+  if (typeof size === 'number' && size > ENC_READ_MAX_BYTES) {
+    return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+  }
+  let bytes = null
+  try {
+    // 必须显式传 maxBytes：契约里它是必填的整文件上限（dsh-fs-local 的预检是
+    // info.size > maxBytes，漏传时该比较恒为 false，createReadStream({end: undefined})
+    // 会一路读到 EOF）——漏传等于让任意大小的文件被无界整读进内存，而 readText
+    // 的失败判定本身已经整读过一次，峰值会是文件大小的两倍。
+    //
+    // 这个值只作**本插件的内存硬保护**，不承担业务判定：服务的 maxFileBytes 是可配置的
+    // （配置文件 / DSH_FS_ENCODING_MAX_FILE_BYTES，默认 10MiB），而 service.ts 没暴露
+    // 读取它的接口，所以无法真正对齐。取一个明显高于任何合理服务配置的值（64MiB）：
+    // 服务配得更大时不会被我方提前拦截（业务上限交给服务用自己的 E_TOO_LARGE 判定，
+    // 文案准确）；同时仍挡住「GB 级文件被整读进内存」这种真正的内存风险。
+    bytes = await fsService.readBytes(target, undefined, ENC_READ_MAX_BYTES)
+  } catch (e) {
+    // 字节读失败要**带出自己的原因**，不能退回 direct.error（那是 readText 的
+    // invalid UTF-8 text）——那会把「文件太大」谎报成「编码读不出」，审批者据此
+    // 去查编码却查不到真实原因。
+    //
+    // 但体积超限要单独走项目既有的「文件过大」口径，不能把 FS_TOO_LARGE 的原始
+    // message 直接抛给用户：它形如 `cannot read "<绝对路径>": 73400316 bytes exceeds
+    // the 67108864-byte limit`，会把本插件的**内部内存保护上限**当成对用户有意义的
+    // 业务信息展示出来（那是实现细节，且与别处 `bi('文件过大…')` 的口径不一致）。
+    if (e && e.code === 'FS_TOO_LARGE') {
+      return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+    }
+    return { ok: false, error: readFail(e) }
+  }
+  // 字节读返回了不可用的值（null / 无 length 的对象）。真实 dsh-fs-local 的 readBytes
+  // 恒返回 Buffer（空文件也是 length=0 的真值 Buffer），故这条对真实实现不可达，是防御；
+  // 但文案要与上面的 catch 保持同一原则——带出「字节读不可用」而非退回 readText 的错误
+  // （后者会把「读不到字节」说成「编码读不出」，审批者据此查编码却查不到真实原因）。
+  if (!bytes || bytes.length === undefined) return { ok: false, error: readFail(new Error('byte read returned no content')) }
+  let out = null
+  try {
+    // 服务文档承诺 tryDecode 对任意输入都不抛（refusal 是返回值），故这里不需要
+    // 包一层 catch；但消费方是别人写的插件，仍兜住以防契约变化。
+    //
+    // 传 displayPath 让服务自己的 refusal 文案能指名文件（不传则永远是 "(unknown path)"，
+    // 审批者会以为读错了文件）。但**必须只在它是非空字符串时**才放进 opts：
+    // 上游对 opts 做严格校验，`{ displayPath: null }` 会被拒为
+    // `E_BAD_ENCODING: displayPath must be a string`，而那条内部参数错误会被下面的
+    // 「其余 refusal 原样带出」分支展示给用户——一个本可预览的文件变成无意义报错。
+    // （`target && target.displayPath` 在 target 为 null/undefined 或字段为 null 时
+    // 会产出 null/undefined，正是这个坑。）
+    const dp = target && typeof target.displayPath === 'string' && target.displayPath ? target.displayPath : null
+    out = dp
+      ? await encService.tryDecode(bytes, { displayPath: dp })
+      : await encService.tryDecode(bytes)
+  } catch (e) {
+    return { ok: false, error: readFail(direct.error) }
+  }
+  if (!out || out.ok !== true || !out.result) {
+    const refusal = out && out.refusal
+    // 服务自己的体积超限要走项目既有的「文件过大」口径，不能把它的 message 原样抛给用户：
+    // 那句是**对模型说的**（"Raise maxBytes (or the plugin's maxFileBytes) to decode it."），
+    // 且内含服务的内部上限数字（默认 10485760），对审批者既无意义又与本插件 297 行的
+    // 处理自相矛盾（同一个上限数字只是换了个来源照样进弹窗）。
+    if (refusal && refusal.code === 'E_TOO_LARGE') {
+      return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+    }
+    // E_BAD_ENCODING 是**我方调用参数**的问题（opts 类型/字段非法），不是这个文件的问题，
+    // 它的 message（如 "displayPath must be a string"）对审批者毫无意义——展示它等于把
+    // 本插件的 bug 说成文件的错。退回 ctx.fs 的原始报错（即改动前的行为）。
+    // 这里必须**自己记日志**：调用链上 4 个调用点都是返回值传递、不会进入任何 catch，
+    // 路由的 console.error 只在 buildFileDiffData 抛出时触发，此路径永不抛出——
+    // 不记日志的话，我方 opts 参数错误会在用户侧伪装成「读取失败」而运维侧零线索。
+    if (refusal && refusal.code === 'E_BAD_ENCODING') {
+      try { console.error('[permgate] fsEncoding rejected our opts:', refusal.message) } catch (e) {}
+      return { ok: false, error: readFail(direct.error) }
+    }
+    // 其余拒绝（E_NOT_TEXT 二进制 / 猜测关闭）：把服务的说明原样带出——
+    // 它比 ctx.fs 的 invalid UTF-8 text 更准确（能区分「没尝试猜」与「猜了但失败」）
+    const msg = refusal && refusal.message ? String(refusal.message) : (direct.error && direct.error.message) || 'not decodable text'
+    return { ok: false, error: { zh: msg, en: msg } }
+  }
+  const r = out.result
+  const text = String(r.text == null ? '' : r.text)
+  // readText 的失败原因不只是编码：ctx.fs 还会以「NUL 采样命中」拒绝二进制文件，
+  // 而某些字节序列恰好是合法 UTF-8（ASCII 与 NUL 交替），服务会把 NUL 原样解出来。
+  // 这类内容不可预览——既不能当文本展示，也不该替换掉原本明确的「binary file」报错。
+  //
+  // 判据只看「解出的文本是否含 U+0000」，**不按 decided 豁免**。曾经的写法是
+  // 「只对未做编码转换的结果（decided==='utf8'，后加 'bom'+UTF-8 族）施加检查」，
+  // 理由是「guessed 时服务真的解出了文本，不该推翻」——这个理由不成立：
+  // 猜测路径的语义是「在候选编码里挑一个能解通的」，而单字节编码
+  // （windows-1251/iso-8859-1 等）能把**任意字节**映射成字符，所以二进制必然「解通」。
+  // 那不是成功解码，是兜底映射：实测 autoGuessEncoding=true 时一个 MZ 头二进制被解成
+  // windows-1251/guessed 且满是 U+0000，会被放行并当文件内容渲染。
+  //
+  // 判据的依据是**单向蕴含**：解出文本含 U+0000 ⟹ 输入含 0x00 字节 ⟹ 二进制或损坏文件。
+  // （实测：对全部编码做 1 字节 0x01–0xFF 与全部 2 字节非零组合穷举，无任何非零输入产出
+  // U+0000，故蕴含方向成立。补充：0x00 在单字节编码与多字节编码下都产出 U+0000；仅
+  // UTF-16/32 对**孤立**的单字节 0x00 例外——utf16le/utf16be 在服务层被
+  // isAcceptableDecode 拒为 E_DECODE_FAILED（decodeBytes 层给 U+FFFD），utf32le/utf32be
+  // 返回空串，那是码元不完整的处理。该例外只影响孤立字节的穷举结论，不影响上面的单向
+  // 蕴含——注意**不能**反过来用「0x00 成对出现」论证安全：UTF-16LE 里 0x00 恰恰是成对的
+  // 高字节（如 [41 00] → "A"），成对出现正是反向不成立的原因，见下。）
+  // 反向**不成立**，这是本判据的已知残余缺口：UTF-16/32 解码会把 0x00 字节吸收进
+  // 码元，故「UTF-16 BOM 前缀 + 二进制体」若每个 16 位单元的高字节非零，解出的文本
+  // 不含 U+0000 而会被放行（实测 FF FE + 随机体 → utf16le/bom，无 NUL）。
+  //
+  // 缺口暴露面**不小**（实测 UTF-16 BOM + 随机字节经本函数的放行率）：1KB≈100%、
+  // 4KB≈97%、64KB≈63%、256KB≈13%、~590KB 才降到 ~0%。即只有「恰好以 UTF-16 BOM 开头」
+  // 这一条件较苛刻（对随机二进制约 1/65536），一旦满足，中小型二进制**大多会被当文本渲染**。
+  // 未为此再加「像文本」闸的原因：这类内容解出的是乱码，审批者能自行看出不是正常文本，
+  // 风险是观感而非误判放行；而加闸需要设计可打印性阈值，误伤合法 UTF-16/32 的代价更高。
+  // 若日后要收紧，应对 decided==='bom' 的结果另加可打印性检查，而**不能**用「字节含
+  // 0x00」一刀切——合法 UTF-16/32 文本的字节里全是 0x00，那正是本功能存在的理由。
+  // 这不会误伤合法文本：实测各 UTF BOM 变体（utf16le/utf16be/utf32le/utf8bom）与
+  // GBK/Big5/Shift-JIS 的正常文件解出的文本都不含 U+0000。
+  if (text.indexOf('\u0000') !== -1) return { ok: false, error: readFail(direct.error) }
+  return { ok: true, text, encoding: r.encoding || null, decided: r.decided || null }
+}
+
 export default {
   inject: ['fs', 'sandboxPolicy', 'tools', 'webServer', 'timer', 'approval', 'permissionPresets', 'sessions'],
   apply(ctx) {
@@ -1475,7 +1667,9 @@ export default {
       return diffPayloadOrFallback(fp, winOld.join('\n'), winNew.join('\n'), 'modified', winStart + 1)
     }
 
-    async function buildUndoDiffData(entry, fsService, fp) {
+    // enc：本次请求的编码来源 holder（由 buildFileDiffData 创建）。给默认值是为了
+    // 漏传时不崩（只是少一个标注），而不是静默接受缺参——调用点只有 buildFileDiffDataRaw 一处。
+    async function buildUndoDiffData(entry, fsService, fp, enc = { meta: null }) {
       if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
       let row = null
       // 先 stat + size 预检，再读 DB：避免 >1MB 文件先全量载入 undo 大行（content/result_content 各约等于文件大小）
@@ -1506,7 +1700,13 @@ export default {
       } catch (e) { invalidateStoreCache(entry.projRoot); row = null }
       if (!row) return { ok: false, error: bi('该文件没有可撤销的编辑记录，撤销会被跳过', 'No undo history for this file; the undo will be skipped') }
       try {
-        const curText = await fsService.readText(target)
+        // 撤销预览要拿磁盘当前内容与撤销目标比对，非 UTF-8 文件同样要能读出，
+        // 否则撤销预览直接报 invalid UTF-8 text 而看不到将被恢复的内容。
+        const curRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size)
+        if (!curRR.ok) return curRR
+        const curText = curRR.text
+        // 记录编码来源：撤销预览同样是「按解码文本生成的对比」，须让客户端能标注
+        enc.meta = { encoding: curRR.encoding, decided: curRR.decided }
         const after = row.content === null || row.content === undefined ? '' : String(row.content)
         if (overMaxChars(curText, after)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
         // 与 better-edit 的校验口径对齐：better-edit 用 undo 行的 bom/ending 做字节级精确比较，
@@ -1593,18 +1793,30 @@ export default {
       }
     }
 
-    // 统一「预检 + readText」：返回 {ok:true,target,info,text} 或 {ok:false,error}。
-    // 写分支各读盘入口共用；preText 非空时直接复用（调用方已完成预检读盘，如 str_replace 唯一性检查），避免双读盘
+    // 统一「预检 + readText」：返回 {ok:true,target,info,text,encoding,decided} 或 {ok:false,error}。
+    // 写分支各读盘入口共用；preText 非空时直接复用（调用方已完成预检读盘，如 str_replace 唯一性检查），避免双读盘。
+    // 注意：本函数不写编码来源——它拿不到本次请求的 holder，且 preText 短路时并未读盘，
+    // 编码来源由调用方按返回的 encoding/decided 自行记录（见 readTargetCheckedMeta）。
     async function readTargetChecked(fp, projRoot, fsService, preText) {
       if (preText !== null && preText !== undefined) return { ok: true, target: null, info: null, text: preText }
       const st = await statTargetChecked(fp, projRoot, fsService)
       if (!st.ok) return st
-      try {
-        const text = await fsService.readText(st.target)
-        return { ok: true, target: st.target, info: st.info, text }
-      } catch (e) {
-        return { ok: false, error: readFail(e) }
-      }
+      // 走 readPreviewText：UTF-8 直接读；非 UTF-8 且解码服务在场时由它判定。
+      // 写类 diff 同样需要读到非 UTF-8 文件的既有内容，否则编辑预览会报 invalid UTF-8 text。
+      const rr = await readPreviewText(fsService, st.target, getFsEncodingService(ctx), st.info && st.info.size)
+      if (!rr.ok) return rr
+      return { ok: true, target: st.target, info: st.info, text: rr.text, encoding: rr.encoding, decided: rr.decided }
+    }
+
+    // 读盘并把编码来源记到**本次请求的** holder：写类 diff 的 payload 由
+    // diffPayloadOrFallback / windowedDiffPayload / previewInsert 等多个构造器产出，
+    // 逐个加 encoding/decided 必漏改（漏改即「猜测解码」在对比面板里无标注地当成
+    // 文件真实内容展示）。故读盘处统一记录、buildFileDiffData 出口统一附加。
+    // holder 由调用方按请求创建（不是 entry 属性），避免并发请求互相覆盖。
+    async function readTargetCheckedMeta(enc, fp, projRoot, fsService, preText) {
+      const rd = await readTargetChecked(fp, projRoot, fsService, preText)
+      if (rd.ok && rd.encoding && rd.decided) enc.meta = { encoding: rd.encoding, decided: rd.decided }
+      return rd
     }
 
     // 按审批 entry 生成对比数据（/permgate/file-diff 路由用；失败返回 {ok:false,error}，不支持返回 null）
@@ -1655,11 +1867,37 @@ export default {
       return out
     }
 
+    // 编码来源单点附加：各读盘分支都经 readPreviewText 拿到 encoding/decided，
+    // 统一记到**本次请求的局部** holder，由 buildFileDiffData 在出口挂到 payload 上——
+    // 写类 diff 与撤销预览的 payload 由 diffPayloadOrFallback / windowedDiffPayload /
+    // newFilePayload / previewInsert 各自构造，逐个加字段必漏改（漏改即「猜测解码」
+    // 在对比面板里无标注地当成文件真实内容展示）。
+    //
+    // holder 必须是局部对象，**不能挂在 entry 上**：file-diff 是 HTTP 路由且无按 id
+    // 串行化（见路由处直接 await），同一 entry 的两个并发请求会交错读写同一字段——
+    // 撤销路径的「赋值 → await readByteRange → 出口读取」窗口会让先完成的那次丢掉
+    // 标注、或拿到另一次请求的编码（实测复现）。挂 entry 上等于把请求内数据放进
+    // 跨请求共享的可变状态。
+    function withEncMeta(out, meta) {
+      if (out && out.ok === true && meta && meta.encoding && meta.decided) {
+        out.encoding = meta.encoding
+        out.decided = meta.decided
+      }
+      return out
+    }
+
     async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
       const fp = pathArg(args)
-      if (isUndo(name)) return await buildUndoDiffData(entry, fsService, fp)
+      // 每次请求各建一个 holder：请求内传递编码来源，请求间互不可见
+      const enc = { meta: null }
+      const r = await buildFileDiffDataRaw(entry, fsService, name, args, fp, enc)
+      return withEncMeta(r, enc.meta)
+    }
+
+    async function buildFileDiffDataRaw(entry, fsService, name, args, fp, enc) {
+      if (isUndo(name)) return await buildUndoDiffData(entry, fsService, fp, enc)
       if (isFileImage(name)) return await buildImageDiffData(entry, fsService, fp)
       if (isFileRead(name, args)) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
@@ -1703,26 +1941,67 @@ export default {
           let line = 0
           let done = false
           let sawMore = false
-          outer:
-          for await (const chunk of await fsService.streamText(target)) {
-            buf += chunk
-            // 无换行的极长行：只保留尾部片段，防止 buf 无界增长；该行内容被截断时标记省略
-            if (buf.indexOf('\n') === -1 && buf.length > MAX_LINE) { cut = true; buf = buf.slice(buf.length - MAX_LINE) }
-            let nl
-            while ((nl = buf.indexOf('\n')) !== -1) {
-              line++
-              // 窗口末行之后确认还有内容才标记「下方还有更多行」（文件恰好结束在窗口边界时不误报）
-              if (done) { sawMore = true; break outer }
-              if (line >= winStart && line <= winEnd) {
-                if (outBytes < MAX_BYTES) {
-                  let s = buf.slice(0, nl)
-                  if (s.length > MAX_LINE) { s = s.slice(0, MAX_LINE); cut = true }
-                  out.push(s)
-                  outBytes += s.length
-                } else { cut = true; break outer }
+          // 非 UTF-8 文件（GBK/Big5/…）：streamText 是 UTF-8-only 契约，对这类文件会抛
+          // 「invalid UTF-8 text」，且**抛在迭代时**而非调用时（实测：streamText() 正常返回
+          // 一个流，for await 第一次取块才抛）——所以不能只包住 streamText() 调用本身。
+          // 失败时改走 readPreviewText：它只在 dsh-fs-encoding 的解码服务在场时才继续
+          // （没有服务就维持原报错，不自造猜测），拿到的文本再在内存里切窗口。
+          try {
+            outer:
+            for await (const chunk of await fsService.streamText(target)) {
+              buf += chunk
+              // 无换行的极长行：只保留尾部片段，防止 buf 无界增长；该行内容被截断时标记省略
+              if (buf.indexOf('\n') === -1 && buf.length > MAX_LINE) { cut = true; buf = buf.slice(buf.length - MAX_LINE) }
+              let nl
+              while ((nl = buf.indexOf('\n')) !== -1) {
+                line++
+                // 窗口末行之后确认还有内容才标记「下方还有更多行」（文件恰好结束在窗口边界时不误报）
+                if (done) { sawMore = true; break outer }
+                if (line >= winStart && line <= winEnd) {
+                  if (outBytes < MAX_BYTES) {
+                    let s = buf.slice(0, nl)
+                    if (s.length > MAX_LINE) { s = s.slice(0, MAX_LINE); cut = true }
+                    out.push(s)
+                    outBytes += s.length
+                  } else { cut = true; break outer }
+                }
+                buf = buf.slice(nl + 1)
+                if (line >= winEnd) done = true
               }
-              buf = buf.slice(nl + 1)
-              if (line >= winEnd) done = true
+            }
+          } catch (e) {
+            // 流式失败才回退（正常 UTF-8 文件不付这份整读代价）
+            // 必须复位流式阶段已累积的状态：streamText 是**逐块解码、解码失败才抛**，
+            // 前段合法 UTF-8 的块已经 yield 并被上面推入 out——不复位就会把整个窗口
+            // 追加在那些残留行之后，预览出现大段重复行、行号错位，outBytes 也会被
+            // 双重计费而提前触发 MAX_BYTES 截断。
+            out.length = 0
+            outBytes = 0
+            cut = false
+            const rr = await readPreviewText(fsService, target, getFsEncodingService(ctx), st.info && st.info.size)
+            if (!rr.ok) return { ok: false, error: rr.error }
+            const lines = String(rr.text).split(/\r?\n/)
+            // 尾随换行会多出一个空元素：它既不是真实行（不该被渲染成末行并占用行号），
+            // 也不该参与「下方还有更多行」的比较（否则文件恰好结束在窗口边界时误报）
+            if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+            const slice = lines.slice(winStart - 1, winEnd)
+            for (const s0 of slice) {
+              if (outBytes >= MAX_BYTES) { cut = true; break }
+              let s = s0
+              if (s.length > MAX_LINE) { s = s.slice(0, MAX_LINE); cut = true }
+              out.push(s)
+              outBytes += s.length
+            }
+            return {
+              ok: true, kind: 'read', file: fp, text: out.join('\n'),
+              startLine: winStart,
+              // 与流式分支同口径：窗口之前确实有内容才算「上方还有更多行」，
+              // 否则 offset 越过文件末尾时会对审批者谎报省略行数
+              topOmitted: winStart > 1 && lines.length >= winStart,
+              bottomOmitted: lines.length > winEnd || cut,
+              // 如实标注编码来源：'guessed' 是概率性选择，必须让用户知道不是原文编码
+              encoding: rr.encoding,
+              decided: rr.decided,
             }
           }
           if (done && buf !== '') sawMore = true
@@ -1777,7 +2056,7 @@ export default {
             // 故不做内核分叉：一律按「不唯一即失败」提示，避免展示一次永远不会发生的替换
             const oldStr = typeof args.old_str === 'string' ? args.old_str : ''
             if (oldStr) {
-              const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+              const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService)
               if (!rd.ok) return rd
               let count = 0
               let at = 0
@@ -1801,7 +2080,7 @@ export default {
             const rawInsLine = args.insert_line
             const insLine = (rawInsLine === null || rawInsLine === undefined || rawInsLine === '' || rawInsLine === false) ? NaN : Number(rawInsLine)
             const insText = typeof args.new_str === 'string' ? args.new_str : ''
-            const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+            const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService)
             if (!rd.ok) return rd
             const fileText = rd.text
             if (overMaxChars(fileText, insText)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
@@ -1821,7 +2100,7 @@ export default {
           // dsh-better-edit 兼容：{path, edits:[[remove_from,remove_to,replacement_text],...]} hash 锚点格式。
           // 与旧格式（old_string/new_string）互斥，优先识别 edits 数组。
           if (Array.isArray(args.edits) && args.edits.length > 0) {
-            const rd = await readTargetChecked(fp, entry.projRoot, fsService)
+            const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService)
             if (!rd.ok) return rd
             const fileText = rd.text
             const target = rd.target
@@ -1934,7 +2213,7 @@ export default {
           // 关键：edit 是补丁式，仅对比 old_string/new_string 会丢失文件上下文（抽屉只会显示
           // 补丁那几行）。改为读取磁盘当前内容、应用补丁后，取改动前后各 W 行的窗口做 diff——
           // 行号从真实位置起算，payload 恒定小，大文件无需整文件对比（write 才是整文件语义）。
-          const rd = await readTargetChecked(fp, entry.projRoot, fsService, sreText)
+          const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService, sreText)
           if (!rd.ok) return rd
           const fileText = rd.text
           if (overMaxChars(fileText, newText)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
@@ -1990,7 +2269,13 @@ export default {
           }
           if (info.type !== 'file') return { ok: false, error: bi('不是普通文件', 'Not a regular file') }
           if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
-          const oldText = await fsService.readText(target)
+          // 非 UTF-8 文件的编辑预览同样要能读出既有内容（否则直接报 invalid UTF-8 text）。
+          // 这里只用于展示 diff；写盘编码由 DSH/编码插件按原编码处理，不受此解码影响。
+          const oldRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size)
+          if (!oldRR.ok) return oldRR
+          const oldText = oldRR.text
+          // 记录编码来源：write 全文对比同样按解码文本生成，须让客户端能标注
+          enc.meta = { encoding: oldRR.encoding, decided: oldRR.decided }
           if (overMaxChars(oldText, content)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           return diffPayloadOrFallback(fp, oldText, content, 'modified')
         } catch (e) {

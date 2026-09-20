@@ -30,7 +30,7 @@ try {
     'pathJoin', 'pathResolve', 'pathIsAbsolute',
     'fsExistsSync', 'fsReadFileSync', 'fsReaddirSync', 'fsUnlinkSync', 'fsLstatSync', 'fsRealpathSync',
     'osHomedir', 'process', 'console',
-    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, CATEGORY_ENUM, EXC_CATEGORY_ENUM, EDITOR_KERNELS, EDITOR_KERNEL_VALUES, DIFF_MAX_CHARS };'
+    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, CATEGORY_ENUM, EXC_CATEGORY_ENUM, EDITOR_KERNELS, EDITOR_KERNEL_VALUES, DIFF_MAX_CHARS, readPreviewText, getFsEncodingService, FS_ENCODING_SERVICE };'
   )(
     pathJoin, pathResolve, pathIsAbsolute,
     fsExistsSync, fsReadFileSync, fsReaddirSync, fsUnlinkSync, fsLstatSync, fsRealpathSync,
@@ -146,6 +146,20 @@ ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'")
   const readmeZh = readFileSync(pathJoin(ROOT, 'README.md'), 'utf8')
   const readmeEn = readFileSync(pathJoin(ROOT, 'README_EN.md'), 'utf8')
   ok('README 不再有兜底策略说明条目', !readmeZh.includes('**兜底策略**') && !readmeEn.includes('**Fallback policy**'))
+  // hash 锚点式 edit 参数的兼容解析仍在（按行 hash 定位、读 hash-store.sqlite 快照、
+  // 快照过期时从磁盘重算）。这是纯代码行为断言：兼容链上任一环缺失，这类 edit 的
+  // 预览就会失效，所以把定义形态钉住。
+  //
+  // 断言锚定**函数定义**而非「名字在文件里出现过」：这些名字在 index.js 里有多处出现
+  // （注释、调用点），`src.includes(name)` 在删掉定义后仍为 true（变异实测漏判）。
+  //
+  // 刻意**不**断言 README 里有哪些兼容条目：文档写不写某个兼容是产品决策，
+  // 不是可测契约；用测试去要求/禁止某个条目，等于把文档措辞钉死，也让断言读起来
+  // 像是在针对具体插件。（本文件上面那条「不再有兜底策略说明条目」是防回退——
+  // 防止已下线的过时说明重新出现，性质不同。）
+  ok('hash 锚点式 edit 的兼容解析保留（定义与快照读取路径都在）',
+    ['betterEditAnchor', 'applyBetterEdits', 'betterEditStoreFor'].every((k) => src.includes('function ' + k + '(')) &&
+    src.includes("pathJoin(full, 'hash-store.sqlite')"))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -269,6 +283,464 @@ ok('home: DSH_HOME 优先', homeFromEnvSim({ DSH_HOME: A, HOME: B }, C, process.
 ok('home: os.homedir 优先于 HOME', homeFromEnvSim({ HOME: B }, C, process.platform === 'win32').replace(/\\/g, '/') === C.replace(/\\/g, '/') + '/.dsh')
 ok('home: 无 osHome 回退 HOME', homeFromEnvSim({ HOME: B }, '', process.platform === 'win32').replace(/\\/g, '/') === B.replace(/\\/g, '/') + '/.dsh')
 ok('home: 相对路径被拒', homeFromEnvSim({ DSH_HOME: 'rel/path' }, '', process.platform === 'win32') === null)
+
+// ─────────────────────────────────────────────────────────────
+group('9c. 非 UTF-8 预览复用 dsh-fs-encoding 的 ctx.fsEncoding 服务（可选依赖）')
+// 背景：ctx.fs 是 UTF-8-only 契约，而 dsh-fs-encoding 在**工具层** shadow read/write/edit，
+// 不替换 ctx.fs——绕过工具层的审批预览因此读不到非 UTF-8 文件。该插件现已 provide
+// ctx.fsEncoding 服务（tryDecode：refusal 是返回值、decided 区分「猜的/确定的」）。
+//
+// 硬约束：**不能依赖它**——其他用户不一定装。有就用、没有就维持原报错，且绝不自己实现猜测
+// （两处各自猜会让同一部署的两半对同一文件产生分歧，正是服务注释点名的问题）。
+if (mod) {
+  // 服务缺失（含 ctx.get 抛错、同名异物）时必须安静返回 null，而不是抛
+  ok('服务缺失/抛错/同名异物时安静返回 null', mod.getFsEncodingService({ get: () => undefined }) === null && mod.getFsEncodingService({ get: () => { throw new Error('x') } }) === null && mod.getFsEncodingService({ get: () => ({ decode: () => {} }) }) === null)
+  ok('服务名与插件声明一致（fsEncoding）', mod.FS_ENCODING_SERVICE === 'fsEncoding')
+  // 不写进 inject：那是硬依赖，会让本插件在没装该插件时一直等待服务出现
+  ok('fsEncoding 未写进 inject（保持可选）', !/inject:\s*\[[^\]]*fsEncoding/.test(src))
+
+  const utf8Fs = { readText: async () => '你好' }
+  const badFs = {
+    readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
+    readBytes: async () => Buffer.from([0xC4, 0xE3]),
+    resolve: async (p) => ({ displayPath: p, targetKey: p }),
+  }
+  const okSvc = { tryDecode: async () => ({ ok: true, result: { text: '你好', encoding: 'gbk', decided: 'guessed' } }) }
+  const refuseSvc = { tryDecode: async () => ({ ok: false, refusal: { message: 'E_NOT_TEXT: not decodable text', code: 'E_NOT_TEXT' } }) }
+  const throwSvc = { tryDecode: async () => { throw new Error('boom') } }
+
+  // ① UTF-8 走原路径，不碰服务（服务在场也不该被调用）
+  let svcCalled = false
+  const spySvc = { tryDecode: async () => { svcCalled = true; return { ok: true, result: { text: 'x', encoding: 'gbk', decided: 'guessed' } } } }
+  const r1 = await mod.readPreviewText(utf8Fs, { displayPath: 'x' }, spySvc)
+  ok('UTF-8 文件走原路径且不调用解码服务', r1.ok === true && r1.text === '你好' && r1.decided === 'utf8' && svcCalled === false)
+
+  // ①b UTF-8 路径解出的文本含 NUL 时同样按二进制处理，且不调用服务。
+  // ctx.fs.readText 只对**前 8192 字节**采样判二进制（dsh-fs-local 的 BINARY_SAMPLE_BYTES），
+  // NUL 落在采样窗口之后时它会成功返回一段含 U+0000 的文本——若不在这里查，同一份含 NUL
+  // 的内容会因 NUL 的位置不同而行为不同（窗口内被拦、窗口外放行并渲染）。
+  //
+  // 已知边界（不在本断言覆盖范围，也不打算修）：read 预览走的是上游 streamText（同样只采样
+  // 前 8192 字节），只有它**失败**时才回退到 readPreviewText。故「read 预览 + NUL 在窗口之后」
+  // 仍会放行——那是上游采样窗口的既有行为（改动前也放行），触发条件极罕见，且要修就得
+  // 在流式路径自行扫描 NUL、偏离上游语义。write/edit/undo 预览都走 readPreviewText，已覆盖。
+  let svcCalled2 = false
+  const spySvc2 = { tryDecode: async () => { svcCalled2 = true; return { ok: true, result: { text: 'x', encoding: 'gbk', decided: 'guessed' } } } }
+  const lateNulFs = { readText: async () => 'A'.repeat(9000) + '\u0000' + 'tail' }
+  const r1b = await mod.readPreviewText(lateNulFs, { displayPath: 'x' }, spySvc2)
+  ok('UTF-8 路径解出文本含 NUL（采样窗口之外）时也按二进制处理',
+    r1b.ok === false && /binary file/.test(r1b.error.zh) && svcCalled2 === false, JSON.stringify(r1b))
+
+  // ② 非 UTF-8 + 无服务 → 维持原报错（不得自造猜测）
+  const r2 = await mod.readPreviewText(badFs, { displayPath: 'x' }, null)
+  ok('无服务时非 UTF-8 维持原报错（不猜）', r2.ok === false && /invalid UTF-8 text/.test(r2.error.zh), JSON.stringify(r2.error))
+
+  // ③ 非 UTF-8 + 有服务 → 拿到文本，且 decided 如实透传（guessed 必须能让 UI 标注）
+  const r3 = await mod.readPreviewText(badFs, { displayPath: 'x' }, okSvc)
+  ok('有服务时解出文本并透传 encoding/decided', r3.ok === true && r3.text === '你好' && r3.encoding === 'gbk' && r3.decided === 'guessed', JSON.stringify(r3))
+
+  // ④ 服务拒绝 → 带出**服务的**说明（比 ctx.fs 的报错更准确：能区分「没尝试猜」与「猜了但失败」）
+  const r4 = await mod.readPreviewText(badFs, { displayPath: 'x' }, refuseSvc)
+  ok('服务拒绝时带出服务自己的说明', r4.ok === false && /E_NOT_TEXT/.test(r4.error.zh), JSON.stringify(r4.error))
+
+  // ⑤ 服务抛异常（契约说不会，消费方仍须兜住）→ 退回原报错，不崩。
+  // 必须把 await 包在 try 里：若实现不再兜住，异常会从 readPreviewText 逃出，
+  // 直接终止整个测试进程（实测：进程以未捕获异常退出，断言根本没机会记录失败）——
+  // 那样 CI 只会看到「崩溃」而不是「哪条断言失败」，且退出码语义也依赖于运行器。
+  let r5 = null
+  try {
+    r5 = await mod.readPreviewText(badFs, { displayPath: 'x' }, throwSvc)
+  } catch (e) {
+    r5 = { ok: false, error: { zh: 'THREW: ' + ((e && e.message) || e) } }
+  }
+  ok('服务抛异常时退回原报错（不崩）', r5.ok === false && /invalid UTF-8 text/.test(r5.error.zh), JSON.stringify(r5.error))
+
+  // ⑥ 字节读失败（体积超限/权限）→ 必须带出**字节读自己的**原因，而不是 readText 的
+  // invalid UTF-8 text：后者会把「文件太大」谎报成「编码读不出」，审批者据此查编码却
+  // 查不到真实原因。（早期版本这里断言的是「退回原报错」，等于把缺陷固化成了契约。）
+  const tooBigFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => { throw new Error('FS_TOO_LARGE') },
+    resolve: async (p) => ({ displayPath: p, targetKey: p }),
+  }
+  const r6 = await mod.readPreviewText(tooBigFs, { displayPath: 'x' }, okSvc)
+  ok('字节读失败时带出字节读自己的原因（不谎报为编码错误）',
+    r6.ok === false && /FS_TOO_LARGE/.test(r6.error.zh) && !/invalid UTF-8 text/.test(r6.error.zh), JSON.stringify(r6.error))
+
+  // ⑥a 字节读返回不可用值（null / 无 length）→ 文案同样不得退回 readText 的错误。
+  // 真实 dsh-fs-local 的 readBytes 恒返回 Buffer，故这条对真实实现不可达，是防御；
+  // 但若某个第三方 fs 后端返回 null，退回 direct.error 会把「读不到字节」说成
+  // 「编码读不出」——与上面 catch 确立的原则矛盾。
+  const noBytesFs = {
+    readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
+    readBytes: async () => null,
+  }
+  const r6a = await mod.readPreviewText(noBytesFs, { displayPath: 'x' }, okSvc)
+  ok('字节读返回 null 时不退回 readText 的错误（同一原则）',
+    r6a.ok === false && !/invalid UTF-8 text/.test(r6a.error.zh), JSON.stringify(r6a.error))
+  const noLenFs = {
+    readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
+    readBytes: async () => ({ notABuffer: true }),
+  }
+  const r6a2 = await mod.readPreviewText(noLenFs, { displayPath: 'x' }, okSvc)
+  ok('字节读返回无 length 的对象时不退回 readText 的错误',
+    r6a2.ok === false && !/invalid UTF-8 text/.test(r6a2.error.zh), JSON.stringify(r6a2.error))
+  // 空 Buffer（length=0）是**合法**结果，不得被当成"不可用"拦下
+  const emptyFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => Buffer.alloc(0),
+  }
+  const r6a3 = await mod.readPreviewText(emptyFs, { displayPath: 'x' }, { tryDecode: async () => ({ ok: true, result: { text: '', encoding: 'utf8', decided: 'utf8' } }) })
+  ok('空文件（length=0 的 Buffer）不被当成不可用',
+    r6a3.ok === true && r6a3.text === '', JSON.stringify(r6a3))
+
+  // ⑥b 体积超限（带 code 的真实错误）→ 走项目既有的「文件过大」口径，而不是把
+  // dsh-fs-local 的原始 message 抛给用户：那条 message 形如
+  // `cannot read "<绝对路径>": 73400316 bytes exceeds the 67108864-byte limit`，
+  // 会把本插件的**内部内存保护上限**当成业务信息展示（实现细节，且与别处口径不一致）。
+  const fsTooLargeFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => { const e = new Error('cannot read "C:/x/big.txt": 73400316 bytes exceeds the 67108864-byte limit'); e.code = 'FS_TOO_LARGE'; throw e },
+  }
+  const r6b = await mod.readPreviewText(fsTooLargeFs, { displayPath: 'x' }, okSvc)
+  ok('体积超限时走「文件过大」文案（不暴露内部保护上限与绝对路径）',
+    r6b.ok === false && /文件过大/.test(r6b.error.zh) && !/67108864/.test(r6b.error.zh) && !/exceeds the/.test(r6b.error.zh),
+    JSON.stringify(r6b.error))
+
+  // ⑥c 已知 size 且超限 → 预检直接拒绝，不再整读一次（省掉白读）
+  let readBytesCalled = false
+  const precheckFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => { readBytesCalled = true; return Buffer.from([0xC4, 0xE3]) },
+  }
+  const r6c = await mod.readPreviewText(precheckFs, { displayPath: 'x' }, okSvc, 128 * 1024 * 1024)
+  ok('已知 size 超限时预检拒绝，不做无用的整读',
+    r6c.ok === false && /文件过大/.test(r6c.error.zh) && readBytesCalled === false,
+    JSON.stringify({ err: r6c.error, readBytesCalled }))
+
+  // ⑥d 预检阈值必须与 readBytes 的上限**一致**：预检只是把「注定失败」提前（省掉无用的
+  // 整读），不能改变任何文件的可预览性。阈值取小了会把本可预览的文件误拒——这里用一个
+  // 明确小于 64MiB 上限、但足以被任何「取小了的阈值」拦下的 size 来验证。
+  let smallSizeReadBytesCalled = false
+  const smallSizeFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => { smallSizeReadBytesCalled = true; return Buffer.from([0xC4, 0xE3]) },
+  }
+  const r6d = await mod.readPreviewText(smallSizeFs, { displayPath: 'x' }, okSvc, 8 * 1024 * 1024)
+  ok('未超上限的 size 不被预检拦下（预检阈值不得小于字节读上限）',
+    r6d.ok === true && smallSizeReadBytesCalled === true,
+    JSON.stringify({ ok: r6d.ok, err: r6d.error, readBytesCalled: smallSizeReadBytesCalled }))
+
+  // ⑦ 服务返回畸形结果（ok:true 但无 result）→ 当作失败处理，不产出 undefined 文本
+  const r7 = await mod.readPreviewText(badFs, { displayPath: 'x' }, { tryDecode: async () => ({ ok: true }) })
+  ok('服务返回畸形结果时按失败处理', r7.ok === false, JSON.stringify(r7))
+
+  // ⑧ 字节读必须显式带上限：漏传 maxBytes 时 dsh-fs-local 的体积闸退化为
+  // `info.size > undefined === false`，createReadStream({end: undefined}) 会读到 EOF，
+  // 任意大小的文件都会被无界整读进内存（readText 的失败判定本身已整读过一次）。
+  // 该值是**本插件的内存硬保护**，不是业务上限：服务的 maxFileBytes 可配置且未暴露
+  // 读取接口，故不能对齐，只能取得足够大（曾误取 DIFF_MAX_CHARS(1MiB)，把服务本来
+  // 能解码的 1~10MiB 文件提前拦成 FS_TOO_LARGE，退回误导性的 invalid UTF-8 text）。
+  let capSeen = 'MISSING'
+  const capFs = {
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async (t, sig, maxBytes) => { capSeen = maxBytes; return Buffer.from([0xC4, 0xE3]) },
+  }
+  await mod.readPreviewText(capFs, { displayPath: 'x' }, okSvc)
+  ok('readBytes 显式传入体积上限，且远高于服务的默认业务上限(10MiB)',
+    typeof capSeen === 'number' && capSeen >= 64 * 1024 * 1024, 'maxBytes=' + String(capSeen))
+  // 上限必须远大于 DIFF_MAX_CHARS：否则服务能解码的文件会被提前拦住（见上）
+  ok('字节读上限不得收紧到 DIFF_MAX_CHARS 量级（会误拒服务可解码的文件）',
+    typeof capSeen === 'number' && capSeen > mod.DIFF_MAX_CHARS, 'maxBytes=' + String(capSeen))
+
+  // ⑨ 字节读失败必须带出**自己的**原因（体积超限 / 权限），不能退回 readText 的错误：
+  // 那会把「文件太大」谎报成「编码读不出」，审批者据此去查编码却查不到真实原因。
+  const tooBigFs2 = {
+    readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
+    readBytes: async () => { throw new Error('cannot read "x": 13631520 bytes exceeds the 10485760-byte limit') },
+  }
+  const rTooBig = await mod.readPreviewText(tooBigFs2, { displayPath: 'x' }, okSvc)
+  ok('字节读超限时带出真实原因（不是 invalid UTF-8 text）',
+    rTooBig.ok === false && /exceeds the/.test(rTooBig.error.zh) && !/invalid UTF-8 text/.test(rTooBig.error.zh),
+    JSON.stringify(rTooBig.error))
+
+  // ⑨ UTF-16LE/BE（无 BOM）的字节是合法 UTF-8（ASCII 与 NUL 交替），ctx.fs 会以
+  // 「binary file」拒绝，而服务会判成 decided:'utf8' 并把 NUL 原样解出来。这类内容
+  // 不可预览：既不能当文本展示（decided==='utf8' 时客户端连徽标都不显示），
+  // 也不该替换掉原本明确的 binary file 报错。
+  const nulFs = {
+    readText: async () => { throw new Error('cannot read "x": binary file') },
+    readBytes: async () => Buffer.from([0x68, 0x00, 0x69, 0x00]),
+  }
+  const nulSvc = { tryDecode: async () => ({ ok: true, result: { text: 'h\u0000i\u0000', encoding: 'utf8', decided: 'utf8' } }) }
+  const r9 = await mod.readPreviewText(nulFs, { displayPath: 'x' }, nulSvc)
+  ok('服务判成 utf8 且文本含 NUL 时按不可预览处理（退回 binary file 报错）',
+    r9.ok === false && /binary file/.test(r9.error.zh), JSON.stringify(r9))
+  // 猜测路径**同样**必须拦下：曾经的写法按 decided 豁免 guessed，理由是「服务真的解出了
+  // 文本」——该理由不成立。猜测路径的语义是「在候选编码里挑一个能解通的」，而单字节编码
+  // （windows-1251/iso-8859-1）能把任意字节映射成字符，所以二进制必然"解通"；实测
+  // autoGuessEncoding=true 时 MZ 头二进制被解成 windows-1251/guessed 且满是 U+0000，
+  // 旧写法会把它放行并当文件内容渲染。
+  const guessedNulSvc = { tryDecode: async () => ({ ok: true, result: { text: 'ab\u0000cd', encoding: 'windows-1251', decided: 'guessed' } }) }
+  const r9b = await mod.readPreviewText(nulFs, { displayPath: 'x' }, guessedNulSvc)
+  ok('猜测结果含 NUL（二进制被单字节编码兜底映射）同样按不可预览处理',
+    r9b.ok === false && /binary file/.test(r9b.error.zh), JSON.stringify(r9b))
+  // 而猜测出的**合法**文本（无 NUL）必须正常放行，不得误伤
+  const guessedOkSvc = { tryDecode: async () => ({ ok: true, result: { text: '你好，世界\n', encoding: 'gbk', decided: 'guessed' } }) }
+  const r9b2 = await mod.readPreviewText(nulFs, { displayPath: 'x' }, guessedOkSvc)
+  ok('猜测出的合法文本（无 NUL）正常放行',
+    r9b2.ok === true && r9b2.decided === 'guessed', JSON.stringify(r9b2))
+  // 判据是「解出的文本含 U+0000 即不可预览」，**不按 decided 或编码豁免**。
+  // 下面用上游真实会出现的组合逐一验证「合法文本不被误伤、二进制被拦下」。
+  // 上游 CANONICAL_ENCODINGS 实测为：utf8 / utf8bom / utf16le / utf16be / utf32le /
+  // utf32be / gbk / big5 / shift_jis / euc-kr / windows-1251…1257 / iso-8859-1。
+  // 关键事实（真实服务实测）：所有**合法文本**——含各 UTF BOM 变体（utf16le/utf16be/
+  // utf32le/utf8bom）与 GBK/Big5/Shift-JIS 正常文件——解出的文本都**不含** U+0000，
+  // 故「含 NUL 即拦」不会误伤它们；而二进制（含 autoGuess 下被单字节编码兜底映射的）
+  // 必然含 U+0000。
+  //
+  // 已知残余缺口（本组断言覆盖不到，也不打算修）：判据是**单向**蕴含——「解出文本含
+  // U+0000 ⟹ 输入含 0x00」，反向不成立。UTF-16/32 解码会把 0x00 吸收进码元，故
+  // 「UTF-16 BOM 前缀 + 二进制体」若每个 16 位单元高字节非零，解出的文本不含 U+0000
+  // 会被放行（实测 FF FE + 二进制体 → utf16le/bom，无 NUL）。该组合要求文件极短且恰好
+  // 以 UTF-16 BOM 开头（随机二进制约 1/65536；长度超过 ~1KB 后几乎必然出现 U+0000），
+  // 后果是审批者看到一段乱码、可自行判断。注意：**不能**用「字节含 0x00」一刀切收紧
+  // ——合法 UTF-16/32 文本的字节里全是 0x00，那正是本功能存在的理由。
+  for (const enc of ['utf8bom', 'utf16le', 'utf16be', 'utf32le', 'gbk', 'big5', 'shift_jis', 'windows-1251']) {
+    for (const dec of ['utf8', 'bom', 'guessed']) {
+      // 无 NUL 的合法解码结果：任何 decided/encoding 组合都必须放行（不得误伤）
+      const okSvc = { tryDecode: async () => ({ ok: true, result: { text: '你好世界\n', encoding: enc, decided: dec } }) }
+      const rOk = await mod.readPreviewText(nulFs, { displayPath: 'x' }, okSvc)
+      ok('合法文本（' + enc + '/' + dec + '，无 NUL）必须放行',
+        rOk.ok === true && rOk.encoding === enc && rOk.decided === dec, JSON.stringify(rOk))
+    }
+  }
+  // 含 NUL 的结果：**所有** decided/encoding 组合都必须拦下（含 guessed —— 猜测路径的
+  // 单字节编码能把任意字节兜底映射成字符，二进制必然"解通"，那不是成功解码）
+  for (const dec of ['utf8', 'bom', 'guessed']) {
+    for (const enc of ['utf8bom', 'utf16le', 'windows-1251', 'iso-8859-1']) {
+      const badSvc = { tryDecode: async () => ({ ok: true, result: { text: 'a\u0000b', encoding: enc, decided: dec } }) }
+      const rBad = await mod.readPreviewText(nulFs, { displayPath: 'x' }, badSvc)
+      ok('含 NUL 的结果（' + enc + '/' + dec + '）必须拦下（二进制强信号）',
+        rBad.ok === false, JSON.stringify(rBad))
+    }
+  }
+
+  // ⑨b 用**真实字节**（而非桩喂解码后文本）验证判据：单字节编码兜底映射出的二进制
+  // 必然含 U+0000，故走服务路径时会被拦下。上面那批断言全部由桩直接提供 text，
+  // 结构上无法反映「真实字节 → 服务 → 判据」这条链，这条补上。
+  // 注意 UTF-16 的无 NUL 缺口无法在此固化（见上方注释），故只钉「能被拦下」的方向。
+  {
+    const mzBytes = Buffer.concat([Buffer.from([0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00]), Buffer.alloc(40, 0)])
+    const mzFs = {
+      readText: async () => { throw new Error('cannot read "x": binary file') },
+      readBytes: async () => mzBytes,
+    }
+    const seenBytes = []
+    const realishSvc = {
+      tryDecode: async (bytes) => {
+        seenBytes.push(bytes.length)
+        // 以 latin1 近似「单字节兜底映射」：这是**近似而非逐位仿真**——真实服务在
+        // autoGuess=true 时对这段字节选的是 windows-1251（且默认配置下直接 E_NOT_TEXT，
+        // 根本不进猜测路径）；windows-1252 有 5 个码位映射为 U+FFFD、windows-1251 有
+        // 112/256 与 latin1 不同，**只有 iso-8859-1 才是真 1:1**。
+        // 但本断言只关心「0x00 → U+0000 因而被 NUL 判据拦下」，这一点上近似与真实一致。
+        const text = Buffer.from(bytes).toString('latin1')
+        return { ok: true, result: { text, encoding: 'windows-1252', decided: 'guessed' } }
+      },
+    }
+    // 本块的主要覆盖点是「字节被原样传给服务」（seenBytes 校验）这条链路；
+    // NUL 判据本身另有多条断言覆盖，故这里不是该判据的主防线。
+    const rBytes = await mod.readPreviewText(mzFs, { displayPath: 'x' }, realishSvc)
+    ok('真实二进制字节经服务兜底映射后含 NUL，被拦下',
+      rBytes.ok === false && seenBytes.length === 1 && seenBytes[0] === mzBytes.length,
+      JSON.stringify({ res: rBytes, seenBytes }))
+  }
+
+  // ⑨c 服务自己的体积超限（refusal.code === 'E_TOO_LARGE'）→ 走项目既有的「文件过大」
+  // 口径。服务那句 message 是**对模型说的**（"Raise maxBytes (or the plugin's
+  // maxFileBytes) to decode it."），且含服务的内部上限数字，对审批者无意义。
+  const svcTooLarge = { tryDecode: async () => ({ ok: false, refusal: { code: 'E_TOO_LARGE', message: '[E_TOO_LARGE] (unknown path) is 12582912 bytes, over the 10485760-byte cap for a decode. Raise maxBytes (or the plugin\'s maxFileBytes) to decode it.' } }) }
+  const r9e = await mod.readPreviewText(badFs, { displayPath: 'x' }, svcTooLarge)
+  ok('服务的 E_TOO_LARGE 走「文件过大」文案（不把内部上限与原话抛给用户）',
+    r9e.ok === false && /文件过大/.test(r9e.error.zh) && !/10485760/.test(r9e.error.zh) && !/maxFileBytes/.test(r9e.error.zh),
+    JSON.stringify(r9e.error))
+  // 其余 refusal（如 E_NOT_TEXT 二进制）仍原样带出服务的说明
+  const svcNotText = { tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'E_NOT_TEXT: not decodable text; enable autoGuessEncoding or re-read with an explicit encoding' } }) }
+  const r9f = await mod.readPreviewText(badFs, { displayPath: 'x' }, svcNotText)
+  ok('其余 refusal 仍带出服务自己的说明（能区分「没尝试猜」与「猜了但失败」）',
+    r9f.ok === false && /E_NOT_TEXT/.test(r9f.error.zh), JSON.stringify(r9f.error))
+  // tryDecode 必须带上 displayPath：否则服务文案永远是 "(unknown path)"，审批者会以为读错文件
+  let seenOpts = null
+  const optsSvc = { tryDecode: async (b, o) => { seenOpts = o; return { ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } } } }
+  await mod.readPreviewText(badFs, { displayPath: 'G:/proj/big.txt', targetKey: 'k' }, optsSvc)
+  ok('tryDecode 传入 displayPath（服务文案能指名文件）',
+    !!(seenOpts && seenOpts.displayPath === 'G:/proj/big.txt'), JSON.stringify(seenOpts))
+
+  // ⑨d displayPath 不是非空字符串时**不得**放进 opts：上游对 opts 严格校验，
+  // `{ displayPath: null }` 会被拒为 E_BAD_ENCODING（"displayPath must be a string"），
+  // 而那条内部参数错误会被展示给用户——一个本可预览的文件变成无意义报错。
+  // `target && target.displayPath` 在 target 为 null 或字段为 null 时正好产出 null。
+  //
+  // 桩必须**模拟上游的 opts 校验**才能捕获这个缺陷（一个不校验的桩对 null 照收，
+  // 于是「传 null」和「不传」无法区分——实测这种桩会让变异逃逸）。
+  const mkStrictSvc = (record) => ({
+    tryDecode: async (b, o) => {
+      record.opts = o
+      // 复刻上游校验：opts 必须是对象且非 null；字段若存在则必须是字符串
+      if (o !== undefined) {
+        if (typeof o !== 'object' || o === null) return { ok: false, refusal: { code: 'E_BAD_ENCODING', message: '[E_BAD_ENCODING] opts must be an object' } }
+        if ('displayPath' in o && o.displayPath !== undefined && typeof o.displayPath !== 'string') {
+          return { ok: false, refusal: { code: 'E_BAD_ENCODING', message: '[E_BAD_ENCODING] displayPath must be a string, got ' + typeof o.displayPath + '.' } }
+        }
+      }
+      return { ok: true, result: { text: 'ok', encoding: 'gbk', decided: 'guessed' } }
+    },
+  })
+  const recNull = {}
+  const rNullDp = await mod.readPreviewText(badFs, { displayPath: null }, mkStrictSvc(recNull))
+  ok('displayPath 为 null 时不放进 opts（否则上游拒为 E_BAD_ENCODING）',
+    rNullDp.ok === true && recNull.opts === undefined, JSON.stringify({ opts: recNull.opts, res: rNullDp }))
+  const recUndef = {}
+  const rUndefTarget = await mod.readPreviewText(badFs, null, mkStrictSvc(recUndef))
+  ok('target 为 null 时不放进 opts（同上）',
+    rUndefTarget.ok === true && recUndef.opts === undefined, JSON.stringify({ opts: recUndef.opts, res: rUndefTarget }))
+  const recNoDp = {}
+  const rNoDp = await mod.readPreviewText(badFs, { targetKey: 'k' }, mkStrictSvc(recNoDp))
+  ok('target 无 displayPath 字段时不放进 opts',
+    rNoDp.ok === true && recNoDp.opts === undefined, JSON.stringify({ opts: recNoDp.opts }))
+  const recEmpty = {}
+  const rEmptyDp = await mod.readPreviewText(badFs, { displayPath: '' }, mkStrictSvc(recEmpty))
+  ok('displayPath 为空串时不放进 opts（空串对用户无意义）',
+    rEmptyDp.ok === true && recEmpty.opts === undefined, JSON.stringify({ opts: recEmpty.opts }))
+
+  // ⑨e 服务的 E_BAD_ENCODING 是我方调用参数的问题，不是文件的问题：它的 message
+  // （如 "displayPath must be a string"）对审批者毫无意义，展示它等于把本插件的 bug
+  // 说成文件的错。应退回 ctx.fs 的原始报错，而不是把内部契约错误抛给用户。
+  // 且必须**记日志**：4 个调用点都是返回值传递、不会进入任何 catch，路由的
+  // console.error 只在 buildFileDiffData 抛出时触发——不记日志则我方 opts 参数错误
+  // 在用户侧伪装成「读取失败」、运维侧零线索。
+  const svcBadEnc = { tryDecode: async () => ({ ok: false, refusal: { code: 'E_BAD_ENCODING', message: '[E_BAD_ENCODING] displayPath must be a string, got object.' } }) }
+  const logged = []
+  const origErr = console.error
+  console.error = (...a) => { logged.push(a.map(String).join(' ')) }
+  let r9g
+  try { r9g = await mod.readPreviewText(badFs, { displayPath: 'x' }, svcBadEnc) } finally { console.error = origErr }
+  ok('服务的 E_BAD_ENCODING 不展示给用户（退回 ctx.fs 原始报错）',
+    r9g.ok === false && !/E_BAD_ENCODING/.test(r9g.error.zh) && !/displayPath must be/.test(r9g.error.zh),
+    JSON.stringify(r9g.error))
+  ok('服务的 E_BAD_ENCODING 必须记日志（否则我方 opts 错误在运维侧零线索）',
+    logged.some((l) => /fsEncoding rejected our opts/.test(l) && /E_BAD_ENCODING/.test(l)),
+    JSON.stringify(logged))
+
+  // ⑩ target 只接受已解析对象：契约已收窄，路径字符串不再被 resolve。
+  // 断言必须**限定在 readPreviewText 函数体内**：全文否定匹配 `typeof X === 'string'`
+  // 会误伤（本文件有 41 处该惯用法，无关函数里加一处就失败），而且换个写法
+  // （如 `typeof target !== 'object'`）重新接受字符串照样能通过——两头都不成立。
+  const rptBody = (() => {
+    const s = src.indexOf('async function readPreviewText')
+    if (s < 0) return ''
+    let i = src.indexOf('{', s), depth = 0
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(s, i + 1) }
+    }
+    return ''
+  })()
+  ok('readPreviewText 不接受路径字符串（函数体内不 resolve 字符串 target）',
+    rptBody.length > 0 && !/fsService\.resolve\s*\(\s*target\s*\)/.test(rptBody) && !/typeof\s+target\s*===\s*'string'/.test(rptBody))
+
+  // ⑪ 编码来源必须**原样透传**服务返回值，不得自行编造 provenance。
+  // 这是行为断言：服务说 bom 就必须是 bom（曾实测把实现改成硬编码 'guessed'，
+  // 而当时那批纯文本断言全部通过）。
+  const bomSvc = { tryDecode: async () => ({ ok: true, result: { text: 'ok', encoding: 'big5', decided: 'bom' } }) }
+  const rBom = await mod.readPreviewText(badFs, { displayPath: 'x' }, bomSvc)
+  ok('服务返回 decided=bom 时原样透传（不得改写为 guessed）',
+    rBom.ok === true && rBom.decided === 'bom' && rBom.encoding === 'big5', JSON.stringify(rBom))
+  const hintSvc = { tryDecode: async () => ({ ok: true, result: { text: 'ok', encoding: 'gbk', decided: 'hint' } }) }
+  const rHint = await mod.readPreviewText(badFs, { displayPath: 'x' }, hintSvc)
+  ok('服务返回 decided=hint 时原样透传', rHint.ok === true && rHint.decided === 'hint', JSON.stringify(rHint))
+  // 服务未给 decided 时不得自行编造一个（须为 null，让 UI 走「未经服务」分支）
+  const noProvSvc = { tryDecode: async () => ({ ok: true, result: { text: 'ok', encoding: 'gbk' } }) }
+  const rNoProv = await mod.readPreviewText(badFs, { displayPath: 'x' }, noProvSvc)
+  ok('服务未给 decided 时不得编造 provenance（须为 null）',
+    rNoProv.ok === true && (rNoProv.decided === null || rNoProv.decided === undefined), JSON.stringify(rNoProv))
+}
+// 防回退：三条预览读盘路径都走 readPreviewText，而不是裸 readText。
+// 计数含函数定义本身（`async function readPreviewText(fsService, …`），故为 5。
+ok('预览读盘走 readPreviewText（读预览 / 写 diff / 撤销预览 / 写类单点）', (src.match(/readPreviewText\(fsService, /g) || []).length === 5)
+// 防回退：不得出现自写的编码猜测（判定权归 dsh-fs-encoding）。
+// 断言只约束**可观察契约**，不做全文件文本黑名单：黑名单对「换个名字重新实现」无效
+// （scoreDecodedText 等名字在仓库与 git 历史里都不存在，断言恒真）；而全文件否定正则
+// 又会误伤注释（`new TextDecoder` 出现在注释里就失败）。真正的契约是：
+//   ① 宿主侧编码判定只经服务的 tryDecode（不建自己的解码器）；
+//   ② provenance 原样来自服务（已由上面 ⑪ 的三条行为断言覆盖）。
+ok('不自实现编码猜测：判定只经服务的 tryDecode',
+  // 用正则容忍参数：`encService.tryDecode(bytes, { displayPath })` 是纯改进，
+  // 精确子串匹配会把它判成回归、挡住后续正确修复
+  /\bencService\.tryDecode\(bytes\s*[,)]/.test(src) &&
+  !/Buffer\.from\(bytes\)\.toString\(/.test(src) &&
+  !/from\s+['"]iconv/.test(src))
+// 防回退：客户端必须标注编码来源，且把「猜的」与「确定的」区分开——
+// 用户会照着这段内容判断是否放行编辑，猜的编码必须让他知道可能不准。
+// 两个 i18n 键的 zh/en 条目都要校验：漏掉任一条目时 T() 会回退显示原始 key
+// （徽标 title 字面出现 "app.encHint"），而此前只校验了 encGuessedHint。
+ok('客户端标注编码来源并区分「猜的/确定的」，且两个键的中英条目齐全',
+  cli.includes("data.decided === 'guessed' ? T('app.encGuessedHint') : T('app.encHint')") &&
+  cli.includes("data.decided === 'utf8'") &&
+  cli.includes("'app.encHint': '该文件不是 UTF-8，内容已按此编码解码显示'") &&
+  cli.includes("'app.encHint': 'Not UTF-8; content decoded with this encoding'") &&
+  cli.includes("'app.encGuessedHint': '该文件不是 UTF-8；编码是按内容猜测的（可能不准），请留意'") &&
+  cli.includes("'app.encGuessedHint': 'Not UTF-8; the encoding was guessed from the content and may be wrong'"))
+// 防回退：编码徽标必须由**同一个**共用组件渲染，且三处渲染位都在。
+// 只断言「源码里存在 encoding/decided 字符串」证明不了数据真的到了界面——曾实测把
+// withEncMeta 改成永不附加字段（徽标彻底消失），那种断言照样通过。故这里：
+//   ① 用**带尾逗号的渲染位形态** `encBadge(data),` 计数（恰为 3），与函数定义形参区分开
+//      （曾把形参与渲染点混在同一计数里：形参改名就误报失败，删一处+别处重复则漏判）；
+//   ② 把三处分别锚定在各自 header 块内，避免「删一处、别处重复一次」的守恒式绕过。
+ok('编码徽标单点渲染，且 fallback / 常规 diff / read 三处 header 都挂载',
+  (cli.match(/function encBadge\(/g) || []).length === 1 &&
+  (cli.match(/encBadge\(data\),/g) || []).length === 3 &&
+  // fallback 视图：'-' + data.removed 之后紧跟徽标
+  /'-' \+ data\.removed\),\s*\n\s*encBadge\(data\),/.test(cli) &&
+  // read 视图：diffLines 之后紧跟徽标
+  /T\('app\.diffLines'\)\.replace\([^\n]*\),\s*\n\s*encBadge\(data\),/.test(cli))
+// 防回退：服务判定结果必须从宿主透传到客户端（readPreviewText → holder → payload → badge）。
+// 写类 diff 与撤销预览的 payload 由多个构造器产出，故经**请求内局部 holder** 单点附加。
+// holder 必须是局部对象而非 entry 属性：file-diff 是 HTTP 路由且无按 id 串行化，
+// 挂 entry 上会让并发请求交错读写同一字段（实测：一次请求拿到另一次的编码）。
+ok('编码来源经请求内局部 holder 透传（不挂 entry，避免并发互相覆盖）',
+  src.includes('const enc = { meta: null }') &&
+  src.includes('function withEncMeta(out, meta)') &&
+  src.includes('return withEncMeta(r, enc.meta)') &&
+  !/entry\.encMeta/.test(src))
+// 行为断言：withEncMeta 必须**真的**把字段附加到 payload 上。
+// 纯文本断言（源码里出现 encoding/decided 字样）证明不了这一点——曾实测把它改成
+// `if (false && ...)`（永不附加 → 徽标在写类/撤销预览里彻底消失）而断言照样通过。
+// 从源码里提取 withEncMeta 的函数体并实际调用它，验证三种输入的输出。
+const withEncMetaFn = (() => {
+  const s = src.indexOf('function withEncMeta(')
+  if (s < 0) return null
+  let i = src.indexOf('{', s), depth = 0
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') { depth--; if (depth === 0) break }
+  }
+  try { return new Function('return (' + src.slice(s, i + 1) + ')')() } catch (e) { return null }
+})()
+{
+  const applied = withEncMetaFn ? withEncMetaFn({ ok: true }, { encoding: 'gbk', decided: 'guessed' }) : null
+  ok('withEncMeta 真的把 encoding/decided 附加到 payload（不是恒不附加）',
+    !!(applied && applied.encoding === 'gbk' && applied.decided === 'guessed'), JSON.stringify(applied))
+  // 不得覆盖：仅当 payload ok:true 且 meta 完整时才附加；失败结果与空 meta 都不该被写脏
+  const onFail = withEncMetaFn ? withEncMetaFn({ ok: false }, { encoding: 'gbk', decided: 'guessed' }) : null
+  const onEmpty = withEncMetaFn ? withEncMetaFn({ ok: true }, null) : null
+  ok('withEncMeta 不污染失败结果与空 meta',
+    !!(onFail && onFail.encoding === undefined && onEmpty && onEmpty.encoding === undefined),
+    JSON.stringify({ onFail, onEmpty }))
+}
+ok('decided/encoding 从 readPreviewText 透传到预览数据',
+  src.includes('enc.meta = { encoding:') && src.includes('readTargetCheckedMeta(enc, '))
 
 // ─────────────────────────────────────────────────────────────
 group('10. 读图独立分类（image）口径')
