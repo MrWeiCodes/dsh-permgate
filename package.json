@@ -1,7 +1,7 @@
 {
   "name": "@mrweicodes/dsh-permgate",
   "description": "Permission gateway for DSH (DeepSeek Harness): reviews tool calls per category (directory/command/read/image/edit/undo/subagent/doom loop) with global/project config, exceptions, quick-tool defaults, custom rules, a fallback policy for unmatched calls, bilingual approval modal and sandbox-upgrade flow. Config persisted at $DSH_HOME/dsh-permgate/config.json.",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "repository": {
     "type": "git",
     "url": "https://github.com/MrWeiCodes/dsh-permgate.git"
