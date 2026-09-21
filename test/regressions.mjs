@@ -1356,6 +1356,275 @@ ok('小字 i18n 双语齐备', cli.includes("'app.fromSession': '来自对话：
 ok('小字样式 pg-modal-sub 已定义（标题下、字号更小）', cli.includes('.pg-modal-sub { font-size: 11px;') && cli.includes('.pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }'))
 
 // ─────────────────────────────────────────────────────────────
+group('17. 权限选择器 Custom 改写：真实执行 pgScanCustom（含标记过期回归）')
+// 从 client.js 切出真实函数体在最小 DOM 桩上执行（不是复刻一份逻辑来"模拟"）。
+// 覆盖两个曾经的缺陷：
+//   ① 无条件改写 —— 实测 315 个显示 Custom 的会话里 48 个 preset=null（从没选过审查），
+//      改写会让用户误以为审查开着。必须只在 activeForSession 时改写。
+//   ② 改写标记过期 —— cr+fa 改写后把沙箱改到 ww，平台会原生渲染审查名，但我们留在
+//      元素上的 data-pg-rewritten 不会随之消失；此时状态查询失败就会拿过期标记把
+//      平台原生文案误还原成 Custom。靠宿主下发的 platformPreset 判定并清标记。
+{
+  const at = (m, from = 0) => { const i = cli.indexOf(m, from); return i }
+  const eol = (i) => cli.indexOf('\n', i) + 1
+  const iA = at('const PG_STYLE ='), iB = at('const pgNoop =')
+  const iC = at('let pgReviewActive = false;'), iD = at('function pgTriggerLabel')
+  const iE = at('function pgSwapText'), iF = at('const PG_CONFINED =')
+  const iG = at('function pgScanText')
+  ok('能定位 pgScanCustom 相关代码块',
+    iA > 0 && iB > iA && iC > 0 && iD > iC && iE > iD && iF > iE && iG > iF)
+  if (iA > 0 && iG > iF) {
+    const body = [
+      cli.slice(iA, eol(iB)),
+      cli.slice(iC, iD),
+      cli.slice(iD, iE),
+      cli.slice(iE, iF),
+      cli.slice(iF, iG),
+    ].join('\n')
+    ok('切出的代码块含 pgScanCustom', body.includes('function pgScanCustom'))
+    // 最小 DOM 桩：只实现 pgScanCustom 用到的 API
+    class T { constructor(v) { this.nodeType = 3; this.nodeValue = v; this.parentElement = null } }
+    class El {
+      constructor(tag, ...k) { this.nodeType = 1; this.tagName = tag; this.attrs = {}; this.childNodes = []; for (const x of k) this.append(x) }
+      append(n) { if (n instanceof T) n.parentElement = this; this.childNodes.push(n); return this }
+      get children() { return this.childNodes.filter((n) => n.nodeType === 1) }
+      get textContent() { return this.childNodes.map((n) => (n.nodeType === 3 ? n.nodeValue : n.textContent)).join('') }
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null }
+      setAttribute(k, v) { this.attrs[k] = String(v) }
+      removeAttribute(k) { delete this.attrs[k] }
+      querySelectorAll() { const out = []; const w = (e) => { for (const c of e.childNodes) if (c.nodeType === 1) { out.push(c); w(c) } }; w(this); return out }
+    }
+    const api = (() => {
+      const m = { exports: {} }
+      new Function('module', 'exports', body + '\nmodule.exports = { pgScanCustom, pgBeginReviewSession, pgSetReviewState, pgEndReviewSession, PG_CUSTOM_BUILTIN, PG_NAME_ZH, PG_NAME_EN, PG_REWRITTEN_ATTR };')(m, m.exports)
+      return m.exports
+    })()
+    const ZH = api.PG_NAME_ZH, BUILTIN = api.PG_CUSTOM_BUILTIN
+    const A = (n) => '访问模式，当前：' + n
+    const mk = (text) => { const b = new El('button', new El('span', new T(text))); b.setAttribute('aria-label', A(text)); return b }
+    const doc = (els) => ({ querySelectorAll: () => els })
+    // 平台自己重渲染（沙箱变更后平台按新预设渲染 DOM）
+    const platformRenders = (btn, text) => {
+      btn.setAttribute('aria-label', A(text))
+      for (const n of btn.querySelectorAll()) for (const c of n.childNodes) if (c.nodeType === 3) c.nodeValue = text
+    }
+    const scan = (btn, sid, state, lang = 'zh') => {
+      api.pgBeginReviewSession(sid)
+      api.pgSetReviewState(sid, state)
+      api.pgScanCustom(doc([btn]), lang)
+    }
+
+    // ① 审查生效 + full access：Custom 被改写（这是本功能的主用途）
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's1', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom' })
+      ok('cr+fa：Custom 改写为审查名', b.getAttribute('aria-label') === A(ZH), '实际 ' + b.getAttribute('aria-label'))
+      ok('cr+fa：打上改写标记', b.getAttribute(api.PG_REWRITTEN_ATTR) === '1')
+    }
+    // ② 防误报：没选过审查的会话，Custom 必须原样保留
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's2', { activeForSession: false, sandbox: { session: 'workspace-write' }, platformPreset: 'custom' })
+      ok('未选审查：Custom 不被改写', b.getAttribute('aria-label') === A(BUILTIN))
+    }
+    // ③ 回归（标记过期）：cr+fa 改写 → 沙箱改 ww（平台原生渲染审查名）→ 查询失败
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's3', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom' })
+      const afterRewrite = b.getAttribute('aria-label')
+      platformRenders(b, ZH)
+      scan(b, 's3', { activeForSession: true, sandbox: { session: 'workspace-write' }, platformPreset: 'custom-review' })
+      ok('标记过期：平台原生审查名不被改动', b.getAttribute('aria-label') === A(ZH))
+      ok('标记过期：data-pg-rewritten 被清除（否则下一步会误还原）',
+        b.getAttribute(api.PG_REWRITTEN_ATTR) === null)
+      api.pgSetReviewState('s3', null)
+      api.pgScanCustom(doc([b]), 'zh')
+      ok('查询失败后不误还原平台原生文案（本次修复的核心断言）',
+        b.getAttribute('aria-label') === A(ZH),
+        '期望 ' + A(ZH) + ' 实际 ' + b.getAttribute('aria-label') + '（改写后曾是 ' + afterRewrite + '）')
+      ok('查询失败后可见文本仍是审查名', b.textContent.trim() === ZH)
+    }
+    // ④ 还原路径：改写过的触发器切到「平台原生也渲染 Custom」的非审查会话，查询成功后还原。
+    // 注意这只在查询成功（平台态已知）时成立——这是唯一可靠的还原路径。
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's4', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom' })
+      scan(b, 's5', { activeForSession: false, sandbox: { session: 'workspace-write' }, platformPreset: 'custom' })
+      ok('切非审查会话（查询成功）：改写被还原为 Custom', b.getAttribute('aria-label') === A(BUILTIN))
+      ok('切非审查会话：标记被清除', b.getAttribute(api.PG_REWRITTEN_ATTR) === null)
+    }
+    // ④b 反向保护：切到「已开审查」的新会话时，绝不能把我们上一会话的残留按字面量
+    // 还原成 Custom —— 切会话瞬间 DOM 内容无法区分「我们的残留」与「新会话的平台原生
+    // 审查名」（React 若已写回，DOM 就是新会话的权威值）。曾试图在清空缓存时无条件
+    // 同步还原，实测会把开着审查的新会话误显示成未匹配态 Custom，且标记被清后不自愈。
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's4b', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom' })
+      ok('④b 前置：改写已生效', b.getAttribute('aria-label') === A(ZH))
+      // React 在切会话时把 DOM 写成新会话的权威值（cr + ww → 平台原生渲染审查名）
+      platformRenders(b, ZH)
+      api.pgBeginReviewSession('s4b-next')
+      api.pgScanCustom(doc([b]), 'zh')
+      ok('切到已开审查的新会话：平台原生审查名不被误还原成 Custom',
+        b.getAttribute('aria-label') === A(ZH), '实际 ' + b.getAttribute('aria-label'))
+      // 新会话查询成功（cr + ww）：平台自己就渲染审查名，标记应作为过期产物被清除
+      api.pgSetReviewState('s4b-next', { activeForSession: true, sandbox: { session: 'workspace-write' }, platformPreset: 'custom-review' })
+      api.pgScanCustom(doc([b]), 'zh')
+      ok('④b 查询成功后仍显示审查名', b.getAttribute('aria-label') === A(ZH))
+      ok('④b 过期标记被清除', b.getAttribute(api.PG_REWRITTEN_ATTR) === null)
+    }
+    // ④c 卸载路径：pgEndReviewSession 同样不得按字面量无条件还原（理由同 ④b）
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's4c', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom' })
+      platformRenders(b, ZH) // DOM 已是新会话的权威值
+      api.pgEndReviewSession('s4c')
+      api.pgScanCustom(doc([b]), 'zh')
+      ok('卸载时平台原生审查名不被误还原成 Custom',
+        b.getAttribute('aria-label') === A(ZH), '实际 ' + b.getAttribute('aria-label'))
+    }
+    // ⑤ 平台状态未知（宿主未下发 platformPreset）：一律不动 DOM，但沙箱图标仍打标
+    {
+      const b = mk(BUILTIN)
+      scan(b, 's6', { activeForSession: true, sandbox: { session: 'danger-full-access' } })
+      ok('平台态未知：不改写（宁可不改也不误报）', b.getAttribute('aria-label') === A(BUILTIN))
+      const b2 = mk(ZH)
+      scan(b2, 's6', { activeForSession: true, sandbox: { session: 'workspace-write' } })
+      ok('平台态未知：仍按真实沙箱打标（图标不受影响）',
+        b2.getAttribute('data-pg-sandbox') === 'workspace-write')
+    }
+    // ⑥ 沙箱图标：受限集合含 read-only（只认 workspace-write 会让最受限的反而用非受限图标）
+    {
+      const b = mk(ZH)
+      scan(b, 's7', { activeForSession: true, sandbox: { session: 'read-only' }, platformPreset: 'custom-review' })
+      ok('read-only 也打受限标记', b.getAttribute('data-pg-sandbox') === 'read-only')
+      const b2 = mk(ZH)
+      scan(b2, 's8', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom-review' })
+      ok('full access 不打受限标记（用放大镜图标）', b2.getAttribute('data-pg-sandbox') === null)
+    }
+    // ⑦ 平台渲染别的预设名：不动，且清掉过期标记
+    {
+      const b = mk('Workspace Write')
+      b.setAttribute(api.PG_REWRITTEN_ATTR, '1')
+      scan(b, 's9', { activeForSession: true, sandbox: { session: 'workspace-write' }, platformPreset: 'workspace-write' })
+      ok('别的预设名不被改动', b.getAttribute('aria-label') === A('Workspace Write'))
+      ok('别的预设名：过期标记被清除', b.getAttribute(api.PG_REWRITTEN_ATTR) === null)
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+group('18. 扫描触发条件：输入区 characterData 必须被排除（防打字卡顿）')
+// 背景：MutationObserver 的 characterData 覆盖是「改写不被 React 撤销」的前提，但
+// composer 里同时住着 Lexical 的 contenteditable 输入框。用户在输入框打字时每条
+// characterData 都会命中，若不排除就会每次按键触发一次全量扫描（全文 textContent
+// + 多次全文档 querySelectorAll），长对话里是可感知的输入卡顿。
+// 关键：en 分支（全局扫描，为换回中文）排在 pgInsideTrigger 之前，若不先排除输入区，
+// 收窄对 en 完全失效 —— 所以排除必须排在 en 判断之前。
+{
+  const at = (m, from = 0) => cli.indexOf(m, from)
+  const eol = (i) => cli.indexOf('\n', i) + 1
+  const iA = at('const PG_STYLE ='), iB = at('const pgNoop =')
+  const iC = at('let pgReviewActive = false;'), iD = at('function pgTriggerLabel')
+  const iE = at('function pgSwapText'), iF = at('const PG_CONFINED =')
+  const iG = at('function pgScanText'), iH = at('function pgTouchesSurface')
+  const iI = at('function pgCustomItem')
+  ok('能定位 pgRelevant 相关代码块',
+    iA > 0 && iB > iA && iC > 0 && iD > iC && iE > iD && iF > iE && iG > iF && iH > iG && iI > iH)
+  if (iH > 0 && iI > iH) {
+    const body = [
+      cli.slice(iA, eol(iB)),
+      cli.slice(iC, iD),
+      cli.slice(iD, iE),
+      cli.slice(iE, iF),
+      cli.slice(iF, iG),
+      cli.slice(iH, iI),
+    ].join('\n')
+    ok('切出的代码块含 pgRelevant / pgInsideInput',
+      body.includes('function pgRelevant') && body.includes('function pgInsideInput'))
+    // DOM 桩：closest 必须沿祖先链上溯（真实 DOM 语义），否则输入框内的文本节点会误判
+    let ACTIVE = 'zh'
+    const LC = { locale: { getLocale: () => ({ active: ACTIVE }) } }
+    class El {
+      constructor(tag, attrs = {}, parent = null) { this.nodeType = 1; this.tagName = tag; this.attrs = attrs; this.parentElement = parent }
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null }
+      closest(sel) { for (let el = this; el; el = el.parentElement) if (match(el, sel)) return el; return null }
+    }
+    class Txt { constructor(parent) { this.nodeType = 3; this.parentElement = parent } }
+    const matchOne = (el, s) => {
+      const pre = s.match(/^([a-z]*)\[([a-zA-Z-]+)\^="([^"]*)"\]$/i)
+      if (pre) {
+        const [, tag, attr, val] = pre
+        if (tag && el.tagName.toLowerCase() !== tag.toLowerCase()) return false
+        const v = el.getAttribute(attr)
+        return typeof v === 'string' && v.startsWith(val)
+      }
+      const m = s.match(/^([a-z]*)((\[[^\]]+\])*)$/i)
+      if (!m) return false
+      const [, tag, attrPart] = m
+      if (tag && el.tagName.toLowerCase() !== tag.toLowerCase()) return false
+      for (const a of attrPart.match(/\[[^\]]+\]/g) || []) {
+        const inner = a.slice(1, -1)
+        const eq = inner.match(/^([^=]+)="([^"]*)"$/)
+        if (eq) { if (el.getAttribute(eq[1]) !== eq[2]) return false }
+        else if (el.getAttribute(inner) === null) return false
+      }
+      return true
+    }
+    const match = (el, sel) => sel.split(',').some((s) => matchOne(el, s.trim()))
+    const api = (() => {
+      const m = { exports: {} }
+      new Function('module', 'exports', 'LC', body + '\nmodule.exports = { pgRelevant, pgInsideInput, pgInsideTrigger };')(m, m.exports, LC)
+      return m.exports
+    })()
+    const rec = (type, target, extra = {}) => Object.assign({ type, target }, extra)
+    const evt = (target) => api.pgRelevant([rec('characterData', target)])
+
+    // 真实结构（dsh-client-ui-conversation）：composer 输入区是带 contenteditable
+    // 与 data-composer-input 的 div，Lexical 在内部渲染文本节点
+    const editorHost = new El('div', { contenteditable: 'true', 'data-composer-input': 'true' })
+    const innerSpan = new El('span', {}, editorHost)
+    const ta = new El('textarea', {})
+    const inp = new El('input', {})
+    ok('contenteditable 输入区内：不重扫',
+      api.pgInsideInput(new Txt(editorHost)) && api.pgInsideInput(new Txt(innerSpan)))
+    ok('textarea / input 内：不重扫', api.pgInsideInput(new Txt(ta)) && api.pgInsideInput(new Txt(inp)))
+    ok('null / 非元素安全返回 false',
+      api.pgInsideInput(null) === false && api.pgInsideInput(new Txt(null)) === false)
+
+    // zh：输入区不扫、触发器内要扫、其他位置不扫
+    ACTIVE = 'zh'
+    ok('zh：输入区打字不触发扫描', evt(new Txt(innerSpan)) === false)
+    const trigger = new El('button', { 'aria-label': '访问模式，当前：Custom' })
+    const trigSpan = new El('span', {}, trigger)
+    ok('zh：触发器内 characterData 触发重扫（改写不被 React 撤销）', evt(new Txt(trigSpan)) === true)
+    ok('zh：其他位置 characterData 不触发（无谓扫描）', evt(new Txt(new El('div', {}))) === false)
+
+    // en：输入区必须同样排除（否则收窄对 en 失效），触发器内仍要扫，其他位置仍全局扫
+    ACTIVE = 'en'
+    ok('en：输入区打字不触发扫描（排除必须排在 en 全局分支之前）', evt(new Txt(innerSpan)) === false)
+    ok('en：触发器内 characterData 触发重扫', evt(new Txt(trigSpan)) === true)
+    ok('en：其他位置 characterData 仍全局扫描（设置页/菜单需换回中文）',
+      evt(new Txt(new El('div', {}))) === true)
+
+    // 源码顺序断言：排除必须写在 en 判断之前，否则 en 下打字照样全量扫描
+    const relStart = cli.indexOf('function pgRelevant')
+    const relBody = cli.slice(relStart, cli.indexOf('function pgCustomItem', relStart))
+    const iInput = relBody.indexOf('pgInsideInput(record.target)')
+    const iEn = relBody.indexOf("pgActiveLang() === 'en'")
+    ok('pgInsideInput 排除排在 en 全局扫描之前（顺序即正确性）',
+      iInput > 0 && iEn > 0 && iInput < iEn, 'pgInsideInput@' + iInput + ' en@' + iEn)
+
+    // aria-label 变化仍须被捕获（预设切换/图标打标依赖它）
+    ACTIVE = 'zh'
+    ok('触发器 aria-label 变化被捕获',
+      api.pgRelevant([rec('attributes', trigger, { attributeName: 'aria-label' })]) === true)
+    ok('无关元素的 aria-label 变化不触发',
+      api.pgRelevant([rec('attributes', new El('button', { 'aria-label': '普通按钮' }), { attributeName: 'aria-label' })]) === false)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)

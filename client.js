@@ -332,7 +332,28 @@ window.__ModuleLoader__.load({
 		const PG_PERMISSION_LABELS = new Set(['Read Only', 'Workspace Write', '自定义审查', 'Custom Review', 'Full access', '仅可查看', '工作区内修改', '完全权限']);
 		const PG_TRIGGER_PREFIXES = ['访问模式，当前：', 'Access mode, current: '];
 		const PG_TRIGGER_SELECTOR = ['button[aria-label^="访问模式，当前："]', 'button[aria-label^="Access mode, current: "]'].join(',');
-		const PG_MASK = 'url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22 fill=%22none%22%3E%3Cpath d=%22M8.20554%200.899994L14.7901%203.36857V7.01026C14.7901%2012%2011.0466%2014.2103%208.20554%2015.3C5.36446%2014.2103%201.62012%2012%201.62012%207.01026V3.36857L8.20554%200.899994Z%22 stroke=%22black%22 stroke-width=%221.31831%22 stroke-linejoin=%22round%22/%3E%3Ccircle cx=%227%22 cy=%227%22 r=%222.9%22 stroke=%22black%22 stroke-width=%221.2%22/%3E%3Cpath d=%22M9.2%209.2L11.6%2011.6%22 stroke=%22black%22 stroke-width=%221.4%22 stroke-linecap=%22round%22/%3E%3C/svg%3E")';
+		// 图标绘制语言对齐平台内置图标（dsh-client-ui-conversation 的 permissionGlyphs）：
+		// 盾牌轮廓用 stroke-width 1.31831，内部符号一律用「实心 fill」——
+		// 仅可查看是对勾、工作区内修改是线条、完全权限是两根 1.5 宽的实心条。
+		// 早先放大镜用细描边（1.2/1.4），在菜单里与那三个实心图标并列时显得细弱发灰。
+		const PG_SVG_OPEN = 'url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22 fill=%22none%22%3E';
+		const PG_SVG_CLOSE = '%3C/svg%3E")';
+		const PG_SHIELD = '%3Cpath d=%22M8.20554%200.899994L14.7901%203.36857V7.01026C14.7901%2012%2011.0466%2014.2103%208.20554%2015.3C5.36446%2014.2103%201.62012%2012%201.62012%207.01026V3.36857L8.20554%200.899994Z%22 stroke=%22black%22 stroke-width=%221.31831%22 stroke-linejoin=%22round%22/%3E';
+		// 放大镜：圆环做成「实心圆环」（evenodd 双圆相减，环宽 1.3 ≈ 盾牌描边宽度），
+		// 手柄为实心斜条。平台三个内置图标的内部符号一律是实心 fill（对勾/线条/感叹号），
+		// 若这里用描边圆环，在同一列里会比它们明显偏重。
+		const PG_MASK = PG_SVG_OPEN + PG_SHIELD +
+			'%3Cpath d=%22M3.8%206.85a3.35%203.35%200%201%200%206.7%200a3.35%203.35%200%201%200-6.7%200Z%20M5.1%206.85a2.05%202.05%200%201%200%204.1%200a2.05%202.05%200%201%200-4.1%200Z%22 fill=%22black%22 fill-rule=%22evenodd%22/%3E' +
+			'%3Cpath d=%22M9.73%208.37L11.85%2010.49L10.79%2011.55L8.67%209.43Z%22 fill=%22black%22/%3E' +
+			PG_SVG_CLOSE;
+		// 锁孔（受限沙箱 workspace-write）：实心圆 + 实心梯形柄，同为实心画法
+		const PG_MASK_LOCK = PG_SVG_OPEN + PG_SHIELD +
+			'%3Ccircle cx=%228%22 cy=%226.6%22 r=%221.55%22 fill=%22black%22/%3E' +
+			'%3Cpath d=%22M7.32%207.65L8.68%207.65L8.48%2010.7L7.52%2010.7Z%22 fill=%22black%22/%3E' +
+			PG_SVG_CLOSE;
+		// 平台内置的「未匹配态」显示名：预设表按 (sandbox, approval) 反查不到任何表项时，
+		// 客户端（dsh-client-connection 的 fixture 预设表）兜底渲染这个字符串。
+		const PG_CUSTOM_BUILTIN = 'Custom';
 		const PG_CSS = '\n' +
 			// 触发器徽标：纯 CSS 按 aria-label 选择（平台 t() 本地化前缀 + 两种语言的
 			// 预设名，四个变体全覆盖）。无需 JS 打标，跟随语言/预设自动显示，重渲染不丢失。
@@ -340,8 +361,95 @@ window.__ModuleLoader__.load({
 			'button[aria-label^="Access mode, current: 自定义审查"]::before,' +
 			'button[aria-label^="访问模式，当前：Custom Review"]::before,' +
 			'button[aria-label^="Access mode, current: Custom Review"]::before' +
-			' { content: ""; display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; margin-right: 4px; background-color: currentColor; -webkit-mask: ' + PG_MASK + ' center / contain no-repeat; mask: ' + PG_MASK + ' center / contain no-repeat; }\n';
+			' { content: ""; display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; margin-right: 4px; background-color: currentColor; -webkit-mask: ' + PG_MASK + ' center / contain no-repeat; mask: ' + PG_MASK + ' center / contain no-repeat; }\n' +
+			// 受限沙箱变体：JS 仅在「本会话确实选中自定义审查且沙箱受限」时给触发器打
+			// data-pg-sandbox，换用锁孔图标（与默认的盾牌+放大镜成对）。workspace-write
+			// 与 read-only 都是受限，两者共用锁孔（都表示「写盘受限」）。
+			'button[data-pg-sandbox][aria-label^="访问模式，当前：自定义审查"]::before,' +
+			'button[data-pg-sandbox][aria-label^="Access mode, current: 自定义审查"]::before,' +
+			'button[data-pg-sandbox][aria-label^="访问模式，当前：Custom Review"]::before,' +
+			'button[data-pg-sandbox][aria-label^="Access mode, current: Custom Review"]::before' +
+			' { -webkit-mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; }\n';
 		const pgNoop = () => {};
+		// ── 会话审查态缓存：DOM 兼容层要知道「当前会话是否真的选了自定义审查」以及
+		//    「其底层沙箱是什么」。不能靠猜显示名——实测 315 个显示 Custom 的会话里
+		//    有 48 个 preset=null（从没选过审查），无条件改写会让用户误以为审查开着。
+		//    权威来源是宿主的 permgate:status（activeForSession 走 permission/preset
+		//    事件，是按会话的），与 DockBar 用的是同一个接口。
+		//    仅缓存「审查是否生效」与「沙箱」两个标量，按会话 id 分键，避免跨会话串。 ──
+		let pgReviewActive = false;
+		let pgReviewSandbox = null;
+		// 缓存归属会话（= 当前正在显示的会话）：写入方 DockBar 是按会话查询的，消费者
+		// pgScanCustom 却作用于全文档触发器 —— 不校验归属就会在切会话的窗口期（或查询
+		// 失败时）把上一个会话的审查态套到当前会话上。下面两个标量只对 pgReviewSid 有效。
+		let pgReviewSid = null;
+		// 查询序号：同一会话内只接受最新一次查询的结果，乱序到达的旧响应直接丢弃
+		let pgReviewSeq = 0;
+		let pgReviewSeqApplied = 0;
+		// 状态更新后触发一次重扫（由 pgInstallCompat 填充；未安装时为 null）
+		let pgRescan = null;
+		// 进入/切换会话：登记当前会话，并清空上一个会话的缓存后立即重扫。
+		// 宁可退回平台原生显示（Custom），也不把别的会话的审查态显示成当前会话的。
+		// 平台选择器此刻原生显示哪个预设（'custom' = 内置未匹配态，即原生渲染 "Custom"）。
+		// 与 pgReviewActive（审查是否生效）是两个独立事实，必须分开记：
+		//   审查生效 + 平台渲染 Custom  → 需要我们改写
+		//   审查生效 + 平台渲染审查名    → 平台自己就对，我们的改写标记已过期
+		// 早先只用 pgReviewActive 判断，导致「沙箱从 fa 改到 ww」后平台已原生显示审查名、
+		// 我们却仍留着改写标记，一旦状态查询失败就把平台原生文案误还原成 Custom。
+		let pgPlatformPreset = null;
+		// 清空缓存时不做「立即还原」：切会话瞬间 DOM 的内容无法区分两种来源——
+		//   (a) React 未写回（新旧会话 vdom 同字面量）→ DOM 是我们上次的改写，应还原；
+		//   (b) React 已写回（新会话 vdom 不同）→ DOM 是新会话的平台权威值，绝不能动。
+		// 两者 DOM 完全相同（都是「访问模式，当前：自定义审查」），无法区分；按 (a) 处理
+		// 会在命中 (b) 时把「已开审查的新会话」误改成未匹配态 Custom，且清标记后不自愈。
+		// 故这里只清空缓存，还原交给「新会话查询成功且平台仍渲染 Custom」这条唯一
+		// 可靠的路径（canRestore）；平台态未知时保持不动是面对不可知情况的正确保守取舍。
+		function pgBeginReviewSession(sid) {
+			try {
+				const key = sid || null;
+				if (key === pgReviewSid) return; // 同一会话：保留已有缓存，等 refresh 收敛
+				pgReviewSid = key;
+				pgReviewActive = false;
+				pgReviewSandbox = null;
+				pgPlatformPreset = null;
+				if (typeof pgRescan === 'function') pgRescan();
+			} catch (e) {}
+		}
+		function pgSetReviewState(sid, s, seq) {
+			try {
+				// 只接受「当前会话」的结果：切走后到达的旧响应、以及查询失败时的
+				// 兜底调用都不写入，避免跨会话串状态
+				if ((sid || null) !== pgReviewSid) return;
+				const n = typeof seq === 'number' ? seq : ++pgReviewSeq;
+				if (n < pgReviewSeqApplied) return; // 过期响应（乱序到达），丢弃
+				pgReviewSeqApplied = n;
+				const nextActive = !!(s && s.activeForSession === true);
+				const nextSandbox = (s && s.sandbox && s.sandbox.session) || null;
+				const nextPlatform = (s && typeof s.platformPreset === 'string' && s.platformPreset) || null;
+				if (nextActive === pgReviewActive && nextSandbox === pgReviewSandbox && nextPlatform === pgPlatformPreset) return;
+				pgReviewActive = nextActive;
+				pgReviewSandbox = nextSandbox;
+				pgPlatformPreset = nextPlatform;
+				if (typeof pgRescan === 'function') pgRescan();
+			} catch (e) {
+				pgReviewActive = false;
+				pgReviewSandbox = null;
+				pgPlatformPreset = null;
+				if (typeof pgRescan === 'function') pgRescan();
+			}
+		}
+		// 会话视图卸载：仅当它仍是「当前会话」时清空缓存。同样不做立即还原——卸载时
+		// 触发器可能已属于下一个会话（DOM 复用），理由见 pgBeginReviewSession 上方注释。
+		function pgEndReviewSession(sid) {
+			try {
+				if ((sid || null) !== pgReviewSid) return;
+				pgReviewSid = null;
+				pgReviewActive = false;
+				pgReviewSandbox = null;
+				pgPlatformPreset = null;
+				if (typeof pgRescan === 'function') pgRescan();
+			} catch (e) {}
+		}
 		function pgTriggerLabel(value) {
 			return typeof value === 'string' && PG_TRIGGER_PREFIXES.some((p) => value.startsWith(p));
 		}
@@ -413,9 +521,96 @@ window.__ModuleLoader__.load({
 			} catch (e) {}
 			return false;
 		}
+		// 受限沙箱集合：workspace-write 与 read-only 都是「写盘受限」，都必须用受限图标。
+		// 只认 workspace-write 会让 read-only 会话落到默认的非受限图标，与实际最受限相反。
+		const PG_CONFINED = new Set(['workspace-write', 'read-only']);
+		// 标记「这个触发器被我们改写成了审查名」：还原只针对自己改写过的元素，
+		// 平台原生渲染的「自定义审查」不能被误改回 Custom。
+		const PG_REWRITTEN_ATTR = 'data-pg-rewritten';
+		// 触发器沙箱打标 + Custom 改写。
+		// 平台对「自定义审查 + full access 沙箱」这种组合反查不到表项，兜底渲染
+		// "Custom"；此时把它改写成与 workspace-write 下一致的「自定义审查」，并用
+		// 图标区分沙箱（受限用锁孔、full access 用放大镜）。仅在宿主确认本会话审查
+		// 生效（activeForSession）时改写——没选过审查的会话保持 Custom，不做误导。
+		function pgScanCustom(document, lang) {
+			try {
+				const triggers = Array.from(document.querySelectorAll(PG_TRIGGER_SELECTOR));
+				if (triggers.length === 0) return;
+				const want = lang === 'en' ? PG_NAME_EN : PG_NAME_ZH;
+				const builtin = PG_CUSTOM_BUILTIN;
+				// 改写/还原的共同前提：平台此刻「原生渲染 Custom」（内置未匹配态）。
+				// 只有平台确实渲染 Custom 时，DOM 里的审查名才可能是我们改写的产物；
+				// 平台原生渲染审查名（沙箱从 fa 改到 ww 就会发生）或渲染别的预设名时，
+				// 平台自己就是权威，我们的标记必然过期 —— 清标记，且不改写也不还原。
+				// 平台状态未知（宿主未下发，或状态查询失败被清空）时一律不动 DOM：
+				// 改错的代价（把没开审查的会话显示成开着）比不改的代价大得多。
+				const platformKnown = pgPlatformPreset !== null;
+				const nativeCustom = platformKnown && pgPlatformPreset === 'custom';
+				for (const el of triggers) {
+					// 1) 沙箱打标：无条件按当前会话的真实沙箱标记，供 CSS 选图标
+					try {
+						const cur = el.getAttribute('data-pg-sandbox');
+						if (pgReviewActive && PG_CONFINED.has(pgReviewSandbox)) {
+							if (cur !== pgReviewSandbox) el.setAttribute('data-pg-sandbox', pgReviewSandbox);
+						} else if (cur !== null) {
+							el.removeAttribute('data-pg-sandbox');
+						}
+					} catch (e) {}
+					// 2) 名称：审查生效且平台渲染 Custom 时改写；平台仍渲染 Custom 而审查
+					//    已不生效时，把「我们改写过的」还原回 Custom（React 的 vdom 新旧值
+					//    相等都是 Custom 时不会写回 DOM，不还原就会永久残留）。
+					//    还原只针对自己改写过的触发器（data-pg-rewritten）：平台预设表里
+					//    custom-review 表项原生就渲染审查名，无条件按名称反推会把平台原生
+					//    文案误改成 Custom。
+					//    标记过期判定：平台已不再渲染 Custom 时，DOM 里的审查名来自平台而非
+					//    我们 —— 必须清掉标记，否则状态查询失败会拿过期标记把平台原生文案
+					//    误还原成 Custom（沙箱 fa→ww 后即会命中这条）。
+					const rewritten = el.getAttribute && el.getAttribute(PG_REWRITTEN_ATTR) !== null;
+					if (rewritten && platformKnown && !nativeCustom) {
+						try { el.removeAttribute(PG_REWRITTEN_ATTR); } catch (e) {}
+					}
+					const canRewrite = pgReviewActive && nativeCustom;
+					const canRestore = rewritten && !pgReviewActive && nativeCustom;
+					const label = el.getAttribute && el.getAttribute('aria-label');
+					if (typeof label === 'string') {
+						for (const p of PG_TRIGGER_PREFIXES) {
+							if (label.length <= p.length || !label.startsWith(p)) continue;
+							const name = label.slice(p.length);
+							if (name === builtin && canRewrite) {
+								try { el.setAttribute('aria-label', p + want); } catch (e) {}
+								try { el.setAttribute(PG_REWRITTEN_ATTR, '1'); } catch (e) {}
+							} else if (canRestore && (name === PG_NAME_ZH || name === PG_NAME_EN)) {
+								try { el.setAttribute('aria-label', p + builtin); } catch (e) {}
+								try { el.removeAttribute(PG_REWRITTEN_ATTR); } catch (e) {}
+							}
+							break;
+						}
+					}
+					// 可见文本：触发器自身及叶子中恰为 Custom / 审查名 的整段替换
+					const nodes = [el];
+					try { nodes.push.apply(nodes, Array.from(el.querySelectorAll('*'))); } catch (e) {}
+					for (const n of nodes) {
+						if (n.children && n.children.length) continue;
+						const t = (n.textContent || '').trim();
+						if (t === builtin && canRewrite) pgSwapSingleText(n, want);
+						else if (canRestore && (t === PG_NAME_ZH || t === PG_NAME_EN)) pgSwapSingleText(n, builtin);
+					}
+					// title 同步（平台对 custom 不设 description，通常为 null）
+					if (canRewrite) pgSwapAttr(el, 'title', builtin, want);
+					else if (canRestore) {
+						pgSwapAttr(el, 'title', PG_NAME_ZH, builtin);
+						pgSwapAttr(el, 'title', PG_NAME_EN, builtin);
+					}
+				}
+			} catch (e) {}
+		}
 		function pgScanText(document) {
 			try {
 				const lang = pgActiveLang();
+				// 审查态专属处理（Custom 改写 + 沙箱图标打标）：必须独立于下面按
+				// 「自定义审查」做的早退——审查生效但沙箱为 full access 时，页面里
+				// 恰恰只有 Custom 而没有「自定义审查」字样，早退会把这一支整个跳过。
+				try { pgScanCustom(document, lang); } catch (e) {}
 				const from = lang === 'en' ? PG_NAME_ZH : PG_NAME_EN;
 				const to = lang === 'en' ? PG_NAME_EN : PG_NAME_ZH;
 				const fromDesc = lang === 'en' ? PG_DESC_ZH : PG_DESC_EN;
@@ -492,6 +687,34 @@ window.__ModuleLoader__.load({
 				return typeof node.closest === 'function' && node.closest('[data-composer-seat]') !== null;
 			} catch (e) { return false; }
 		}
+		// characterData 突变的 target 是 Text 节点（nodeType 3），且必须收窄到
+		// 「触发器内部」而不是整个 composer 区域：data-composer-seat 里同时住着
+		// Lexical 的 contenteditable 输入框（data-composer-input），用户在输入框
+		// 打字时每条 characterData 都会命中 composer —— 用 pgInsideComposer 会让
+		// 每次按键都触发一次全量扫描（全文 textContent + 多次全文档
+		// querySelectorAll），长对话里是可感知的输入卡顿。这里只覆盖真正需要重扫
+		// 的那条路径：React 把触发器里的 Custom 文本改回时，就地再改写一次。
+		function pgInsideTrigger(node) {
+			try {
+				if (!node) return false;
+				if (node.nodeType === 3) node = node.parentElement || node.parentNode;
+				if (!node || node.nodeType !== 1) return false;
+				return typeof node.closest === 'function' && node.closest(PG_TRIGGER_SELECTOR) !== null;
+			} catch (e) { return false; }
+		}
+		// 用户输入区（Lexical 的 contenteditable / 原生输入框）：打字时每条 characterData
+		// 突变都落在这里，必须单独排除。en 语言下 characterData 需要全局扫描（设置页行、
+		// 弹层菜单等不位于触发器内），但若把输入区也算进去，用户每按一个键就会触发一次
+		// 全量扫描（全文 textContent + 多次全文档 querySelectorAll），长对话里是可感知的卡顿。
+		function pgInsideInput(node) {
+			try {
+				if (!node) return false;
+				if (node.nodeType === 3) node = node.parentElement || node.parentNode;
+				if (!node || node.nodeType !== 1) return false;
+				if (typeof node.closest !== 'function') return false;
+				return node.closest('[contenteditable="true"], [contenteditable=""], textarea, input, [data-composer-input]') !== null;
+			} catch (e) { return false; }
+		}
 		function pgRelevant(records) {
 			try {
 				for (const record of records) {
@@ -503,9 +726,18 @@ window.__ModuleLoader__.load({
 						continue;
 					}
 					// React 更新既有文本节点走 nodeValue（characterData 突变），
-					// 不产生 childList 记录 —— en 下必须监听它才能把被改回的中文换回来
+					// 不产生 childList 记录 —— en 下必须监听它才能把被改回的中文换回来；
+					// zh 下同理：把 Custom 改写成「自定义审查」后，React 重渲染会把同一
+					// 文本节点的值改回 Custom，不重扫就等于改写被撤销。
+					// 判定用 pgInsideTrigger（而非 pgInsideComposer）：composer 区域还
+					// 住着 contenteditable 输入框，用它会让每次按键都触发全量扫描。
+					// en 下仍保留全局扫描（设置页行/弹层菜单不在触发器内，需要换回中文），
+					// 但显式排除输入区：否则 en 界面里打字同样会每键触发全量扫描 ——
+					// 这一支排在 pgInsideTrigger 之前，若不排除，收窄对 en 完全失效。
 					if (record.type === 'characterData') {
+						if (pgInsideInput(record.target)) continue;
 						if (pgActiveLang() === 'en') return true;
+						if (pgInsideTrigger(record.target)) return true;
 						continue;
 					}
 					if (record.type !== 'childList') continue;
@@ -614,6 +846,8 @@ window.__ModuleLoader__.load({
 				if (stopped || frame !== undefined) return;
 				try { frame = requestFrame.call(window, runScan); } catch (e) {}
 			};
+			// 暴露给状态刷新路径：宿主状态变化后立即重扫一次，不等 DOM 突变
+			pgRescan = () => { if (!stopped) schedule(); };
 			let observer;
 			try {
 				observer = new Observer((records) => {
@@ -649,6 +883,7 @@ window.__ModuleLoader__.load({
 			return () => {
 				if (stopped) return;
 				stopped = true;
+				pgRescan = null;
 				try { observer.disconnect(); } catch (e) {}
 				try { document.removeEventListener('click', onInteraction, true); } catch (e) {}
 				try { document.removeEventListener('focusin', onInteraction, true); } catch (e) {}
@@ -1773,14 +2008,29 @@ window.__ModuleLoader__.load({
 			const sessionId = props && props.sessionId;
 			const [status, setStatus] = React.useState(null);
 			useLocaleTick();
-			const refresh = () => { call('permgate:status', { sessionId: sessionId || undefined }).then(setStatus).catch(() => {}); };
+			// 查询序号：同一会话内若有多次重查（SSE status/refresh 广播）乱序返回，
+			// pgSetReviewState 只接受最新一次，避免旧响应把新状态覆盖回去
+			const refresh = () => {
+				const seq = ++pgReviewSeq;
+				call('permgate:status', { sessionId: sessionId || undefined })
+					.then((s) => { setStatus(s); pgSetReviewState(sessionId || null, s, seq); })
+					.catch(() => { setStatus(null); pgSetReviewState(sessionId || null, null, seq); });
+			};
 			React.useEffect(() => {
+				// 登记本实例为「当前会话」：审查态缓存是全局单例，不登记归属就会在
+				// 切会话的窗口期把上一个会话的状态套到当前会话的触发器上
+				pgBeginReviewSession(sessionId || null);
 				refresh();
 				const off = subscribeEvents((ev) => {
 					if (ev.type === 'status' || ev.type === 'refresh') refresh();
 				});
-				return () => off();
-			}, []);
+				return () => {
+					off();
+					pgEndReviewSession(sessionId || null);
+				};
+				// sessionId 变化（切换对话）必须重查：审查态是「按会话」的，
+				// 沿用上一个会话的状态会让触发器的图标/名称张冠李戴。
+			}, [sessionId]);
 			// 仅当前会话选中「自定义审查」时显示分类徽标（只读展示，无开关）
 			if (!status || status.activeForSession !== true) return null;
 			const eff = status.effective || {};

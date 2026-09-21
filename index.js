@@ -3485,6 +3485,39 @@ export default {
         if (d.action === 'deny') stats.deny++
         else if (d.action === 'ask') stats.ask++
       }
+      // 会话真实生效的沙箱（浏览器半的权限选择器图标按它区分受限/非受限）：
+      // 语义等价于 resolve 内部对 mode 的计算（会话 sandbox/mode 折叠值 ?? 部署默认），
+      // 但不用 resolve —— 它顺带算 workspaceRoot，内部走 canonicalPath 的
+      // realpathSync.native（同步文件系统调用），而 statusView 在 HTTP 路由与每次
+      // 工具调用上都会跑，这里只要 mode，没必要付出这个代价。
+      // 不能只用 overrideOf：它对「从未写过 sandbox/mode」的会话返回 undefined，
+      // 客户端会按「非受限」渲染，但部署默认（DSH_PERMISSION_MODE 未设时）恰是受限的。
+      // 与 sandbox.effective（permgate 配置解析值）区分开：配置值在 syncSandbox
+      // 尚未落地的瞬间可能与会话真实值不一致。
+      const sess = currentSession(exec)
+      let sessionSandbox = null
+      try {
+        if (sess) {
+          const ov = sp.overrideOf ? sp.overrideOf(sess) : null
+          if (ov) sessionSandbox = ov
+          else if (typeof sp.defaultMode === 'string') sessionSandbox = sp.defaultMode
+          else if (sp.resolve) sessionSandbox = sp.resolve({ session: sess }).mode || null
+        }
+      } catch (e) { sessionSandbox = null }
+      // 平台选择器「此刻会显示哪个预设名」= 投影的 derive 结果（客户端渲染 currentValue
+      // 用的就是它）。与 activeForSession 不是一回事：后者回答「审查是否生效」（显式
+      // permission/preset 事件），本字段回答「平台原生显示什么」。两者会分叉——
+      // 选了 custom-review 但 knobs 落在别的组合时平台显示 Custom；反之 preset 为空
+      // 而 knobs 恰好命中 custom-review 表项时平台原生就显示审查名。
+      // 浏览器半据此决定是否要把 Custom 改写成审查名，以及自己的改写标记是否已过期。
+      let platformPreset = null
+      try {
+        const pp = ctx.permissionPresets
+        if (sess && pp && typeof pp.current === 'function') {
+          const arg = typeof pp.permissionState === 'function' ? sess : (sess && sess.events)
+          platformPreset = pp.current(arg) || null
+        }
+      } catch (e) { platformPreset = null }
       return {
         configPath: target ? (fs.processPath ? fs.processPath(target) : String(root)) : String(root) + '/.dsh/.permgate.json',
         active: true,
@@ -3493,8 +3526,13 @@ export default {
           global: config.global.sandboxMode || 'danger-full-access',
           project: (projectBlock() && projectBlock().sandboxMode) || 'inherit',
           effective: effectiveSandboxConfig(),
+          session: sessionSandbox,
         },
         activeForSession: sessionPresetName(exec) === 'custom-review',
+        // 平台选择器此刻原生会显示哪个预设（'custom' = 内置未匹配态）。浏览器半据它
+        // 判断「Custom 是不是平台原生渲染的」——只有平台确实渲染 Custom 时才该改写，
+        // 也只有在平台仍渲染 Custom 时才该把自己的改写还原回去。
+        platformPreset,
         projectKey: root,
         rootSource,
         debugAgentCwd: agentCwd(exec) || null,
