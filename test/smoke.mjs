@@ -144,15 +144,56 @@ function withTimeout(p, label, ms = 2000) {
   // race 已分出胜负时必须清掉守卫定时器，否则进程退出前会补打无意义的 TIMEOUT
   return raced.finally(() => clearTimeout(timer))
 }
-async function runApproval(name, args, fileText, fileName) {
-  if (fileText !== undefined) writeFileSync(join(workspace, fileName || 'a.txt'), fileText, 'utf8')
-  const exec = makeExec(workspace, name, args)
-  const pending = pre(exec, async () => ({ kind: 'allow' }))
-  pending.catch(() => {})
-  await new Promise((r) => setTimeout(r, 30))
+// 残留清理：runApproval 的早退路径（本次审批还没出现）不会 decide，会把审批留在表里。
+// 之后每个用例取到的都是「上一次那条」，把上一份 diff 当成自己的，连环错位。
+// 只服务模块级 host：probe18/freshUndo 各自新建 host、pendingApprovals 独立，不需要清理。
+async function drainPending() {
   const p = await callRoute(host.routes, 'GET', '/permgate/pending')
   const list = Array.isArray(p.data) ? p.data : ((p.data && p.data.pending) || [])
-  const item = list[0]
+  for (const x of list) {
+    await callRoute(host.routes, 'POST', '/permgate/decide', { id: x.id, action: 'deny', lang: 'zh' })
+  }
+}
+
+// 等「本次」审批出现：轮询 + 按工具名取最后一个（pendingApprovals 是 Map、按插入序，本次的排在最末）。
+// 固定 sleep(30) 在机器繁忙时不够：一旦没等到就早退，调用方会把「本该 ask」读成 allow/deny，
+// 后续用例还会全部错位一格（实测会连环失败）。故等待逻辑只此一份，各用例共用。
+//
+// 两个退出条件，缺一不可：
+//   ① 该工具名的审批出现在 pending 里 → 返回它（调用方按 ask 处理）；
+//   ② hook 已落定（done.value）→ 返回 null：放行/拒绝已经发生，不会再冒出审批了。
+// 只有 ① 时，「期望不弹窗」的用例（放行与拒绝）每例都要空转满 40×25ms —— 实测 6 例约 6 秒纯等待。
+// 先查一次再睡：命中时不必白等一个轮询间隔。
+// h 缺省用模块级 host；probe18/freshUndo 各自新建 host，须显式传入。
+async function awaitPending(name, done, h) {
+  const hh = h || host
+  for (let i = 0; i < 40; i++) {
+    const p = await callRoute(hh.routes, 'GET', '/permgate/pending')
+    const list = Array.isArray(p.data) ? p.data : ((p.data && p.data.pending) || [])
+    const mine = list.filter((x) => x.tool === name)
+    if (mine.length) return mine[mine.length - 1]
+    if (done && done.value) return null
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return null
+}
+
+// hook 落定标记：resolve 与 reject 都要置位，否则失败路径会白等满轮询上限。
+// 用 then(mark, mark) 而非 finally —— 后者会把 rejection 再抛一次，需要额外的 catch 兜。
+function settleFlag() {
+  const done = { value: false }
+  const mark = () => { done.value = true }
+  return { done, mark }
+}
+
+async function runApproval(name, args, fileText, fileName) {
+  await drainPending()
+  if (fileText !== undefined) writeFileSync(join(workspace, fileName || 'a.txt'), fileText, 'utf8')
+  const exec = makeExec(workspace, name, args)
+  const { done, mark } = settleFlag()
+  const pending = pre(exec, async () => ({ kind: 'allow' }))
+  pending.then(mark, mark)
+  const item = await awaitPending(name, done)
   if (!item) return { id: null, pending, decided: null, diff: null }
   const diff = await withTimeout(callRoute(host.routes, 'POST', '/permgate/file-diff', { id: item.id, lang: 'zh' }), 'file-diff')
   const decided = await withTimeout(callRoute(host.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' }), 'decide')
@@ -565,8 +606,10 @@ group('13. 复合权限（工作区外 + 各自分类）的候选：四种都带
   const h5 = createHost({ workspaceRoot: ws5, dshHome: home5 })
   const pre5 = h5.hooks.get('tools/pre-execute')
   const setCat5 = (cat, mode) => callRoute(h5.routes, 'POST', '/permgate/set-category', { target: 'project', category: cat, mode, lang: 'zh', sessionId: 'sess-1' })
-  // read 默认 allow，需显式改 ask 才会进审批；image/edit/undo 默认已是 ask
+  // read 默认 allow，需显式改 ask 才会进审批；image/edit 默认已是 ask，
+  // undo 现默认 allow，故这里显式设回 ask 才能走到候选断言（本组测的是候选文案，不是默认值）
   await setCat5('read', 'ask')
+  await setCat5('undo', 'ask')
   const preview = async (name, args) => {
     const p = pre5(makeExec(ws5, name, args), async () => ({ kind: 'allow' }))
     p.catch(() => {})
@@ -1018,6 +1061,164 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
     await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
+}
+
+// ── 18. insert / undo_edit 并入文件类分类闸（可选依赖：未装 dsh-fs-encoding 时这些名字不存在）──
+group('18. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入 edit / undo 分类')
+{
+  const SRE_BUILTIN = {
+    description: 'Custom editing tool for viewing, creating and editing files',
+    parameters: { type: 'object', properties: {
+      command: { description: 'The commands to run. Allowed options are: view, create, str_replace, insert.' },
+      insert_line: { description: 'Required integer parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.' },
+    } },
+  }
+  const SRE_FSENC = {
+    description: 'View, create and edit text files by exact string match, preserving each file\'s encoding. Commands: `view` {path} shows numbered lines; `insert` {path, insert_line, new_str} inserts AFTER insert_line (0 is the top); `undo_edit` {path} reverts the last edit, exactly like `undo_last_edit`.',
+    parameters: { type: 'object', properties: {
+      command: { description: 'The command to run. One of: view, create, str_replace, insert, undo_edit.' },
+      insert_line: { description: 'For `insert`: the line number to insert AFTER. 0 inserts at the very top; the number of lines in the file appends.' },
+    } },
+  }
+
+  // 分类全 deny + 兜底 allow：命中分类闸 → 弹窗（ask 态记为 cat）；掉到兜底 → 直接放行。
+  // 这样「是否被闸住」与「落在哪个分类」一次跑出来。
+  async function probe18(sreDef, name, args, askCat) {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-g18-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-g18-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const h = createHost({ workspaceRoot: ws, dshHome: home })
+    h.ctx.tools.get = () => sreDef
+    await callRoute(h.routes, 'POST', '/permgate/set-fallback', { target: 'global', mode: 'allow' })
+    for (const c of ['edit', 'undo', 'read', 'directory']) {
+      await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'global', category: c, mode: 'deny' })
+    }
+    // 目标分类改 ask：deny 会直接拒绝、不弹窗，看不到落点；ask 才能从 pending 里读出 cat
+    if (askCat) await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'global', category: askCat, mode: 'ask' })
+    const file = join(ws, 'a.txt')
+    // 固定 3 行内容：本组的上限边界断言（insert_line=3 可、=4 越界）就按这个行数设计
+    writeFileSync(file, 'l1\nl2\nl3\n', 'utf8')
+    const realArgs = JSON.parse(JSON.stringify(args).replace(/__FILE__/g, file.replace(/\\/g, '\\\\')))
+    const exec = makeExec(ws, name, realArgs)
+    const hook = h.hooks.get('tools/pre-execute')
+    let nextCalled = false
+    const { done, mark } = settleFlag()
+    const pending = hook(exec, async () => { nextCalled = true; return { kind: 'allow' } })
+    pending.then(mark, mark)
+    // 与 runApproval 同一等待助手（不传 host 会去等模块级 host 的 pending，永远等不到）
+    const item = await awaitPending(name, done, h)
+    let diff = null
+    if (item) {
+      const d = await withTimeout(callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item.id, lang: 'zh' }), 'g18 file-diff')
+      diff = d && d.data
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    }
+    await withTimeout(pending, 'g18 settle')
+    const verdict = item ? 'ask' : (nextCalled ? 'allow' : 'deny')
+    // pending 不下发 cat（只有 id/tool/reason/intent/...）。分类从 reason 文案里读：
+    // 「编辑权限…」「撤销权限…」「读取权限…」分别是 edit / undo / read 三条闸的措辞；
+    // intent 是动作描述（「写入/修改文件 …」），不带分类名，不能用来判分类。
+    const reason = item ? String(item.reason || '') : ''
+    const cat = /撤销权限/.test(reason) ? 'undo'
+      : (/编辑权限/.test(reason) ? 'edit'
+        : (/读取权限/.test(reason) ? 'read' : null))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    return { verdict, cat, diff }
+  }
+
+  // insert 是 dsh-fs-encoding 的独立工具：会写盘 ⇒ 必须落 edit 闸（旧行为掉兜底，静默放行）
+  const i1 = await probe18(SRE_BUILTIN, 'insert', { file_path: '__FILE__', insert_line: 1, new_string: 'NEW' }, 'edit')
+  ok('group18: insert 落 edit 闸（不再掉兜底）', i1.verdict === 'ask' && i1.cat === 'edit', JSON.stringify({ v: i1.verdict, cat: i1.cat }))
+  // 形状判定独立于内核：没有 sre 定义时同样认得出
+  const i2 = await probe18(null, 'insert', { file_path: '__FILE__', insert_line: 1, new_string: 'NEW' }, 'edit')
+  ok('group18: 内核探测不到时 insert 仍落 edit 闸', i2.verdict === 'ask' && i2.cat === 'edit', JSON.stringify({ v: i2.verdict, cat: i2.cat }))
+  // 同名但非文件语义的 insert（数据库类）不得被误判 —— 应掉兜底放行
+  const i3 = await probe18(SRE_BUILTIN, 'insert', { collection: 'users', document: { a: 1 } })
+  ok('group18: 非文件形状的同名 insert 不误判', i3.verdict === 'allow' && !i3.cat, JSON.stringify({ v: i3.verdict, cat: i3.cat }))
+  // 预览：insert_line=0 插到最顶端，insert_line=2 插到第 2 行之后（不得折算成 old_string='' 的 edit）
+  const i4 = await probe18(SRE_BUILTIN, 'insert', { file_path: '__FILE__', insert_line: 0, new_string: 'NEW' }, 'edit')
+  ok('group18: insert_line=0 预览插在最顶端', !!(i4.diff && i4.diff.ok && i4.diff.ops && i4.diff.ops[0] && i4.diff.ops[0].t === 'a' && i4.diff.ops[0].s === 'NEW'), JSON.stringify(i4.diff && i4.diff.ops && i4.diff.ops.slice(0, 3)))
+  const i5 = await probe18(SRE_BUILTIN, 'insert', { file_path: '__FILE__', insert_line: 2, new_string: 'NEW' }, 'edit')
+  ok('group18: insert_line=2 预览插在第 2 行之后', !!(i5.diff && i5.diff.ok && i5.diff.ops && i5.diff.ops[2] && i5.diff.ops[2].t === 'a'), JSON.stringify(i5.diff && i5.diff.ops && i5.diff.ops.slice(0, 4)))
+  // 上限口径：3 行文件的合法范围是 [0,3]，4 必须被拒（用 splitDiffLines(...).length 会多算一行而放过 4）
+  const i6 = await probe18(SRE_BUILTIN, 'insert', { file_path: '__FILE__', insert_line: 3, new_string: 'NEW' }, 'edit')
+  ok('group18: insert_line=3（3 行文件的合法上限）可预览', !!(i6.diff && i6.diff.ok === true), JSON.stringify(i6.diff && i6.diff.error))
+  const i7 = await probe18(SRE_BUILTIN, 'insert', { file_path: '__FILE__', insert_line: 4, new_string: 'NEW' }, 'edit')
+  ok('group18: insert_line=4 越界被拒', !!(i7.diff && i7.diff.ok === false), JSON.stringify(i7.diff))
+
+  // undo_last_edit 恒落 undo 闸（两个插件都注册这个名字）
+  const u1 = await probe18(SRE_BUILTIN, 'undo_last_edit', { file_path: '__FILE__' }, 'undo')
+  ok('group18: undo_last_edit 落 undo 闸', u1.verdict === 'ask' && u1.cat === 'undo', JSON.stringify({ v: u1.verdict, cat: u1.cat }))
+  // undo_edit 的写盘与否随内核：内置没有该命令 ⇒ 不写盘 ⇒ 不占用 undo 闸（掉兜底）
+  const u2 = await probe18(SRE_BUILTIN, 'str_replace_editor', { command: 'undo_edit', path: '__FILE__' })
+  ok('group18: 内置内核的 undo_edit 不占用 undo 闸（该命令不存在）', u2.verdict === 'allow' && !u2.cat, JSON.stringify({ v: u2.verdict, cat: u2.cat }))
+  // dsh-fs-encoding 的 undo_edit 真写盘 ⇒ 必须落 undo 闸
+  const u3 = await probe18(SRE_FSENC, 'str_replace_editor', { command: 'undo_edit', path: '__FILE__' }, 'undo')
+  ok('group18: fs-encoding 内核的 undo_edit 落 undo 闸', u3.verdict === 'ask' && u3.cat === 'undo', JSON.stringify({ v: u3.verdict, cat: u3.cat }))
+  // 探测不到描述 ⇒ fail-closed，按会写盘拦住
+  const u4 = await probe18(null, 'str_replace_editor', { command: 'undo_edit', path: '__FILE__' }, 'undo')
+  ok('group18: 探测不到内核时 undo_edit 按会写盘拦住（fail-closed）', u4.verdict === 'ask' && u4.cat === 'undo', JSON.stringify({ v: u4.verdict, cat: u4.cat }))
+  // 撤销预览文案中性：读不到记录 ≠ 会被跳过（fs-encoding 的记录只在内存里）
+  ok('group18: 撤销预览为中性文案（不说「会被跳过」）', !!(u1.diff && u1.diff.ok === false && /无法预览撤销内容/.test(u1.diff.error) && !/跳过/.test(u1.diff.error)), JSON.stringify(u1.diff))
+  // 同类闸不得误伤：view 仍走 read
+  const u5 = await probe18(SRE_FSENC, 'str_replace_editor', { command: 'view', path: '__FILE__' }, 'read')
+  ok('group18: sre view 仍落 read 闸（未被 undo 判定误伤）', u5.verdict === 'ask' && u5.cat === 'read', JSON.stringify({ v: u5.verdict, cat: u5.cat }))
+}
+
+// ── 18b. undo 默认 allow：影响面是「所有未显式设置过 undo 的配置」，显式落盘的值不迁移 ──
+group('18b. 撤销分类默认值 = allow（缺键回落），显式落盘的值不迁移')
+{
+  // seed 非空时预置隔离 config.json，模拟「老用户已落盘」的配置
+  async function freshUndo(seed) {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-g18b-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-g18b-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    if (seed) writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(seed), 'utf8')
+    const h = createHost({ workspaceRoot: ws, dshHome: home })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    const file = join(ws, 'a.txt')
+    writeFileSync(file, 'l1\nl2\nl3\n', 'utf8')
+    const exec = makeExec(ws, 'undo_last_edit', { path: file })
+    const hook = h.hooks.get('tools/pre-execute')
+    let nextCalled = false
+    const { done, mark } = settleFlag()
+    const p = hook(exec, async () => { nextCalled = true; return { kind: 'allow' } })
+    p.then(mark, mark)
+    // 与 runApproval/probe18 同一等待助手：固定 sleep 在机器繁忙时会把「本该 ask」读成
+    // allow/deny —— 对期望 deny 的用例更糟，那是**假通过**（verdict 半边失去判别力）
+    const item = await awaitPending('undo_last_edit', done, h)
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await withTimeout(p, 'g18b settle')
+    const verdict = item ? 'ask' : (nextCalled ? 'allow' : 'deny')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    // 整个 effective 一并返回：对照断言要能检查 undo 之外的分类是否被顺手放宽
+    return { eff: st.data && st.data.effective && st.data.effective.undo, effective: (st.data && st.data.effective) || null, verdict }
+  }
+
+  // ① 全新配置：undo 默认 allow，撤销不再弹窗
+  const n1 = await freshUndo(null)
+  ok('group18b: 新建配置 undo 默认 allow', n1.eff === 'allow', 'effective.undo=' + n1.eff)
+  ok('group18b: 新建配置下撤销不再弹窗', n1.verdict === 'allow', 'verdict=' + n1.verdict)
+  // ② 老配置已显式落盘 ask → 必须保持 ask（不迁移）
+  const n2 = await freshUndo({ global: { undo: { mode: 'ask', exceptions: [] }, fallbackMode: 'ask' }, projects: {} })
+  ok('group18b: 老配置 undo:ask 保持 ask（不迁移）', n2.eff === 'ask' && n2.verdict === 'ask', JSON.stringify(n2))
+  // ③ 老配置已显式落盘 deny → 必须保持 deny
+  const n3 = await freshUndo({ global: { undo: { mode: 'deny', exceptions: [] }, fallbackMode: 'ask' }, projects: {} })
+  ok('group18b: 老配置 undo:deny 保持 deny（不迁移）', n3.eff === 'deny' && n3.verdict === 'deny', JSON.stringify(n3))
+  // ④ 对照：改 undo 的默认值不得顺手放宽其它从严分类。
+  // 必须真的断言 edit/image/doomloop/directory/command —— 只断言 undo 自己等于没测
+  //（把 freshCategory 的 ask 集合写成只剩 directory/command 也必须在这里失败）。
+  const n4 = await freshUndo(null)
+  const e4 = n4.effective || {}
+  ok('group18b: 对照 —— undo=allow 不牵连其它从严分类',
+    n4.eff === 'allow' && e4.edit === 'ask' && e4.image === 'ask' && e4.doomloop === 'ask' && e4.directory === 'ask' && e4.command === 'ask',
+    JSON.stringify({ undo: n4.eff, edit: e4.edit, image: e4.image, doomloop: e4.doomloop, directory: e4.directory, command: e4.command }))
+  // ⑤ 缺 undo 键的存量配置（1.3.x 直升路径）：回落 allow 是**已知取舍**，此处钉住实际行为，
+  // 避免「注释说只影响新建配置、实际也放宽存量」这类无声漂移再次发生（要改行为先改这条断言）
+  const legacy = { global: { directory: { mode: 'ask', exceptions: [] }, command: { mode: 'ask', exceptions: [] }, read: { mode: 'allow', exceptions: [] }, image: { mode: 'ask', exceptions: [] }, edit: { mode: 'ask', exceptions: [] }, fallbackMode: 'ask' }, projects: {} }
+  const n5 = await freshUndo(legacy)
+  ok('group18b: 缺 undo 键的存量配置回落 allow（影响面已如实标注）', n5.eff === 'allow' && n5.verdict === 'allow', JSON.stringify({ eff: n5.eff, verdict: n5.verdict }))
+  ok('group18b: 缺 undo 键的存量配置里，显式的 edit:ask 仍存活', (n5.effective || {}).edit === 'ask', JSON.stringify(n5.effective))
 }
 
 if (fail.length) {

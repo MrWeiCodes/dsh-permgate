@@ -70,8 +70,8 @@ ok('sreCommand 定义一次', (src.match(/function sreCommand\(args\)/g) || []).
 ok('无裸 args.command 解析（仅 sreCommand 内）', (src.match(/String\(\(?args(?: && args)?\.command/g) || []).length === 1)
 ok('isFileWrite 走 sreCommand', src.includes('return !!SRE_WRITE_CMDS[sreCommand(args)]'))
 ok('isFileRead 走 sreCommand', src.includes("return sreCommand(args) === 'view'"))
-ok('isPreviewableFileTool 定义并组合四类（含图片）', src.includes('function isPreviewableFileTool(name, args) {') && src.includes('return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name))'))
-ok('hasDiff 使用 isPreviewableFileTool', src.includes('hasDiff: isPreviewableFileTool(exec.name, exec.arguments)'))
+ok('isPreviewableFileTool 定义并组合四类（含图片）', src.includes('function isPreviewableFileTool(name, args, undoWrites) {') && src.includes('return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name, args, undoWrites))'))
+ok('hasDiff 使用 isPreviewableFileTool（经内核探测包装）', src.includes('hasDiff: isPreviewableFileToolNow(exec.name, exec.arguments, exec)'))
 ok('系统打开入口已移除（改走 DSH 右侧栏的 file tab）', !src.includes("pathname === '/permgate/open-file'") && !src.includes('const OPEN_TEXT_EXTS') && cli.includes("'permgate:open-file'") === false && cli.includes('openInSidebar(file,'))
 ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id）', cli.includes('props.useSessions((st) => (st ? st.current : undefined))') && cli.includes('(props && props.sessionId) || (p && p.sessionId)'))
 ok('normTarget 定义 + 五个设置路由统一使用（含 set-category / set-quick）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 5)
@@ -748,7 +748,18 @@ ok('read_image 已从 read 移出、单列 FILE_IMAGE_TOOLS', !src.includes('FIL
 ok('image 进入分类清单与例外分类清单', src.includes("const CATS = ['directory', 'command', 'read', 'image'") && src.includes("const EXC_CATS = ['directory', 'command', 'read', 'image'"))
 ok('decide 里有 image 判定（与 read 同链：工作区外先过目录访问）', src.includes("resolveCategory('image', fp, 'path')") && src.includes('if (isFileImage(name)) {'))
 ok('pathToolCat 把 read_image 归到 image（不继承 read）', src.includes("if (isFileImage(name)) return 'image'") && src.includes("if (isFileRead(name, args)) return 'read'"))
-ok('image 默认 ask（read/subagent 仍默认 allow）', src.includes("key === 'undo' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow'"))
+// undo 默认 allow 是一个取舍（撤销恢复既有内容、不接受新内容），不是「撤销无害」的结论：
+// 两个撤销实现的破坏面不同 —— fs-encoding 只在内存、按 session 分桶且文件改动后拒绝；
+// better-edit 落盘 sqlite、按 workspace 共享、跨会话、TTL 7 天。影响面是「所有未显式设置过
+// undo 的配置」（缺键即回落此默认值），不只新建配置；显式落盘的 ask/deny 仍存活（smoke 18b 覆盖）。
+ok('undo 默认 allow（image/doomloop 仍 ask，read/subagent 仍 allow）', src.includes("key === 'edit' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow'") && !src.includes("key === 'undo' || key === 'image'"))
+// 防回退：注释不得再声称「只影响新建配置」——缺 undo 键的存量配置同样吃这个默认值（实测 1.3.x 直升路径）
+ok('undo 默认值的影响面如实标注（不再声称仅影响新建配置）', src.includes('所有未显式设置过 undo 的配置') && !src.includes('注意这里只影响**新建配置**'))
+ok('undo 默认值的取舍论证覆盖 better-edit 的持久化跨会话撤销', src.includes('dsh-better-edit：记录落盘 sqlite') && src.includes('跨会话'))
+ok('默认值改动不做迁移（migrateOld 未针对 undo 特判）', !/migrateOld[\s\S]{0,2500}?c === 'undo'/.test(src))
+// normalizeCategory 只在 mode 缺失/非法时才回落到默认值 —— 老配置里显式落盘的 ask/deny 必须存活，
+// 否则「改默认值」会静默覆盖老用户已经做过的选择
+ok('normalizeCategory 仅在校验失败时回落默认值（显式值存活）', src.includes('const cat = { mode: (inheritDefault ? ALL_MODES : MODES).indexOf(c.mode) !== -1 ? c.mode : def.mode }'))
 // 图片嗅探：直接断言解析行为（构造最小文件头），而非只匹配源码里的格式字面量
 const sn = mod.sniffImage
 const pngHead = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64')
@@ -780,7 +791,7 @@ ok('迁移不把老模式套到 image 上', src.includes("c === 'image' ? (oldMo
 ok('pending 不再下发已废弃的 imagePreview 标记', !src.includes('imagePreview') && !cli.includes('imagePreview'))
 ok('图片详情默认展开并自动预取（读图时直接看到缩略图）', cli.includes("openDetail[p.id] === undefined ? !!p.hasDiff") && !cli.includes('!p.imagePreview') && !cli.includes('p.imagePreview && !userOpened'))
 // 防回退：工作区外审批给两条候选（整个目录 / 仅此文件），且「仅此文件」写两条例外（自身分类 + 目录精确路径）
-ok('工作区外 path 审批给两条候选', src.includes("const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))") && src.includes('function pathToolCat(name, args)') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments)'))
+ok('工作区外 path 审批给两条候选', src.includes("const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))") && src.includes('function pathToolCat(name, args, exec) {') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments, exec)'))
 ok('「仅允许此文件」写自身分类 + 目录精确路径两条例外（值取归一化路径）', src.includes("{ cat: catKey, kind: 'path', value: fileVal }, { cat: 'directory', kind: 'path', value: fileVal }") && src.includes('const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null') && cli.includes('({ id: c.id, value: c.value, kind: c.kind, decision: sel[c.id] })'))
 ok('「整个目录」同时写目录闸与自身分类的 glob', src.includes("{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }") && src.includes('const hasKindGlob = globSafe && alreadyInProject(glob'))
 // 防回退：缩略图像素上限、落盘分类/类型自洽、reason 前缀跟随决定闸、read 复用预检单点
@@ -1178,6 +1189,105 @@ ok('命令全覆盖判定只认 allow 例外（ask 例外不静默放行）', sr
 // 防回退：全局快捷工具曾不跳过 inherit —— decide() 只处理 ask/deny，inherit 落到 pre-execute
 // 的「两者都不匹配」分支直接 next()，等于静默放行（项目分支一直有该守卫，两侧须同口径）
 ok('全局快捷工具同样跳过 inherit（与项目分支同口径，不静默放行）', src.includes("if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name))") && (src.match(/!== 'inherit' && matchGlob\(k, name\)/g) || []).length === 2)
+
+// ─────────────────────────────────────────────────────────────
+group('15. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入文件类分类闸')
+// 背景：这两个工具名都不在 DSH 内置里（内置只有 str_replace_editor，insert/undo_edit 是它的
+// 子命令）。dsh-fs-encoding 把它们注册成独立工具/命令且**会写盘**，而旧判定只认 write/edit 与
+// sre 的 create/str_replace/insert 子命令 —— 实测两者都掉到兜底策略，连 edit 分类的拒绝例外都绕过。
+// 反例（改回旧行为即失败）：isFileWrite 去掉 isFileInsert、isUndo 恒 false、sreUndoWrites 恒 false。
+ok('insert 判定要求「名字 + 路径 + 文件插入专有参数」', src.includes('function isFileInsert(name, args) {') && src.includes('return args.insert_line !== undefined || typeof args.new_string === \'string\''))
+// 逐行比对函数体：只查 includes 时，把整个判定改成恒 false / 恒 true 都能蒙混过关（实测漏网）。
+// 有意去注释与空白后逐字比 —— 等价改写会走到这里，宁可误报也不漏报。
+;(function () {
+  const body = src.slice(src.indexOf('function isFileInsert(name, args) {'), src.indexOf('// 文件写工具判定：write/edit 原生工具、insert'))
+  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim()
+  const expected = [
+    "function isFileInsert(name, args) {",
+    "if (!FILE_INSERT_TOOLS[name]) return false",
+    "try {",
+    "if (!args || typeof args !== 'object') return false",
+    "const p = typeof args.file_path === 'string' ? args.file_path : (typeof args.path === 'string' ? args.path : '')",
+    "if (!p) return false",
+    "return args.insert_line !== undefined || typeof args.new_string === 'string'",
+    "} catch (e) { return false }",
+    "}",
+  ].join(' ')
+  const bodyOk = norm(body) === expected
+  ok('isFileInsert 函数体与期望一致（恒 true/false 均判失败）', bodyOk,
+    bodyOk ? '' : ('\n      期望: ' + expected + '\n      实际: ' + norm(body)))
+})()
+ok('isFileWrite 纳入 insert', src.includes('if (isFileInsert(name, args)) return true'))
+ok('undo_edit 常量单一来源', src.includes("const SRE_UNDO_CMD = 'undo_edit'") && (src.match(/SRE_UNDO_CMD/g) || []).length >= 3)
+ok('SRE_WRITE_CMDS 不含 undo_edit（它按内核判别，不在此一刀切）', src.includes('const SRE_WRITE_CMDS = { create: 1, str_replace: 1, insert: 1 }'))
+// 探测：三个内核中只有「描述列了 undo_edit」的才可能写盘（better-edit 抛错、fs-encoding 真写），
+// 描述分不开后两者 ⇒ 一律按会写盘处理；探测不到描述也按会写盘（fail-closed）
+ok('sreUndoWrites 探测不到描述时 fail-closed', src.includes('if (!t) return true') && /function sreUndoWrites\(exec\) \{[\s\S]{0,200}?return \/undo_edit\/i\.test\(t\.all\)/.test(src))
+ok('sreToolText 单点探测（内核判别与 undo 判别共用）', (src.match(/function sreToolText\(exec\) \{/g) || []).length === 1 && src.includes('const t = sreToolText(exec)\n      if (!t) return null'))
+// 同样逐字比对：只查片段时「undo_last_edit 恒 false」这类改动能蒙混过关（实测漏网）
+;(function () {
+  const body = src.slice(src.indexOf('function isUndo(name, args, undoWrites) {'), src.indexOf('// 「可预览文件内容」判定'))
+  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim()
+  const expected = [
+    'function isUndo(name, args, undoWrites) {',
+    'if (UNDO_TOOLS[name]) return true',
+    "if (name !== 'str_replace_editor') return false",
+    'return sreCommand(args) === SRE_UNDO_CMD && undoWrites === true',
+    '}',
+  ].join(' ')
+  const bodyOk = norm(body) === expected
+  ok('isUndo 纯函数函数体与期望一致（恒 false 判失败）', bodyOk,
+    bodyOk ? '' : ('\n      期望: ' + expected + '\n      实际: ' + norm(body)))
+})()
+ok('isUndo 纯函数：undo_last_edit 恒真、undo_edit 需 undoWrites', src.includes("return sreCommand(args) === SRE_UNDO_CMD && undoWrites === true"))
+ok('isUndoNow 负责探测后调用纯函数', src.includes('return isUndo(name, args, sreUndoWrites(exec))'))
+ok('撤销预览按 entry.toolCat 或探测判定', src.includes("if (entry.toolCat === 'undo' || isUndoNow(name, args, null)) return await buildUndoDiffData"))
+// 防回退：insert 预览不得折算成 old_string='' 的 edit（那会把插入点伪造成文件开头）
+ok('insert 预览走 previewInsert 而非 edit 折算', src.includes('if (isFileInsert(name, args)) {') && /if \(isFileInsert\(name, args\)\) \{[\s\S]{0,900}?return previewInsert\(fp, oldLines, splitDiffLines\(insText\), insLine, insertLineCount\(oldLines\)\)/.test(src))
+// 防回退：上限不能用 splitDiffLines(...).length —— 末尾换行会多算一行，预览出必然被拒的插入
+ok('insertLineCount 与工具 splitForEdit 同口径（末尾换行不另开一行）', src.includes('function insertLineCount(lines) {') && src.includes("return arr[arr.length - 1] === '' ? arr.length - 1 : arr.length"))
+// 上限改从**已物化的行数组**推导，而不是再扫一遍全文（同一分支里 splitDiffLines 已切过一次）
+// 逐字比对函数体：只查片段时「改回扫全文」或「恒返回 0」都能蒙混过关
+;(function () {
+  const body = src.slice(src.indexOf('function insertLineCount(lines) {'), src.indexOf('// 插入参数解析单点'))
+  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim()
+  const expected = [
+    'function insertLineCount(lines) {',
+    'const arr = Array.isArray(lines) ? lines : splitDiffLines(lines)',
+    "if (arr.length === 1 && arr[0] === '') return 0",
+    "return arr[arr.length - 1] === '' ? arr.length - 1 : arr.length",
+    '}',
+  ].join(' ')
+  const bodyOk = norm(body) === expected
+  ok('insertLineCount 接受行数组、不重复扫全文（函数体逐字比对）', bodyOk,
+    bodyOk ? '' : ('\n      期望: ' + expected + '\n      实际: ' + norm(body)))
+})()
+// 插入参数解析必须是单点：sre 的 insert 子命令与 fs-encoding 的独立 insert 共用同一份
+// 占位值折算规则（各写一份时「改一处忘另一处」会预览出必然失败的插入，该公式历史上出过 off-by-one）
+;(function () {
+  const body = src.slice(src.indexOf('function insertArgsOf(args, textKey) {'), src.indexOf('// 插入预览统一'))
+  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim()
+  const expected = [
+    'function insertArgsOf(args, textKey) {',
+    'const rawInsLine = args.insert_line',
+    "const insLine = (rawInsLine === null || rawInsLine === undefined || rawInsLine === '' || rawInsLine === false) ? NaN : Number(rawInsLine)",
+    "const insText = typeof args[textKey] === 'string' ? args[textKey] : ''",
+    'return { insLine, insText }',
+    '}',
+  ].join(' ')
+  const bodyOk = norm(body) === expected
+  ok('insertArgsOf 占位值折算规则单点（函数体逐字比对）', bodyOk,
+    bodyOk ? '' : ('\n      期望: ' + expected + '\n      实际: ' + norm(body)))
+})()
+ok('两个 insert 分支都走 insertArgsOf（只差内容键名）', src.includes("const { insLine, insText } = insertArgsOf(args, 'new_str')") && src.includes("const { insLine, insText } = insertArgsOf(args, 'new_string')"))
+// 防回退：折算公式不得再出现第二份副本（只查 includes 时，留下旧副本也能通过）
+ok('占位值折算公式全文件仅一份（无重复副本）', (src.match(/rawInsLine === null \|\| rawInsLine === undefined/g) || []).length === 1)
+// 撤销预览文案必须中性：fs-encoding 的撤销记录只在内存里、外部读不到，
+// 「读不到」不等于「没有记录」，更不等于撤销会被跳过
+ok('撤销预览读不到记录时为中性文案（不下「会被跳过」的结论）', src.includes('无法预览撤销内容（不影响撤销本身是否执行）') && !src.includes('该文件没有可撤销的编辑记录'))
+ok('内置内核的 undo_edit 仍提示无改动可预览', src.includes("if (name === 'str_replace_editor' && sreCommand(args) === SRE_UNDO_CMD) {") && src.includes("bi('该命令没有可预览的改动'"))
+// 可选依赖：全程不查 fsEncoding 服务是否存在，只按工具名/描述判别 —— 未装该插件时这些名字不存在
+ok('insert/undo_edit 判定不依赖 fsEncoding 服务在场', !/isFileInsert[\s\S]{0,300}?getFsEncodingService/.test(src) && !/sreUndoWrites[\s\S]{0,300}?getFsEncodingService/.test(src))
 
 // ─────────────────────────────────────────────────────────────
 if (fail.length) {

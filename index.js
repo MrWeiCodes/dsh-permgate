@@ -55,8 +55,13 @@ const FILE_WRITE_TOOLS = { write: 1, edit: 1 }
 const COMMAND_TOOLS = { pwsh: 1, bash: 1 }
 const SUBAGENT_TOOLS = { subagent: 1, subagent_fork: 1, workflow: 1, ralph: 1 }
 
-// str_replace_editor 的写命令（view 只读；undo_edit 只抛 E_UNSUPPORTED、不写盘，故不计入写）
+// str_replace_editor 的写命令（view 只读）。
+// undo_edit 有意不在列：它是否写盘取决于当前生效的内核 —— DSH 内置根本没有该命令、
+// dsh-better-edit 有但抛 E_UNSUPPORTED（不写盘）、dsh-fs-encoding 转发 performUndo（真写盘）。
+// 故它由 isUndo 按内核单独判别，而不是在这里一刀切。
 const SRE_WRITE_CMDS = { create: 1, str_replace: 1, insert: 1 }
+// str_replace_editor 的撤销子命令名：语义等同 undo_last_edit（恢复既有内容、不接受新内容）
+const SRE_UNDO_CMD = 'undo_edit'
 
 // str_replace_editor 的内核：DSH 内置（官方语义，insert_line 0 基、插到该行之后）
 // 或 dsh-better-edit 的同名 shadow 覆盖（1 基、插到该行之前）。两者语义相反，
@@ -70,9 +75,30 @@ function sreCommand(args) {
   try { return String((args && args.command) || '') } catch (e) { return '' }
 }
 
-// 文件写工具判定：write/edit 原生工具，或 str_replace_editor 的写命令
+// dsh-fs-encoding 的 insert 是**独立注册的工具**（DSH 内置没有这个名字，内置的 insert 只是
+// str_replace_editor 的子命令）。它会写盘，故归入 edit 分类。
+const FILE_INSERT_TOOLS = { insert: 1 }
+
+// insert 判定：名字 + 参数形状双重确认。只按名字会把别的插件注册的同名工具（数据库 insert、
+// 数组 insert 之类）也算成写文件；要求「文件路径 + 至少一个文件插入专有参数」才认定 ——
+// file_path/path 是它的路径形状，insert_line/new_string 是它区别于「带 path 的其它 insert」的特征。
+// 有意不校验这两个参数的类型：形状畸形时仍按写文件拦住（fail-closed），否则一个
+// insert_line:"1" 的畸形调用就能绕过 edit 分类的拒绝例外、掉到兜底策略上。
+// 未装该插件时这个名字根本不存在，判定永不触发 —— 不构成对它的依赖。
+function isFileInsert(name, args) {
+  if (!FILE_INSERT_TOOLS[name]) return false
+  try {
+    if (!args || typeof args !== 'object') return false
+    const p = typeof args.file_path === 'string' ? args.file_path : (typeof args.path === 'string' ? args.path : '')
+    if (!p) return false
+    return args.insert_line !== undefined || typeof args.new_string === 'string'
+  } catch (e) { return false }
+}
+
+// 文件写工具判定：write/edit 原生工具、insert（dsh-fs-encoding），或 str_replace_editor 的写命令
 function isFileWrite(name, args) {
   if (FILE_WRITE_TOOLS[name]) return true
+  if (isFileInsert(name, args)) return true
   if (name !== 'str_replace_editor') return false
   return !!SRE_WRITE_CMDS[sreCommand(args)]
 }
@@ -89,25 +115,23 @@ function isFileImage(name) {
   return !!FILE_IMAGE_TOOLS[name]
 }
 
-// 撤销类工具（dsh-better-edit 的 undo_last_edit）：会写盘但不是「编辑」——它恢复既有内容、
-// 不接受调用方提供的新内容，因此单列一类（undo），默认询问。
+// 撤销类工具：会写盘但不是「编辑」——它恢复既有内容、不接受调用方提供的新内容，
+// 因此单列一类（undo），默认询问。dsh-better-edit 与 dsh-fs-encoding 都注册这个名字。
 const UNDO_TOOLS = { undo_last_edit: 1 }
-function isUndo(name) { return !!UNDO_TOOLS[name] }
 
-// 工具自身所属的路径类分类（不含 directory 闸）：工作区外审批的「仅此文件」候选要写哪个分类，
-// 不能靠 entry.cat —— 它只记录「作出决定的那道闸」，directory 处于 ask 时反映不出工具本身属于哪类。
-function pathToolCat(name, args) {
-  if (isFileWrite(name, args)) return 'edit'
-  if (isFileImage(name)) return 'image'
-  if (isUndo(name)) return 'undo'
-  if (isFileRead(name, args)) return 'read'
-  return null
+// 撤销判定。undoWrites 表示「当前生效的 str_replace_editor 的 undo_edit 会不会写盘」，
+// 由调用方用 sreUndoWrites() 探测后传入 —— 探测要读 ctx.tools，而本函数有意保持为纯函数。
+// undo_last_edit 恒为撤销；str_replace_editor 只有 undo_edit 子命令才是，且仅当它真写盘。
+function isUndo(name, args, undoWrites) {
+  if (UNDO_TOOLS[name]) return true
+  if (name !== 'str_replace_editor') return false
+  return sreCommand(args) === SRE_UNDO_CMD && undoWrites === true
 }
 
 // 「可预览文件内容」判定：详情 diff 与「打开文件」路由共用同一口径（写类/文本读类/图片类/撤销类），
-// 避免两处判据分叉导致「面板有对比但打开文件报不支持」
-function isPreviewableFileTool(name, args) {
-  return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name))
+// 避免两处判据分叉导致「面板有对比但打开文件报不支持」。undoWrites 含义同 isUndo。
+function isPreviewableFileTool(name, args, undoWrites) {
+  return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name, args, undoWrites))
 }
 
 // ── 图片嗅探（详情缩略图用）────────────────────────────────────────
@@ -478,8 +502,22 @@ export default {
     }
 
     function freshCategory(key, inheritDefault) {
-      // 默认 ask：不可逆/越界/涉及外部执行或输入的分类（含读图）从严；read/subagent 这类只读或可回收的默认放行
-      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'undo' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow') }
+      // 默认 ask：不可逆/越界/涉及外部执行或输入的分类（含读图）从严。
+      // 默认 allow：read/subagent 这类只读或可回收的，以及 undo。
+      //
+      // undo 默认 allow 的**影响面**：这里是「配置里没有该键」时的回落值，而 normalizeCategory
+      // 对缺键形态正是回落到它，故它作用于**所有未显式设置过 undo 的配置** —— 不只是新建配置。
+      // undo 分类是 v1.4.0 才引入的，从更早版本（无 undo 键）直升的存量配置同样吃这个默认值，
+      // 且随后任何一次 persist 都会把 allow 固化。需要 undo 每次确认的用户须显式设为 ask。
+      //
+      // 这个默认值是一个**取舍**，不是「撤销无害」的结论：两个撤销实现的破坏面不同 ——
+      //   dsh-fs-encoding：记录只在进程内存、按 session 分桶，且文件被改动后直接拒绝，破坏面受限；
+      //   dsh-better-edit：记录落盘 sqlite（undo 表以 path 为主键，无 session 维度）、按 workspace
+      //     共享、跨会话、TTL 7 天 —— 同 workspace 的新会话可无弹窗回退到别的会话 7 天内的旧状态。
+      // 即 allow 下这条写路径没有用户可见的检查点（不弹窗即无 diff 预览）。取 allow 是因为撤销
+      // 恢复的是「既有内容」、不接受调用方提供的新内容，破坏方向有限；认定该风险不可接受时，
+      // 把 undo 显式设为 ask 即可恢复逐次确认。
+      const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow') }
       if (EXC_CATS.indexOf(key) !== -1) cat.exceptions = []
       return cat
     }
@@ -723,7 +761,7 @@ export default {
     // 写类工具 + 目标在工作区外 + 会话沙箱受限（workspace-write）→ 需要沙箱升级
     function needsUpgrade(exec) {
       try {
-        if (!isFileWrite(exec.name, exec.arguments) && !isUndo(exec.name)) return false
+        if (!isFileWrite(exec.name, exec.arguments) && !isUndoNow(exec.name, exec.arguments, exec)) return false
         const fp = pathArg(exec.arguments)
         if (!fp || !isOutside(fp, root)) return false
         const agent = (exec && exec.agent) || agentRef
@@ -1070,27 +1108,69 @@ export default {
       return firstEffective(proj && proj.editorKernel, config.global.editorKernel, 'auto')
     }
 
-    function detectEditorKernel(exec) {
+    // str_replace_editor 工具定义的文字描述（顶层 + 相关参数）：内核判别与 undo_edit 判别共用
+    // 同一次探测，避免两处各自 tools.get + 解析而漂移。探测不到返回 null（未注册 / 无描述 / 抛错）。
+    function sreToolText(exec) {
       try {
         const tools = ctx.tools
         if (!tools || typeof tools.get !== 'function') return null
         const def = tools.get('str_replace_editor', (exec && exec.agent) || agentRef)
-        // 内置的「AFTER the line」只出现在 insert_line 的**参数**描述里（顶层描述没有该短语），
-        // 故把参数描述一并纳入匹配，使两种内核都能被正向识别，而不是让内置只能靠回退
-        const top = def && typeof def.description === 'string' ? def.description : ''
-        const params = def && def.parameters && typeof def.parameters === 'object' ? def.parameters : null
+        if (!def) return null
+        const top = typeof def.description === 'string' ? def.description : ''
+        const params = def.parameters && typeof def.parameters === 'object' ? def.parameters : null
         // defineTool 编译后 parameters 是 JSON Schema（{type:'object', properties:{...}}），
-        // 参数描述在 properties.insert_line.description；兼容可能存在的旧式扁平结构
+        // 参数描述在 properties.<name>.description；兼容可能存在的旧式扁平结构
         const props = params && params.properties && typeof params.properties === 'object' ? params.properties : params
-        const insDesc = (props && props.insert_line && typeof props.insert_line.description === 'string') ? props.insert_line.description : ''
-        const desc = top + '\n' + insDesc
-        if (!desc.trim()) return null
-        // shadow: "inserts new line(s) before insert_line (1-indexed, lines+1 appends)"
-        if (/before\s+insert_line/i.test(desc) || /1-indexed/i.test(desc)) return 'shadow'
-        // 内置: "The `new_str` will be inserted AFTER the line `insert_line`"
-        if (/AFTER the line/i.test(desc)) return 'builtin'
-        return null
+        const propDesc = (k) => (props && props[k] && typeof props[k].description === 'string') ? props[k].description : ''
+        const all = [top, propDesc('insert_line'), propDesc('command')].join('\n')
+        return all.trim() ? { top, propDesc, all } : null
       } catch (e) { return null }
+    }
+
+    function detectEditorKernel(exec) {
+      const t = sreToolText(exec)
+      if (!t) return null
+      // 内置的「AFTER the line」只出现在 insert_line 的**参数**描述里（顶层描述没有该短语），
+      // 故把参数描述一并纳入匹配，使两种内核都能被正向识别，而不是让内置只能靠回退
+      const desc = t.top + '\n' + t.propDesc('insert_line')
+      // shadow: "inserts new line(s) before insert_line (1-indexed, lines+1 appends)"
+      if (/before\s+insert_line/i.test(desc) || /1-indexed/i.test(desc)) return 'shadow'
+      // 内置: "The `new_str` will be inserted AFTER the line `insert_line`"
+      if (/AFTER the line/i.test(desc)) return 'builtin'
+      return null
+    }
+
+    // str_replace_editor 的 undo_edit 是否写盘。三个内核各不相同：
+    //   DSH 内置         —— 描述只列 view/create/str_replace/insert，没有 undo_edit：调用必然失败，不写盘
+    //   dsh-better-edit  —— 描述列了 undo_edit，但实现抛 E_UNSUPPORTED：不写盘
+    //   dsh-fs-encoding  —— 描述列了 undo_edit，且转发 performUndo：真写盘
+    // 描述无法区分后两者，故「命令存在」即按会写盘处理（fail-closed）：误报只是多一次确认，
+    // 漏报则是一条绕过 undo 分类的无闸写盘路径。探测不到描述时同样按会写盘处理。
+    function sreUndoWrites(exec) {
+      const t = sreToolText(exec)
+      if (!t) return true
+      return /undo_edit/i.test(t.all)
+    }
+
+    // 撤销类工具判定：undo_last_edit 直接命中；str_replace_editor 的 undo_edit 按内核判别。
+    // exec 用于探测当前会话实际生效的 str_replace_editor，缺省时按全局 agentRef 探测。
+    function isUndoNow(name, args, exec) {
+      return isUndo(name, args, sreUndoWrites(exec))
+    }
+
+    // 工具自身所属的路径类分类（不含 directory 闸）：工作区外审批的「仅此文件」候选要写哪个分类，
+    // 不能靠 entry.cat —— 它只记录「作出决定的那道闸」，directory 处于 ask 时反映不出工具本身属于哪类。
+    function pathToolCat(name, args, exec) {
+      if (isFileWrite(name, args)) return 'edit'
+      if (isFileImage(name)) return 'image'
+      if (isUndoNow(name, args, exec)) return 'undo'
+      if (isFileRead(name, args)) return 'read'
+      return null
+    }
+
+    // 纯函数版的可预览判定需要调用方先探测内核，这里包一层，调用点不必各自记着探测
+    function isPreviewableFileToolNow(name, args, exec) {
+      return isPreviewableFileTool(name, args, sreUndoWrites(exec))
     }
 
     function resolveEditorKernel(exec) {
@@ -1652,6 +1732,32 @@ export default {
       return diffPayloadOrFallback(fp, winOldText, winNewText, 'modified', winStart)
     }
 
+    // 插入类工具的「文件行数」上限口径：末尾换行不另开一行、空文件为 0 行。
+    // 与 dsh-fs-encoding 的 splitForEdit / insertAfterLine 的 [0, lines] 同源；
+    // 不能直接用 splitDiffLines(...).length —— 它会为末尾换行多算一行。
+    // 入参是**已物化的行数组**（splitDiffLines(text) 的结果），而不是原文：调用点本来就要这个
+    // 数组去渲染，让它顺手传进来即可，不必为取一个行数把同一份全文再归一化+切分一遍。
+    // 判据全部从数组本身读：normEol(text)==='' ⟺ ['']；归一化后以 \n 结尾 ⟺ 末项为空串
+    //（末尾的 \r 已被 normEol 折成 \n，故这里天然覆盖 CR/CRLF 结尾，不会漏算一行）。
+    function insertLineCount(lines) {
+      const arr = Array.isArray(lines) ? lines : splitDiffLines(lines)
+      if (arr.length === 1 && arr[0] === '') return 0
+      return arr[arr.length - 1] === '' ? arr.length - 1 : arr.length
+    }
+
+    // 插入参数解析单点：sre 的 insert 子命令与 dsh-fs-encoding 的独立 insert 工具共用。
+    // 两者只差**内容键名**（sre 用 new_str、独立工具用 new_string），占位值折算规则必须一致 ——
+    // 都喂给同一个 previewInsert，各写一份的话「改一处忘另一处」会预览出一次必然失败的插入
+    //（该公式历史上出现过 off-by-one）。故键名作为参数传入，规则本身只此一份。
+    // null/''/false 等占位值不得折算为 0：两个内核的取参都把 null 视为未提供并报 required，
+    // 折算成 0 会被当成合法的 0 基位置。
+    function insertArgsOf(args, textKey) {
+      const rawInsLine = args.insert_line
+      const insLine = (rawInsLine === null || rawInsLine === undefined || rawInsLine === '' || rawInsLine === false) ? NaN : Number(rawInsLine)
+      const insText = typeof args[textKey] === 'string' ? args[textKey] : ''
+      return { insLine, insText }
+    }
+
     // 插入预览统一：内置（0 基 after）与 shadow（1 基 before）只差插入点索引与上限的换算，
     // 参数校验、越界文案与窗口渲染全部共用，避免两侧独立演化（该公式历史上出现过 off-by-one）
     function previewInsert(fp, oldLines, addedLines, at, maxAt) {
@@ -1698,7 +1804,10 @@ export default {
           } finally { try { db.close() } catch (e) {} }
         }
       } catch (e) { invalidateStoreCache(entry.projRoot); row = null }
-      if (!row) return { ok: false, error: bi('该文件没有可撤销的编辑记录，撤销会被跳过', 'No undo history for this file; the undo will be skipped') }
+      // 撤销记录的存放位置随内核而异：dsh-better-edit 落在可读的 sqlite store，dsh-fs-encoding
+      // 只存在进程内存里、外部读不到。读不到不等于「没有记录」，更不等于撤销会被跳过，
+      // 故这里只说明「无法预览」，不对撤销本身是否执行下结论。
+      if (!row) return { ok: false, error: bi('无法预览撤销内容（不影响撤销本身是否执行）', 'Cannot preview the undo (this does not affect whether it runs)') }
       try {
         // 撤销预览要拿磁盘当前内容与撤销目标比对，非 UTF-8 文件同样要能读出，
         // 否则撤销预览直接报 invalid UTF-8 text 而看不到将被恢复的内容。
@@ -1897,7 +2006,9 @@ export default {
     }
 
     async function buildFileDiffDataRaw(entry, fsService, name, args, fp, enc) {
-      if (isUndo(name)) return await buildUndoDiffData(entry, fsService, fp, enc)
+      // entry.toolCat 是审批发起时判定的工具归属（见 pendingApprovals 的构造），与本处探测同源；
+      // 两者取或，避免 entry 缺该字段时漏判。此处没有发起调用的 exec，探测走全局 agentRef。
+      if (entry.toolCat === 'undo' || isUndoNow(name, args, null)) return await buildUndoDiffData(entry, fsService, fp, enc)
       if (isFileImage(name)) return await buildImageDiffData(entry, fsService, fp)
       if (isFileRead(name, args)) {
         if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
@@ -2025,8 +2136,9 @@ export default {
           return { ok: false, error: readFail(e) }
         }
       }
-      // str_replace_editor 的 undo_edit 命令不写盘（better-edit 直接抛 E_UNSUPPORTED），无改动可预览
-      if (name === 'str_replace_editor' && sreCommand(args) === 'undo_edit') {
+      // str_replace_editor 的 undo_edit：写盘的内核（dsh-fs-encoding）已在上面被 isUndo 接走，
+      // 能走到这里说明当前内核不写盘 —— 内置没有该命令、better-edit 抛 E_UNSUPPORTED，都没有改动可预览
+      if (name === 'str_replace_editor' && sreCommand(args) === SRE_UNDO_CMD) {
         return { ok: false, error: bi('该命令没有可预览的改动', 'This command has no previewable change') }
       }
       if (isFileWrite(name, args)) {
@@ -2075,11 +2187,8 @@ export default {
             // 否则会把插入位置画到错误的地方。
             // 不能折算成 old_string='' 的 edit —— 那会让 rawIdx 恒为 -1，插入位置被伪造成
             // 「文件开头第 1 行」。这里读盘后按真实插入点生成窗口 diff，行号与实际执行一致。
-            // null/''/false 等占位值不得折算为 0：内置取参把 null 视为未提供并报 required，
-            // 折算成 0 会被当成合法的 0 基位置，预览出一次必定失败的插入
-            const rawInsLine = args.insert_line
-            const insLine = (rawInsLine === null || rawInsLine === undefined || rawInsLine === '' || rawInsLine === false) ? NaN : Number(rawInsLine)
-            const insText = typeof args.new_str === 'string' ? args.new_str : ''
+            // 参数解析（含占位值折算）走 insertArgsOf 单点，与 fs-encoding 的独立 insert 共用
+            const { insLine, insText } = insertArgsOf(args, 'new_str')
             const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService)
             if (!rd.ok) return rd
             const fileText = rd.text
@@ -2095,6 +2204,25 @@ export default {
             const maxInsert = fileText.length === 0 ? 1 : (fileText.endsWith('\n') ? oldLines.length : oldLines.length + 1)
             return previewInsert(fp, oldLines, addedLines, insLine - 1, maxInsert - 1)
           }
+        }
+        // dsh-fs-encoding 的独立 insert 工具（不是 str_replace_editor 的子命令）：
+        // 参数 file_path/insert_line/new_string，语义与内置 sre 的 insert 一致
+        //（0 基、插到该行之后，范围 [0, 行数]），故复用同一条 previewInsert 路径，不做内核分叉。
+        // 同样不能折算成 old_string='' 的 edit —— 理由见上面 sre insert 分支。
+        if (isFileInsert(name, args)) {
+          // 参数解析走 insertArgsOf 单点（与 sre 的 insert 子命令共用占位值折算规则），
+          // 只把内容键名换成该工具的契约名 new_string
+          const { insLine, insText } = insertArgsOf(args, 'new_string')
+          const rd = await readTargetCheckedMeta(enc, fp, entry.projRoot, fsService)
+          if (!rd.ok) return rd
+          const fileText = rd.text
+          if (overMaxChars(fileText, insText)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
+          // 渲染用行数组保留末尾空行（与既有 insert 预览一致），上限另按工具自己的行计数算：
+          // 该工具的 insertAfterLine 以「末尾换行不另开一行、空文件为 []」计数，直接用渲染数组的
+          // length 会让合法范围多出一行，预览出一次必然被工具 RangeError 拒绝的插入。
+          // 行数组只物化一次，上限由它推导（insertLineCount 接受行数组，不再重复扫全文）。
+          const oldLines = splitDiffLines(fileText)
+          return previewInsert(fp, oldLines, splitDiffLines(insText), insLine, insertLineCount(oldLines))
         }
         if (tool === 'edit') {
           // dsh-better-edit 兼容：{path, edits:[[remove_from,remove_to,replacement_text],...]} hash 锚点格式。
@@ -2421,7 +2549,7 @@ export default {
       return idx >= 0 ? s.slice(idx + 1) : s
     }
 
-    function humanArgsPreview(name, args) {
+    function humanArgsPreview(name, args, exec) {
       const lang = uiLang
       const lines = []
       const push = (label, value, extra) => {
@@ -2436,7 +2564,7 @@ export default {
       try {
         if (!args || typeof args !== 'object') return lines
         const fp = pathArg(args)
-        if (isUndo(name)) {
+        if (isUndoNow(name, args, exec)) {
           push(t('撤销', 'Undo'), fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
           if (fp) push(t('路径', 'Path'), fp, { path: fp })
         } else if (isFileRead(name, args)) {
@@ -2456,9 +2584,11 @@ export default {
           const sreCmd = isSre ? sreCommand(args) : ''
           const wLabel = isSre
             ? (sreCmd === 'create' ? t('创建', 'Create') : t('编辑', 'Edit'))
-            : (name === 'edit' ? t('修改', 'Edit') : t('写入', 'Write'))
+            : (name === 'edit' ? t('修改', 'Edit') : (isFileInsert(name, args) ? t('插入', 'Insert') : t('写入', 'Write')))
           push(wLabel, fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
           if (fp) push(t('路径', 'Path'), fp, { path: fp })
+          // 插入位置是审批时的关键信息（0 = 文件最顶端），单列一行而不是混在内容里
+          if (isFileInsert(name, args)) push(t('插入到第几行之后', 'Insert after line'), args.insert_line)
           const content = typeof args.content === 'string'
             ? args.content
             : (typeof args.new_string === 'string'
@@ -2612,7 +2742,7 @@ export default {
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过「目录访问」闸（directory + undo 合并矩阵）。
-      if (isUndo(name)) {
+      if (isUndoNow(name, args, exec)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           const m = outsideMatrix('undo', fp)
@@ -2903,7 +3033,7 @@ export default {
           intent: taskText || describeIntent(exec, d),
           ts: Date.now(),
           candidates: [],
-          argLines: humanArgsPreview(exec.name, exec.arguments),
+          argLines: humanArgsPreview(exec.name, exec.arguments, exec),
           // 审批发起时的项目根：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
           // 审批发起时的项目根与会话 id：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
           // 打相对路径/对比/打开侧栏必须用发起会话自己的这两样（会话 id 用来构造 file 地址）。
@@ -2911,8 +3041,8 @@ export default {
           sessionId: (exec.session && exec.session.id) || null,
           // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开并自动取数据
           // （写类=diff，读类=窗口化内容；图片是整图 data URL，受 IMAGE_MAX_BYTES/像素上限约束）
-          hasDiff: isPreviewableFileTool(exec.name, exec.arguments) && !!pathArg(exec.arguments),
-          toolCat: pathToolCat(exec.name, exec.arguments),
+          hasDiff: isPreviewableFileToolNow(exec.name, exec.arguments, exec) && !!pathArg(exec.arguments),
+          toolCat: pathToolCat(exec.name, exec.arguments, exec),
           // str_replace_editor 的内核在审批发起时定下（insert 的 insert_line 语义随内核相反），
           // 详情预览按发起时的实际内核解释，避免中途判别漂移
           editorKernel: resolveEditorKernel(exec).kernel,
