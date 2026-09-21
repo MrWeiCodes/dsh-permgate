@@ -1625,6 +1625,158 @@ group('18. 扫描触发条件：输入区 characterData 必须被排除（防打
 }
 
 // ─────────────────────────────────────────────────────────────
+group('19. 菜单项图标：与平台 itemIcon 同构（尺寸/间距/受限变体）')
+// 平台真实结构与规则（dsh-web-frontend 的 ._item_ / ._itemIcon_ CSS）：
+//   button._item { display:flex; align-items:center; gap:8px }    ← 间距来自父级 gap
+//     ├─ span._itemIcon { inline-flex; 16x16; 居中; color:label-tertiary }
+//     └─ span._itemLabel { flex:1; ... }
+// 三个曾经的缺陷：
+//   ① 图标直接插进 label 内部、用 14px + margin-right + vertical-align 硬凑 ——
+//      尺寸偏大、颜色偏深（currentColor 继承主色而非三级灰）、父级 gap 够不着。
+//   ② pgEnsureMenuIcon 开头「已注入就 return」且遮罩硬编码 PG_MASK —— 沙箱切到
+//      受限后菜单图标仍是放大镜，且菜单不重建就永远不会更新。
+//   ③ 修 ② 时用 getAttribute('style') 与源码串比较当守卫 —— CSSOM 会补空格/展开
+//      简写/丢弃 -webkit- 长写，两者恒不相等，守卫退化成每次扫描都重写 style。
+//      故变体标记写进属性值，下面 mock 的 cssText 也据此反射进 attrs。
+{
+  const at = (m, from = 0) => cli.indexOf(m, from)
+  const eol = (i) => cli.indexOf('\n', i) + 1
+  const iA = at('const PG_STYLE ='), iB = at('const pgNoop =')
+  const iC = at('let pgReviewActive = false;'), iD = at('function pgTriggerLabel')
+  const iE = at('function pgSwapText'), iF = at('const PG_CONFINED =')
+  const iG = at('function pgScanText'), iH = at('const pgMenuIcons = new Set();')
+  const iI = at('function pgScanAll')
+  ok('能定位 pgEnsureMenuIcon 相关代码块',
+    iA > 0 && iB > iA && iC > 0 && iD > iC && iE > iD && iF > iE && iG > iF && iH > iG && iI > iH)
+  if (iH > 0 && iI > iH) {
+    const body = [
+      cli.slice(iA, eol(iB)),
+      cli.slice(iC, iD),
+      cli.slice(iD, iE),
+      cli.slice(iE, iF),
+      cli.slice(iF, iG),
+      cli.slice(iH, iI),
+    ].join('\n')
+    ok('切出的代码块含 pgEnsureMenuIcon', body.includes('function pgEnsureMenuIcon'))
+    // 浏览器读 style 属性返回的是「解析后重新序列化」的结果，不是写入的源码串：
+    // 补空格、展开 flex:none、小写化 currentColor、丢弃 -webkit- 长写。mock 必须
+    // 复现这一点，否则「拿 style 串当守卫」的写法会在 mock 里假通过（真实浏览器恒不等）。
+    const serializeStyle = (css) => css
+      .split(';').map((d) => d.trim()).filter(Boolean)
+      .filter((d) => !/^-webkit-mask\s*:/i.test(d))
+      .map((d) => {
+        const i = d.indexOf(':')
+        const prop = d.slice(0, i).trim()
+        let val = d.slice(i + 1).trim()
+        if (prop === 'flex' && val === 'none') val = '0 0 auto'
+        val = val.replace(/currentColor/g, 'currentcolor').replace(/center\/contain/g, 'center center / contain')
+        return prop + ': ' + val + ';'
+      })
+      .join(' ')
+    class El {
+      constructor(tag, ...k) {
+        this.nodeType = 1; this.tagName = String(tag).toUpperCase(); this.attrs = {}; this.childNodes = []
+        this.styleWrites = 0
+        let cssText = ''
+        const self = this
+        this.style = {
+          get cssText() { return cssText },
+          set cssText(v) { cssText = serializeStyle(String(v)); self.styleWrites++; self.attrs.style = cssText },
+        }
+        for (const x of k) this.append(x)
+      }
+      append(n) { if (n.nodeType === 3) n.parentElement = this; this.childNodes.push(n); return this }
+      insertBefore(n, ref) { const i = this.childNodes.indexOf(ref); if (n.nodeType === 3) n.parentElement = this; this.childNodes.splice(i < 0 ? this.childNodes.length : i, 0, n); return n }
+      get children() { return this.childNodes.filter((n) => n.nodeType === 1) }
+      get textContent() { return this.childNodes.map((n) => (n.nodeType === 3 ? n.nodeValue : n.textContent)).join('') }
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null }
+      setAttribute(k, v) { this.attrs[k] = String(v) }
+      removeAttribute(k) { delete this.attrs[k] }
+      descendants() { const o = []; const w = (e) => { for (const c of e.childNodes) if (c.nodeType === 1) { o.push(c); w(c) } }; w(this); return o }
+      querySelector(sel) { const a = sel.match(/\[([^\]]+)\]/); if (!a) return null; return this.descendants().find((e) => e.getAttribute(a[1]) !== null) || null }
+    }
+    class Txt { constructor(v) { this.nodeType = 3; this.nodeValue = v; this.parentElement = null } }
+    const doc = { createElement: (t) => new El(t) }
+    const api = (() => {
+      const m = { exports: {} }
+      new Function('module', 'exports', body + '\nmodule.exports = { pgEnsureMenuIcon, pgMenuIconCss, pgBeginReviewSession, pgSetReviewState, PG_MENU_ICON_ATTR, PG_MASK, PG_MASK_LOCK };')(m, m.exports)
+      return m.exports
+    })()
+    const mkItem = (text) => {
+      const item = new El('button')
+      const label = new El('span'); label.append(new Txt(text))
+      item.append(label)
+      return { item, label }
+    }
+    const setState = (sid, sandbox) => {
+      api.pgBeginReviewSession(sid)
+      api.pgSetReviewState(sid, { activeForSession: true, sandbox: { session: sandbox }, platformPreset: 'custom' })
+    }
+
+    // 结构：图标与 label 平级（插到 item 层级），间距才能由父级 flex gap 给出
+    setState('m1', 'danger-full-access')
+    const { item, label } = mkItem('自定义审查')
+    api.pgEnsureMenuIcon(doc, item)
+    ok('图标插到 item 层级（与 label 平级）',
+      item.children.length === 2 && item.children[1] === label, 'children=' + item.children.length)
+    ok('图标不在 label 内部（父级 gap 才管得到）', label.children.length === 0)
+    ok('图标带 aria-hidden（不干扰读屏）', item.children[0].getAttribute('aria-hidden') === 'true')
+
+    // 尺寸/颜色：照抄平台的 ._itemIcon_ 规则
+    const css = api.pgMenuIconCss(api.PG_MASK)
+    ok('图标 16×16 容器', /width:16px/.test(css) && /height:16px/.test(css))
+    ok('inline-flex + 居中', /display:inline-flex/.test(css) && /align-items:center/.test(css) && /justify-content:center/.test(css))
+    ok('颜色用 label-tertiary（与平台同色，非 currentColor 主色）',
+      /color:var\(--dsw-alias-label-tertiary\)/.test(css))
+    ok('不写 margin（间距交给父级 gap，紧凑模式才不会错）', !/margin/.test(css))
+    ok('不写 vertical-align（容器居中取代硬调）', !/vertical-align/.test(css))
+    ok('不再是 inline-block/14px 旧写法', !/inline-block/.test(css) && !/width:14px/.test(css))
+
+    // 回归②：切受限沙箱后图标必须更新为锁孔（菜单保持挂载的场景）
+    const b2 = mkItem('自定义审查')
+    api.pgEnsureMenuIcon(doc, b2.item)
+    const icon = b2.item.children[0]
+    ok('初始（fa）用放大镜', icon.style.cssText.includes(api.PG_MASK) && !icon.style.cssText.includes(api.PG_MASK_LOCK))
+    api.pgSetReviewState('m1', { activeForSession: true, sandbox: { session: 'workspace-write' }, platformPreset: 'custom-review' })
+    api.pgEnsureMenuIcon(doc, b2.item)
+    ok('切 ww 后更新为锁孔（本次修复的核心断言）',
+      icon.style.cssText.includes(api.PG_MASK_LOCK), '仍为 ' + (icon.style.cssText.includes(api.PG_MASK) ? '放大镜' : '未知'))
+    ok('切 ww 后不再用放大镜', !icon.style.cssText.includes(api.PG_MASK))
+    ok('更新而非重复注入', b2.item.children.length === 2)
+    api.pgSetReviewState('m1', { activeForSession: true, sandbox: { session: 'read-only' }, platformPreset: 'custom-review' })
+    api.pgEnsureMenuIcon(doc, b2.item)
+    ok('read-only 也用锁孔（受限集合含 read-only）', icon.style.cssText.includes(api.PG_MASK_LOCK))
+    api.pgSetReviewState('m1', { activeForSession: true, sandbox: { session: 'danger-full-access' }, platformPreset: 'custom-review' })
+    api.pgEnsureMenuIcon(doc, b2.item)
+    ok('切回 fa 恢复放大镜', !icon.style.cssText.includes(api.PG_MASK_LOCK))
+    ok('变体标记随状态更新（fa→open）', b2.item.children[0].getAttribute(api.PG_MENU_ICON_ATTR) === 'open')
+
+    // 幂等 + 非审查项不注入
+    const b3 = mkItem('自定义审查')
+    for (let i = 0; i < 5; i++) api.pgEnsureMenuIcon(doc, b3.item)
+    ok('重复扫描不重复注入', b3.item.children.length === 2)
+    // 回归③：同一状态重复扫描不得再写 style。旧写法拿序列化后的 style 串当守卫，
+    // 与源码串恒不相等 → 5 次扫描 5 次写入；写入计数是唯一能守住这条的断言。
+    const icon3 = b3.item.children[0]
+    ok('同状态重复扫描只写一次 style（守卫必须真的生效）',
+      icon3.styleWrites === 1, 'styleWrites=' + icon3.styleWrites)
+    // 并固定住「为什么不能拿 style 串当守卫」：读出的是序列化结果，与源码串恒不等
+    ok('style 属性读出为序列化结果（不可与源码串比较）',
+      typeof icon3.getAttribute('style') === 'string'
+      && icon3.getAttribute('style') !== api.pgMenuIconCss(api.PG_MASK))
+    ok('序列化后仍保留 mask 载荷（includes(PG_MASK) 断言在真实浏览器同样成立）',
+      icon3.getAttribute('style').includes(api.PG_MASK))
+    ok('注入时变体标记为 open（非受限）', icon3.getAttribute(api.PG_MENU_ICON_ATTR) === 'open')
+    const other = mkItem('仅可查看')
+    api.pgEnsureMenuIcon(doc, other.item)
+    ok('非审查项不注入图标', other.item.children.length === 1)
+    const en = mkItem('Custom Review')
+    api.pgEnsureMenuIcon(doc, en.item)
+    ok('英文标签也能注入', en.item.children.length === 2)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)

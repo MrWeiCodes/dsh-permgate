@@ -782,25 +782,57 @@ window.__ModuleLoader__.load({
 				return hits >= 3 ? custom : undefined;
 			} catch (e) { return undefined; }
 		}
-		// ── 菜单项徽标：向 label span 注入内联样式图标元素。不依赖平台按钮布局
-		//    （::before 在 flex/grid 布局下可能不可见），inline-block 与文本同行；
-		//    React 不管理未知子元素，重渲染/切语言不丢失，卸载时统一清理。──
+		// ── 菜单项徽标：与平台 Menu 同构注入（平台用 React 渲染 span.itemIcon，
+		//    这里注入等价的内联样式元素，React 不管理未知子元素，重渲染不丢失）。
+		//    平台真实结构与尺寸（dsh-web-frontend 的 ._item_/_itemIcon_ 规则）：
+		//      button._item { display:flex; align-items:center; gap:8px }   ← 间距来自父级 gap
+		//        ├─ span._itemIcon { inline-flex; 16x16; 居中; color: label-tertiary }
+		//        └─ span._itemLabel { flex:1; ... }
+		//    因此图标必须插到 item 层级（与 label 平级），间距由父级 gap 自动给出；
+		//    插在 label 内部则 gap 够不着，只能拿 margin 硬凑，紧凑模式（gap:6px）下还会错。
+		//    16x16 容器内居中 + 14px 内容，与另三个内置图标逐像素一致。──
 		const pgMenuIcons = new Set();
 		const PG_MENU_ICON_ATTR = 'data-pg-menu-icon';
+		function pgMenuIconCss(mask) {
+			return 'display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center;'
+				+ 'color:var(--dsw-alias-label-tertiary);background-color:currentColor;'
+				+ '-webkit-mask:' + mask + ' center/contain no-repeat;mask:' + mask + ' center/contain no-repeat;';
+		}
 		function pgEnsureMenuIcon(document, item) {
 			try {
+				// label span：菜单项内承载预设名的那个 span（排除 check 等兄弟节点）
 				let label = null;
 				for (const child of Array.from(item.children || [])) {
 					if (child.tagName !== 'SPAN') continue;
 					const t = (child.textContent || '').trim();
 					if (t === PG_CUSTOM_LABEL || t === PG_NAME_EN || t.indexOf(PG_CUSTOM_LABEL) !== -1 || t.indexOf(PG_NAME_EN) !== -1) { label = child; break; }
 				}
-				if (!label || label.querySelector('[' + PG_MENU_ICON_ATTR + ']')) return;
+				if (!label) return;
+				// 受限沙箱用锁孔，否则放大镜：与触发器同一判据（pgReviewActive + 受限集合）
+				const confined = pgReviewActive && PG_CONFINED.has(pgReviewSandbox);
+				const mask = confined ? PG_MASK_LOCK : PG_MASK;
+				// 变体标记写进属性值，用它判断要不要重写样式：style 串不能拿来比较 ——
+				// CSSOM 会补空格、展开简写（flex:none → flex:0 0 auto）、丢掉 -webkit- 长写，
+				// getAttribute('style') 返回的是序列化结果，与拼出的串恒不相等；
+				// 拿它当守卫会退化成每次扫描都白写一遍（比改动前的「已存在就 return」更重）。
+				const variant = confined ? 'lock' : 'open';
+				const existing = item.querySelector('[' + PG_MENU_ICON_ATTR + ']');
+				if (existing) {
+					// 已注入则按变体更新：沙箱/审查态变化后菜单可能保持挂载（不重建），
+					// 早先「已存在就 return」会让图标永远停在首次注入的放大镜上。
+					if (existing.getAttribute(PG_MENU_ICON_ATTR) !== variant) {
+						existing.setAttribute(PG_MENU_ICON_ATTR, variant);
+						existing.style.cssText = pgMenuIconCss(mask);
+					}
+					return;
+				}
 				const icon = document.createElement('span');
-				icon.setAttribute(PG_MENU_ICON_ATTR, '1');
+				icon.setAttribute(PG_MENU_ICON_ATTR, variant);
 				icon.setAttribute('aria-hidden', 'true');
-				icon.style.cssText = 'display:inline-block;flex:none;width:14px;height:14px;margin-right:6px;vertical-align:-2px;background-color:currentColor;-webkit-mask:' + PG_MASK + ' center/contain no-repeat;mask:' + PG_MASK + ' center/contain no-repeat;';
-				label.insertBefore(icon, label.firstChild);
+				icon.style.cssText = pgMenuIconCss(mask);
+				// 插到 item 层级、label 之前：与平台 itemIcon/itemLabel 的兄弟关系一致，
+				// 间距交给父级 flex gap（常规 8px / 紧凑 6px），不写 margin
+				item.insertBefore(icon, label);
 				pgMenuIcons.add(icon);
 			} catch (e) {}
 		}
