@@ -705,6 +705,34 @@ export default {
       return null
     }
 
+    // 会话标题：DSH 把标题作为会话事件 'session/title' 落在事件日志里
+    //（SessionTitleEventData { title, messageSeqs }），宿主侧 session 上没有 title 字段
+    //（SessionHeader 只有 id/createdAt/cwd/parentSession/origin/delegationDepth/agentPreset）。
+    // 故倒序折叠事件日志取最后一个标题事件。日志读法：0.1.5 的 Session 只暴露
+    // eventAt/snapshotEvents/ownEvents，没有 events 属性（读 session.events 恒 undefined，
+    // 会让本函数静默恒返回 null、标题永远不显示），旧版若只暴露 events 则回退用它。
+    // 会话来源只认 exec.agent.session —— 必须与 sessionId 同源：currentSession 在
+    // exec.agent 缺失时会回退到 agentRef / sessions.list() 的最后一个会话，
+    // 那会把「别的对话的标题」当成本次审批的来源显示，误导用户授权判断。
+    // 取不到返回 null —— 由客户端回落到只显示会话 id 前缀，不编造占位文案。
+    function sessionTitleOf(exec) {
+      try {
+        const session = exec && exec.agent && exec.agent.session
+        if (!session) return null
+        const evs = typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events
+        if (Array.isArray(evs)) {
+          for (let i = evs.length - 1; i >= 0; i--) {
+            const e = evs[i]
+            if (e && e.type === 'session/title' && e.data) {
+              const t = e.data.title
+              if (typeof t === 'string' && t.trim()) return t.trim().slice(0, 120)
+            }
+          }
+        }
+        return null
+      } catch (e) { return null }
+    }
+
     function sessionPresetName(exec) {
       try {
         const session = currentSession(exec)
@@ -3038,7 +3066,14 @@ export default {
           // 审批发起时的项目根与会话 id：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
           // 打相对路径/对比/打开侧栏必须用发起会话自己的这两样（会话 id 用来构造 file 地址）。
           projRoot: root || null,
-          sessionId: (exec.session && exec.session.id) || null,
+          // 会话标识：session 挂在 agent 上，不在 exec 上（ToolExecutionInput 只有 agent/name/
+          // arguments/callId/signal，没有 session）。旧写法读 exec.session 恒为 undefined，
+          // 导致下发给客户端的 sessionId 一直是 null —— 弹窗因此认不出「来自哪个对话」，
+          // 「打开文件」也拿不到会话、构造不出 dsh-resource://file/session/<id>/<path> 地址。
+          sessionId: (exec.agent && exec.agent.session && exec.agent.session.id) || null,
+          // 会话标题：同一会话可能同时开着多个弹窗，标题比 id 更便于人辨认。
+          // 取不到就留 null，由客户端回落到只显示 id 前缀，不编造占位文案。
+          sessionTitle: sessionTitleOf(exec),
           // 编辑/写入，或带文件路径的读取 → 弹窗「详情」默认展开并自动取数据
           // （写类=diff，读类=窗口化内容；图片是整图 data URL，受 IMAGE_MAX_BYTES/像素上限约束）
           hasDiff: isPreviewableFileToolNow(exec.name, exec.arguments, exec) && !!pathArg(exec.arguments),
@@ -3578,7 +3613,7 @@ export default {
             // 折算成工作区相对路径（工作区外的绝对路径则原样进地址），与上游 fileAddressFor 同口径
             // projRoot/sessionId 下发给客户端：打开 DSH 右侧栏的 file tab 需要它们来构造
             // dsh-resource://file/session/<sessionId>/<path> 地址（工作区内的绝对路径还依赖 projRoot 折算）
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null })
           }
           return json(res, out)
         }

@@ -1290,6 +1290,72 @@ ok('内置内核的 undo_edit 仍提示无改动可预览', src.includes("if (na
 ok('insert/undo_edit 判定不依赖 fsEncoding 服务在场', !/isFileInsert[\s\S]{0,300}?getFsEncodingService/.test(src) && !/sreUndoWrites[\s\S]{0,300}?getFsEncodingService/.test(src))
 
 // ─────────────────────────────────────────────────────────────
+group('16. 审批弹窗的会话标识（来自哪个对话）')
+// 背景：pending 下发的 sessionId 长期恒为 null —— 读的是 exec.session，而 ToolExecutionInput
+// 只有 agent/name/arguments/callId/signal，session 挂在 exec.agent.session 上。
+// 后果：弹窗认不出「来自哪个对话」，且「打开文件」拿不到会话、构造不出
+// dsh-resource://file/session/<id>/<path> 地址。
+// 反例（改回旧行为即失败）：读 exec.session；或 pending 不下发 sessionTitle。
+ok('sessionId 从 exec.agent.session 读（不是 exec.session）', src.includes('sessionId: (exec.agent && exec.agent.session && exec.agent.session.id) || null') && !src.includes('sessionId: (exec.session && exec.session.id)'))
+ok('pending 下发 sessionTitle', src.includes('sessionTitle: e.sessionTitle || null'))
+// 标题是会话事件，不是 header 字段：SessionHeader 只有 id/createdAt/cwd/parentSession/
+// origin/delegationDepth/agentPreset，没有 title；标题落在 'session/title' 事件里
+ok('sessionTitleOf 折叠 session/title 事件', src.includes("if (e && e.type === 'session/title' && e.data)") && src.includes('function sessionTitleOf(exec) {'))
+// 日志读法：0.1.5 的 Session 只有 snapshotEvents/ownEvents/eventAt，没有 events 属性。
+// 只查片段时「读 session.events 导致恒 null」能蒙混过关（实测漏网），故行为验证。
+ok('sessionTitleOf 用 snapshotEvents 读日志（不是只读 session.events）',
+  src.includes("const evs = typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events"))
+// 行为验证：真正喂一个「只有 snapshotEvents、没有 events」的会话对象（0.1.5 的真实形状），
+// 必须取到标题。旧写法（只读 session.events）在这里返回 null，即被判失败。
+;(function () {
+  // sessionTitleOf 定义在 export default 之后的闭包内，不在上面的 head 里，
+  // 故按花括号配平切出函数源码单独求值（它只依赖 exec 参数，不依赖闭包变量）。
+  const start = src.indexOf('function sessionTitleOf(exec) {')
+  if (start < 0) { ok('能定位 sessionTitleOf 定义', false); return }
+  let depth = 0
+  let end = -1
+  for (let i = src.indexOf('{', start); i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') { depth--; if (depth === 0) { end = i + 1; break } }
+  }
+  if (end < 0) { ok('能切出 sessionTitleOf 完整函数体', false); return }
+  let st = null
+  try {
+    st = new Function('return (' + src.slice(start, end) + ')')()
+  } catch (e) {
+    ok('sessionTitleOf 可求值：' + (e && e.message), false)
+  }
+  if (typeof st === 'function') {
+    // 0.1.5 真实形状：只有 snapshotEvents()，没有 events 属性
+    const modern = {
+      snapshotEvents: () => [
+        { type: 'user/message', data: {} },
+        { type: 'session/title', data: { title: '第一个标题' } },
+        { type: 'session/title', data: { title: '最新标题' } },
+      ],
+    }
+    ok('取最新标题（倒序折叠，后者胜）', st({ agent: { session: modern } }) === '最新标题')
+    // 旧版形状：只暴露 events 数组
+    ok('旧版 events 数组仍可读（兼容回退）',
+      st({ agent: { session: { events: [{ type: 'session/title', data: { title: '旧版标题' } }] } } }) === '旧版标题')
+    // 空/非法输入一律 null（不编造占位文案）
+    ok('无标题事件返回 null', st({ agent: { session: { snapshotEvents: () => [{ type: 'user/message', data: {} }] } } }) === null)
+    ok('标题为空串/非字符串返回 null', st({ agent: { session: { snapshotEvents: () => [{ type: 'session/title', data: { title: '   ' } }] } } }) === null
+      && st({ agent: { session: { snapshotEvents: () => [{ type: 'session/title', data: { title: 123 } }] } } }) === null)
+    // 与 sessionId 同源：exec.agent 缺失时必须返回 null，绝不回退到别的会话（agentRef/sessions.list）
+    ok('exec.agent 缺失时返回 null（不回退到别的会话）', st({}) === null && st(null) === null && st({ agent: {} }) === null)
+    // 抛错的会话对象不得冒泡
+    ok('会话访问抛错时安静返回 null', st({ agent: { session: { get snapshotEvents() { throw new Error('x') } } } }) === null)
+  }
+})()
+ok('标题为空/非字符串时不返回（交客户端回落 id 前缀）', src.includes("if (typeof t === 'string' && t.trim()) return t.trim().slice(0, 120)"))
+ok('标题取不到返回 null（不编造占位文案）', /function sessionTitleOf\(exec\) \{[\s\S]{0,1200}?catch \(e\) \{ return null \}/.test(src))
+// 客户端：标题下小字 + 取不到就整行不渲染
+ok('客户端渲染「来自对话」小字（含 id 前缀回落）', cli.includes("const label = p.sessionTitle || (p.sessionId ? String(p.sessionId).slice(0, 8) : '');") && cli.includes("if (!label) return null;"))
+ok('小字 i18n 双语齐备', cli.includes("'app.fromSession': '来自对话：'") && cli.includes("'app.fromSession': 'From conversation: '"))
+ok('小字样式 pg-modal-sub 已定义（标题下、字号更小）', cli.includes('.pg-modal-sub { font-size: 11px;') && cli.includes('.pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }'))
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)
