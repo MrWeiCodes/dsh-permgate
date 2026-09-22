@@ -397,6 +397,67 @@ window.__ModuleLoader__.load({
 		// 早先只用 pgReviewActive 判断，导致「沙箱从 fa 改到 ww」后平台已原生显示审查名、
 		// 我们却仍留着改写标记，一旦状态查询失败就把平台原生文案误还原成 Custom。
 		let pgPlatformPreset = null;
+		// ── 新会话（hero）兜底槽位 ────────────────────────────────────────────────
+		// 平台把「新会话界面」判为 hero 有两种成因（dsh-client-ui-conversation:14868）：
+		//   const hero = sessionId === void 0 || shellPhase === "blank" && (openState === "open" || summaryBlank === true)
+		// ① sessionId 为 undefined（刚启动、还没会话）
+		// ② sessionId 有值但界面为 blank —— 点侧边栏「新对话」就是这一种
+		// 两种情况下 DockBar 都不渲染：它的槽位条件是 variant === "composer" &&
+		// sessionId !== undefined，而 hero 时 variant 是 "hero"。
+		// 注意本槽位只服务成因①（确实没有会话可查）。成因②背后是一个真实存在的会话，
+		// 必须按该会话查询其真实权限态（见 OverlayRoot），绝不能拿本槽位（全局新会话
+		// 默认）冒充 —— 两者在「恢复的空白会话」「在 hero 里改过预设」等情形下会分叉。
+		// 因此本槽位的读取还额外要求「确实没有当前会话」（pgCurrentSid 为空）。
+		let pgDefaultActive = false;
+		let pgDefaultSandbox = null;
+		let pgDefaultPlatform = null;
+		let pgDefaultSet = false;
+		// 当前正在显示的会话 id（由 OverlayRoot 维护；它挂在 root 作用域，始终存在）。
+		// 用途：区分「会话态为空」的两种成因 —— ① 确实没有会话（刚启动）② 会话仍存在
+		// 但 DockBar 未挂载（hero 界面）。只有 ① 才允许回落到新会话默认槽位；② 若回落，
+		// 就是把「全局新会话默认」冒充成该会话的真实权限态（误报审查开着）。
+		// 不能改用 pgReviewSid 判断：DockBar 卸载时会清空它，而界面从 composer 变 hero
+		// 并不改变 sessionId，OverlayRoot 的 effect（依赖 sessionId）不会重跑补登记，
+		// 于是「有会话」与「无会话」在该判据下无法区分。
+		let pgCurrentSid = null;
+		function pgSetCurrentSession(sid) {
+			try {
+				const key = sid || null;
+				if (key === pgCurrentSid) return;
+				pgCurrentSid = key;
+				if (typeof pgRescan === 'function') pgRescan();
+			} catch (e) {}
+		}
+		// 读取合并视图：会话态优先（DockBar / OverlayRoot 按会话写入），确实无会话时
+		// 才用新会话默认值。
+		// pgScanCustom / pgEnsureMenuIcon 一律经此读取，避免各处各自判断而漏掉回落。
+		function pgView() {
+			if (pgReviewSid !== null) {
+				return { active: pgReviewActive, sandbox: pgReviewSandbox, platform: pgPlatformPreset };
+			}
+			// 会话态为空：仅「确实没有当前会话」时才用新会话默认槽位。有会话却取不到它的
+			// 状态（hero 界面 DockBar 不在、查询未返回/失败）时保守不动 —— 平台态未知
+			// 的代价（退回显示 Custom）远小于误报（把没开审查的会话显示成开着）。
+			if (pgCurrentSid === null && pgDefaultSet) {
+				return { active: pgDefaultActive, sandbox: pgDefaultSandbox, platform: pgDefaultPlatform };
+			}
+			return { active: false, sandbox: null, platform: null };
+		}
+		function pgSetDefaultView(s) {
+			try {
+				const dv = s && s.defaultView;
+				const nextSet = !!dv;
+				const nextActive = !!(dv && dv.activeForSession === true);
+				const nextSandbox = (dv && dv.sandbox) || null;
+				const nextPlatform = (dv && typeof dv.platformPreset === 'string' && dv.platformPreset) || null;
+				if (nextSet === pgDefaultSet && nextActive === pgDefaultActive && nextSandbox === pgDefaultSandbox && nextPlatform === pgDefaultPlatform) return;
+				pgDefaultSet = nextSet;
+				pgDefaultActive = nextActive;
+				pgDefaultSandbox = nextSandbox;
+				pgDefaultPlatform = nextPlatform;
+				if (typeof pgRescan === 'function') pgRescan();
+			} catch (e) {}
+		}
 		// 清空缓存时不做「立即还原」：切会话瞬间 DOM 的内容无法区分两种来源——
 		//   (a) React 未写回（新旧会话 vdom 同字面量）→ DOM 是我们上次的改写，应还原；
 		//   (b) React 已写回（新会话 vdom 不同）→ DOM 是新会话的平台权威值，绝不能动。
@@ -544,14 +605,16 @@ window.__ModuleLoader__.load({
 				// 平台自己就是权威，我们的标记必然过期 —— 清标记，且不改写也不还原。
 				// 平台状态未知（宿主未下发，或状态查询失败被清空）时一律不动 DOM：
 				// 改错的代价（把没开审查的会话显示成开着）比不改的代价大得多。
-				const platformKnown = pgPlatformPreset !== null;
-				const nativeCustom = platformKnown && pgPlatformPreset === 'custom';
+				// 取值走 pgView()：会话态为空时自动回落到新会话默认值（hero 界面）。
+				const view = pgView();
+				const platformKnown = view.platform !== null;
+				const nativeCustom = platformKnown && view.platform === 'custom';
 				for (const el of triggers) {
 					// 1) 沙箱打标：无条件按当前会话的真实沙箱标记，供 CSS 选图标
 					try {
 						const cur = el.getAttribute('data-pg-sandbox');
-						if (pgReviewActive && PG_CONFINED.has(pgReviewSandbox)) {
-							if (cur !== pgReviewSandbox) el.setAttribute('data-pg-sandbox', pgReviewSandbox);
+						if (view.active && PG_CONFINED.has(view.sandbox)) {
+							if (cur !== view.sandbox) el.setAttribute('data-pg-sandbox', view.sandbox);
 						} else if (cur !== null) {
 							el.removeAttribute('data-pg-sandbox');
 						}
@@ -569,8 +632,8 @@ window.__ModuleLoader__.load({
 					if (rewritten && platformKnown && !nativeCustom) {
 						try { el.removeAttribute(PG_REWRITTEN_ATTR); } catch (e) {}
 					}
-					const canRewrite = pgReviewActive && nativeCustom;
-					const canRestore = rewritten && !pgReviewActive && nativeCustom;
+					const canRewrite = view.active && nativeCustom;
+					const canRestore = rewritten && !view.active && nativeCustom;
 					const label = el.getAttribute && el.getAttribute('aria-label');
 					if (typeof label === 'string') {
 						for (const p of PG_TRIGGER_PREFIXES) {
@@ -808,8 +871,9 @@ window.__ModuleLoader__.load({
 					if (t === PG_CUSTOM_LABEL || t === PG_NAME_EN || t.indexOf(PG_CUSTOM_LABEL) !== -1 || t.indexOf(PG_NAME_EN) !== -1) { label = child; break; }
 				}
 				if (!label) return;
-				// 受限沙箱用锁孔，否则放大镜：与触发器同一判据（pgReviewActive + 受限集合）
-				const confined = pgReviewActive && PG_CONFINED.has(pgReviewSandbox);
+				// 受限沙箱用锁孔，否则放大镜：与触发器同一判据（pgView 合并视图）
+				const mv = pgView();
+				const confined = mv.active && PG_CONFINED.has(mv.sandbox);
 				const mask = confined ? PG_MASK_LOCK : PG_MASK;
 				// 变体标记写进属性值，用它判断要不要重写样式：style 串不能拿来比较 ——
 				// CSSOM 会补空格、展开简写（flex:none → flex:0 0 auto）、丢掉 -webkit- 长写，
@@ -2022,6 +2086,66 @@ window.__ModuleLoader__.load({
 			const sessionId = (props && typeof props.useSessions === 'function')
 				? props.useSessions((st) => (st ? st.current : undefined))
 				: undefined;
+			// 新会话界面的权限态：DockBar 挂在 conversation.composer.dock 上，而该槽位仅在
+			// variant === "composer" && sessionId !== undefined 时渲染（平台 client.js:16259），
+			// 新会话界面（hero）根本没有 DockBar，审查态缓存拿不到值，pgScanCustom 按
+			// 「平台态未知」保守不动，于是选择器一直显示 Custom。这里在 root 作用域补一条
+			// 查询路径，并按平台 hero 判定的两种成因分开处理（平台 client.js:14868）：
+			//   ① sessionId 为空（刚启动、确实没有会话）→ 无会话可查，用宿主下发的
+			//      defaultView（由「新会话默认预设」推出）填新会话槽位；
+			//   ② sessionId 有值但界面 blank（点侧边栏「新对话」）→ 会话真实存在，它的
+			//      权限态才是权威值，必须按该会话查询并登记会话态。绝不能拿「全局新会话
+			//      默认」冒充它的真实值：两者在「恢复的空白会话」「在 hero 里改过预设」
+			//      等情形下会分叉，而 DockBar 在 hero 不渲染、没人登记，冒充了无人纠正。
+			React.useEffect(() => {
+				let cancelled = false;
+				if (sessionId) {
+					// 成因②：DockBar 在 hero 不渲染、无人登记，这里补登记本会话。与 DockBar
+					// 同一纪律「先登记再查询」：登记即把判据清为「平台态未知」，响应到达前
+					// pgScanCustom 保守不动，不会把上一个会话的判据套到本会话的触发器上。
+					pgBeginReviewSession(sessionId);
+				} else {
+					// 成因①：确实没有会话。清掉可能残留的会话登记（否则 pgView 会继续用
+					// 上一个会话的缓存），再写新会话默认视图。
+					pgEndReviewSession(pgReviewSid);
+				}
+				const apply = (s, seq) => {
+					if (cancelled) return;
+					if (sessionId) {
+						// 写入前确保已登记：DockBar 卸载（composer → hero）会清空会话态，
+						// 而 sessionId 未变、本 effect 不会重跑；不在此补登记的话，后续 SSE
+						// 刷新会被 pgSetReviewState 的归属校验挡掉（pgReviewSid 为 null），
+						// hero 界面就再也收敛不回来。幂等：同会话时保留已有缓存。
+						pgBeginReviewSession(sessionId);
+						pgSetReviewState(sessionId, s, seq);
+					} else pgSetDefaultView(s);
+				};
+				// 带 sessionId 查询：宿主据它按会话解析项目根（index.js 的 ensureTarget），
+				// 不带会让宿主回退到 agentRef/末位会话并就地改写全局 root，使 defaultView
+				// 的沙箱取自别的项目。
+				// 序号在「发起查询时」领取，与 DockBar 共用同一套乱序保护：晚发起的查询号
+				// 更大，乱序返回的旧响应才会被丢弃。若等响应到达才领号（pgSetReviewState
+				// 的 seq 缺省分支），本路径的号会晚于 DockBar 已领的号，把 DockBar 的**新**
+				// 响应误判为过期而丢弃 —— 与「只接受最新一次」的意图正好相反。
+				const refresh = () => {
+					const seq = ++pgReviewSeq;
+					call('permgate:status', sessionId ? { sessionId } : {})
+						.then((s) => apply(s, seq))
+						.catch(() => apply(null, seq));
+				};
+				refresh();
+				const off = subscribeEvents((ev) => {
+					if (ev.type === 'status' || ev.type === 'refresh') refresh();
+				});
+				return () => { cancelled = true; off(); };
+				// sessionId 变化必须重查：成因②的会话就是「当前会话」，切换/新建会话后
+				// 沿用上一个会话的判据会让选择器张冠李戴。
+			}, [sessionId]);
+			// 每次渲染同步「当前显示的会话」（渲染期赋值，不受 effect 依赖数组限制）：
+			// 界面在 composer/hero 之间切换（如点「新对话」）时 sessionId 可能不变，但
+			// DockBar 会卸载并清空会话态；pgView() 靠本标记区分「确实无会话」与「有会话
+			// 但 DockBar 不在」，从而不会把全局新会话默认冒充成该会话的真实权限态。
+			pgSetCurrentSession(sessionId);
 			const sidOf = (p) => sessionId || (p && p.sessionId) || null;
 			return React.createElement('div', null,
 				React.createElement(PGErrorBoundary, { fallback: T('app.uiErr') },

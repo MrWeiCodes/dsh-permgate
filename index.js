@@ -3518,6 +3518,28 @@ export default {
           platformPreset = pp.current(arg) || null
         }
       } catch (e) { platformPreset = null }
+      // 新会话（尚未创建）时没有会话可查：权限状态由「新会话默认预设」唯一决定，
+      // 平台在 pinInitialPermission 里正是用它 seed 新会话。浏览器半据此判断
+      // 新会话界面的选择器该显示什么 —— 不提供的话它会按「平台态未知」保守不动，
+      // 新会话就永远显示内置未匹配态 Custom（新会话界面没有 DockBar，见客户端注释）。
+      let defaultView = null
+      try {
+        const pp = ctx.permissionPresets
+        const dp = pp && typeof pp.defaultPreset === 'string' ? pp.defaultPreset : null
+        if (dp) {
+          defaultView = {
+            // 新会话还没有会话日志，permissions 投影为空，平台的 derive() 落到内置
+            // 未匹配态（新会话界面确实渲染 Custom），故固定为 'custom'。
+            platformPreset: 'custom',
+            // 审查是否生效由默认预设决定：平台按它 seed 新会话
+            activeForSession: dp === 'custom-review',
+            // 沙箱用 permgate 的配置解析值，而非预设捆绑值：新会话创建后 syncSandbox
+            // 会把会话沙箱对齐到该值，用它才能与创建后看到的图标一致（预设捆绑值是
+            // 平台的初始意图，随后就被 permgate 覆盖，拿它会让图标闪一下再变）。
+            sandbox: effectiveSandboxConfig(),
+          }
+        }
+      } catch (e) { defaultView = null }
       return {
         configPath: target ? (fs.processPath ? fs.processPath(target) : String(root)) : String(root) + '/.dsh/.permgate.json',
         active: true,
@@ -3533,6 +3555,10 @@ export default {
         // 判断「Custom 是不是平台原生渲染的」——只有平台确实渲染 Custom 时才该改写，
         // 也只有在平台仍渲染 Custom 时才该把自己的改写还原回去。
         platformPreset,
+        // 新会话（无 sessionId）视图：浏览器半在 sessionId 缺失时用它，让新会话界面
+        // 的选择器也能显示插件预设名与图标。null = 取不到默认预设（宿主未挂载
+        // permissionPresets 时），此时客户端保持「平台态未知」的保守行为。
+        defaultView,
         projectKey: root,
         rootSource,
         debugAgentCwd: agentCwd(exec) || null,

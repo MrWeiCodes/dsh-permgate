@@ -1777,6 +1777,237 @@ group('19. 菜单项图标：与平台 itemIcon 同构（尺寸/间距/受限变
 }
 
 // ─────────────────────────────────────────────────────────────
+group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为空时回落')
+// 背景：平台把「新会话界面」判为 hero 有两种成因（dsh-client-ui-conversation:14868）：
+//   const hero = sessionId === void 0 || shellPhase === "blank" && (openState === "open" || summaryBlank === true)
+// ① sessionId 为 undefined（刚启动）  ② sessionId 有值但界面 blank（点侧边栏「新对话」）
+// 两种情况下 DockBar 都不渲染（其槽位要求 variant === "composer"，hero 时是 "hero"），
+// 于是审查态缓存拿不到值 → pgScanCustom 按「平台态未知」保守不动 → 选择器恒显示 Custom。
+// 曾经按 sessionId 过滤兜底分支，恰好漏掉成因 ②（实测即此，重启后仍无效）。
+// 现改为两个独立槽位：会话态（DockBar 按会话写）优先，为空时回落到新会话默认值。
+{
+  // 宿主侧：defaultView 由「新会话默认预设」推导（index.js）
+  ok('宿主下发 defaultView 字段', src.includes('defaultView,'))
+  ok('defaultView 读 permissionPresets.defaultPreset（新会话由它 seed）',
+    src.includes('typeof pp.defaultPreset === \'string\' ? pp.defaultPreset : null'))
+  ok('defaultView.platformPreset 固定 custom（新会话投影为空，平台确实渲染 Custom）',
+    /defaultView = \{[\s\S]{0,300}?platformPreset: 'custom'/.test(src))
+  ok('defaultView.activeForSession 由默认预设决定',
+    /activeForSession: dp === 'custom-review'/.test(src))
+  ok('defaultView.sandbox 用 permgate 配置解析值（非预设捆绑值，避免图标闪变）',
+    /sandbox: effectiveSandboxConfig\(\)/.test(src))
+  ok('取不到默认预设时 defaultView 为 null（客户端保守不动）',
+    /let defaultView = null\n\s*try \{/.test(src) && /\} catch \(e\) \{ defaultView = null \}/.test(src))
+
+  // 客户端：真实函数体执行
+  const at = (m, from = 0) => cli.indexOf(m, from)
+  const eol = (i) => cli.indexOf('\n', i) + 1
+  const iA = at('const PG_STYLE ='), iB = at('const pgNoop =')
+  const iC = at('let pgReviewActive = false;'), iD = at('function pgTriggerLabel')
+  const iE = at('function pgSwapText'), iF = at('const PG_CONFINED =')
+  const iG = at('function pgScanText')
+  ok('能定位 pgView / pgSetDefaultView 相关代码块',
+    iA > 0 && iB > iA && iC > 0 && iD > iC && iE > iD && iF > iE && iG > iF)
+  if (iA > 0 && iG > iF) {
+    const body = [
+      cli.slice(iA, eol(iB)),
+      cli.slice(iC, iD),
+      cli.slice(iD, iE),
+      cli.slice(iE, iF),
+      cli.slice(iF, iG),
+    ].join('\n')
+    ok('切出的代码块含 pgView / pgSetDefaultView',
+      body.includes('function pgView()') && body.includes('function pgSetDefaultView('))
+    class Txt { constructor(v) { this.nodeType = 3; this.nodeValue = v; this.parentElement = null } }
+    class El {
+      constructor(tag, ...k) { this.nodeType = 1; this.tagName = String(tag).toUpperCase(); this.attrs = {}; this.childNodes = []; this.style = { cssText: '' }; for (const x of k) this.append(x) }
+      append(n) { if (n.nodeType === 3) n.parentElement = this; this.childNodes.push(n); return this }
+      get children() { return this.childNodes.filter((n) => n.nodeType === 1) }
+      get textContent() { return this.childNodes.map((n) => (n.nodeType === 3 ? n.nodeValue : n.textContent)).join('') }
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null }
+      setAttribute(k, v) { this.attrs[k] = String(v) }
+      removeAttribute(k) { delete this.attrs[k] }
+      descendants() { const o = []; const w = (e) => { for (const c of e.childNodes) if (c.nodeType === 1) { o.push(c); w(c) } }; w(this); return o }
+      querySelectorAll() { return this.descendants() }
+    }
+    const api = (() => {
+      const m = { exports: {} }
+      new Function('module', 'exports', body + '\nmodule.exports = { pgScanCustom, pgBeginReviewSession, pgSetReviewState, pgEndReviewSession, pgSetDefaultView, pgView, pgSetCurrentSession, PG_CUSTOM_BUILTIN, PG_NAME_ZH, PG_REWRITTEN_ATTR, get sid(){return pgReviewSid}, get cur(){return pgCurrentSid} };')(m, m.exports)
+      return m.exports
+    })()
+    const ZH = api.PG_NAME_ZH, BUILTIN = api.PG_CUSTOM_BUILTIN
+    const A = (n) => '访问模式，当前：' + n
+    const mk = (t) => { const b = new El('button', new El('span', new Txt(t))); b.setAttribute('aria-label', A(t)); return b }
+    const doc = (els) => ({ querySelectorAll: () => els })
+    const scan = (b) => api.pgScanCustom(doc([b]), 'zh')
+    const DV = { defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'danger-full-access' } }
+
+    // ① 点「新对话」（blank hero）：无 DockBar，只有 OverlayRoot 写新会话槽位
+    api.pgSetDefaultView(DV)
+    ok('新会话槽位写入后会话态仍为空（DockBar 未登记）', api.sid === null)
+    {
+      const v = api.pgView()
+      ok('pgView 回落到新会话默认值（active/platform/sandbox）',
+        v.active === true && v.platform === 'custom' && v.sandbox === 'danger-full-access')
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('★ 新对话界面：Custom 改写为审查名（本次修复的核心断言）',
+        b.getAttribute('aria-label') === A(ZH), '实际 ' + b.getAttribute('aria-label'))
+      ok('★ 新对话界面：可见文本已改写', b.textContent.trim() === ZH)
+      ok('★ 新对话界面：打上改写标记', b.getAttribute(api.PG_REWRITTEN_ATTR) === '1')
+    }
+
+    // ② 有会话时：会话态优先，新会话槽位让位
+    api.pgBeginReviewSession('sess-1')
+    api.pgSetReviewState('sess-1', { activeForSession: false, sandbox: { session: 'workspace-write' }, platformPreset: 'workspace-write' })
+    {
+      const v = api.pgView()
+      ok('会话态优先（不被新会话默认值覆盖）', v.active === false && v.platform === 'workspace-write')
+      const b = mk('Workspace Write')
+      scan(b)
+      ok('会话态下别的预设名不被改动', b.getAttribute('aria-label') === A('Workspace Write'))
+    }
+
+    // ③ 从会话切回「新对话」：会话态清空 → 自动回落
+    api.pgEndReviewSession('sess-1')
+    {
+      const v = api.pgView()
+      ok('会话态清空后回落到新会话默认值', v.active === true && v.platform === 'custom')
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('★ 切回新对话后仍能改写', b.getAttribute('aria-label') === A(ZH))
+    }
+
+    // ④ 两个槽位都空 → 保守不动（防误报不变式）
+    api.pgSetDefaultView(null)
+    api.pgEndReviewSession(null)
+    {
+      const v = api.pgView()
+      ok('两槽皆空：platform 为 null（未知）', v.platform === null && v.active === false)
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('两槽皆空：Custom 保持原样（不误报）', b.getAttribute('aria-label') === A(BUILTIN))
+    }
+
+    // ⑤ 新会话默认预设非审查 → 不改写
+    api.pgSetDefaultView({ defaultView: { platformPreset: 'custom', activeForSession: false, sandbox: 'workspace-write' } })
+    {
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('默认预设非审查：Custom 不动', b.getAttribute('aria-label') === A(BUILTIN))
+    }
+
+    // ⑥ 新对话 + 受限沙箱：锁孔图标（与触发器同一判据）
+    api.pgSetDefaultView({ defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'workspace-write' } })
+    {
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('新对话 + ww：改写并打上受限标记', b.getAttribute('aria-label') === A(ZH) && b.getAttribute('data-pg-sandbox') === 'workspace-write')
+      api.pgSetDefaultView({ defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'read-only' } })
+      scan(b)
+      ok('新对话 + read-only：同样受限', b.getAttribute('data-pg-sandbox') === 'read-only')
+    }
+
+    // ⑦ 有会话但会话态为空（hero 界面 DockBar 卸载）时不得回落到新会话默认槽位：
+    //    否则会把「全局新会话默认」冒充成该会话的真实权限态 —— 未开审查的会话被显示
+    //    成开着审查。这是本次修复要防的核心误报，必须有行为断言钉住。
+    {
+      // 当前有会话（cur 非空），会话态被 DockBar 卸载清空，新会话槽位仍在（审查开着）
+      api.pgSetCurrentSession('sess-live')
+      api.pgEndReviewSession('sess-live')
+      api.pgSetDefaultView({ defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'workspace-write' } })
+      const v = api.pgView()
+      ok('有会话而会话态为空：不回落到新会话默认槽位（平台态未知）',
+        v.active === false && v.platform === null && v.sandbox === null)
+      const b = mk(BUILTIN)
+      scan(b)
+      ok('★ 有会话而会话态为空：Custom 保持原样（不误报审查开着）',
+        b.getAttribute('aria-label') === A(BUILTIN) && b.getAttribute('data-pg-sandbox') === null)
+      // 确实无会话（刚启动）时才允许回落
+      api.pgSetCurrentSession(null)
+      const v2 = api.pgView()
+      ok('确实无会话：回落到新会话默认槽位',
+        v2.active === true && v2.platform === 'custom' && v2.sandbox === 'workspace-write')
+      const b2 = mk(BUILTIN)
+      scan(b2)
+      ok('确实无会话：Custom 改写为审查名', b2.getAttribute('aria-label') === A(ZH))
+      api.pgSetCurrentSession(null)
+      api.pgEndReviewSession(null)
+      api.pgSetDefaultView(null)
+    }
+
+    // ⑧ 兜底分支必须按「平台 hero 的两种成因」分流，且不得拿全局新会话默认冒充真实会话
+    //    （成因 ② 的会话真实存在，其权限态才是权威值；DockBar 在 hero 不渲染，无人纠正）
+    {
+      const iOv = cli.indexOf('function OverlayRoot(props)')
+      const iOvEnd = cli.indexOf('function DockBar(props)')
+      ok('能定位 OverlayRoot 函数体', iOv > 0 && iOvEnd > iOv)
+      const ovBody = iOv > 0 && iOvEnd > iOv ? cli.slice(iOv, iOvEnd) : ''
+      // 有会话时登记会话态（否则 pgView 会一直回落到全局默认槽位）
+      ok('OverlayRoot 有会话时登记会话态并写该会话的真实状态',
+        ovBody.includes('pgBeginReviewSession(sessionId)') && ovBody.includes('pgSetReviewState(sessionId, s, seq)'))
+      // 无会话时才写新会话默认槽位
+      ok('OverlayRoot 无会话时才写新会话默认槽位', ovBody.includes('pgSetDefaultView(s)'))
+      // 查询必须带 sessionId：不带会让宿主回退到 agentRef 并就地改写全局 root
+      ok('OverlayRoot 的 status 查询带 sessionId',
+        /call\('permgate:status', sessionId \? \{ sessionId \} : \{\}\)/.test(ovBody))
+      // 不得存在「按 sessionId 早退」的分支（成因 ② 会被漏掉）
+      ok('OverlayRoot 不按 sessionId 早退', !/if\s*\(\s*sessionId\s*\)\s*\{?\s*return/.test(ovBody))
+      // effect 必须随 sessionId 重查（切换/新建会话后判据要跟着走）
+      ok('OverlayRoot 的 effect 依赖 sessionId', /}\s*,\s*\[sessionId\]\s*\)\s*;/.test(ovBody))
+      // 序号必须在「发起查询时」领取（与 DockBar 同一纪律）。若走 pgSetReviewState 的
+      // seq 缺省分支（响应到达才领号），本路径会领到比 DockBar 更大的号，把 DockBar 的
+      // 新响应误判为过期丢弃 —— 与「只接受最新一次」的意图正好相反。
+      ok('OverlayRoot 的查询在发起时领号并传 seq', /const seq = \+\+pgReviewSeq;/.test(ovBody))
+      ok('OverlayRoot 写入会话态时传 seq（不用缺省领号分支）',
+        /pgSetReviewState\(sessionId, s, seq\)/.test(ovBody))
+      // 渲染期同步「当前显示的会话」：界面在 composer/hero 间切换时 sessionId 可能不变，
+      // 但 DockBar 会卸载并清空会话态，pgView 需要靠它区分「确实无会话」与「有会话但
+      // DockBar 不在」，否则会把全局新会话默认冒充成该会话的真实权限态。
+      ok('OverlayRoot 渲染期同步当前会话标记', /pgSetCurrentSession\(sessionId\)/.test(ovBody))
+      // apply 写入前必须补登记：DockBar 卸载（composer → hero）会清空会话态，而 sessionId
+      // 未变、effect 不重跑；不补登记则后续 SSE 刷新被 pgSetReviewState 的归属校验挡掉，
+      // hero 界面再也收敛不回来。
+      {
+        const iApply = ovBody.indexOf('const apply = (s, seq) =>')
+        const iApplyEnd = ovBody.indexOf('};', iApply)
+        const applyBody = iApply >= 0 && iApplyEnd > iApply ? ovBody.slice(iApply, iApplyEnd) : ''
+        ok('能切出 apply 函数体', applyBody.length > 0)
+        ok('apply 写入会话态前补登记（hero 才能收敛）',
+          applyBody.includes('pgBeginReviewSession(sessionId)') && applyBody.includes('pgSetReviewState(sessionId, s, seq)'))
+      }
+    }
+    // ⑧ pgView 的回落条件：只有「确实没有当前会话」时才允许用新会话默认槽位
+    {
+      const iV = cli.indexOf('function pgView()')
+      const iVEnd = cli.indexOf('function pgSetDefaultView(')
+      ok('能定位 pgView 函数体', iV > 0 && iVEnd > iV)
+      const viewBody = iV > 0 && iVEnd > iV ? cli.slice(iV, iVEnd) : ''
+      // 回落必须同时要求 pgCurrentSid === null；只看 pgDefaultSet 会在 hero 界面
+      // （有会话、DockBar 卸载）误报「审查开着」
+      ok('pgView 回落到新会话默认槽位要求确实无会话',
+        /pgCurrentSid === null && pgDefaultSet/.test(viewBody))
+      ok('pgView 仍以会话态优先', /pgReviewSid !== null/.test(viewBody))
+      ok('pgSetCurrentSession 有定义且被 pgView 依赖', cli.includes('function pgSetCurrentSession('))
+    }
+    // 反向断言：判据读取只允许经 pgView()，消费者函数体内不得直接读三个会话态标量
+    // （只查「存在 pgView 调用」检测不到新增第二套判据，正是本次要防的漂移）
+    {
+      const bodyOf = (startMarker, endMarker) => {
+        const a = cli.indexOf(startMarker), b = cli.indexOf(endMarker, a + 1)
+        return a > 0 && b > a ? cli.slice(a, b) : ''
+      }
+      const scanBody = bodyOf('function pgScanCustom(', 'function pgScanText(')
+      const iconBody = bodyOf('function pgEnsureMenuIcon(', 'function pgScanIcons(')
+      ok('能切出 pgScanCustom / pgEnsureMenuIcon 函数体', scanBody.length > 0 && iconBody.length > 0)
+      const leak = /pgReviewActive|pgReviewSandbox|pgPlatformPreset/
+      ok('pgScanCustom 不直接读会话态标量（只经 pgView）', scanBody.length > 0 && !leak.test(scanBody))
+      ok('pgEnsureMenuIcon 不直接读会话态标量（只经 pgView）', iconBody.length > 0 && !leak.test(iconBody))
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)
