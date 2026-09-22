@@ -432,10 +432,17 @@ export default {
     const onDispose = (fn) => disposers.push(fn)
     ctx.effect(() => () => { for (let i = disposers.length - 1; i >= 0; i--) { try { disposers[i]() } catch (e) {} } })
 
-    const fallbackRoot = String(sp.workspaceRoot || '').replace(/[\\/]+$/, '')
-    let root = norm(fallbackRoot)
-    let rootSource = 'policy'
+    // 部署级工作区根（无会话可依时的回落）。必须保证非空：isOutside 对空根判定为
+    // 「非工作区外」，会让工作区外路径跳过目录闸（fail-open）。sp.workspaceRoot 理论上
+    // 恒有值，但拿不到时退到进程 cwd，宁可判宽也不留空串。
+    // norm 会剥掉全部尾部分隔符：`/`、`//`、`\` 都归一到空串，故 norm(process.cwd()) 同样
+    // 可能得空串（POSIX 容器 WORKDIR / 时 cwd 即 /）——末位再兜一个 '/'，确保恒非空。
+    const fallbackRoot = norm(String(sp.workspaceRoot || '').replace(/[\\/]+$/, '')) || norm(process.cwd()) || '/'
+    // target 是「配置文件路径」：配置按 DSH home 归属、对所有会话是同一个文件，
+    // 故它作为模块级缓存是正确的（与按会话的工作区根不是一回事）。
+    // targetBase 只用于 ensureTarget 的早退比较：记录 target 是依据哪个会话根派生的。
     let target = null
+    let targetBase = null
     let loaded = false
     let agentRef = null
     let dshHomeCache = null
@@ -460,9 +467,37 @@ export default {
       return String(p).replace(/\\/g, '/').replace(/\/+$/, '')
     }
 
+    // ── 工作区根的唯一派生点 ────────────────────────────────────────────────
+    // root 曾经是一个模块级闭包变量，由 ensureTarget 在每次 init(exec) 时按当前 exec 的
+    // cwd 覆写。那是跨会话共享的可变单例：A 会话在 await 期间 B 会话 init，A 随后读到的
+    // 就是 B 的根。实测危害分两类：
+    //   ① 写盘归属：addProjectException 走 projectBlock()/ensureProject()，例外会写进
+    //      别的项目块（用户实测「在 ePicDLL 点的，写到了 MCP 项目里」）。
+    //   ② 安全判定：isOutside 的 6 个调用点里 4 处在 decide()。root 漂移到「包含目标」
+    //      的位置时判定翻转为 false，工作区外路径被判成区内、直接跳过目录闸（fail-open）。
+    // 故 root 一律由调用方从自己的会话上下文显式取得，不再有全局状态：
+    //   · 工具执行链 → rootOf(exec)
+    //   · 审批落盘   → entry.projRoot（审批发起时的快照：弹窗可能挂起很久、期间会切会话）
+    //   · HTTP 路由  → rootOf(该请求的 exec)（路由入口已按 sessionId 解析）
+    // 返回恒为非空串：空串会让 isOutside 判「非区外」（fail-open），故兜底到 fallbackRoot。
+    function rootOf(exec) {
+      try {
+        const session = exec && exec.agent && exec.agent.session
+        const cwd = session && session.header && session.header.cwd
+        // 必须先归一化再判空：norm 会剥掉尾部分隔符，cwd 为盘根形态（'/'、'//'、'\'）时
+        // 归一化结果为 ''。若按原文判空就直接 return norm(cwd)，会返回空串绕过下面的兜底，
+        // 而 isOutside 对空根判「非工作区外」（fail-open）→ 工作区外路径跳过目录闸。
+        const n = typeof cwd === 'string' && cwd ? norm(cwd) : ''
+        if (n) return n
+      } catch (e) {}
+      return fallbackRoot
+    }
+
     // 路径规范化单点：相对路径先按 root 绝对化，再折叠 .. 与重复分隔符。
     // glob/norm/globToRegExp 都不折叠 ..，仅规范化写入侧会让例外永不命中参数原文。
-    function normAbsPath(p) {
+    // root 由调用方显式传入（见 rootOf 注释）：这是「同一条例外在三处同答案」的前提，
+    // 否则判重、写入、匹配会各自按不同的根绝对化。
+    function normAbsPath(p, root) {
       const s = norm(p)
       if (!s) return s
       // glob 不是文件路径：绝对化会改变匹配范围（`**/*.env` 会被拼成 `G:/MCP/**/*.env`，
@@ -472,7 +507,8 @@ export default {
       // file:// 等 URL 形态不是文件系统路径，原样返回（与 resolveArgPath 同口径）
       if (s.indexOf('://') !== -1) return s
       const isAbs = s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)
-      const abs = isAbs ? s : (root ? norm(root + '/' + s) : '')
+      const base = root || fallbackRoot
+      const abs = isAbs ? s : norm(base + '/' + s)
       if (!abs) return s
       return norm(pathResolve(/^[a-zA-Z]:$/.test(abs) ? abs + '/' : abs))
     }
@@ -480,8 +516,8 @@ export default {
     // 路径同一性键：判重、写入去重、匹配三处共用同一口径，保证「同一条例外」在三处同答案。
     // 必须基于 normAbsPath（绝对化 + 折叠 ..）而非裸 normPathKey，否则候选写入的规范值
     // 与面板/工具入口写入的相对路径或含 .. 原文会被当成两条不同例外。
-    function pathKey(p) {
-      return normPathKey(normAbsPath(p))
+    function pathKey(p, root) {
+      return normPathKey(normAbsPath(p, root))
     }
 
     function safeJson(v) {
@@ -653,8 +689,11 @@ export default {
       return cfg
     }
 
-    function sessionPolicy() {
-      try { return sp.resolve ? sp.resolve() : null } catch (e) { return null }
+    // 沙箱策略解析。必须带 session：sp.resolve 的 workspaceRoot 取自
+    // session.header.cwd（无 session 时退到部署级 workspaceRoot），不带就等于拿到一个
+    // 与会话无关的根。sessionPolicy 只在 ensureTarget 里用于「无 cwd 会话」的兜底。
+    function sessionPolicy(session) {
+      try { return sp.resolve ? sp.resolve(session ? { session } : {}) : null } catch (e) { return null }
     }
 
     function agentCwd(exec) {
@@ -752,33 +791,36 @@ export default {
     }
 
     // 底层沙箱有效值：项目非 inherit 用项目值，否则用全局值
-    function effectiveSandboxConfig() {
-      const proj = projectBlock()
+    function effectiveSandboxConfig(root) {
+      const proj = projectBlock(root)
       const p = proj && proj.sandboxMode ? proj.sandboxMode : 'inherit'
       if (p !== 'inherit') return p
       return config.global.sandboxMode || 'danger-full-access'
     }
 
-    function setSandboxConfig(target, mode) {
+    function setSandboxConfig(root, target, mode) {
       if (target === 'global') {
         if (mode !== 'workspace-write' && mode !== 'danger-full-access') return false
         config.global.sandboxMode = mode
         return true
       }
       if (mode !== 'workspace-write' && mode !== 'danger-full-access' && mode !== 'inherit') return false
-      const block = ensureProject()
+      const block = ensureProject(root)
       block.sandboxMode = mode
       return true
     }
 
-    // 会话处于「自定义审查」时，把解析后的底层沙箱同步为会话 sandbox
+    // 会话处于「自定义审查」时，把解析后的底层沙箱同步为会话 sandbox。
+    // 根与会话必须同源：session 取自 (exec.agent || agentRef)，故根也要由**同一个 session**
+    // 派生。若直接用 rootOf(exec)，exec 为 null（请求不带 sessionId）时根会落到 fallbackRoot，
+    // 而 session 是 agentRef 的会话 —— 两者指向不同项目，会把部署根项目的沙箱策略写进本会话。
     function syncSandbox(exec) {
       try {
         if (sessionPresetName(exec) !== 'custom-review') return
-        const mode = effectiveSandboxConfig()
         const agent = (exec && exec.agent) || agentRef
         const session = agent && agent.session
         if (!session) return
+        const mode = effectiveSandboxConfig(rootOf({ agent: { session } }))
         const cur = sp.overrideOf(session)
         if (cur !== mode) setSandboxMode(session, mode)
       } catch (e) {
@@ -791,7 +833,7 @@ export default {
       try {
         if (!isFileWrite(exec.name, exec.arguments) && !isUndoNow(exec.name, exec.arguments, exec)) return false
         const fp = pathArg(exec.arguments)
-        if (!fp || !isOutside(fp, root)) return false
+        if (!fp || !isOutside(fp, rootOf(exec))) return false
         const agent = (exec && exec.agent) || agentRef
         const session = agent && agent.session
         if (!session) return false
@@ -879,7 +921,8 @@ export default {
         const tryEcho = async (expr) => {
           const handle = sub.spawn({
             argv: [exe, '/c', 'echo', expr],
-            cwd: String(root || 'C:\\').replace(/\//g, '\\'),
+            // home 探测与工作区无关（只是读环境变量），用部署级根即可，不取会话根
+            cwd: String(fallbackRoot || 'C:\\').replace(/\//g, '\\'),
             stdio: { stdin: 'ignore', stdout: { maxBytes: 8192 }, stderr: { maxBytes: 8192 } },
             graceMs: 5000,
           })
@@ -904,23 +947,25 @@ export default {
       return dshHomeCache
     }
 
+    // 配置目标解析。注意：配置路径只由 DSH home 决定（所有会话共用一份配置），
+    // 与会话工作区根无关 —— 早退比较因此用 targetBase（派生 target 时用的会话根）
+    // 而非 root：root 已不再是全局状态，且它本就不该影响配置路径。
     async function ensureTarget(exec) {
       const cwd = agentCwd(exec)
-      const pol = sessionPolicy()
-      const base = cwd || (pol && pol.workspaceRoot ? norm(String(pol.workspaceRoot)) : '') || (fallbackRoot ? norm(fallbackRoot) : '')
-      const source = cwd ? 'agent' : 'policy'
-      if (target && rootSource === source && norm(root) === norm(base)) return target
-      root = base
-      rootSource = source
+      const session = exec && exec.agent && exec.agent.session
+      const pol = sessionPolicy(session)
+      const base = cwd || (pol && pol.workspaceRoot ? norm(String(pol.workspaceRoot)) : '') || fallbackRoot
+      if (target && targetBase === base) return target
       const home = await resolveDshHome()
       const resolved = home
         ? await homeConfigTarget(home)
-        : await fs.resolve(base ? base + '/.dsh/.permgate.json' : '.dsh/.permgate.json')
+        : await fs.resolve(base + '/.dsh/.permgate.json')
       // 配置路径发生切换时不重置磁盘快照：persist 的防覆盖守卫（磁盘内容 vs 快照）依赖它，
       // 置空会让守卫整段跳过，可能用「旧路径加载的内存配置」静默覆盖新路径上已存在的配置。
       // 切换后由 load() 对新目标重新建立快照基线；若 persist 在切换后未经 load 直接保存，
       // 守卫会因新旧目标内容不一致而拒绝并提示「重新加载配置文件」，方向安全。
       target = resolved
+      targetBase = base
       return target
     }
 
@@ -937,7 +982,8 @@ export default {
           const winPath = String(home + '/dsh-permgate').replace(/\//g, '\\')
           const handle = sub.spawn({
             argv: [exe, '/c', 'mkdir', winPath],
-            cwd: String(root || 'C:\\').replace(/\//g, '\\'),
+            // 建的是 home 下的配置目录，与工作区无关，用部署级根即可
+            cwd: String(fallbackRoot || 'C:\\').replace(/\//g, '\\'),
             stdio: { stdin: 'ignore', stdout: { maxBytes: 8192 }, stderr: { maxBytes: 8192 } },
             graceMs: 5000,
           })
@@ -961,32 +1007,87 @@ export default {
       if (!loaded) {
         loaded = true
         await load(exec)
-        await cleanupStaleProjects()
+        await cleanupStaleProjects(exec)
       }
     }
 
-    async function cleanupStaleProjects() {
+    // 清理失效工作区配置：删除磁盘上已**确认不存在**的项目块。
+    // 保护集必须是「所有当前活跃会话的根」而非单个全局 root —— 旧实现只跳过触发清理的
+    // 那一个根，其他会话若恰有目录不可达（网络盘/权限）就会被误删配置。
+    // 但保护集只覆盖「本进程 live 的会话」，用户本次没打开过的项目不在其中，故判定侧必须
+    // 区分「确认不存在」与「不可达」。实测 fs 服务语义（dsh-fs-local）：
+    //   · fs.resolve 对不存在的路径不抛错（ENOENT 时回溯到最近存在祖先再拼回余段）；
+    //   · fs.stat 对不存在的目标返回 undefined 而非抛错。
+    // 于是「未挂载的网络盘/拔掉的移动盘」与「目录真被删除」都表现为 stat→undefined，
+    // 仅靠 stat 结果无法区分——直接删就会把离线盘上的项目配置永久删除（persist 是原子
+    // 替换且无备份，删除不可逆）。故先确认**卷根可达**：卷根都不可达说明盘未挂载，跳过。
+    // 只有卷可达 + stat 返回空值，才认定该项目确已被删除。
+    function volumeRootOf(key) {
+      const k = norm(key)
+      // 盘根单独处理：norm 已剥掉尾斜杠，'G:/' 会变成 'G:'，故必须在带斜杠的盘符正则之前
+      // 匹配裸盘符形态——否则它会落到最后的 '/'，把「未挂载的 Z: 盘」误查成当前盘根
+      if (/^[a-zA-Z]:$/.test(k)) return k + '/'
+      const drive = /^([a-zA-Z]:)\//.exec(k)
+      if (drive) return drive[1] + '/'
+      const unc = /^(\/\/[^/]+\/[^/]+)/.exec(k)
+      if (unc) return unc[1]
+      return '/'
+    }
+    async function cleanupStaleProjects(exec) {
       try {
         const projs = config.projects || {}
         const keys = Object.keys(projs)
         if (!keys.length) return
-        let removed = []
+        const keep = new Set([norm(rootOf(exec)).toLowerCase()])
+        try {
+          const all = ctx.sessions && typeof ctx.sessions.list === 'function' ? ctx.sessions.list() : []
+          if (!Array.isArray(all)) throw new Error('sessions.list() 未返回数组')
+          for (const s of all) {
+            const c = s && s.header && s.header.cwd
+            if (typeof c === 'string' && c) keep.add(norm(c).toLowerCase())
+          }
+        } catch (e) {
+          // 保护集不完整时不再继续删除：宁可不清理，也不误删用户配置
+          console.warn('[permgate] 会话列表不可用，跳过失效工作区清理:', (e && e.message) || String(e))
+          return
+        }
+        const removed = []
+        const keptBackup = {}
         for (const key of keys) {
-          if (norm(key).toLowerCase() === norm(root).toLowerCase()) continue
-          let exists = false
+          if (keep.has(norm(key).toLowerCase())) continue
+          // 先确认卷根可达：不可达（盘未挂载/已拔出）时 stat 也会返回「不存在」，
+          // 无法据此判断项目是否真被删除，一律保留
+          const volRoot = volumeRootOf(key)
+          let volOk = false
+          try {
+            const vd = await fs.resolve(volRoot)
+            volOk = !!(await fs.stat(vd))
+          } catch (e) { volOk = false }
+          if (!volOk) {
+            console.warn('[permgate] 卷不可达（盘未挂载？），保留其配置:', key)
+            continue
+          }
+          let missing = false
           try {
             const d = await fs.resolve(norm(key))
             const info = await fs.stat(d)
-            exists = !!info
-          } catch (e) { exists = false }
-          if (!exists) {
+            missing = !info
+          } catch (e) {
+            // 权限/IO 故障：无法确认是否真的不存在，保守跳过
+            console.warn('[permgate] 工作区不可达，保留其配置:', key, (e && e.message) || String(e))
+            continue
+          }
+          if (missing) {
+            keptBackup[key] = projs[key]
             delete projs[key]
             removed.push(key)
           }
         }
         if (removed.length) {
-          console.log('[permgate] 清理失效工作区配置:', removed.join(', '))
-          await persist()
+          // 日志带上被删块的完整内容：删除不可逆，事后只能靠日志还原用户规则
+          console.log('[permgate] 清理失效工作区配置:', removed.join(', '),
+            '\n[permgate] 被删内容（如需恢复请手工写回 config.json 的 projects 段）:', JSON.stringify(keptBackup))
+          await persist(exec)
         }
       } catch (e) {
         console.error('[permgate] cleanupStaleProjects error:', e)
@@ -1061,7 +1162,10 @@ export default {
       return true
     }
 
-    function projectBlock() {
+    // 项目块读写：root 由调用方显式传入（见 rootOf 注释）。两者必须同口径查找——
+    // 迁移来的 key 可能只是大小写/斜杠形式不同，若 ensureProject 用精确 root 查找
+    // 会另建一个条目，同一项目出现两个 key（面板改动看似无效）。
+    function projectBlock(root) {
       const key = norm(root).toLowerCase()
       const projs = config.projects || {}
       for (const k of Object.keys(projs)) {
@@ -1070,17 +1174,16 @@ export default {
       return undefined
     }
 
-    function ensureProject() {
-      // 与 projectBlock() 同口径查找：迁移来的 key 可能只是大小写/斜杠形式不同，
-      // 若这里用精确 root 查找会另建一个条目，同一项目出现两个 key（面板改动看似无效）
+    function ensureProject(root) {
       const key = norm(root).toLowerCase()
       const projs = config.projects || {}
       for (const k of Object.keys(projs)) {
         if (norm(k).toLowerCase() === key) return projs[k]
       }
       if (!config.projects) config.projects = {}
-      config.projects[root] = freshProject()
-      return config.projects[root]
+      const k = norm(root)
+      config.projects[k] = freshProject()
+      return config.projects[k]
     }
 
     // 分类默认值写入单点（面板路由与 perm_set_category 共用）。
@@ -1089,10 +1192,10 @@ export default {
     // 但「没传 reason」不等于「要清掉」：perm_set_category 与 HTTP 直连可能只想重设动作或确认当前值，
     // 一律删除会让用户写好的原因在一次无关写入后静默消失。故 reason 的三种语义分开：
     //   未提供（undefined）—— 保留原值；空串/纯空白 —— 显式清除；有内容 —— 覆盖。
-    function setCategoryMode(targetKey, cat, mode, reason) {
+    function setCategoryMode(root, targetKey, cat, mode, reason) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
-      const block = targetKey === 'global' ? config.global : ensureProject()
+      const block = targetKey === 'global' ? config.global : ensureProject(root)
       if (!block[cat]) block[cat] = freshCategory(cat, targetKey !== 'global')
       block[cat].mode = mode
       if (mode !== 'deny') { delete block[cat].reason; return true }
@@ -1106,9 +1209,9 @@ export default {
     // 快捷工具写入单点（面板路由、perm_set_quick 与弹窗「记住此决定」共用）。
     // action=inherit 表示删除该键（回落到下一级：全局键 → 预设默认 → 兜底）。
     // reason 语义与 setCategoryMode 一致：未提供（undefined）保留该键原有原因、空串显式清除、有内容覆盖。
-    function setQuickAction(targetKey, tool, action, reason) {
+    function setQuickAction(root, targetKey, tool, action, reason) {
       if (ALL_MODES.indexOf(action) === -1) return false
-      const block = targetKey === 'project' ? ensureProject() : config.global
+      const block = targetKey === 'project' ? ensureProject(root) : config.global
       if (!block.quickTools) block.quickTools = {}
       if (action === 'inherit') { delete block.quickTools[tool]; return true }
       // 与 normalizeQuickEntry 同构：只存 { action } / { action, reason }，deny 才带原因
@@ -1131,8 +1234,8 @@ export default {
     // 两者 insert 的 insert_line 语义相反（内置 0 基、插到该行之后 / shadow 1 基、插到该行之前），
     // 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
     // 判别顺序：显式配置 > 工具描述探测 > 回退内置（内置始终存在）。
-    function editorKernelSetting() {
-      const proj = projectBlock()
+    function editorKernelSetting(root) {
+      const proj = projectBlock(root)
       return firstEffective(proj && proj.editorKernel, config.global.editorKernel, 'auto')
     }
 
@@ -1201,18 +1304,18 @@ export default {
       return isPreviewableFileTool(name, args, sreUndoWrites(exec))
     }
 
-    function resolveEditorKernel(exec) {
-      const setting = editorKernelSetting()
+    function resolveEditorKernel(exec, root) {
+      const setting = editorKernelSetting(root)
       if (setting === 'builtin' || setting === 'shadow') return { kernel: setting, source: 'config' }
       const detected = detectEditorKernel(exec)
       if (detected) return { kernel: detected, source: 'detected' }
       return { kernel: 'builtin', source: 'fallback' }
     }
 
-    function setEditorKernel(targetKey, mode) {
+    function setEditorKernel(root, targetKey, mode) {
       const allowed = targetKey === 'global' ? EDITOR_KERNELS : EDITOR_KERNEL_VALUES
       if (allowed.indexOf(mode) === -1) return false
-      const block = targetKey === 'global' ? config.global : ensureProject()
+      const block = targetKey === 'global' ? config.global : ensureProject(root)
       block.editorKernel = mode
       return true
     }
@@ -1220,21 +1323,21 @@ export default {
     // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）。
     // 与分类默认值同构：mode 与它自己的拒绝原因同源取用——项目显式配置就取项目的，
     // 项目是 inherit 才穿透到全局的（否则会出现「动作来自项目、文字来自全局」的错配）。
-    function fallbackSetting() {
-      const proj = projectBlock()
+    function fallbackSetting(root) {
+      const proj = projectBlock(root)
       const pv = proj && proj.fallbackMode
       if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }
       return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }
     }
 
-    function fallbackMode() {
-      return fallbackSetting().mode
+    function fallbackMode(root) {
+      return fallbackSetting(root).mode
     }
 
-    function setFallbackMode(targetKey, mode, reason) {
+    function setFallbackMode(root, targetKey, mode, reason) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
-      const block = targetKey === 'global' ? config.global : ensureProject()
+      const block = targetKey === 'global' ? config.global : ensureProject(root)
       block.fallbackMode = mode
       // 与分类同口径：拒绝原因只在 deny 时保留，切走时清掉；
       // 未提供 reason（undefined）保留原值，避免无关写入静默清空用户写好的原因。
@@ -1246,22 +1349,22 @@ export default {
       return true
     }
 
-    function matchException(r, value, kind) {
+    function matchException(r, value, kind, root) {
       // 路径两侧统一走 normAbsPath：写入值可能来自候选（规范绝对路径），而 value 是
       // 工具参数原文（可能是相对路径或含 ..）——只规范化写入侧会让例外永不命中。
-      if (kind === 'path') return matchGlob(normAbsPath(r.path), normAbsPath(value))
+      if (kind === 'path') return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))
       return matchCommand(r.match, value)
     }
 
-    function resolveCategory(catKey, value, kind) {
-      const proj = projectBlock()
+    function resolveCategory(catKey, value, kind, root) {
+      const proj = projectBlock(root)
       const pCat = proj ? proj[catKey] : undefined
       const gCat = config.global[catKey] || freshCategory(catKey, false)
       if (value !== null && value !== undefined && EXC_CATS.indexOf(catKey) !== -1) {
         const pl = pCat && Array.isArray(pCat.exceptions) ? pCat.exceptions : []
-        for (const r of pl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of pl) if (matchException(r, value, kind, root)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
-        for (const r of gl) if (matchException(r, value, kind)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of gl) if (matchException(r, value, kind, root)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
       }
       // 没命中例外 → 落分类默认值：它的拒绝原因与 mode 同源取用（项目显式配置就取项目的，
       // 项目 inherit 才穿透全局），避免「动作来自项目、文字来自全局」的错配。
@@ -1294,7 +1397,7 @@ export default {
       if (s.indexOf('://') !== -1) return s
       if (/^[a-zA-Z]:[\\/]/.test(s)) return s
       if (s[0] === '/') return s
-      const b = base || root
+      const b = base || fallbackRoot
       return b ? norm(b + '/' + s) : s
     }
 
@@ -2480,8 +2583,8 @@ export default {
       return n
     }
 
-    function quickAction(name) {
-      const proj = projectBlock()
+    function quickAction(name, root) {
+      const proj = projectBlock(root)
       const pMap = proj && proj.quickTools ? proj.quickTools : {}
       // 取值函数：正常路径下配置项恒为对象（normalizeQuick 已在加载时收敛，freshConfig/migrateOld/
       // setQuickAction 也都只写对象），所以下面的字符串回退当前不可达，它是纯防御——万一有路径让
@@ -2652,9 +2755,9 @@ export default {
       undo: ['撤销权限：', 'Undo permission: '],
     }
 
-    function outsideMatrix(catKey, fp) {
-      const d = resolveCategory('directory', fp, 'path')
-      const e = resolveCategory(catKey, fp, 'path')
+    function outsideMatrix(catKey, fp, root) {
+      const d = resolveCategory('directory', fp, 'path', root)
+      const e = resolveCategory(catKey, fp, 'path', root)
       if (d.action === 'deny' || e.action === 'deny') {
         const src = d.action === 'deny' ? d : e
         const cat = src === d ? 'directory' : catKey
@@ -2681,6 +2784,10 @@ export default {
     function decide(exec) {
       const name = exec.name
       const args = exec.arguments
+      // 本会话的工作区根：全部判定（例外匹配、工作区内外、写盘归属）都必须基于它。
+      // 从 exec 派生而非读全局变量：否则并发会话会互相改写，导致 isOutside 用错根
+      // 把工作区外路径判成区内、直接跳过目录闸（fail-open）。
+      const root = rootOf(exec)
       // 自定义文字分两种，用途不同、不可互换：
       //   reason —— 拒绝理由，会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
       //             例外的 reason、分类默认值的 reason、兜底/快捷工具拒绝时的 reason 都走它。
@@ -2707,13 +2814,13 @@ export default {
         return { action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null }
       }
       if (repeatStreak(name, args) >= REPEAT_STREAK) {
-        const d = resolveCategory('doomloop', null, null)
+        const d = resolveCategory('doomloop', null, null, root)
         if (d.action !== 'allow') {
           // 分类默认值的拒绝原因同样带上（doomloop 无例外，d.reason 只可能来自分类默认值）
           return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls' + exReasonEn(d)), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
         }
       }
-      const proj = projectBlock()
+      const proj = projectBlock(root)
       const rules = []
       if (proj && Array.isArray(proj.custom)) { for (const r of proj.custom) rules.push(r) }
       if (Array.isArray(config.global.custom)) { for (const r of config.global.custom) rules.push(r) }
@@ -2727,12 +2834,12 @@ export default {
         if (fp && isOutside(fp, root)) {
           // 与 image/edit/undo 同口径：工作区外先过「目录访问」闸，再过「读取文件」闸。
           // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
-          const m = outsideMatrix('read', fp)
+          const m = outsideMatrix('read', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
           if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
-        const d = resolveCategory('read', fp, 'path')
+        const d = resolveCategory('read', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
@@ -2744,12 +2851,12 @@ export default {
         if (fp && isOutside(fp, root)) {
           // 工作区外读图：directory + image 合并矩阵（不能用 directory 的动作短路，
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
-          const m = outsideMatrix('image', fp)
+          const m = outsideMatrix('image', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
           if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
-        const d = resolveCategory('image', fp, 'path')
+        const d = resolveCategory('image', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' }
@@ -2758,12 +2865,12 @@ export default {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
-          const m = outsideMatrix('edit', fp)
+          const m = outsideMatrix('edit', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
           if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
-        const d = resolveCategory('edit', fp, 'path')
+        const d = resolveCategory('edit', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
@@ -2773,12 +2880,12 @@ export default {
       if (isUndoNow(name, args, exec)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          const m = outsideMatrix('undo', fp)
+          const m = outsideMatrix('undo', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
           if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
-        const d = resolveCategory('undo', fp, 'path')
+        const d = resolveCategory('undo', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
@@ -2786,19 +2893,19 @@ export default {
       if (COMMAND_TOOLS[name]) {
         const cmd = commandArg(args)
         // 命令的所有可识别命令 token 均已命中 allow 例外 → 视为已覆盖，直接放行（不再弹窗）
-        if (commandFullyCovered(cmd)) {
+        if (commandFullyCovered(cmd, root)) {
           return { action: 'allow', reason: bi('命令组成均已命中例外，放行', 'All command tokens covered by exceptions, allowed'), cat: null, value: null, kind: null }
         }
-        const d = resolveCategory('command', cmd, 'command')
+        const d = resolveCategory('command', cmd, 'command', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return { action: d.action, reason: bi('执行命令' + exZh, 'Run command' + exEn), ruleId: d.ruleId, cat: 'command', value: cmd, kind: 'command' }
       }
       if (SUBAGENT_TOOLS[name]) {
-        const d = resolveCategory('subagent', null, null)
+        const d = resolveCategory('subagent', null, null, root)
         return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
       }
-      const q = quickAction(name)
+      const q = quickAction(name, root)
       if (q) {
         // 命中预设默认值时区分措辞，避免把「默认动作」说成用户显式设置
         const label = q.isDefault ? '快捷默认' : '快捷设置'
@@ -2808,7 +2915,7 @@ export default {
         const qrEn = q.action === 'deny' && q.reason ? ' (' + q.reason + ')' : ''
         return { action: q.action, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
       }
-      const fb = fallbackSetting()
+      const fb = fallbackSetting(root)
       if (fb.mode === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
       // 兜底的拒绝原因同样回给 AI（ask 时它只是弹窗文案的一部分，不参与回传）
       const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
@@ -2832,8 +2939,8 @@ export default {
       return dir + '/*'
     }
 
-    function alreadyInProject(value, kind, catKey) {
-      const proj = projectBlock()
+    function alreadyInProject(value, kind, catKey, root) {
+      const proj = projectBlock(root)
       if (!proj) return false
       // 只有「方向明确」的例外（allow / deny）才算已表态，ask 例外不算：
       // ask 例外表达的是「这个值每次都问我」，不是「用户已决定放行或拒绝」。
@@ -2847,7 +2954,7 @@ export default {
       if (kind === 'path' && catKey && EXC_CATS.indexOf(catKey) !== -1) {
         const cat = proj[catKey]
         // 与 pathKey 同口径：相对路径、含 .. 、斜杠与大小写写法都归一到同一条
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && pathKey(r.path) === pathKey(value)))
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && pathKey(r.path, root) === pathKey(value, root)))
       }
       if (kind === 'tool') {
         return !!(Array.isArray(proj.custom) && proj.custom.some((r) => r.tool === value))
@@ -2911,7 +3018,7 @@ export default {
     // ② 任一命令段识别不出命令 token（变量赋值/表达式/字符串拼接等）也不视为已覆盖。
     // 两者命中时仍需弹窗走正常判定（用户显式配置的 allow 例外仍会命中，这里只挡「碰巧覆盖」）。
     const DANGEROUS_CMD_RE = /\b(?:Stop-Process|Stop-Service|Stop-Computer|Stop-Job|Restart-Computer|Restart-Service|Remove-Item|Remove-ItemProperty|Remove-Service|Remove-PSDrive|Remove-Variable|Remove-Alias|Remove-Event|Remove-Job|Start-Process|Start-Service|Start-Computer|Start-Job|taskkill|shutdown|format|diskpart|rmdir|erase|Clear-Content|Clear-Item|Set-ExecutionPolicy|icacls|takeown|attrib|reg\s+delete|wmic\s+process)\b/i
-    function commandFullyCovered(cmd) {
+    function commandFullyCovered(cmd, root) {
       try {
         const whole = String(cmd || '')
         // 破坏性命令：即便命令 token 命中 allow 例外，也不允许静默放行
@@ -2925,7 +3032,7 @@ export default {
           let label = toks[0]
           if (toks.length >= 2 && ROUTER_CMDS[toks[0].toLowerCase()]) label = toks[0] + ' ' + toks[1]
           const value = label + ' *'
-          const proj = projectBlock()
+          const proj = projectBlock(root)
           const lists = []
           if (proj && proj.command && Array.isArray(proj.command.exceptions)) lists.push(proj.command.exceptions)
           if (config.global.command && Array.isArray(config.global.command.exceptions)) lists.push(config.global.command.exceptions)
@@ -2968,6 +3075,10 @@ export default {
     }
 
     function buildCandidates(entry) {
+      // 候选的判重、路径规范化与「工作区外」判定都必须基于**审批发起时**的项目根
+      // （entry.projRoot 快照），不能用当前会话的根：弹窗可能挂起很久，期间用户会切会话，
+      // 用当前根会让候选的判重与落盘归属跟实际发起审批的项目不一致。
+      const root = entry.projRoot || fallbackRoot
       const out = []
       // hint：候选行下方的灰色小字（说明这条会放开什么），与 label（主文案，通常就是路径）分开下发，
       // 由客户端排版成「路径 + 小字 + 按钮」，避免把说明塞进 label 里挤成一大段
@@ -2984,7 +3095,7 @@ export default {
           if (seen[label]) continue
           seen[label] = true
           const val = label + ' *'
-          if (alreadyInProject(val, 'command', null)) continue
+          if (alreadyInProject(val, 'command', null, root)) continue
           push(label, val, 'command')
         }
       } else if (entry.kind === 'path' && entry.value) {
@@ -3007,13 +3118,13 @@ export default {
           // 路径先规范化为绝对路径（折叠 .. 与重复分隔符）：判重与落盘值统一基于它。
           // 含通配符的原文不做折叠——pathResolve 会把 `*` 当普通目录名、被其后的 .. 吃掉
           // （实测 C:/x/*/../y.txt → C:/x/y.txt），使通配路径被误当成精确路径生成候选。
-          const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value)
+          const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)
           // 守卫按**原始值**判定：absVal 已折叠 ..，对它判 hasParentSeg 恒为 false，等于没有守卫。
           // 含 .. 的原文不给目录 glob——dirGlob 取父目录，`..` 可拼出覆盖整个盘根的 `G:/*`。
           const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)
           const glob = globSafe ? dirGlob(absVal) : ''
-          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', 'directory')
-          const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey)
+          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', 'directory', root)
+          const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey, root)
           if (globSafe && (!hasDirGlob || !hasKindGlob)) {
             // label 就是路径本身（弹窗里最该被看清的东西），范围说明走 hint 小字
             push(glob, glob, 'path', [{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }], t('工作区外访问目录 + ' + kindLabel[0] + '权限', 'Outside workspace · directory + ' + kindLabel[1]))
@@ -3027,15 +3138,15 @@ export default {
           // 注：能走到这里就说明至少一道闸没命中等价例外（两道都命中时 resolveCategory 直接
           // 返回 allow/deny、不会弹窗），因此 covered 当前恒为 false——保留它是防御性冗余，
           // 用来表达「两条写入目标各自判重」的语义，避免未来弹窗流程变更后候选被误隐藏。
-          const covered = fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat))
+          const covered = fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat, root))
           // 文件候选只要求原文无通配符：含 .. 的原文已被规范化成精确绝对路径，可以安全给候选
           if (!hasGlobMeta(entry.value) && !covered) {
             push(fileVal, fileVal, 'path', fileWrites, t('工作区外访问文件 + ' + kindLabel[0] + '权限', 'Outside workspace · file + ' + kindLabel[1]))
           }
         } else if (!hasGlobMeta(entry.value)) {
           // 工作区内同样走规范化单点，避免同一份配置里两种路径写法并存
-          const absVal = normAbsPath(entry.value)
-          if (!alreadyInProject(absVal, 'path', entry.cat)) push(absVal, absVal, 'path')
+          const absVal = normAbsPath(entry.value, root)
+          if (!alreadyInProject(absVal, 'path', entry.cat, root)) push(absVal, absVal, 'path')
         }
       }
       // 其余分类无「例外」候选：快捷工具（web_search/skill 等）走 quickTools 设置；
@@ -3062,10 +3173,9 @@ export default {
           ts: Date.now(),
           candidates: [],
           argLines: humanArgsPreview(exec.name, exec.arguments, exec),
-          // 审批发起时的项目根：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
-          // 审批发起时的项目根与会话 id：root 是跨会话共享的闭包变量，随后可能被其他会话覆盖，
-          // 打相对路径/对比/打开侧栏必须用发起会话自己的这两样（会话 id 用来构造 file 地址）。
-          projRoot: root || null,
+          // 审批发起时的项目根：审批可能挂起很久、期间用户会切会话，故必须把发起时的
+          // 根快照下来 —— 打相对路径/对比/打开侧栏/落盘例外都用它，不能用「当前会话」的根。
+          projRoot: rootOf(exec),
           // 会话标识：session 挂在 agent 上，不在 exec 上（ToolExecutionInput 只有 agent/name/
           // arguments/callId/signal，没有 session）。旧写法读 exec.session 恒为 undefined，
           // 导致下发给客户端的 sessionId 一直是 null —— 弹窗因此认不出「来自哪个对话」，
@@ -3080,7 +3190,7 @@ export default {
           toolCat: pathToolCat(exec.name, exec.arguments, exec),
           // str_replace_editor 的内核在审批发起时定下（insert 的 insert_line 语义随内核相反），
           // 详情预览按发起时的实际内核解释，避免中途判别漂移
-          editorKernel: resolveEditorKernel(exec).kernel,
+          editorKernel: resolveEditorKernel(exec, rootOf(exec)).kernel,
           resolve,
           cleanup() {
             if (onAbort && exec.signal) { try { exec.signal.removeEventListener('abort', onAbort) } catch (e) {} }
@@ -3109,8 +3219,16 @@ export default {
     // 候选写入由调用方显式指定项目块）。
     // 候选各自携带目标分类（buildCandidates 的 writes），不再由 entry.cat 统一决定——
     // 否则「仅允许此文件」这类要写两条例外（自身分类 + 目录闸）的候选会写错分类。
-    function addProjectException(cat, kind, value, decision, opts) {
+    // root 由调用方显式传入（位置参数，与其余根消费函数同一通道），且必须是**决定归属的
+    // 那个根**：审批落盘用 entry.projRoot（发起时的快照，弹窗挂起期间可能已切会话），
+    // 面板/工具入口用当前请求会话的根。
+    // 不再走 opts.root：根有两条通道时，漏传不会报错而是静默落到部署根，例外会写进别的
+    // 项目块（正是旧实现「在 ePicDLL 点的例外写进了 MCP 项目块」那类归属错误），且 arity
+    // 守卫只校验位置参数、拦不住 opts 里的漏传。
+    // 缺根时显式回落 fallbackRoot（仍是非空兜底），但调用方必须显式传根。
+    function addProjectException(cat, kind, value, decision, root, opts) {
       const o = opts || {}
+      const rootKey = root || fallbackRoot
       const target = o.target === 'project' ? 'project' : 'global'
       // reason / note 直接复用 normalizeText（trim + 截断 200 + 非字符串丢弃），与 normalizeException
       // 同一份实现：否则同一请求会先经 normalizeException 校验、再经这里落盘，两份口径一旦分叉，
@@ -3128,13 +3246,13 @@ export default {
       // 同方向重复写入直接跳过并返回既有条目，避免同一决定在列表里堆积。
       const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {}, note ? { note } : {})
       try {
-        const block = target === 'global' ? config.global : ensureProject()
+        const block = target === 'global' ? config.global : ensureProject(rootKey)
         if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1) {
           const c = block[cat] || freshCategory(cat, target === 'project')
           if (!c.exceptions) c.exceptions = []
           // 去重与 alreadyInProject / matchException 同口径（pathKey：绝对化 + 折叠 .. + 大小写/斜杠归一）：
           // 否则候选写规范绝对路径、面板写相对或含 .. 原文时会各存一条指向同一路径的例外。
-          const idx = c.exceptions.findIndex((r) => pathKey(r.path) === pathKey(value) && r.action === decision)
+          const idx = c.exceptions.findIndex((r) => pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision)
           if (idx !== -1) {
             // 命中既有同向条目：提到数组头部，否则它会被前面的反向旧条目遮蔽（resolveCategory 只取首个匹配），
             // 用户的决定等于被静默丢弃；带新理由时一并回写（reason 已在入口按 deny + trim + 200 规范化）。
@@ -3145,7 +3263,7 @@ export default {
             return hit
           }
           // 落盘统一存规范化路径，与判重/匹配口径一致
-          const item = build({ path: normAbsPath(value) })
+          const item = build({ path: normAbsPath(value, rootKey) })
           c.exceptions.unshift(item)
           block[cat] = c
           return item
@@ -3200,21 +3318,24 @@ export default {
       return { removed: true, count, remaining, exception: target }
     }
 
+    // 弹窗「记住此决定」的落盘。root 取审批发起时的快照（entry.projRoot）：
+    // 与 addProjectException 同源，保证「哪个项目发起的审批，就写进哪个项目块」。
     function addRememberedRule(entry, action, target) {
+      const root = entry.projRoot || fallbackRoot
       try {
-        const block = target === 'project' ? ensureProject() : config.global
+        const block = target === 'project' ? ensureProject(root) : config.global
         if (entry.cat === 'quick') {
-          setQuickAction(target, entry.tool, action)
+          setQuickAction(root, target, entry.tool, action)
           return
         }
         if (entry.kind === 'path' && entry.cat && EXC_CATS.indexOf(entry.cat) !== -1 && entry.value) {
           // 复用例外写入单点。注意：choice 是用户在弹窗上的显式选择（「拒绝并加入项目黑名单」），
           // 不能套用候选双写场景的「deny 不写 directory 例外」过滤，否则显式决定会被静默丢弃。
-          addProjectException(entry.cat, 'path', String(entry.value), action, { target })
+          addProjectException(entry.cat, 'path', String(entry.value), action, root, { target })
           return
         }
         if (entry.kind === 'command' && entry.cat === 'command' && entry.value) {
-          addProjectException('command', 'command', String(entry.value), action, { target })
+          addProjectException('command', 'command', String(entry.value), action, root, { target })
           return
         }
         if (!block.custom) block.custom = []
@@ -3287,7 +3408,9 @@ export default {
             return false
           }
         }
-        const writePolicy = { mode: 'danger-full-access', workspaceRoot: root }
+        // 写策略用本会话自己的根：配置目标在 home 下、mode 是 full access，workspaceRoot
+        // 实际不参与判定，但取值口径应与调用会话一致（旧实现读全局 root，会取到别的会话的根）
+        const writePolicy = { mode: 'danger-full-access', workspaceRoot: rootOf(exec) }
         await fs.writeText(t, JSON.stringify(config, null, 2), undefined, undefined, writePolicy)
         lastDiskJson = JSON.stringify(config, null, 2)
         saveError = null
@@ -3303,7 +3426,7 @@ export default {
     // 仓库分发或被 agent 写入（不可信），其 global 段一律忽略，避免 clone 即得的宽松「全局」
     // 策略覆盖用户配置；源里若只有旧格式 global（无 projects）则不迁移，从而不会走 migrateOld
     // （旧模式 permissive 会被映射成全 allow）。源不可解析或无可迁移内容时返回 null。
-    function projectsFromConfig(srcText) {
+    function projectsFromConfig(srcText, root) {
       try {
         const src = JSON.parse(String(srcText == null ? '' : srcText))
         if (!src || typeof src !== 'object') return null
@@ -3326,7 +3449,7 @@ export default {
     }
 
     // 迁移成功后清理项目残留配置文件（删除失败只影响清理，不影响已完成的落盘）
-    function removeMigratedSource(p) {
+    function removeMigratedSource(p, root) {
       try {
         const raw = pathString(p)
         // 迁移源必须是工作区内那个字面文件：targetKey 为 realpath，符号链接会让删除落到
@@ -3394,7 +3517,7 @@ export default {
               } else {
                 // home 配置不存在：检查项目目录残留配置（1.3.x 竞态期可能 persist 到项目
                 // .dsh/.permgate.json），存在且可读则迁移为初始配置（解析后落盘 homeT），避免用户规则静默丢失
-                const projCfg = root ? await fs.resolve(root + '/.dsh/.permgate.json') : null
+                const projCfg = await fs.resolve(rootOf(exec) + '/.dsh/.permgate.json')
                 if (projCfg) {
                   const projExists = await configExists(fs, projCfg)
                   if (projExists) {
@@ -3402,7 +3525,7 @@ export default {
                       const projText = await fs.readText(projCfg)
                       // 并入项目残留配置：只采纳 projects 段（工作区内文件不可信，其 global 一律忽略），
                       // 迁移成功落盘后再删除源文件
-                      const mergedText = projectsFromConfig(projText)
+                      const mergedText = projectsFromConfig(projText, rootOf(exec))
                       if (mergedText !== null) { target = hp.target; text = mergedText; migratedFromProject = true; migratedFromPath = projCfg }
                     } catch (e) {
                       // 残留存在但读不出（权限/占用/非 UTF-8）：与 home 的 readFailed 同口径——置哨兵并提示，
@@ -3464,7 +3587,7 @@ export default {
         if (isOld || migratedFromProject) {
           const saved = await persist(exec)
           // 迁移成功落盘后才删除项目残留文件，避免写盘失败导致配置丢失
-          if (saved && migratedFromPath) removeMigratedSource(migratedFromPath)
+          if (saved && migratedFromPath) removeMigratedSource(migratedFromPath, rootOf(exec))
         }
         broadcast({ type: 'status' })
       } catch (e) {
@@ -3475,7 +3598,10 @@ export default {
 
     function statusView(exec, lang) {
       const l = normLang(lang || uiLang)
-      const proj = projectBlock()
+      // 本视图对应的项目根：HTTP 路由按 sessionId 解析出 exec，工具调用直接有 exec，
+      // 都从会话派生；拿不到时回落部署级根（面板显示的是「当前请求会话」的项目配置）。
+      const root = rootOf(exec)
+      const proj = projectBlock(root)
       const effective = {}
       for (const c of CATS) {
         effective[c] = firstEffective(proj && proj[c] && proj[c].mode, config.global[c] && config.global[c].mode, 'allow')
@@ -3536,7 +3662,7 @@ export default {
             // 沙箱用 permgate 的配置解析值，而非预设捆绑值：新会话创建后 syncSandbox
             // 会把会话沙箱对齐到该值，用它才能与创建后看到的图标一致（预设捆绑值是
             // 平台的初始意图，随后就被 permgate 覆盖，拿它会让图标闪一下再变）。
-            sandbox: effectiveSandboxConfig(),
+            sandbox: effectiveSandboxConfig(root),
           }
         }
       } catch (e) { defaultView = null }
@@ -3546,8 +3672,8 @@ export default {
         preset: sessionPresetName(exec),
         sandbox: {
           global: config.global.sandboxMode || 'danger-full-access',
-          project: (projectBlock() && projectBlock().sandboxMode) || 'inherit',
-          effective: effectiveSandboxConfig(),
+          project: (proj && proj.sandboxMode) || 'inherit',
+          effective: effectiveSandboxConfig(root),
           session: sessionSandbox,
         },
         activeForSession: sessionPresetName(exec) === 'custom-review',
@@ -3560,7 +3686,6 @@ export default {
         // permissionPresets 时），此时客户端保持「平台态未知」的保守行为。
         defaultView,
         projectKey: root,
-        rootSource,
         debugAgentCwd: agentCwd(exec) || null,
         loadError,
         saveError,
@@ -3588,8 +3713,8 @@ export default {
         stats,
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
         cats: CATS,
-        editorKernel: { setting: editorKernelSetting(), ...resolveEditorKernel(exec) },
-        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
+        editorKernel: { setting: editorKernelSetting(root), ...resolveEditorKernel(exec, root) },
+        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
         excCats: EXC_CATS,
         modes: MODES,
         allModes: ALL_MODES,
@@ -3667,6 +3792,11 @@ export default {
             if (s) exec = { agent: { session: s } }
           } catch (e) {}
         }
+        // 未带 sessionId 时回落到 agentRef 的会话，而不是让 exec 保持 null：
+        // 下游根派生 rootOf(exec) 会因此落到部署根，而 syncSandbox/agentCwd 用的是
+        // agentRef.session —— 同一请求内「根」与「会话」分属两个项目，写盘归属与沙箱
+        // 同步都会串台。在此统一到同一会话，使整条路由的根与会话同源。
+        if (!exec && agentRef && agentRef.session) exec = { agent: { session: agentRef.session } }
         if (pathname === '/permgate/pending' && method === 'GET') {
           const out = []
           for (const e of pendingApprovals.values()) {
@@ -3704,13 +3834,29 @@ export default {
         if (pathname === '/permgate/decide' && method === 'POST') {
           const entry = pendingApprovals.get(a.id)
           if (!entry) return json(res, { error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
+          // 本路由的会话上下文：客户端 decide 载荷只有 {id, action, rules, reason}，不带 sessionId，
+          // 故按 entry.sessionId（审批发起时记下的会话）反查。没有它时 init/persist 会退到
+          // 「最近活跃会话」，落盘路径与写策略都会跟着别的会话走 —— 这正是「第一次点允许没写进去、
+          // 第二次才成功」的成因（首次进入本路由时闭包 root/target 可能还停在别的项目）。
+          let exec = null
+          if (entry.sessionId && ctx.sessions && typeof ctx.sessions.get === 'function') {
+            try {
+              const s = ctx.sessions.get(entry.sessionId)
+              if (s) exec = { agent: { session: s } }
+            } catch (e) {}
+          }
+          // 与其余写盘路由一致：先确保配置已加载、target 已解析，再落盘。
+          await init(exec)
           let allow = false
           let ruleCount = 0
           // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
           // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
+          // root 用 entry.projRoot（审批发起时的快照）：弹窗可能挂起很久、期间用户会切会话，
+          // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 ePicDLL 点的写进了 MCP）。
+          const entryRoot = entry.projRoot || rootOf(exec)
           const writeException = (cat, kind, value, decision) => {
             if (decision === 'deny' && cat === 'directory') return
-            addProjectException(cat, kind, value, decision, { target: 'project' })
+            addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })
             ruleCount++
           }
           const writeCandidate = (cand, decision) => {
@@ -3752,7 +3898,7 @@ export default {
           }
           const customReason = typeof a.reason === 'string' ? a.reason.trim().slice(0, 500) : ''
           entry.cleanup()
-          if (ruleCount > 0) await persist()
+          if (ruleCount > 0) await persist(exec)
           entry.resolve(allow
             ? { kind: 'allow', ruleAdded: ruleCount > 0 }
             : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')) })
@@ -3761,7 +3907,7 @@ export default {
         if (pathname === '/permgate/set-sandbox' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
-          if (!setSandboxConfig(target, a.mode)) return json(res, { error: '非法沙箱参数: target=' + target + ' mode=' + a.mode })
+          if (!setSandboxConfig(rootOf(exec), target, a.mode)) return json(res, { error: '非法沙箱参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           syncSandbox(exec)
           return json(res, statusView(exec))
@@ -3769,14 +3915,14 @@ export default {
         if (pathname === '/permgate/set-fallback' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
-          if (!setFallbackMode(target, a.mode, a.reason)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
+          if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           return json(res, statusView(exec))
         }
         if (pathname === '/permgate/set-editor-kernel' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
-          if (!setEditorKernel(target, a.mode)) return json(res, { error: '非法内核参数: target=' + target + ' mode=' + a.mode })
+          if (!setEditorKernel(rootOf(exec), target, a.mode)) return json(res, { error: '非法内核参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -3786,7 +3932,7 @@ export default {
             const src = a[t]
             if (!src || typeof src !== 'object') continue
             for (const c of CATS) {
-              if (typeof src[c] === 'string') setCategoryMode(t, c, src[c])
+              if (typeof src[c] === 'string') setCategoryMode(rootOf(exec), t, c, src[c])
             }
           }
           await persist(exec)
@@ -3795,10 +3941,10 @@ export default {
         if (pathname === '/permgate/set-category' && method === 'POST') {
           await init(exec)
           // target 与其它设置路由同口径归一（缺失/非法一律 global）：若直接把 a.target 传进
-          // setCategoryMode，非 'global' 的值会落到 project 并 ensureProject() 凭空建块写盘。
+          // setCategoryMode，非 'global' 的值会落到 project 并 ensureProject(rootOf(exec)) 凭空建块写盘。
           const target = normTarget(a)
           if (CATS.indexOf(a.category) === -1) return json(res, { error: '未知分类: ' + a.category })
-          if (!setCategoryMode(target, a.category, a.mode, a.reason)) return json(res, { error: '非法的 target/mode 组合' })
+          if (!setCategoryMode(rootOf(exec), target, a.category, a.mode, a.reason)) return json(res, { error: '非法的 target/mode 组合' })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -3806,7 +3952,7 @@ export default {
           await init(exec)
           const target = normTarget(a)
           if (!a.tool || !String(a.tool)) return json(res, { error: 'tool 不能为空' })
-          if (!setQuickAction(target, a.tool, a.action, a.reason)) return json(res, { error: '非法动作' })
+          if (!setQuickAction(rootOf(exec), target, a.tool, a.action, a.reason)) return json(res, { error: '非法动作' })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -3818,14 +3964,14 @@ export default {
           if (!e) return json(res, { error: '非法的例外参数' })
           // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新决定插头部」的语义，
           // 否则面板新加的例外会排在历史条目之后，被 resolveCategory 的首个匹配静默屏蔽。
-          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, { target: a.target, reason: a.reason, note: a.note })
+          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, rootOf(exec), { target: a.target, reason: a.reason, note: a.note })
           if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)
           return json(res, { added: written, status: statusView(exec) })
         }
         if (pathname === '/permgate/remove-exception' && method === 'POST') {
           await init(exec)
-          const block = a.target === 'project' ? ensureProject() : config.global
+          const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           const del = removeExceptionEntries(block, a.category, a.id)
           if (!del.removed) return json(res, { removed: false, reason: del.reason })
           await persist(exec)
@@ -3836,7 +3982,7 @@ export default {
           if (!a.tool && !a.path && !a.args) return json(res, { error: '至少提供 tool/path/args 之一' })
           const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: a.action, tool: a.tool, path: a.path, args: a.args, reason: a.reason })
           if (!rule) return json(res, { error: '非法的规则参数' })
-          const block = a.target === 'project' ? ensureProject() : config.global
+          const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           if (!block.custom) block.custom = []
           block.custom.push(rule)
           await persist(exec)
@@ -3844,7 +3990,7 @@ export default {
         }
         if (pathname === '/permgate/remove-rule' && method === 'POST') {
           await init(exec)
-          const block = a.target === 'project' ? ensureProject() : config.global
+          const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           const list = block.custom || []
           const idx = list.findIndex((r) => r.id === a.id)
           if (idx === -1) return json(res, { removed: false, reason: '未找到 id=' + a.id })
@@ -3870,7 +4016,8 @@ export default {
             const exe = await sub.resolveExecutable('cmd')
             const handle = sub.spawn({
               argv: [exe, '/c', 'start', '', winPath],
-              cwd: String(root || 'C:\\').replace(/\//g, '\\'),
+              // 打开配置文件：目标在 home 下，与会话工作区无关，用本请求会话的根即可
+              cwd: String(rootOf(exec) || 'C:\\').replace(/\//g, '\\'),
               stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
               graceMs: 5000,
             })
@@ -3966,7 +4113,7 @@ export default {
       async execute(args, exec) {
         await init(exec)
         if (CATS.indexOf(args.category) === -1) return { error: '未知分类: ' + args.category }
-        if (!setCategoryMode(args.target, args.category, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
+        if (!setCategoryMode(rootOf(exec), args.target, args.category, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
         await persist(exec)
         return statusView(exec)
       },
@@ -3983,7 +4130,7 @@ export default {
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
-        if (!setFallbackMode(args.target, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
+        if (!setFallbackMode(rootOf(exec), args.target, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
         await persist(exec)
         return statusView(exec)
       },
@@ -3999,7 +4146,7 @@ export default {
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
-        if (!setEditorKernel(args.target, args.mode)) return { error: '非法的 target/mode 组合' }
+        if (!setEditorKernel(rootOf(exec), args.target, args.mode)) return { error: '非法的 target/mode 组合' }
         await persist(exec)
         return statusView(exec)
       },
@@ -4024,7 +4171,7 @@ export default {
         const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, note: args.note, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
         if (!e) return { error: '非法的例外参数' }
         // 与面板路由共用同一写入点：同方向不重复、新决定插到数组头部，避免被历史条目遮蔽。
-        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, { target: args.target, reason: args.reason, note: args.note })
+        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, rootOf(exec), { target: args.target, reason: args.reason, note: args.note })
         if (!written) return { error: '例外未写入：分类/参数不支持' }
         await persist(exec)
         return { added: written, status: statusView(exec) }
@@ -4042,7 +4189,7 @@ export default {
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
-        const block = args.target === 'project' ? ensureProject() : config.global
+        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
         const del = removeExceptionEntries(block, args.category, args.id)
         if (!del.removed) return { removed: false, reason: del.reason, status: statusView(exec) }
         await persist(exec)
@@ -4063,7 +4210,7 @@ export default {
       async execute(args, exec) {
         await init(exec)
         if (!args.tool || !String(args.tool)) return { error: 'tool 不能为空' }
-        if (!setQuickAction(args.target, args.tool, args.action, args.reason)) return { error: '非法动作' }
+        if (!setQuickAction(rootOf(exec), args.target, args.tool, args.action, args.reason)) return { error: '非法动作' }
         await persist(exec)
         return statusView(exec)
       },
@@ -4086,7 +4233,7 @@ export default {
         if (!args.tool && !args.path && !args.args) return { error: '至少提供 tool/path/args 之一' }
         const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: args.action, tool: args.tool, path: args.path, args: args.args, reason: args.reason })
         if (!rule) return { error: '非法的规则参数' }
-        const block = args.target === 'project' ? ensureProject() : config.global
+        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
         if (!block.custom) block.custom = []
         block.custom.push(rule)
         await persist(exec)
@@ -4104,7 +4251,7 @@ export default {
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(args, exec) {
         await init(exec)
-        const block = args.target === 'project' ? ensureProject() : config.global
+        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
         const list = block.custom || []
         const idx = list.findIndex((r) => r.id === args.id)
         if (idx === -1) return { removed: false, reason: '未找到 id=' + args.id, status: statusView(exec) }

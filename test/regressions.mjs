@@ -98,7 +98,7 @@ ok('projectsFromConfig 只保留当前 root 的 key', src.includes('if (normPath
 ok('仅采纳 projects 段（忽略 global）', src.includes('const projects = src.projects && typeof src.projects === \'object\' ? src.projects : null'))
 ok('ensureProject 与 projectBlock 同口径（归一化查找）', src.includes('if (norm(k).toLowerCase() === key) return projs[k]'))
 ok('迁移读失败不静默（projReadFailed）', src.includes('let projReadFailed = false') && src.includes('projReadFailed = true') && src.includes('Cannot read the project residual config'))
-ok('迁移成功后删除源（先落盘成功）', src.includes('if (saved && migratedFromPath) removeMigratedSource(migratedFromPath)'))
+ok('迁移成功后删除源（先落盘成功）', src.includes('if (saved && migratedFromPath) removeMigratedSource(migratedFromPath, rootOf(exec))'))
 ok('删除前 lstat 普通文件 + 双侧 realpath', src.includes('if (!st || !st.isFile()) return false') && src.includes("want = pathJoin(fsRealpathSync(pathResolve(root, '.dsh')), '.permgate.json')") && src.includes('if (normPathKey(real) !== normPathKey(want)) return false'))
 ok('configExists 统一（定义 + 4 处调用）', src.includes('async function configExists(fsService, p) {') && (src.match(/configExists\(/g) || []).length === 5)
 ok('无内联存在性守卫', !src.includes('let homeExists') && !src.includes('let targetExists') && !src.includes('let projExists'))
@@ -746,7 +746,7 @@ ok('decided/encoding 从 readPreviewText 透传到预览数据',
 group('10. 读图独立分类（image）口径')
 ok('read_image 已从 read 移出、单列 FILE_IMAGE_TOOLS', !src.includes('FILE_READ_TOOLS = { read: 1, read_image: 1 }') && src.includes('const FILE_IMAGE_TOOLS = { read_image: 1 }'))
 ok('image 进入分类清单与例外分类清单', src.includes("const CATS = ['directory', 'command', 'read', 'image'") && src.includes("const EXC_CATS = ['directory', 'command', 'read', 'image'"))
-ok('decide 里有 image 判定（与 read 同链：工作区外先过目录访问）', src.includes("resolveCategory('image', fp, 'path')") && src.includes('if (isFileImage(name)) {'))
+ok('decide 里有 image 判定（与 read 同链：工作区外先过目录访问）', src.includes("resolveCategory('image', fp, 'path', root)") && src.includes('if (isFileImage(name)) {'))
 ok('pathToolCat 把 read_image 归到 image（不继承 read）', src.includes("if (isFileImage(name)) return 'image'") && src.includes("if (isFileRead(name, args)) return 'read'"))
 // undo 默认 allow 是一个取舍（撤销恢复既有内容、不接受新内容），不是「撤销无害」的结论：
 // 两个撤销实现的破坏面不同 —— fs-encoding 只在内存、按 session 分桶且文件改动后拒绝；
@@ -777,9 +777,9 @@ ok('sniffImage: 非图片/空缓冲/短缓冲返回 null', sn(Buffer.from('defin
 ok('IMAGE_MIME 覆盖 PNG/JPEG/GIF/WebP', mod.IMAGE_MIME.png === 'image/png' && mod.IMAGE_MIME.jpeg === 'image/jpeg' && mod.IMAGE_MIME.gif === 'image/gif' && mod.IMAGE_MIME.webp === 'image/webp')
 ok('isFileImage 只认 read_image', mod.isFileImage('read_image') === true && mod.isFileImage('read') === false && mod.isFileImage('str_replace_editor') === false)
 // 防回退：工作区外读图必须走 directory+image 合并矩阵单点，不得再用 directory 的动作短路 image 分类
-ok('工作区外读图走合并矩阵单点（不被 directory 短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('目录权限/.test(src))
+ok('工作区外读图走合并矩阵单点（不被 directory 短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp, root\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('目录权限/.test(src))
 // 防回退：read 也必须走合并矩阵（deny 例外与 read=ask 在跨工作区时必须生效）
-ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp\)/.test(src))
+ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root\)/.test(src))
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
 ok('缩略图有体积上限', src.includes('const IMAGE_MAX_BYTES = 2 * 1024 * 1024'))
 ok('读图的文本预览分支已移除', !src.includes('图片内容不在此预览'))
@@ -797,17 +797,17 @@ ok('「整个目录」同时写目录闸与自身分类的 glob', src.includes("
 // 防回退：缩略图像素上限、落盘分类/类型自洽、reason 前缀跟随决定闸、read 复用预检单点
 ok('缩略图有像素/边长上限（16MP / 4096），尺寸未知时一律不内联', src.includes('const IMAGE_MAX_PIXELS = 16 * 1000 * 1000') && src.includes('const IMAGE_MAX_DIM = 4096') && src.includes('const pixelOver = !!(sizeKnown && (') && src.includes('if (!sizeKnown) { out.sizeUnknown = true; return out }'))
 ok('拒绝候选不落 directory 例外（单点过滤，候选与旧形态共用）', src.includes('const writeException = (cat, kind, value, decision)') && src.includes("if (decision === 'deny' && cat === 'directory') return") && (src.match(/writeException\(/g) || []).length === 2 && !src.includes("w.cat === 'directory') continue"))
-ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => r\.match === value && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path) === pathKey(value) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value) })') && src.includes('const item = build({ match: value })'))
+ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => r\.match === value && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value, rootKey) })') && src.includes('const item = build({ match: value })'))
 ok('面板与工具写入统一走 addProjectException（不再尾部 push）', (src.match(/addProjectException\(a\.category|addProjectException\(args\.category/g) || []).length === 2 && !src.includes('block[a.category].exceptions.push(e)') && !src.includes('block[args.category].exceptions.push(e)'))
 ok('含通配符/.. 的原文不生成目录 glob 候选（守卫作用于原始值）', src.includes('const hasParentSeg =') && src.includes('const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)'))
 ok('预算内图片只读一次盘（嗅探与内联共用缓冲）', src.includes('whole = await fsService.readBytes(target, undefined, IMAGE_MAX_BYTES)') && src.includes('const bytes = whole || await fsService.readBytes'))
-ok('写入缺省作用域与删除侧一致（缺省全局，候选显式项目块）', src.includes("const target = o.target === 'project' ? 'project' : 'global'") && src.includes("addProjectException(cat, kind, value, decision, { target: 'project' })") && !src.includes('function addProjectRule'))
+ok('写入缺省作用域与删除侧一致（缺省全局，候选显式项目块）', src.includes("const target = o.target === 'project' ? 'project' : 'global'") && src.includes("addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })") && !src.includes('function addProjectRule'))
 ok('reason 与 normalizeException 同口径（仅 deny、共用 normalizeText）', src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
 ok('整读后直接用整份缓冲嗅探', src.includes('sniffImage(whole || head)'))
 ok('不可达的 directory else-if 候选分支已删除', !src.includes("else if (entry.cat === 'directory')"))
 ok('范围说明下移到候选小字（hint），标题下只留一句话', !src.includes('允许时同时写入') && src.includes("t('工作区外访问目录 + '") && src.includes("t('工作区外访问文件 + '") && cli.includes("'app.cand.hint': '点亮条目后点「允许 / 拒绝」即写入当前项目例外。'") && cli.includes('c.hint ? React.createElement'))
 ok('拒绝态收起 allow 勾选、取消时恢复并清快照（不再只是置灰变浅）', cli.includes('const [denySaved, setDenySaved]') && cli.includes('const snap = denySaved[p.id]') && cli.includes('setDenySaved(Object.assign({}, denySaved, { [p.id]: snap }))') && cli.includes('if (snap && Object.keys(snap).length) setSel(Object.assign({}, sel, snap))') && (cli.match(/delete rest\[p\.id\]/g) || []).length === 2 && cli.includes('RADIO_DISABLED_CSS') && !cli.includes('const muted = v ==='))
-ok('同向去重按「同值 + 同向」判定（方向交替不再累积）', src.includes('const idx = c.exceptions.findIndex((r) => pathKey(r.path) === pathKey(value) && r.action === decision)') && src.includes('const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)'))
+ok('同向去重按「同值 + 同向」判定（方向交替不再累积）', src.includes('const idx = c.exceptions.findIndex((r) => pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision)') && src.includes('const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)'))
 ok('拒绝只提交 deny 方向规则，服务端二次拦截', cli.includes('const pickedDenyRules = (p) => pickedRules(p).filter((r) => r.decision === \'deny\')') && cli.includes("decide(p.id, 'deny', pickedDenyRules(p), reason || undefined)") && cli.includes('const enterDeny = (p) =>') && src.includes("if (!allow && r.decision === 'allow') continue"))
 ok('hasGlobMeta 只拦 * 与 ?（[ ] 是字面量）', src.includes('const hasGlobMeta = (p) => /[*?]/.test(String(p || \'\'))'))
 ok('例外落盘校验分类与类型自洽', src.includes("if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1)") && src.includes("if (kind === 'command' && cat === 'command')") && src.includes('if (!p) return false'))
@@ -816,14 +816,14 @@ ok('工作区外 allow 的 cat 与 ruleId 同源（不再硬编码 catKey）', s
 ok('read/image 详情复用预检单点且跳过体积闸', (src.match(/skipSizeCheck: true/g) || []).length === 2)
 // 防回退：路径先规范化再判定（含 .. 的原文会写出不生效的例外）；文件级判重按候选要写的全部分类；
 // 通配符仍由 hasGlobMeta 拦下。旧形态（无 id）按 value 反查候选复用 writes
-ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value)') && src.includes('return matchGlob(normAbsPath(r.path), normAbsPath(value))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: \'directory\', kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat))') && src.includes('const hasGlobMeta = (p) =>'))
+ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)') && src.includes('return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: \'directory\', kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat, root))') && src.includes('const hasGlobMeta = (p) =>'))
 ok('旧形态 rules 按 value 反查候选复用 writes', src.includes('const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))'))
 // 防回退：例外删除必须是单点且严格按 id 删除，并回传同路径剩余条目数供 UI 提示
 ok('例外删除严格按 id 并回传 remaining', src.includes('function removeExceptionEntries(block, catKey, id)') && (src.match(/removeExceptionEntries\(block, (a|args)\.category/g) || []).length === 2 && src.includes('const kept = c.exceptions.filter((r) => r.id !== id)') && src.includes('return { removed: true, count, remaining, exception: target }') && !src.includes('const kept = c.exceptions.filter((r) => !(r[key] === value'))
 ok('图片 base64 用视图避免整份字节拷贝', src.includes('Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)'))
 ok('两条候选主文案是纯路径、范围各走 hint（目录 / 文件）', src.includes("push(glob, glob, 'path',") && src.includes("push(fileVal, fileVal, 'path',") && src.includes("工作区外访问目录 + ") && src.includes("工作区外访问文件 + ") && !src.includes("'整个目录：'") && !src.includes("'仅此文件：'"))
 ok('dirGlob 盘根直接拼 /*（不再产生匹配不到的 G://*）', src.includes("if (/^[a-zA-Z]:$/.test(dir)) return dir + '/*'") && !src.includes("if (/^[a-zA-Z]:$/.test(dir)) dir += '/'") )
-ok('choice 路径复用例外写入单点', src.includes("addProjectException(entry.cat, 'path', String(entry.value), action, { target })") && src.includes("addProjectException('command', 'command', String(entry.value), action, { target })") && !src.includes('cat.exceptions[idx].action = action'))
+ok('choice 路径复用例外写入单点', src.includes("addProjectException(entry.cat, 'path', String(entry.value), action, root, { target })") && src.includes("addProjectException('command', 'command', String(entry.value), action, root, { target })") && !src.includes('cat.exceptions[idx].action = action'))
 ok('客户端删除用返回 promise 的 call 并反馈结果', cli.includes("call('permgate:remove-exception', { target: tab, category: c, id })") && !cli.includes("invoke('permgate:remove-exception'") && cli.includes("T('panel.delFailed')"))
 ok('同向去重命中后把条目提到头部并回写文字', src.includes('const hit = c.exceptions.splice(idx, 1)[0]') && (src.match(/c\.exceptions\.unshift\(hit\)/g) || []).length === 2 && src.includes('textPatch(hit)'))
 ok('choice 路径不再套用候选的 deny-directory 过滤', !src.includes("if (!(action === 'deny' && entry.cat === 'directory'))"))
@@ -843,8 +843,8 @@ ok('面板为新工具补了用途说明（中英）', cli.includes("'quick.perm
 // ─────────────────────────────────────────────────────────────
 group('12. 审批弹窗候选文案与路径口径')
 ok('候选分类标签与设置面板一致（不再写「写入/编辑」）', !src.includes("'写入/编辑'") && src.includes("edit: ['编辑文件', 'file edits']"))
-ok('两条候选路径写法一致（均取规范化绝对路径）', src.includes('const absVal = normAbsPath(entry.value)') && src.includes('const fileVal = absVal') && src.includes("push(fileVal, fileVal, 'path',") && !src.includes(") + entry.value, entry.value, 'path'"))
-ok('判重/去重/匹配三处共用 pathKey（同一路径不同写法不重复写入、且能命中）', src.includes('function pathKey(p)') && src.includes('return normPathKey(normAbsPath(p))') && src.includes('pathKey(r.path) === pathKey(value)') && (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); return i >= 0 && j > i && src.slice(i, j).indexOf("indexOf('://')") !== -1 })())
+ok('两条候选路径写法一致（均取规范化绝对路径）', src.includes('const absVal = normAbsPath(entry.value, root)') && src.includes('const fileVal = absVal') && src.includes("push(fileVal, fileVal, 'path',") && !src.includes(") + entry.value, entry.value, 'path'"))
+ok('判重/去重/匹配三处共用 pathKey（同一路径不同写法不重复写入、且能命中）', src.includes('function pathKey(p, root)') && src.includes('return normPathKey(normAbsPath(p, root))') && src.includes('pathKey(r.path, root) === pathKey(value, root)') && (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); return i >= 0 && j > i && src.slice(i, j).indexOf("indexOf('://')") !== -1 })())
 ok('相对 glob 不被绝对化（glob 不是文件路径，只做斜杠归一）', (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); const body = i >= 0 && j > i ? src.slice(i, j) : ''; return body.indexOf('if (/[*?]/.test(s)) return s') !== -1 && body.indexOf('glob 不是文件路径') !== -1 })())
 
 // ─────────────────────────────────────────────────────────────
@@ -960,10 +960,10 @@ ok('分类默认值可带拒绝原因，且只在 deny 时保留', src.includes(
 // 防回退：写入单点曾把「未提供 reason」当成「清除 reason」，一次无关写入就会静默删掉用户写好的原因
 ok('未提供 reason 时保留原值（不再把 undefined 当成清除）', (src.match(/if \(reason === undefined\) return true/g) || []).length === 2 && src.includes("const t = reason === undefined ? prevReason : normalizeText(reason)"))
 ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透全局）', src.includes("if (pv && pv !== 'inherit') return { action: pv, ruleId: null, reason: normalizeText(pCat.reason) }") && src.includes("return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }"))
-ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', src.includes('function fallbackSetting() {') && src.includes("if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }") && src.includes("return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }") && src.includes('return fallbackSetting().mode'))
+ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', src.includes('function fallbackSetting(root) {') && src.includes("if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }") && src.includes("return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }") && src.includes('return fallbackSetting(root).mode'))
 ok('兜底拒绝原因落盘并在切离 deny 时清除', src.includes("if (t) block.fallbackReason = t") && src.includes('else delete block.fallbackReason') && src.includes("if (mode !== 'deny') { delete block.fallbackReason; return true }") && src.includes("if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }"))
 ok('快捷工具改为 { action, reason? } 对象形态，老字符串由单一入口收敛', src.includes('function normalizeQuickEntry(v) {') && src.includes("const raw = typeof v === 'string' ? { action: v } : (v && typeof v === 'object' ? v : null)") && src.includes("if (raw.action === 'deny') { const t = normalizeText(raw.reason); if (t) out.reason = t }"))
-ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 4 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
+ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 4 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
 ok('quickAction 用取值函数取值，并保留防御性字符串回退（防非对象形态产出非法 action）', src.includes("const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)") && src.includes("const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)") && src.includes("return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]) }"))
 ok('三处 reason 都拼进回给 AI 的拒绝文案', src.includes("const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''") && src.includes("const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''") && src.includes("' 次相同调用' + exReason(d)"))
 ok('perm_set_category / set_fallback / set_quick 都收 reason 参数', src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：该分类被拒时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：被兜底拒绝时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 action=deny 生效：该工具被拒时回给 AI"))
@@ -1795,7 +1795,7 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
   ok('defaultView.activeForSession 由默认预设决定',
     /activeForSession: dp === 'custom-review'/.test(src))
   ok('defaultView.sandbox 用 permgate 配置解析值（非预设捆绑值，避免图标闪变）',
-    /sandbox: effectiveSandboxConfig\(\)/.test(src))
+    /sandbox: effectiveSandboxConfig\(root\)/.test(src))
   ok('取不到默认预设时 defaultView 为 null（客户端保守不动）',
     /let defaultView = null\n\s*try \{/.test(src) && /\} catch \(e\) \{ defaultView = null \}/.test(src))
 
@@ -2005,6 +2005,314 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
       ok('pgEnsureMenuIcon 不直接读会话态标量（只经 pgView）', iconBody.length > 0 && !leak.test(iconBody))
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+group('21. 工作区根按会话派生（不再有跨会话共享的可变单例）')
+// 背景：root 曾是模块级闭包变量，由 ensureTarget 在每次 init(exec) 时按当前 exec 的 cwd
+// 覆写。实测危害两类：① 写盘归属 —— addProjectException 走 projectBlock()/ensureProject()，
+// 例外写进别的项目块（用户实测「在 ePicDLL 点的写到了 MCP 项目里」）；② 安全判定 ——
+// isOutside 的 6 个调用点里 4 处在 decide()，root 漂移到「包含目标」的位置时判定翻转为
+// false，工作区外路径被判成区内、直接跳过目录闸（fail-open，实测 3/3 场景复现）。
+// 修法：root 一律由调用方从会话上下文显式取得，不再有全局状态。
+{
+  // 1) 结构性断言：闭包变量与其写入点必须彻底消失
+  ok('模块级闭包 root / rootSource 已删除',
+    !/^\s*let root = /m.test(src) && !src.includes('let rootSource') && !src.includes('rootSource'))
+  ok('ensureTarget 不再写任何全局根', (() => {
+    const i = src.indexOf('async function ensureTarget')
+    const j = src.indexOf('async function ensureConfigDir', i)
+    const body = i >= 0 && j > i ? src.slice(i, j) : ''
+    return body.length > 0 && !/\broot\s*=/.test(body) && !/\brootSource\b/.test(body)
+  })())
+  // 唯一的派生点存在，且按会话取 cwd
+  ok('rootOf(exec) 是唯一派生点并读 session.header.cwd',
+    src.includes('function rootOf(exec) {') && /const session = exec && exec\.agent && exec\.agent\.session/.test(src)
+    && /const cwd = session && session\.header && session\.header\.cwd/.test(src))
+  // 兜底必须非空：isOutside 对空根判「非区外」（fail-open），故空串不可达。
+  // 注意判空必须在 norm **之后**：cwd 为盘根形态（'/'、'//'、'\'）时 norm 结果为 ''，
+  // 按原文判空会直接 return norm(cwd) 返回空串、绕过 fallbackRoot。
+  ok('rootOf 先归一化再判空（盘根 cwd 归一后为空时仍回落非空兜底）', (() => {
+    const i = src.indexOf('function rootOf(exec) {')
+    let d = 0, j = i
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { j = k; break } }
+    }
+    const body = src.slice(i, j + 1)
+    return body.includes('return fallbackRoot') && !body.includes("return ''")
+      && !body.includes('if (typeof cwd === \'string\' && cwd) return norm(cwd)')
+      && /const n = typeof cwd === 'string' && cwd \? norm\(cwd\) : ''/.test(body)
+      && /if \(n\) return n/.test(body)
+  })())
+  ok('fallbackRoot 自身非空（末位兜 \'/\'，norm(\'/\') 会是空串）',
+    /const fallbackRoot = norm\(String\(sp\.workspaceRoot \|\| ''\)\.replace\(\/\[\\\\\/\]\+\$\/, ''\)\) \|\| norm\(process\.cwd\(\)\) \|\| '\/'/.test(src))
+
+  // 2) 机械不变量：所有根消费函数都要求显式传根，且调用点确实传了
+  // 两类消费函数：① 收 root 值（纯函数，好测）；② 收 exec 后内部 rootOf(exec)（有会话上下文）
+  const needsRoot = ['normAbsPath', 'pathKey', 'projectBlock', 'ensureProject', 'resolveCategory',
+    'matchException', 'alreadyInProject', 'outsideMatrix', 'quickAction', 'fallbackSetting',
+    'fallbackMode', 'effectiveSandboxConfig', 'editorKernelSetting', 'commandFullyCovered',
+    'setCategoryMode', 'setQuickAction', 'setFallbackMode', 'setEditorKernel', 'setSandboxConfig',
+    'resolveEditorKernel', 'projectsFromConfig', 'removeMigratedSource']
+  const missingParam = needsRoot.filter((fn) => !new RegExp('function ' + fn + '\\([^)]*\\broot\\b').test(src))
+  ok('所有根消费函数都接收显式 root 参数', missingParam.length === 0, JSON.stringify(missingParam))
+  // 收 exec 的那类：必须内部经 rootOf 取值，不得再有任何别的根来源
+  const needsExec = ['cleanupStaleProjects']
+  const badExec = needsExec.filter((fn) => {
+    const i = src.indexOf('function ' + fn + '(')
+    if (i < 0) return true
+    let d = 0
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return !src.slice(i, k + 1).includes('rootOf(exec)') }
+    }
+    return true
+  })
+  ok('收 exec 的消费函数内部经 rootOf(exec) 取根', badExec.length === 0, JSON.stringify(badExec))
+  // 调用点不得漏传：按括号配平切分实参个数，逐个比对期望值
+  // addProjectException 的根是第 5 个位置参数（曾走 opts.root 第二通道，漏传静默落部署根）
+  const arity = {
+    normAbsPath: 2, pathKey: 2, projectBlock: 1, ensureProject: 1, resolveCategory: 4,
+    matchException: 4, alreadyInProject: 4, outsideMatrix: 3, quickAction: 2, fallbackSetting: 1,
+    fallbackMode: 1, effectiveSandboxConfig: 1, editorKernelSetting: 1, commandFullyCovered: 2,
+    setCategoryMode: 5, setQuickAction: 5, setFallbackMode: 4, setEditorKernel: 3, setSandboxConfig: 3,
+    resolveEditorKernel: 2, cleanupStaleProjects: 1, projectsFromConfig: 2, removeMigratedSource: 2,
+    addProjectException: 6,
+  }
+  const argCount = (s, open) => {
+    let d = 0, cur = '', args = []
+    for (let i = open + 1; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === '(' || ch === '[' || ch === '{') d++
+      else if (ch === ')' || ch === ']' || ch === '}') { if (d === 0) { args.push(cur); break } d-- }
+      else if (ch === ',' && d === 0) { args.push(cur); cur = ''; continue }
+      cur += ch
+    }
+    return args.filter((a) => a.trim() !== '').length
+  }
+  const badArity = []
+  for (const [fn, want] of Object.entries(arity)) {
+    const lines = src.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      const code = lines[i].replace(/\/\/.*$/, '')
+      if (new RegExp('function\\s+' + fn + '\\s*\\(').test(code)) continue
+      const re = new RegExp('\\b' + fn + '\\s*\\(', 'g')
+      let m
+      while ((m = re.exec(code)) !== null) {
+        const got = argCount(code, m.index + m[0].length - 1)
+        // 可选尾参（reason/opts）允许省略：只拦「少于必填数」
+        const min = fn === 'setCategoryMode' || fn === 'setQuickAction' ? want - 1 : want
+        if (got < min) badArity.push(fn + '@L' + (i + 1) + ' got=' + got + ' min=' + min)
+      }
+    }
+  }
+  ok('所有调用点都传了根参数（漏传会让函数回落到兜底根、静默错判）',
+    badArity.length === 0, JSON.stringify(badArity.slice(0, 6)))
+
+  // 3) 行为断言：真实执行 rootOf/projectBlock/ensureProject，验证按会话隔离
+  const CATS_L = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop']
+  const EXC_L = ['directory', 'command', 'read', 'image', 'edit', 'undo']
+  const sliceFn = (name) => {
+    const s = src.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const harness = [
+    "const norm = (p) => String(p).replace(/\\\\/g, '/').replace(/\\/+$/, '')",
+    "const normPathKey = (p) => String(p || '').toLowerCase()",
+    "const fallbackRoot = 'G:/FALLBACK'",
+    "let config = { global: {}, projects: {} }",
+    "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
+    "function freshProject() { const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit', editorKernel: 'inherit' }; for (const c of CATS) pb[c] = freshCategory(c, true); return pb }",
+    "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
+    sliceFn('rootOf'), sliceFn('normAbsPath'), sliceFn('pathKey'),
+    sliceFn('projectBlock'), sliceFn('ensureProject'), sliceFn('addProjectException'),
+    sliceFn('effectiveSandboxConfig'),
+    "return { rootOf, normAbsPath, pathKey, projectBlock, ensureProject, addProjectException, effectiveSandboxConfig, cfg: () => config }",
+  ].join('\n')
+  let H = null
+  try { H = new Function('CATS', 'EXC_CATS', 'pathResolve', harness)(CATS_L, EXC_L, pathResolve) } catch (e) {
+    ok('根派生逻辑可独立求值：' + (e && e.message), false)
+  }
+  if (H) {
+    const execA = { agent: { session: { header: { cwd: 'D:/proj/ePicDLL' } } } }
+    const execB = { agent: { session: { header: { cwd: 'G:/MCP' } } } }
+    ok('rootOf 按会话取 cwd（两会话各得各的）',
+      H.rootOf(execA) === 'D:/proj/ePicDLL' && H.rootOf(execB) === 'G:/MCP')
+    ok('rootOf 取不到会话时回落非空兜底根（空串会 fail-open）',
+      H.rootOf(null) === 'G:/FALLBACK' && H.rootOf({ agent: { session: {} } }) === 'G:/FALLBACK'
+      && H.rootOf({ agent: { session: { header: { cwd: '' } } } }) === 'G:/FALLBACK')
+    // 盘根形态 cwd：norm 归一后为空串，必须回落兜底根而不是返回空串（否则 isOutside fail-open）
+    ok('rootOf 对盘根形态 cwd 仍返回非空兜底根（归一后为空不得直接返回）',
+      H.rootOf({ agent: { session: { header: { cwd: '/' } } } }) === 'G:/FALLBACK'
+      && H.rootOf({ agent: { session: { header: { cwd: '//' } } } }) === 'G:/FALLBACK'
+      && H.rootOf({ agent: { session: { header: { cwd: '\\\\' } } } }) === 'G:/FALLBACK')
+    // 核心：两个会话各写各的项目块
+    H.ensureProject(H.rootOf(execA)).sandboxMode = 'workspace-write'
+    H.ensureProject(H.rootOf(execB)).sandboxMode = 'danger-full-access'
+    const cfg = H.cfg()
+    ok('并发会话各写各的项目块（不再串台）',
+      Object.keys(cfg.projects).length === 2
+      && cfg.projects['D:/proj/ePicDLL'].sandboxMode === 'workspace-write'
+      && cfg.projects['G:/MCP'].sandboxMode === 'danger-full-access',
+      JSON.stringify(Object.keys(cfg.projects)))
+    // 审批落盘用 entry.projRoot：发起会话与「期间切到的会话」不同，必须写进发起方
+    const entryRoot = H.rootOf(execA)
+    H.addProjectException('directory', 'path', 'D:/shared/lib/*', 'allow', entryRoot, { target: 'project' })
+    H.addProjectException('read', 'path', 'D:/shared/lib/*', 'allow', entryRoot, { target: 'project' })
+    const c2 = H.cfg()
+    const epi = c2.projects['D:/proj/ePicDLL']
+    ok('审批落盘用 entry.projRoot：两条例外都进发起会话的项目块',
+      !!(epi && epi.directory.exceptions.length === 1 && epi.read.exceptions.length === 1),
+      JSON.stringify(epi && { d: epi.directory.exceptions.length, r: epi.read.exceptions.length }))
+    ok('审批落盘不污染期间切到的那个会话的项目块',
+      c2.projects['G:/MCP'].directory.exceptions.length === 0 && c2.projects['G:/MCP'].read.exceptions.length === 0)
+    ok('effectiveSandboxConfig 按传入根取项目值（A=ww 生效、B=fa 生效）',
+      H.effectiveSandboxConfig(H.rootOf(execA)) === 'workspace-write'
+      && H.effectiveSandboxConfig(H.rootOf(execB)) === 'danger-full-access')
+    // normAbsPath 的相对路径绝对化也必须按传入根，否则同一例外在判重/写入/匹配三处不同答案
+    ok('normAbsPath 按传入根绝对化（同值不同根得不同结果）',
+      H.normAbsPath('a/b.txt', 'G:/MCP') === 'G:/MCP/a/b.txt'
+      && H.normAbsPath('a/b.txt', 'D:/proj/ePicDLL') === 'D:/proj/a/b.txt'.replace('/proj', '/proj/ePicDLL'))
+    ok('pathKey 也按传入根（判重口径与写入一致）',
+      H.pathKey('a.txt', 'G:/MCP') === H.pathKey('G:/MCP/a.txt', 'G:/MCP'))
+  }
+
+  // 3.5) isOutside 的每个调用点都必须传「会话派生值」——这是安全判定，不能有固定根。
+  // 回退成 fallbackRoot/字面量时，root 漂移会以另一种形式回来：所有会话共用同一根，
+  // 某个项目里的工作区外路径会被判成区内、直接跳过目录闸。
+  {
+    const argsOf = (s, open) => {
+      let d = 0, cur = '', out = []
+      for (let k = open + 1; k < s.length; k++) {
+        const ch = s[k]
+        if (ch === '(' || ch === '[' || ch === '{') d++
+        else if (ch === ')' || ch === ']' || ch === '}') { if (d === 0) { out.push(cur); break } d-- }
+        else if (ch === ',' && d === 0) { out.push(cur); cur = ''; continue }
+        cur += ch
+      }
+      return out.map((a) => a.trim())
+    }
+    const calls = []
+    const lines = src.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      const code = lines[i].replace(/\/\/.*$/, '')
+      if (/function isOutside\(/.test(code)) continue
+      const re = /isOutside\(/g
+      let m
+      while ((m = re.exec(code)) !== null) {
+        const a = argsOf(code, m.index + m[0].length - 1)
+        calls.push({ line: i + 1, arg: a[1] || '' })
+      }
+    }
+    const bad = calls.filter((c) => c.arg !== 'root' && c.arg !== 'rootOf(exec)')
+    ok('isOutside 的每个调用点都传会话派生的根（不得用固定兜底根）',
+      calls.length === 6 && bad.length === 0,
+      JSON.stringify(bad.length ? bad : calls.length))
+  }
+
+  // 4) 安全方向断言：isOutside 在真实 root 下对工作区外路径必然为 true
+  const iOut = src.indexOf('function isOutside(p, rootKey) {')
+  if (iOut > 0) {
+    let d = 0, j = iOut
+    for (let k = src.indexOf('{', iOut); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { j = k; break } }
+    }
+    const isOutside = new Function('norm', 'pathResolve', 'return (' + src.slice(iOut, j + 1) + ')')(
+      (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, ''), pathResolve)
+    const target = 'D:/visual studio 2022/Projects/WeiHengLib/WeiHengLib/src/a.ts'
+    ok('isOutside：会话根下工作区外路径必然过目录闸',
+      isOutside(target, 'D:/visual studio 2022/Projects/ePicDLL/ePicDLL') === true)
+    // 防回退：空根是 fail-open 的（返回 false = 判为区内），故 rootOf 的兜底必须非空
+    ok('isOutside 对空根返回 false（fail-open）—— 这正是兜底不可为空的原因',
+      isOutside(target, '') === false)
+    ok('isOutside 对 null/undefined 根返回 true（fail-closed，兜底方向的另一侧）',
+      isOutside(target, null) === true && isOutside(target, undefined) === true)
+  }
+
+  // 5) 路由级：decide 必须自解析会话（客户端载荷不带 sessionId）
+  ok('decide 路由按 entry.sessionId 自解析 exec（否则 init/persist 跟别的会话走）', (() => {
+    const i = src.indexOf("if (pathname === '/permgate/decide'")
+    const j = src.indexOf("if (pathname === '/permgate/set-sandbox'", i)
+    const body = i >= 0 && j > i ? src.slice(i, j) : ''
+    return body.includes('ctx.sessions.get(entry.sessionId)') && /await init\(exec\)/.test(body)
+      && /await persist\(exec\)/.test(body)
+  })())
+  ok('decide 落盘用 entry.projRoot 快照（不用「当前会话」的根）',
+    src.includes('const entryRoot = entry.projRoot || rootOf(exec)')
+    && src.includes('decision, entryRoot, { target: \'project\' })'))
+  ok('客户端 decide 载荷确实不带 sessionId（故必须服务端自解析）',
+    !/call\('permgate:decide', \{[^}]*sessionId/.test(cli))
+
+  // 6) 根只允许一条通道：addProjectException 的根是位置参数（曾走 opts.root，漏传静默落部署根，
+  //    且 arity 守卫只校验位置参数、拦不住 opts 漏传）。防回退：不得再出现 opts.root 形态。
+  ok('addProjectException 的根走位置参数（不再有 opts.root 第二通道）',
+    src.includes('function addProjectException(cat, kind, value, decision, root, opts) {')
+    && src.includes('const rootKey = root || fallbackRoot')
+    && !src.includes('const root = o.root || fallbackRoot')
+    && (src.match(/addProjectException\(/g) || []).length === 6
+    && !/addProjectException\([^)]*\{[^}]*root:/.test(src))
+
+  // 7) 清理失效工作区：必须区分「确认不存在」与「不可达」，且保护集降级时不删
+  // 关键：fs.stat 对「未挂载的盘」与「目录真被删除」都返回 undefined（实测 dsh-fs-local），
+  // 仅靠 stat 结果无法区分，必须先确认卷根可达，否则离线盘的项目配置会被永久删除。
+  ok('清理失效工作区：先确认卷根可达（未挂载的盘不得当成目录已删除）', (() => {
+    const i = src.indexOf('async function cleanupStaleProjects')
+    const j = src.indexOf('function globToRegExp', i)
+    const body = i >= 0 && j > i ? src.slice(i, j) : ''
+    return body.length > 0
+      && body.includes('const volRoot = volumeRootOf(key)')
+      && body.includes('if (!volOk) {')
+      && /卷不可达（盘未挂载？），保留其配置[\s\S]{0,80}?continue/.test(body)
+      && body.indexOf('volumeRootOf(key)') < body.indexOf('missing = !info')
+  })())
+  ok('volumeRootOf：盘根形态不得落到当前盘根（norm 剥尾斜杠后仍要认盘符）', (() => {
+    const i = src.indexOf('function volumeRootOf(')
+    if (i < 0) return false
+    let d = 0, j = i
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { j = k; break } }
+    }
+    const fn = new Function('norm', 'return (' + src.slice(i, j + 1) + ')')(
+      (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, ''))
+    return fn('G:/') === 'G:/' && fn('G:') === 'G:/' && fn('Z:') === 'Z:/'
+      && fn('G:/MCP/proj') === 'G:/' && fn('//srv/share/p') === '//srv/share' && fn('/home/u') === '/'
+  })())
+  ok('清理失效工作区：stat 抛错（权限/IO）不得当成不存在而删除', (() => {
+    const i = src.indexOf('async function cleanupStaleProjects')
+    const j = src.indexOf('function globToRegExp', i)
+    const body = i >= 0 && j > i ? src.slice(i, j) : ''
+    return body.length > 0
+      && body.includes('missing = !info')
+      && !body.includes('catch (e) { exists = false }')
+      && /catch \(e\) \{[\s\S]*?工作区不可达，保留其配置[\s\S]*?continue/.test(body)
+  })())
+  ok('清理失效工作区：会话列表不可用（保护集不完整）时跳过本轮清理',
+    /会话列表不可用，跳过失效工作区清理[\s\S]{0,120}?return/.test(src))
+  ok('清理失效工作区：删除前留档被删内容（删除不可逆，事后可还原）', (() => {
+    const i = src.indexOf('async function cleanupStaleProjects')
+    const j = src.indexOf('function globToRegExp', i)
+    const body = i >= 0 && j > i ? src.slice(i, j) : ''
+    // 必须在 delete 之前把块内容存进 keptBackup，且日志确实输出它——否则留档恒为空对象
+    return body.includes('keptBackup[key] = projs[key]')
+      && body.indexOf('keptBackup[key] = projs[key]') < body.indexOf('delete projs[key]')
+      && body.includes('JSON.stringify(keptBackup)')
+      && src.includes('被删内容（如需恢复请手工写回 config.json 的 projects 段）')
+  })())
+
+  // 8) 根与会话同源：syncSandbox 的 session 取自 agentRef，故根也必须由同一 session 派生
+  ok('syncSandbox 的根由同一 session 派生（不与 agentRef 的会话串台）',
+    src.includes('effectiveSandboxConfig(rootOf({ agent: { session } }))'))
+  ok('HTTP 路由未带 sessionId 时回落到 agentRef 的会话（根与会话同源）',
+    src.includes('if (!exec && agentRef && agentRef.session) exec = { agent: { session: agentRef.session } }'))
 }
 
 // ─────────────────────────────────────────────────────────────
