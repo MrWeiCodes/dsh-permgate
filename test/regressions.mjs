@@ -2571,6 +2571,221 @@ group('22. 非 UTF-8 预览：猜测关闭时采用服务给出的候选 + 可�
 }
 
 // ─────────────────────────────────────────────────────────────
+group('23. 编码切换浮层不被父容器裁剪（真实 Chrome 实测过的坑）')
+// 背景：浮层原先用 position:absolute，被 .pg2-block 的 overflow:hidden 裁剪——实测 diff
+// 只有两行时块高约 64px，而浮层需要 130px+，结果只看得见标题、候选与脚注全被切掉
+// （用户截图复现）。改为 position:fixed：包含块是视口，不受祖先 overflow 裁剪
+// （前提是祖先链上没有 transform/filter/will-change 之类会重建包含块的属性）。
+// 代价是坐标要自己算，且 fixed 用视口坐标，滚动/resize 后必须重算。
+{
+  const cssStart = cli.indexOf('const DIFF2_CSS = ')
+  const css = cssStart >= 0 ? cli.slice(cssStart, cli.indexOf("';", cssStart)) : ''
+  ok('浮层用 position:fixed（absolute 会被 .pg2-block 的 overflow:hidden 裁掉）',
+    /\.pg2-enc-pop \{[^}]*position: fixed/.test(css) && !/\.pg2-enc-pop \{[^}]*position: absolute/.test(css))
+  ok('.pg2-block 仍保留 overflow:hidden（圆角裁剪是既有设计，改的是浮层不是它）',
+    /\.pg2-block \{[^}]*overflow: hidden/.test(css))
+  // fixed 的前提：**祖先链**上不能有会重建包含块的属性（transform/filter/perspective/
+  // will-change/contain 非 none 时，该祖先会顶替视口成为 fixed 的包含块，浮层随即退回被
+  // 祖先 overflow 裁剪、且代码写入的视口坐标整体错位）。
+  // 检查对象必须是**两份 CSS 常量里的祖先选择器**，不能只扫 DIFF2_CSS：浮层在审批弹窗里
+  // 的祖先 .pg-modal 定义在第 9 行的 CSS 常量中（detailBody 同时用于弹窗与抽屉两处），
+  // 只扫 DIFF2_CSS 会漏掉它——那样日后给 .pg-modal 加 transform 时本断言照样通过，
+  // 而浮层会退回被 .pg-modal{overflow-y:auto} 裁剪的状态，正是本组要防的回归。
+  // 反向也要注意：不能简单把两份常量合并全扫——第 9 行 CSS 里的 transform/filter 绑在
+  // .pg-action:active/.pg-btn:active 等**按钮自身伪类**上，并非浮层祖先，全扫会误报。
+  const cssMain = (() => {
+    const s = cli.indexOf('const CSS = "')
+    return s >= 0 ? cli.slice(s, cli.indexOf('";', s)) : ''
+  })()
+  // 切片失败必须显性失败：cssMain 为空时祖先链只剩 DIFF2_CSS 那半，.pg-modal 会静默漏检
+  // （本断言存在的全部理由就是覆盖它）。与下面「能切出 measure 函数体」同一防御思路。
+  ok('能切出第 9 行 CSS 常量（切不到则 .pg-modal 祖先链静默漏检）',
+    cssMain.includes('.pg-modal {'))
+  const ancestorRules = (cssMain + ' ' + css).match(/[^{}]+\{[^{}]*\}/g) || []
+  const ancestorSel = /\b(pg-modal|pg2-drawer|pg2-drawer-body|pg2-block|pg2-header|pg2-enc-wrap)\b/
+  const badInAncestors = ancestorRules.filter((r) => ancestorSel.test(r.split('{')[0])
+    && /(transform|filter|perspective|will-change|contain)\s*:/.test(r))
+  ok('浮层祖先链（含 .pg-modal 与抽屉）无 transform/filter/will-change/contain（fixed 的前提）',
+    badInAncestors.length === 0, JSON.stringify(badInAncestors.map((r) => r.split('{')[0].trim())))
+  ok('浮层 z-index 高于 diff 内容（否则被后续行盖住）',
+    /\.pg2-enc-pop \{[^}]*z-index: 9999/.test(css))
+
+  const sliceFn = (name) => {
+    const s = cli.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = cli.indexOf('{', s); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const encBody = sliceFn('EncBadge')
+  ok('能切出 EncBadge 函数体', encBody.length > 0)
+  // 注：曾有一条断言禁止坐标变量叫 top/left，理由是「与 window 的同名只读宿主属性冲突」。
+  // 该归因不成立——函数作用域里的 let/const/var 是局部绑定，必然遮蔽 window.top，写 `let top`
+  // 完全安全；只有**全局**作用域的 `var top` 或无声明的裸赋值 `top = ...` 才会命中该坑，而本
+  // 文件全部代码都在 __ModuleLoader__.load 的回调里。故删除该断言，只验证坐标真的写进了 style。
+  ok('浮层坐标写进 style（且带 px 单位）',
+    /top: pos\.top \+ 'px'/.test(encBody) && /left: pos\.left \+ 'px'/.test(encBody))
+  // 首帧还没量到坐标时必须先隐藏占位，否则浮层会闪现在左上角
+  ok('未测量时隐藏占位（避免首帧闪现在左上角）',
+    /pos \? \{ left: pos\.left \+ 'px'/.test(encBody) && /visibility: 'hidden'/.test(encBody))
+  // 视口边界与翻转：下方放不下且上方更宽裕时翻上去
+  ok('横向越界时贴右边、纵向不足时翻到上方（不出屏）',
+    /popLeft \+ width > vw - 8/.test(encBody) && /popTop \+ need > vh - 8/.test(encBody)
+    && /popTop = r\.top - need - 4/.test(encBody))
+  // 滚动/resize 后重算坐标；且必须经 rAF 合并——scroll 是捕获阶段监听，页面内任意滚动容器
+  // 每滚动一次都会触发，measure 又要同步读几何，不合并则开销按事件数而非帧数增长。
+  // 处理器名不写死（\w+）：把 onMove 重命名成 handleMove 是无害重构，不该让断言失败。
+  // 关键在「同一个处理器同时挂在 scroll(capture) 与 resize 上、并被成对移除」这一行为。
+  ok('滚动/resize 时重算坐标（fixed 是视口坐标，不重算会脱位）',
+    /addEventListener\('scroll',\s*(\w+),\s*true\)/.test(encBody)
+    && /addEventListener\('resize',\s*(\w+)\)/.test(encBody)
+    && /removeEventListener\('scroll',\s*(\w+),\s*true\)/.test(encBody)
+    && (() => {
+      const add = encBody.match(/addEventListener\('scroll',\s*(\w+),\s*true\)/)
+      const addR = encBody.match(/addEventListener\('resize',\s*(\w+)\)/)
+      const rm = encBody.match(/removeEventListener\('scroll',\s*(\w+),\s*true\)/)
+      return add && addR && rm && add[1] === addR[1] && add[1] === rm[1]
+    })())
+  ok('滚动重算经 rAF 合并（否则每个滚动事件都强制一次同步布局）',
+    // 锚定真实调用而非特性检测：`typeof window.requestAnimationFrame !== 'function'` 这行
+    // 本身就含该标识符，只匹配标识符会让断言在去掉合并后依然通过（实测踩到过）。
+    // 变量名不写死（用 \w+）：把 raf 重命名成 rafId 是无害重构，不该让断言失败。
+    /\w+\s*=\s*window\.requestAnimationFrame\(/.test(encBody)
+    && /window\.cancelAnimationFrame\(\s*\w+\s*\)/.test(encBody))
+  // 上面的正则只能证明「调用了 rAF」，证明不了「真的做了合并」：把 `if (raf) return;` 删掉后
+  // 调用仍在、断言照样通过（实测变异 M4 漏检），而合并一旦失效就退回 O(事件数)。
+  // 故真实执行 onMove，断言同一帧内多次滚动只排队一次。
+  // 切片锚点不绑定具体变量名/声明形式：处理器可以是 const onMove = () => {}、
+  // const onMove = function () {} 或 function onMove() {}，名字任意。
+  // 定位方式是**按行为特征**而非靠长度猜：先取被 addEventListener('scroll'/'resize', X) 挂载的
+  // 那个处理器名 X（上面那条断言已保证两处挂的是同一个），再按名字切出它的定义。
+  // 不这样做的坑（实测踩到过）：若改用「取第一个含 requestAnimationFrame 的函数」会命中
+  // EncBadge 自身；若改用「取最短的」则在有人抽出更短的 rAF 辅助函数时选错对象而误报。
+  // 另外把紧邻其上的句柄声明（如 let raf = 0;，名字与 let/const/var 都不写死）一并带进切片，
+  // 否则切片内该变量未定义。
+  const rafMerge = (() => {
+    const hooked = encBody.match(/addEventListener\('scroll',\s*(\w+),\s*true\)/)
+      || encBody.match(/addEventListener\('resize',\s*(\w+)\)/)
+    if (!hooked) return null
+    const name = hooked[1]
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const defRe = new RegExp('(?:const|let|var)\\s+' + esc + '\\s*=\\s*(?:\\([^)]*\\)\\s*=>|function\\s*\\([^)]*\\))\\s*\\{|function\\s+' + esc + '\\s*\\([^)]*\\)\\s*\\{')
+    const m = encBody.match(defRe)
+    if (!m) return null
+    let d = 0
+    for (let k = encBody.indexOf('{', m.index); k < encBody.length; k++) {
+      if (encBody[k] === '{') d++
+      else if (encBody[k] === '}') {
+        d--
+        if (d === 0) {
+          const body = encBody.slice(m.index, k + 1)
+          // 把定义**之前**、且**在该处理器体内被引用**的句柄声明一并带进切片
+          // （不要求紧邻：中间可能插入了别的辅助函数；按「体内是否引用」筛选，
+          //   可避免中间出现其它声明时把无关变量拖进来、真正句柄反而缺失）。
+          // 初值不写死为 0：MDN 明确建议不要把 0 当哨兵值（rAF 的 ID 理论上可能为 0），
+          // 改成 let raf = null 是更正确的写法，不该让断言失败（实测踩到过）。
+          // 起点取**最早**那个被引用的声明（用 min，不是最后匹配的）：体内若引用了两个外部
+          // 声明，只取最后一个会让切片漏掉更早的，运行时假失败 "X is not defined"（实测踩到过）。
+          const before = encBody.slice(0, m.index)
+          let start = m.index
+          for (const dm of before.matchAll(/(?:let|const|var)\s+(\w+)\s*=\s*[^;\n]+;/g)) {
+            const v = dm[1]
+            if (new RegExp('\\b' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(body)) {
+              start = Math.min(start, dm.index)
+            }
+          }
+          return { name, seg: encBody.slice(start, k + 1) }
+        }
+      }
+    }
+    return null
+  })()
+  ok('能切出滚动处理器（切不到则下面的合并行为断言失效）', !!rafMerge)
+  if (rafMerge) {
+    // 单次 ok：把执行结果收进变量，异常也计入失败（不在 catch 里再调一次 ok，否则失败输出会出现两条同名）
+    let queued = 0, seq = 0, err = null
+    const win = { requestAnimationFrame: () => { queued++; return ++seq } }
+    try {
+      const made = new Function('window', 'measure', rafMerge.seg + '\nreturn { h: ' + rafMerge.name + ' };')(win, () => {})
+      for (let k = 0; k < 10; k++) made.h()
+    } catch (e) { err = String(e && e.message) }
+    ok('★ 同一帧内 10 次滚动只排队 1 次 rAF（合并真的生效，而非仅调用了 rAF）',
+      !err && queued === 1, err || ('排队次数=' + queued))
+  }
+  ok('浮层与徽标都在 boxRef 内（外部点击关闭的判定依赖它）',
+    /className: 'pg2-enc-wrap', ref: boxRef/.test(encBody))
+
+  // 行为断言：真实执行 measure 的坐标计算。桩里的 setPos 具备 useState 的函数式更新语义
+  // （实现用它做相等性 bail-out，桩若只接受对象就测不到真实行为）。
+  // 切片锚点不绑定声明形式（箭头函数 / function 声明 / 赋值表达式都接受），
+  // 否则把 measure 改成 function 声明这类等价重构会让「能切出 measure」失败、误导为改坏了。
+  const measure = (() => {
+    const m = encBody.match(/(?:const|let|var)\s+measure\s*=\s*(?:\([^)]*\)\s*=>|function\s*\([^)]*\))\s*\{|function\s+measure\s*\([^)]*\)\s*\{/)
+    if (!m) return null
+    const i = m.index
+    let d = 0
+    for (let k = encBody.indexOf('{', i); k < encBody.length; k++) {
+      if (encBody[k] === '{') d++
+      else if (encBody[k] === '}') { d--; if (d === 0) return encBody.slice(i, k + 1) }
+    }
+    return null
+  })()
+  // 切不到就直接失败：否则下面四条行为断言会被整段跳过，测试仍显示 ALL PASS
+  ok('能切出 measure 函数体（切不到则坐标行为断言全部失效）', !!measure)
+  if (measure) {
+    const run = (rect, popSize, vp) => {
+      const boxRef = { current: { getBoundingClientRect: () => rect } }
+      const popRef = { current: { offsetWidth: popSize.w, offsetHeight: popSize.h } }
+      let got = null
+      const window = { innerWidth: vp.w, innerHeight: vp.h }
+      // 模拟 useState 的 setter：接受值或更新函数，并在引用相等时保持原引用（bail-out）
+      const setPos = (p) => { got = (typeof p === 'function') ? p(got) : p }
+      try {
+        new Function('boxRef', 'popRef', 'setPos', 'window', measure + '\nmeasure();')(boxRef, popRef, setPos, window)
+      } catch (e) { return { err: String(e && e.message) } }
+      return got
+    }
+    const r1 = run({ top: 236, bottom: 251, left: 233 }, { w: 238, h: 130 }, { w: 780, h: 805 })
+    ok('★ 中部位置：浮层贴在徽标下方且左对齐（下方空间充足时不翻转）',
+      r1 && r1.top === 255 && r1.left === 233, JSON.stringify(r1))
+    const r2 = run({ top: 760, bottom: 775, left: 233 }, { w: 238, h: 130 }, { w: 780, h: 805 })
+    ok('★ 底部位置：下方放不下时翻到上方（不出屏）',
+      r2 && r2.top === 626 && r2.left === 233, JSON.stringify(r2))
+    const r3 = run({ top: 236, bottom: 251, left: 700 }, { w: 238, h: 130 }, { w: 780, h: 805 })
+    ok('★ 右侧位置：横向越界时贴右边（不出屏）',
+      r3 && r3.left === 534 && r3.top === 255, JSON.stringify(r3))
+    const r4 = run({ top: 236, bottom: 251, left: 233 }, { w: 238, h: 130 }, { w: 0, h: 0 })
+    ok('视口尺寸取不到时仍给出可用坐标（不产出 NaN）',
+      r4 && r4.top === 255 && r4.left === 233, JSON.stringify(r4))
+    // 相等性 bail-out 也要行为断言：去掉 setPos 里的相等判断后，上面的正则仍会通过
+    // （实测变异 M6 漏检），而坐标未变的帧会退回「每次都重建元素树」。
+    // 桩按 useState 语义记录「返回原引用(bail-out) / 新对象(触发渲染)」。
+    const calls = []
+    let state = null
+    const setPos = (p) => {
+      const next = (typeof p === 'function') ? p(state) : p
+      calls.push(next === state ? 'bail' : 'render')
+      state = next
+    }
+    let err = null
+    try {
+      const { measure: m } = new Function('boxRef', 'popRef', 'setPos', 'window',
+        measure + '\nreturn { measure };')(
+        { current: { getBoundingClientRect: () => ({ top: 236, bottom: 251, left: 233 }) } },
+        { current: { offsetWidth: 238, offsetHeight: 130 } },
+        setPos,
+        { innerWidth: 780, innerHeight: 805 })
+      m(); m(); m()
+    } catch (e) { err = String(e && e.message) }
+    ok('★ 坐标未变时 setPos 返回原引用（相等性 bail-out 真的生效，不重建元素树）',
+      !err && calls.join(',') === 'render,bail,bail', err || calls.join(','))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)
