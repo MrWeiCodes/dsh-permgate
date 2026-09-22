@@ -695,22 +695,29 @@ ok('客户端标注编码来源并区分「猜的/确定的」，且两个键的
 // 防回退：编码徽标必须由**同一个**共用组件渲染，且三处渲染位都在。
 // 只断言「源码里存在 encoding/decided 字符串」证明不了数据真的到了界面——曾实测把
 // withEncMeta 改成永不附加字段（徽标彻底消失），那种断言照样通过。故这里：
-//   ① 用**带尾逗号的渲染位形态** `encBadge(data),` 计数（恰为 3），与函数定义形参区分开
+//   ① 用**带尾逗号的渲染位形态** `encBadge(data,` 计数（恰为 3），与函数定义形参区分开
 //      （曾把形参与渲染点混在同一计数里：形参改名就误报失败，删一处+别处重复则漏判）；
 //   ② 把三处分别锚定在各自 header 块内，避免「删一处、别处重复一次」的守恒式绕过。
+// 第二个实参是切换预览解码的回调（有候选时徽标才可点）——计数只看**调用点**：
+// 先剔除函数定义行，再数剩余的三处渲染位。（直接把 `encBadge(data,` 计数会把定义行也算进去。）
+// 分派层（无状态）与带状态的 EncBadge 组件必须分开：把 hooks 写进被内联调用的普通函数，
+// open/busy 就归属整块 diff，开关一次浮层会重建全部行元素（最多 10 万行上下文）。
 ok('编码徽标单点渲染，且 fallback / 常规 diff / read 三处 header 都挂载',
   (cli.match(/function encBadge\(/g) || []).length === 1 &&
-  (cli.match(/encBadge\(data\),/g) || []).length === 3 &&
+  (cli.match(/function EncBadge\(/g) || []).length === 1 &&
+  (cli.replace(/function encBadge\(data,[^)]*\)\s*\{/g, '').match(/encBadge\(data,\s*[A-Za-z_$][\w$]*\)/g) || []).length === 3 &&
+  // 浮层状态必须落在真组件里（React.createElement(EncBadge, …)），不是内联普通函数调用
+  /React\.createElement\(EncBadge, \{ data, onPick \}\)/.test(cli) &&
   // fallback 视图：'-' + data.removed 之后紧跟徽标
-  /'-' \+ data\.removed\),\s*\n\s*encBadge\(data\),/.test(cli) &&
+  /'-' \+ data\.removed\),\s*\n\s*encBadge\(data,/.test(cli) &&
   // read 视图：diffLines 之后紧跟徽标
-  /T\('app\.diffLines'\)\.replace\([^\n]*\),\s*\n\s*encBadge\(data\),/.test(cli))
+  /T\('app\.diffLines'\)\.replace\([^\n]*\),\s*\n\s*encBadge\(data,/.test(cli))
 // 防回退：服务判定结果必须从宿主透传到客户端（readPreviewText → holder → payload → badge）。
 // 写类 diff 与撤销预览的 payload 由多个构造器产出，故经**请求内局部 holder** 单点附加。
 // holder 必须是局部对象而非 entry 属性：file-diff 是 HTTP 路由且无按 id 串行化，
 // 挂 entry 上会让并发请求交错读写同一字段（实测：一次请求拿到另一次的编码）。
 ok('编码来源经请求内局部 holder 透传（不挂 entry，避免并发互相覆盖）',
-  src.includes('const enc = { meta: null }') &&
+  src.includes('const enc = { meta: null, want:') &&
   src.includes('function withEncMeta(out, meta)') &&
   src.includes('return withEncMeta(r, enc.meta)') &&
   !/entry\.encMeta/.test(src))
@@ -2313,6 +2320,254 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     src.includes('effectiveSandboxConfig(rootOf({ agent: { session } }))'))
   ok('HTTP 路由未带 sessionId 时回落到 agentRef 的会话（根与会话同源）',
     src.includes('if (!exec && agentRef && agentRef.session) exec = { agent: { session: agentRef.session } }'))
+}
+
+// ─────────────────────────────────────────────────────────────
+group('22. 非 UTF-8 预览：猜测关闭时采用服务给出的候选 + 可切换解码')
+// 背景：dsh-fs-encoding 的 autoGuessEncoding 默认 false，此时 ctx.fsEncoding.tryDecode
+// 拒绝（E_NOT_TEXT），但它**已经把候选算出来了**（refusal.candidates 带 encoding/score/sample，
+// 以及 adoptable/ranked）。permgate 原先只把面向模型的整句 message 塞进详情，用户看到的
+// 是 "[E_NOT_TEXT] … Re-read with read({ file_path: …, encoding: "gbk" })…" 而看不到任何内容。
+// 修法：拒绝时用服务自己给出的首候选回灌一次显式编码（不是本插件自己猜），并把候选列表
+// 下发给客户端，让编码徽标可点、可切换。切换只影响预览——服务文档明确 tryDecode 是
+// "只问不记"，不写会话编码记录，故 UI 必须写明这一点。
+{
+  // 1) 宿主：采用逻辑的结构性约束
+  ok('拒绝时用服务给出的首候选回灌（不自己猜编码）',
+    /const retry = await callDecode\(rf\.candidates\[0\]\.encoding\)/.test(src)
+    && /rf\.code === 'E_NOT_TEXT'/.test(src))
+  ok('只在 adoptable === true 时采用（ranked 但不可信的首候选必须放弃）',
+    /rf\.adoptable === true/.test(src) && /rf\.candidates\.length/.test(src))
+  ok('用户手选的编码优先于猜测（wantEncoding 走同一 callDecode）',
+    /out = await callDecode\(wantEncoding\)/.test(src))
+  ok('opts 组装单点：displayPath/encoding 都只在有值时放入（服务严格校验 opts）',
+    /const callDecode = async \(encoding\) => \{/.test(src)
+    && /if \(dp\) opts\.displayPath = dp/.test(src)
+    && /if \(typeof encoding === 'string' && encoding\) opts\.encoding = encoding/.test(src))
+  // 候选必须经 holder 单点透传到 payload（与 encoding/decided 同一出口）
+  // 五处：撤销（curRR）、readTargetChecked（rr）、readTargetCheckedMeta 经 holder（rd）、
+  // read 窗口回退（rr）、write（oldRR）——read 窗口回退那处曾漏掉，导致 ReadBlock 的徽标永远不可点。
+  ok('候选编码经 holder 单点透传到 payload（encCandidates）',
+    /out\.encCandidates = meta\.candidates/.test(src)
+    && (src.match(/candidates: (curRR|rd|oldRR|rr)\.candidates/g) || []).length === 5)
+  // 路由接受客户端手选的编码，且只透传字符串（非法值会顶掉整个详情）
+  ok('file-diff 路由透传 a.encoding（非字符串视为未指定）',
+    /buildFileDiffData\(entry, fs, a\.encoding\)/.test(src))
+  ok('readTargetChecked 把 want 透传给 readPreviewText（不是读不存在的 enc）',
+    /async function readTargetChecked\(fp, projRoot, fsService, preText, want\)/.test(src)
+    && /preText, enc\.want\)/.test(src))
+
+  // 2) 客户端：可点击徽标 + 候选浮层 + 免责说明
+  ok('编码徽标在有候选时变成可点控件（无候选保持纯展示）',
+    /className: 'pg2-enc pg2-enc-btn'/.test(cli) && /role: 'button'/.test(cli)
+    && /if \(!cands\.length \|\| typeof onPick !== 'function'\)/.test(cli))
+  ok('候选浮层列出服务给出的编码与样本，并标出当前项',
+    /className: 'pg2-enc-opt' \+ \(c\.encoding === data\.encoding \? ' pg2-enc-opt-on' : ''\)/.test(cli)
+    && /className: 'pg2-enc-opt-sample'/.test(cli))
+  // 免责说明是**硬要求**：用户会照着预览判断是否放行，不能让他以为改这里会改变写入结果
+  ok('浮层写明「仅影响预览、不改变实际写入」',
+    cli.includes("'app.encPreviewOnly': '这里只改变预览的解码方式，不会改变工具实际写入的结果；文件按它自己记录的编码编辑。'")
+    && cli.includes("'app.encPreviewOnly': 'This only changes how the preview is decoded — it does NOT change what the tool actually writes. The file is edited with its own recorded encoding.'")
+    && /className: 'pg2-enc-note'/.test(cli))
+  ok('切换后重新拉取详情并覆盖缓存（内联详情与抽屉两条路径都有）',
+    /const pickEnc = \(p, enc\) => \{/.test(cli) && /const pickEncDrawer = \(enc\) => \{/.test(cli)
+    && (cli.match(/call\('permgate:file-diff', \{ id: [^}]*encoding: enc \}\)/g) || []).length === 2)
+  ok('onPickEnc 经 detailBody 分派到 DiffBlock/ReadBlock（否则徽标永远不可点）',
+    (cli.match(/onPickEnc: o\.onPickEnc \|\| null/g) || []).length === 2)
+  ok('切换失败有提示且不冲掉已渲染的预览',
+    /setEncErr\(\(m\) => Object\.assign\(\{\}, m, \{ \[p\.id\]: T\('app\.encSwitchFailed'\)/.test(cli)
+    && /encErr\[p\.id\] \? React\.createElement/.test(cli))
+  // 错误提示按审批 id 存：单条全局 state 会让一次失败同时显示在所有展开的卡片上且永不清除
+  ok('切换失败提示按审批 id 存，且成功时清除该条',
+    /const \[encErr, setEncErr\] = React\.useState\(\{\}\)/.test(cli)
+    && /setEncErr\(\(m\) => \{ const kept = Object\.assign\(\{\}, m\); delete kept\[p\.id\]; return kept; \}\)/.test(cli))
+  // 候选必须沿用旧 payload：服务对显式 encoding 只回 hint 且 result.candidates 恒为空，
+  // 宿主无状态、拿不到上次那份拒绝——不沿用则切换一次后徽标立刻退化为不可点
+  ok('★ 切换后沿用旧 payload 的候选列表（否则切一次就再也切不回去）',
+    (cli.match(/norm\.encCandidates = prev\.encCandidates;/g) || []).length === 2
+    && /Array\.isArray\(prev\.encCandidates\)/.test(cli))
+  // 只写不读的死 ref：注释声称「按审批 id 记、失败重试时沿用」，但没有任何读取点
+  ok('无只写不读的 encPickRef 死状态', !cli.includes('encPickRef'))
+  // 撤销预览在「预览解码与工具编码不同源」时跳过 stale 判定，必须显式告知，
+  // 否则「没报无变化」会被读成「撤销一定会执行」（那正是要防的误判放行）
+  ok('★ 撤销预览跳过判定时客户端显式提示',
+    /out\.undoVerdictSkipped = true/.test(src) && /undoVerdictSkipped/.test(cli)
+    && (cli.match(/undoVerdictNote,/g) || []).length === 2)
+  // 撤销预览的三项「撤销是否会执行」判定都必须被同源闸挡住：预览解码与写盘内核不同源时
+  // curText 与 result_content 必然不等，据此断言会输出「撤销不会执行（无变化）」，
+  // 而工具侧其实会执行并改盘——审批者据此以为放行无副作用，正是要防的误判放行。
+  ok('★ 撤销 stale 判定三项都被「解码与内核同源」闸挡住',
+    /const decodeMatchesKernel = !enc\.want && !curRR\.adopted/.test(src)
+    && /if \(decodeMatchesKernel && normTxt\(curText\) !== normTxt\(resultContent\)\)/.test(src)
+    && /if \(decodeMatchesKernel && curText !== exactResult\)/.test(src)
+    // BOM 的 size 回退判据按 curText 反推，解码不同源时该反推不成立，须放弃该复核
+    && /if \(decodeMatchesKernel\) diskHasBom = info\.size === Buffer\.byteLength\(curText, 'utf8'\) \+ 3\s*\n\s*else bomCheckable = false/.test(src)
+    && /if \(bomCheckable && diskHasBom !== wantBom\)/.test(src))
+  ok('浮层点外部/Esc 可关闭（absolute 定位不关会一直压住 diff）',
+    /document\.addEventListener\('mousedown', onDoc\)/.test(cli) && /e\.key === 'Escape'/.test(cli))
+
+  // 3) 行为断言：真实执行 readPreviewText，验证三种调用形态
+  const sliceAsync = (name) => {
+    const s = src.indexOf('async function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const fakeEnc = (behavior) => ({ tryDecode: async (bytes, opts) => behavior(opts || {}) })
+  const mkFs = () => ({
+    readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
+    readBytes: async () => Buffer.from([0x41, 0x42]),
+  })
+  const helpers = [
+    'const ENC_READ_MAX_BYTES = 64 * 1024 * 1024',
+    'const bi = (zh, en) => ({ zh, en })',
+    "const readFail = (e) => ({ zh: '读取失败: ' + ((e && e.message) || e), en: 'Read failed: ' + ((e && e.message) || e) })",
+    sliceAsync('readPreviewText'),
+    'return { readPreviewText }',
+  ].join('\n')
+  let RPT = null
+  try { RPT = new Function(helpers)().readPreviewText } catch (e) { ok('readPreviewText 可独立求值：' + (e && e.message), false) }
+  if (RPT) {
+    const target = { displayPath: 'G:/x/gbk.txt' }
+    // ① 猜测关闭 + 可采信候选 → 自动采用首候选
+    const encOff = fakeEnc((opts) => {
+      if (opts.encoding) return { ok: true, result: { text: '中文', encoding: opts.encoding, decided: 'hint' } }
+      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: true, ranked: true, autoGuessEnabled: false, candidates: [{ encoding: 'gbk', sample: '中文', score: 100 }, { encoding: 'big5', sample: '?', score: 10 }] } }
+    })
+    const r1 = await RPT(mkFs(), target, encOff, 10)
+    ok('★ 猜测关闭时采用首候选（GBK 文件现在能出内容）',
+      r1.ok === true && r1.encoding === 'gbk' && r1.text === '中文',
+      JSON.stringify({ ok: r1.ok, enc: r1.encoding, dec: r1.decided }))
+    // 采用的是**本插件替用户挑的猜测**，服务对显式 encoding 只回 'hint'（确定口径）。
+    // 若原样透传，关闭猜测的部署反而把猜测呈现得比开启时更确定（服务自己采用时标
+    // 'guessed' 并带「可能不准」警告），而审批者正是照这段预览决定是否放行写盘。
+    ok('★ 自动采用时标注降级为 guessed（不得把猜测呈现成确定编码）',
+      r1.decided === 'guessed' && r1.adopted === true,
+      JSON.stringify({ dec: r1.decided, adopted: r1.adopted }))
+    ok('★ 候选列表随结果下发（客户端据此渲染切换器）',
+      Array.isArray(r1.candidates) && r1.candidates.length === 2 && r1.candidates[0].encoding === 'gbk'
+      && r1.candidates[0].score === 100 && r1.candidates[0].sample === '中文',
+      JSON.stringify(r1.candidates))
+    // ② adoptable=false（危险中间态）→ 不采用，保持原有报错。
+    // fake 必须「给显式 encoding 就返回成功」：否则重试必然同样失败，断言恒真——
+    // 实测把 `rf.adoptable === true` 整行删掉，恒真的写法依旧通过（守卫失去保护）。
+    let badRetries = 0
+    const encBad = fakeEnc((opts) => {
+      if (opts.encoding) { badRetries++; return { ok: true, result: { text: 'X', encoding: opts.encoding, decided: 'hint' } } }
+      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: false, ranked: true, candidates: [{ encoding: 'windows-1251', sample: 'x', score: 5 }], message: '[E_NOT_TEXT] nope' } }
+    })
+    const r2 = await RPT(mkFs(), target, encBad, 10)
+    ok('adoptable=false 时不采用（避免重现拒绝本要防止的静默误解码）',
+      r2.ok === false && !!r2.error && badRetries === 0 && r2.encoding === undefined,
+      JSON.stringify({ ok: r2.ok, retries: badRetries, enc: r2.encoding }))
+    // ②b adoptable=true（可采信）→ 采用，且确实发起了回灌重试。
+    // 与 ② 成对：单独看 ② 只能证明「没成功」，成对才能证明分歧点在 adoptable 上。
+    let goodRetries = 0
+    const encGood = fakeEnc((opts) => {
+      if (opts.encoding) { goodRetries++; return { ok: true, result: { text: '中文', encoding: opts.encoding, decided: 'hint' } } }
+      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: true, ranked: true, candidates: [{ encoding: 'gbk', sample: '中文', score: 100 }], message: '[E_NOT_TEXT] off' } }
+    })
+    const r2b = await RPT(mkFs(), target, encGood, 10)
+    ok('adoptable=true 时采用（与 ② 成对，证明分歧点是 adoptable）',
+      r2b.ok === true && r2b.encoding === 'gbk' && goodRetries === 1,
+      JSON.stringify({ ok: r2b.ok, enc: r2b.encoding, retries: goodRetries }))
+    // ③ 候选为空（二进制）→ 保持原有报错
+    let binRetries = 0
+    const encBin = fakeEnc((opts) => {
+      if (opts.encoding) { binRetries++; return { ok: true, result: { text: 'X', encoding: opts.encoding, decided: 'hint' } } }
+      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: false, ranked: false, candidates: [], message: '[E_NOT_TEXT] binary' } }
+    })
+    const r3 = await RPT(mkFs(), target, encBin, 10)
+    ok('候选为空（二进制）时不采用', r3.ok === false && !!r3.error && binRetries === 0)
+    // ④ 用户手选编码 → 直接按它解，不再走猜测
+    let sawHint = null
+    const encPick = fakeEnc((opts) => { if (opts.encoding) sawHint = opts.encoding; return { ok: true, result: { text: 'T', encoding: opts.encoding || 'utf-8', decided: opts.encoding ? 'hint' : 'guessed' } } })
+    const r4 = await RPT(mkFs(), target, encPick, 10, 'big5')
+    ok('用户手选编码直接生效（不经猜测分支）', r4.ok === true && r4.encoding === 'big5' && sawHint === 'big5', JSON.stringify({ enc: r4.encoding, sawHint }))
+    ok('用户手选时保持服务的 hint 标注（用户自己的选择不改写为猜测）',
+      r4.decided === 'hint' && r4.adopted === false, JSON.stringify({ dec: r4.decided, adopted: r4.adopted }))
+    // ⑤ 无解码服务 → 保持原报错（不猜）
+    const r5 = await RPT(mkFs(), target, null, 10)
+    ok('未装 dsh-fs-encoding 时保持原报错（可选依赖不被破坏）', r5.ok === false && !!r5.error)
+    // ⑥ displayPath 只在非空字符串时传入（否则服务拒为 E_BAD_ENCODING）
+    let sawDp = 'unset'
+    const encDp = fakeEnc((opts) => { sawDp = 'displayPath' in opts ? opts.displayPath : '(absent)'; return { ok: true, result: { text: '', encoding: 'utf-8', decided: 'utf8' } } })
+    await RPT(mkFs(), { displayPath: null }, encDp, 10)
+    ok('displayPath 为 null 时不放入 opts（否则被服务拒为 E_BAD_ENCODING）', sawDp === '(absent)', String(sawDp))
+  }
+
+  // 4) 行为断言：真实执行 encBadge，验证渲染形态
+  const sliceFn = (name) => {
+    const s = cli.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = cli.indexOf('{', s); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const mkReact = (openState) => {
+    let n = 0
+    return {
+      useState: (init) => { n++; const v = typeof init === 'function' ? init() : init; return [n === 1 ? openState : v, () => {}] },
+      useRef: (v) => ({ current: v }),
+      useEffect: () => {},
+      createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.filter((k) => k != null && k !== false) }),
+    }
+  }
+  const build = (name, openState, extra) => {
+    const body = sliceFn(name)
+    if (!body) return null
+    const names = ['React', 'T', 'useLocaleTick'].concat(Object.keys(extra || {}))
+    const vals = [mkReact(openState), (k) => k, () => {}].concat(Object.values(extra || {}))
+    return new Function(names.join(','), 'return (' + body + ')')(...vals)
+  }
+  // 徽标拆成两层：encBadge 只做「该不该显示 / 可否点」的分派（无状态），
+  // 带状态的浮层在 EncBadge 组件内——这样开关浮层只重渲染徽标，不再重建整块 diff。
+  // EncBadge 先求值出来，再作为绑定注入 encBadge（后者会 React.createElement(EncBadge, …)）。
+  const closed = build('EncBadge', false)
+  const opened = build('EncBadge', true)
+  const dispatch = build('encBadge', false, { EncBadge: closed })
+  if (dispatch && closed && opened) {
+    const data = { encoding: 'gbk', decided: 'hint', encCandidates: [{ encoding: 'gbk', sample: '中文', score: 100 }, { encoding: 'big5', sample: 'x', score: 10 }] }
+    ok('UTF-8 文件不显示徽标', dispatch({ encoding: 'utf-8', decided: 'utf8' }, () => {}) === null)
+    const t = dispatch(data, () => {})
+    ok('★ 有候选：分派到带状态的 EncBadge 组件（不是内联普通函数调用）',
+      t && t.type === closed && t.props.data === data)
+    const t2 = dispatch({ encoding: 'gbk', decided: 'hint' }, () => {})
+    ok('无候选：退化为纯展示（不给可点的错觉）',
+      t2 && t2.type === 'span' && t2.props.className === 'pg2-enc' && t2.props.role === undefined)
+    const t3 = dispatch(data, null)
+    ok('无 onPick 回调：同样退化为纯展示', t3 && t3.type === 'span' && t3.props.role === undefined)
+    // EncBadge 组件本体：可点徽标 + 浮层
+    const c = closed({ data, onPick: () => {} })
+    ok('★ 徽标可点（role=button + ▾）',
+      c && c.props.className === 'pg2-enc-wrap' && c.kids[0].props.role === 'button'
+      && c.kids[0].kids.join('').indexOf('▾') !== -1)
+    ok('未点开时不渲染浮层', c && c.kids[1] === undefined)
+    // 点开态：候选浮层
+    const o = opened({ data, onPick: () => {} })
+    const pop = o.kids.find((k) => k.props && k.props.className === 'pg2-enc-pop')
+    ok('点开后渲染候选浮层', !!pop)
+    if (pop) {
+      const flat = []
+      for (const k of pop.kids) { if (Array.isArray(k)) flat.push(...k); else flat.push(k) }
+      const opts = flat.filter((k) => k.props && typeof k.props.className === 'string' && k.props.className.indexOf('pg2-enc-opt') === 0)
+      ok('★ 候选按钮与服务下发的候选一一对应（含当前项高亮）',
+        opts.length === 2 && opts[0].props.className.indexOf('pg2-enc-opt-on') !== -1
+        && opts[0].kids[0].kids.join('') === 'gbk' && opts[1].kids[0].kids.join('') === 'big5',
+        JSON.stringify(opts.map((x) => x.kids[0].kids.join(''))))
+      const note = flat.find((k) => k.props && k.props.className === 'pg2-enc-note')
+      ok('★ 浮层带「仅影响预览」免责脚注', !!note && note.kids.join('') === 'app.encPreviewOnly')
+    }
+    const g = closed({ data: { encoding: 'big5', decided: 'guessed', encCandidates: [{ encoding: 'big5', sample: 'x', score: 5 }] }, onPick: () => {} })
+    ok('guessed 态保留 ? 标记（概率性选择必须显式区分）', g.kids[0].kids.join('').indexOf('?') !== -1)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

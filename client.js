@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
 		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; }';
 
 		// dsh-file-review 风格 unified diff + 右侧对比抽屉（浅/深色主题 token 跟随）
-		const DIFF2_CSS = '.pg2-block { position: relative; margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg2-header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; } .pg2-status { color: var(--dsw-alias-state-success-primary, #1a7f37); font-weight: 700; } .pg2-status-read { color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 700; } .pg2-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; } .pg2-path:hover { color: var(--dsw-alias-brand-primary, #1f6feb); text-decoration: underline; } .pg2-added { margin-left: auto; color: var(--dsw-alias-state-success-primary, #1a7f37); } .pg2-enc { margin-left: 6px; padding: 0 5px; border-radius: 3px; font-size: 11px; color: var(--dsw-alias-label-secondary, #57606a); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); white-space: nowrap; } .pg2-removed { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-copy { border: 0; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-copy:hover { color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-body { overflow: auto; max-height: 240px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5; } .pg2-row { display: grid; grid-template-columns: 40px 40px 22px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-old, .pg2-new { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-sign { text-align: center; user-select: none; } .pg2-text { padding-right: 12px; } .pg2-del { color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.10); } .pg2-add { color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.10); } .pg2-ctx { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap { display: block; width: 100%; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.07)); color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: ui-monospace, Consolas, monospace; text-align: left; padding: 4px 8px 4px 104px; } .pg2-gap:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap-more { padding: 4px 8px 4px 104px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; } .pg2-fadd { color: #2e7d32; } .pg2-fdel { color: #c62828; } .pg2-fctx { color: rgba(128,128,128,0.7); } .pg2-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-size: 11px; color: rgba(128,128,128,0.8); } .pg2-rrow { display: grid; grid-template-columns: 40px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-rnum { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-load { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-err { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-state-error-primary, #cf222e); } .pg-path-link { color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; word-break: break-all; flex: 1; } .pg-path-link:hover { text-decoration: underline; } .pg2-drawer { position: fixed; top: 0; right: 0; bottom: 0; left: auto; width: 42vw; min-width: 480px; max-width: 96vw; z-index: 10000; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border-left: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); box-shadow: -8px 0 28px rgba(0,0,0,0.25); display: flex; flex-direction: column; } .pg2-drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); min-height: 44px; } .pg2-drawer-file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; flex: 1; min-width: 0; } .pg2-drawer-close { border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; } .pg2-drawer-close:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-drawer-body { flex: 1; overflow: hidden; padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-block { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-body { flex: 1; overflow: auto; max-height: none; min-height: 0; } .pg2-drawer-body .pg2-load, .pg2-drawer-body .pg2-err { flex: 1; display: flex; align-items: center; justify-content: center; } .pg2-drawer-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; } .pg2-drawer-resize:hover, .pg2-drawer-resize.drag { background: rgba(31, 111, 235, 0.18); } .pg2-drawer-open { border: 1px solid var(--dsw-alias-brand-primary, #1f6feb); background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 2px 10px; height: 26px; cursor: pointer; font-size: 12px; flex: 0 0 auto; } .pg2-drawer-open:hover { background: rgba(31, 111, 235, 0.10); } .pg2-edit-msg { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-right: 6px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pg2-edit-msg.err { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-expand { border: 0; background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-expand:hover { text-decoration: underline; } .pg2-romit { padding: 3px 8px 3px 48px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; font-style: italic; } .pg2-text .token.comment, .pg2-text .token.prolog, .pg2-text .token.doctype, .pg2-text .token.cdata { color: #8c959f; font-style: italic; } .pg2-text .token.punctuation { color: #57606a; } .pg2-text .token.property, .pg2-text .token.tag, .pg2-text .token.constant, .pg2-text .token.symbol, .pg2-text .token.deleted { color: #cf222e; } .pg2-text .token.boolean, .pg2-text .token.number { color: #9a6700; } .pg2-text .token.selector, .pg2-text .token.attr-name, .pg2-text .token.string, .pg2-text .token.char, .pg2-text .token.builtin, .pg2-text .token.inserted { color: #1a7f37; } .pg2-text .token.operator, .pg2-text .token.entity, .pg2-text .token.url { color: #8250df; } .pg2-text .token.atrule, .pg2-text .token.attr-value, .pg2-text .token.keyword { color: #1f6feb; } .pg2-text .token.function, .pg2-text .token.class-name { color: #8250df; } .pg2-text .token.regex, .pg2-text .token.important, .pg2-text .token.variable { color: #953800; }';
+		const DIFF2_CSS = '.pg2-block { position: relative; margin-top: 6px; margin-bottom: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; overflow: hidden; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03)); } .pg2-header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-family: ui-monospace, Consolas, monospace; font-size: 11px; } .pg2-status { color: var(--dsw-alias-state-success-primary, #1a7f37); font-weight: 700; } .pg2-status-read { color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 700; } .pg2-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; } .pg2-path:hover { color: var(--dsw-alias-brand-primary, #1f6feb); text-decoration: underline; } .pg2-added { margin-left: auto; color: var(--dsw-alias-state-success-primary, #1a7f37); } .pg2-enc { margin-left: 6px; padding: 0 5px; border-radius: 3px; font-size: 11px; color: var(--dsw-alias-label-secondary, #57606a); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); white-space: nowrap; } .pg2-enc-btn { cursor: pointer; } .pg2-enc-btn:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-enc-wrap { position: relative; display: inline-flex; flex: 0 0 auto; } .pg2-enc-pop { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; min-width: 220px; max-width: 420px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); box-shadow: 0 6px 20px rgba(0,0,0,0.18); font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 11px; color: var(--dsw-alias-label-primary, #1f2328); white-space: normal; } .pg2-enc-pop-title { font-weight: 600; margin-bottom: 4px; } .pg2-enc-opt { display: flex; align-items: baseline; gap: 6px; width: 100%; text-align: left; padding: 3px 5px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; } .pg2-enc-opt:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.12)); } .pg2-enc-opt-on { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.12)); font-weight: 600; } .pg2-enc-opt-name { flex: 0 0 auto; font-family: ui-monospace, Consolas, monospace; } .pg2-enc-opt-sample { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-enc-note { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-secondary, #57606a); line-height: 1.45; } .pg2-removed { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-copy { border: 0; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-copy:hover { color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-body { overflow: auto; max-height: 240px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5; } .pg2-row { display: grid; grid-template-columns: 40px 40px 22px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-old, .pg2-new { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-sign { text-align: center; user-select: none; } .pg2-text { padding-right: 12px; } .pg2-del { color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.10); } .pg2-add { color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.10); } .pg2-ctx { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap { display: block; width: 100%; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.07)); color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 11px; font-family: ui-monospace, Consolas, monospace; text-align: left; padding: 4px 8px 4px 104px; } .pg2-gap:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg2-gap-more { padding: 4px 8px 4px 104px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; } .pg2-fadd { color: #2e7d32; } .pg2-fdel { color: #c62828; } .pg2-fctx { color: rgba(128,128,128,0.7); } .pg2-foot { padding: 4px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); font-size: 11px; color: rgba(128,128,128,0.8); } .pg2-rrow { display: grid; grid-template-columns: 40px minmax(max-content, 1fr); min-width: max-content; white-space: pre; } .pg2-rnum { padding: 0 6px; border-right: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); color: var(--dsw-alias-label-tertiary, #8c959f); text-align: right; user-select: none; } .pg2-load { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); } .pg2-err { padding: 10px 12px; font-size: 12px; color: var(--dsw-alias-state-error-primary, #cf222e); } .pg-path-link { color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; word-break: break-all; flex: 1; } .pg-path-link:hover { text-decoration: underline; } .pg2-drawer { position: fixed; top: 0; right: 0; bottom: 0; left: auto; width: 42vw; min-width: 480px; max-width: 96vw; z-index: 10000; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border-left: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); box-shadow: -8px 0 28px rgba(0,0,0,0.25); display: flex; flex-direction: column; } .pg2-drawer-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); min-height: 44px; } .pg2-drawer-file { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; flex: 1; min-width: 0; } .pg2-drawer-close { border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; line-height: 1; flex: 0 0 auto; } .pg2-drawer-close:hover { color: var(--dsw-alias-brand-primary, #1f6feb); border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg2-drawer-body { flex: 1; overflow: hidden; padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-block { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; } .pg2-drawer-body .pg2-body { flex: 1; overflow: auto; max-height: none; min-height: 0; } .pg2-drawer-body .pg2-load, .pg2-drawer-body .pg2-err { flex: 1; display: flex; align-items: center; justify-content: center; } .pg2-drawer-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; } .pg2-drawer-resize:hover, .pg2-drawer-resize.drag { background: rgba(31, 111, 235, 0.18); } .pg2-drawer-open { border: 1px solid var(--dsw-alias-brand-primary, #1f6feb); background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 2px 10px; height: 26px; cursor: pointer; font-size: 12px; flex: 0 0 auto; } .pg2-drawer-open:hover { background: rgba(31, 111, 235, 0.10); } .pg2-edit-msg { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-right: 6px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pg2-edit-msg.err { color: var(--dsw-alias-state-error-primary, #cf222e); } .pg2-expand { border: 0; background: transparent; color: var(--dsw-alias-brand-primary, #1f6feb); cursor: pointer; font-size: 11px; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding: 0 2px; margin-left: 6px; flex: 0 0 auto; } .pg2-expand:hover { text-decoration: underline; } .pg2-romit { padding: 3px 8px 3px 48px; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: ui-monospace, Consolas, monospace; font-style: italic; } .pg2-text .token.comment, .pg2-text .token.prolog, .pg2-text .token.doctype, .pg2-text .token.cdata { color: #8c959f; font-style: italic; } .pg2-text .token.punctuation { color: #57606a; } .pg2-text .token.property, .pg2-text .token.tag, .pg2-text .token.constant, .pg2-text .token.symbol, .pg2-text .token.deleted { color: #cf222e; } .pg2-text .token.boolean, .pg2-text .token.number { color: #9a6700; } .pg2-text .token.selector, .pg2-text .token.attr-name, .pg2-text .token.string, .pg2-text .token.char, .pg2-text .token.builtin, .pg2-text .token.inserted { color: #1a7f37; } .pg2-text .token.operator, .pg2-text .token.entity, .pg2-text .token.url { color: #8250df; } .pg2-text .token.atrule, .pg2-text .token.attr-value, .pg2-text .token.keyword { color: #1f6feb; } .pg2-text .token.function, .pg2-text .token.class-name { color: #8250df; } .pg2-text .token.regex, .pg2-text .token.important, .pg2-text .token.variable { color: #953800; }';
 
 		// ── Prism 语法高亮（vendored，prismjs 1.29.0，MIT © Lea Verou，https://prismjs.com）──
 		// PRISM_SRC 为 prism-core + 常用语言语法（components/prism-*.min.js）的拼接源码，
@@ -1098,6 +1098,12 @@ window.__ModuleLoader__.load({
 				'app.diffLines': '{n} 行',
 				'app.encHint': '该文件不是 UTF-8，内容已按此编码解码显示',
 				'app.encGuessedHint': '该文件不是 UTF-8；编码是按内容猜测的（可能不准），请留意',
+				'app.encSwitch': '点击可切换解码方式',
+				'app.encPick': '解码方式（仅影响预览）',
+				'app.encPreviewOnly': '这里只改变预览的解码方式，不会改变工具实际写入的结果；文件按它自己记录的编码编辑。',
+				'app.encSwitching': '切换中…',
+				'app.encSwitchFailed': '切换失败',
+				'app.undoVerdictSkipped': '当前预览的解码方式与工具实际使用的编码不同源，无法判断撤销是否会执行；此处只展示将被恢复的内容，不代表撤销一定会执行。',
 				'app.diffTopMore': '… 上方还有 {n} 行',
 				'app.diffBottomMore': '… 下方还有更多行',
 				'app.diffClose': '关闭',
@@ -1286,6 +1292,12 @@ window.__ModuleLoader__.load({
 				'app.diffLines': '{n} lines',
 				'app.encHint': 'Not UTF-8; content decoded with this encoding',
 				'app.encGuessedHint': 'Not UTF-8; the encoding was guessed from the content and may be wrong',
+				'app.encSwitch': 'Click to switch decoding',
+				'app.encPick': 'Decoding (preview only)',
+				'app.encPreviewOnly': 'This only changes how the preview is decoded — it does NOT change what the tool actually writes. The file is edited with its own recorded encoding.',
+				'app.encSwitching': 'Switching…',
+				'app.encSwitchFailed': 'Switch failed',
+				'app.undoVerdictSkipped': 'This preview is decoded differently from the encoding the tool actually uses, so whether the undo will run cannot be determined here. Only the content to be restored is shown; this does not mean the undo will definitely run.',
 				'app.diffTopMore': '… {n} more lines above',
 				'app.diffBottomMore': '… more lines below',
 				'app.diffClose': 'Close',
@@ -1490,6 +1502,9 @@ window.__ModuleLoader__.load({
 			const [denyMode, setDenyMode] = React.useState({});
 			// 进入拒绝态时被临时收起的「允许此项」勾选（按审批 id 存），点「取消」时原样恢复
 			const [denySaved, setDenySaved] = React.useState({});
+			// 切换预览解码失败时的提示，按审批 id 存：单条全局 state 会让一次失败同时显示在
+			// 所有已展开详情的卡片上，且成功/换一条审批后都不清除。
+			const [encErr, setEncErr] = React.useState({});
 			const [, setTick] = React.useState(0);
 			useLocaleTick();
 			const poll = () => {
@@ -1530,6 +1545,32 @@ window.__ModuleLoader__.load({
 			const decide = (id, action, rules, reason) => {
 				setBusyId(id);
 				call('permgate:decide', { id, action, rules, reason: reason || undefined }).then(poll).catch(() => {}).then(() => setBusyId(null));
+			};
+			// 切换预览解码方式：按该编码重新拉取详情并覆盖缓存。
+			// 返回 promise 供 encBadge 显示「切换中」并在失败时回滚提示。
+			// 只改预览：宿主侧 tryDecode 是"只问不记"，不写会话编码记录，也不影响工具写入。
+			//
+			// 候选列表必须显式沿用旧 payload 的 encCandidates：服务对显式 encoding 只回
+			// decided='hint' 且 result.candidates 恒为空，宿主是无状态的、拿不到上次那份
+			// 拒绝，故手选一次后新 payload 不带候选——不沿用的话徽标立刻退化为不可点，
+			// 用户再也切不回其它编码（缓存已被覆盖，也不会重取）。
+			const pickEnc = (p, enc) => {
+				return call('permgate:file-diff', { id: p.id, encoding: enc }).then((r) => {
+					const norm = (r && typeof r === 'object') ? r : { ok: false, error: '' }
+					if (!norm.ok) {
+						setEncErr((m) => Object.assign({}, m, { [p.id]: T('app.encSwitchFailed') + ': ' + (norm.error || '') }));
+						return;
+					}
+					const prev = diffCache.get(p.id)
+					if (norm.ok && !norm.encCandidates && prev && Array.isArray(prev.encCandidates) && prev.encCandidates.length) {
+						norm.encCandidates = prev.encCandidates;
+					}
+					diffCache.set(p.id, norm)
+					// 成功即清掉该条的错误提示（旧实现从不清除，一次失败会永久残留）。
+					// 用函数式更新：pickEnc 的闭包可能是旧的，直接读 encErr 会丢掉并发期间的更新。
+					setEncErr((m) => { const kept = Object.assign({}, m); delete kept[p.id]; return kept; });
+					setTick((v) => v + 1)
+				}).catch(() => { setEncErr((m) => Object.assign({}, m, { [p.id]: T('app.encSwitchFailed') })) })
 			};
 			if (!pending.length) return null;
 			const pick = (candId, v) => {
@@ -1643,7 +1684,12 @@ window.__ModuleLoader__.load({
 							const c = diffCache.get(p.id)
 							if (!c) return React.createElement('div', { className: 'pg2-load' }, T('app.diffLoading'))
 							if (!c.ok) return React.createElement('div', { className: 'pg2-err' }, (c.error || T('app.diffErr')))
-							return detailBody(c, { onOpenFile: (f) => openFile(p, f), onOpenSidebar: (f) => openSidebarFor(p, f), changesOnly: true, resetKey: payloadKey(c) })
+							return React.createElement('div', null,
+								// 切换解码失败时提示，不覆盖已渲染的预览（旧内容仍可判断）；
+								// 只显示当前这条审批的提示，避免串到其它卡片上
+								encErr[p.id] ? React.createElement('div', { className: 'pg2-err' }, encErr[p.id]) : null,
+								detailBody(c, { onOpenFile: (f) => openFile(p, f), onOpenSidebar: (f) => openSidebarFor(p, f), onPickEnc: (enc) => pickEnc(p, enc), changesOnly: true, resetKey: payloadKey(c) }),
+							)
 						})() : null,
 					) : null,
 					(p.candidates || []).length ? React.createElement('div', null,
@@ -1698,14 +1744,79 @@ window.__ModuleLoader__.load({
 		// dsh-fs-encoding 解出时显示。decided='guessed' 必须显式区分——那是概率性选择，
 		// 用户会照着这段内容判断是否放行编辑，不能让他以为这就是文件的真实编码。
 		// 写在单点：两条渲染路径各自复制一份必漏改（对比面板曾整块缺失该标注）。
-		function encBadge(data) {
-			if (!data.encoding || !data.decided || data.decided === 'utf8') return null;
-			return React.createElement('span', {
-				className: 'pg2-enc',
-				title: data.decided === 'guessed' ? T('app.encGuessedHint') : T('app.encHint'),
-			}, data.encoding + (data.decided === 'guessed' ? ' ?' : ''));
+		//
+		// 有 encCandidates 时徽标可点：点开列出服务给出的候选编码（含样本），选中即按该编码
+		// 重新解码预览。候选来自服务，客户端不自造列表——否则会给出本部署已排除的编码。
+		// 切换只影响**预览**：宿主侧 tryDecode 是"只问不记"（服务文档明确：不得成为会话记录的
+		// 编码），工具实际写入仍按它自己的编码记录，故浮层底部必须写明这一点——用户会照着
+		// 预览内容判断是否放行，不能让他以为改这里会改变写入结果。
+		// 徽标本体：浮层开关与 busy 状态都留在**组件内部**。
+		// 这段必须是真组件而不是普通函数：hooks 的归属是「渲染它的那个组件」，若把它写成
+		// 普通函数内联调用，open/busy 就变成整块 diff 的状态——开关一次浮层会重渲染整个
+		// DiffBlock/ReadBlock 并重建全部行元素（read 窗口可达约 4.5k 行，抽屉里展开 gap
+		// 后可携带最多 10 万行上下文），而实际需要变的只有这个徽标。
+		function EncBadge(props) {
+			const data = props.data;
+			const onPick = props.onPick;
+			const [open, setOpen] = React.useState(false);
+			const [busy, setBusy] = React.useState(null);
+			useLocaleTick();
+			const boxRef = React.useRef(null);
+			// 点击外部/按 Esc 关闭：浮层是 absolute 定位，不关会一直压在 diff 上
+			React.useEffect(() => {
+				if (!open) return;
+				const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+				const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+				document.addEventListener('mousedown', onDoc);
+				document.addEventListener('keydown', onKey);
+				return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+			}, [open]);
+			const cands = Array.isArray(data.encCandidates) ? data.encCandidates : [];
+			const label = data.encoding + (data.decided === 'guessed' ? ' ?' : '');
+			const hint = data.decided === 'guessed' ? T('app.encGuessedHint') : T('app.encHint');
+			const pick = (enc) => {
+				if (busy || enc === data.encoding) { setOpen(false); return; }
+				setBusy(enc);
+				Promise.resolve(onPick(enc)).then(() => { setBusy(null); setOpen(false); }).catch(() => { setBusy(null); setOpen(false); });
+			};
+			return React.createElement('span', { className: 'pg2-enc-wrap', ref: boxRef },
+				React.createElement('span', {
+					className: 'pg2-enc pg2-enc-btn',
+					role: 'button',
+					tabIndex: 0,
+					title: hint + ' · ' + T('app.encSwitch'),
+					onClick: () => setOpen((v) => !v),
+					onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } },
+				}, label + ' ▾'),
+				open ? React.createElement('div', { className: 'pg2-enc-pop' },
+					React.createElement('div', { className: 'pg2-enc-pop-title' }, T('app.encPick')),
+					cands.map((c) => React.createElement('button', {
+						key: c.encoding,
+						type: 'button',
+						className: 'pg2-enc-opt' + (c.encoding === data.encoding ? ' pg2-enc-opt-on' : ''),
+						onClick: () => pick(c.encoding),
+						disabled: !!busy,
+					},
+						React.createElement('span', { className: 'pg2-enc-opt-name' }, busy === c.encoding ? T('app.encSwitching') : c.encoding),
+						typeof c.sample === 'string' && c.sample ? React.createElement('span', { className: 'pg2-enc-opt-sample', title: c.sample }, c.sample) : null
+					)),
+					React.createElement('div', { className: 'pg2-enc-note' }, T('app.encPreviewOnly'))
+				) : null
+			);
 		}
-		function DiffBlock({ data, onOpenFile, onOpenSidebar, onCollapse, changesOnly }) {
+		// 调用点单点：无候选（服务未给出，如 UTF-8 BOM / 二进制）或没有回调时退化为纯展示，
+		// 不给可点的错觉；有候选才挂上带状态的 EncBadge 组件。
+		function encBadge(data, onPick) {
+			if (!data.encoding || !data.decided || data.decided === 'utf8') return null;
+			const cands = Array.isArray(data.encCandidates) ? data.encCandidates : [];
+			const label = data.encoding + (data.decided === 'guessed' ? ' ?' : '');
+			const hint = data.decided === 'guessed' ? T('app.encGuessedHint') : T('app.encHint');
+			if (!cands.length || typeof onPick !== 'function') {
+				return React.createElement('span', { className: 'pg2-enc', title: hint }, label);
+			}
+			return React.createElement(EncBadge, { data, onPick });
+		}
+		function DiffBlock({ data, onOpenFile, onOpenSidebar, onCollapse, changesOnly, onPickEnc }) {
 			const [copied, setCopied] = React.useState(false);
 			const [gaps, setGaps] = React.useState({});
 			useLocaleTick();
@@ -1780,6 +1891,9 @@ window.__ModuleLoader__.load({
 			// 行尾归一化提示条：fallback 降级视图同样渲染（该视图下实际 edit 的原始字节
 			// 字面匹配同样可能因 CRLF/CR 失败，提示不应随降级丢失）
 			const eolNote = data.eolNormalized ? React.createElement('div', { className: 'pg2-eolnote', style: { padding: '4px 8px', fontSize: 11, color: 'var(--dsw-alias-state-warning-primary, #9a6700)' } }, T('app.eolNote')) : null;
+			// 撤销预览在「预览解码与工具编码不同源」时跳过 stale 判定：必须显式说明，
+			// 否则审批者会把「没报无变化」读成「撤销一定会执行」（那正是要防的误判放行）
+			const undoVerdictNote = data.undoVerdictSkipped ? React.createElement('div', { className: 'pg2-verdictnote', style: { padding: '4px 8px', fontSize: 11, color: 'var(--dsw-alias-state-warning-primary, #9a6700)' } }, T('app.undoVerdictSkipped')) : null;
 			if (data.fallback) {
 				return React.createElement('div', { className: 'pg2-block' },
 					React.createElement('div', { className: 'pg2-header' },
@@ -1787,12 +1901,13 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 						React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
 						React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
-						encBadge(data),
+						encBadge(data, onPickEnc),
 						copyBtn,
 						expandBtn,
 						collapseBtn,
 					),
 					eolNote,
+					undoVerdictNote,
 					React.createElement('div', { className: 'pg2-body' },
 						(data.lines || []).map((l, i) => React.createElement('div', { key: i, className: l[0] === '+' ? 'pg2-fadd' : l[0] === '-' ? 'pg2-fdel' : 'pg2-fctx' }, l)),
 					),
@@ -1842,16 +1957,17 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 					React.createElement('span', { className: 'pg2-added' }, '+' + data.added),
 					React.createElement('span', { className: 'pg2-removed' }, '-' + data.removed),
-					encBadge(data),
+					encBadge(data, onPickEnc),
 					copyBtn,
 					expandBtn,
 					collapseBtn,
 				),
 				eolNote,
+				undoVerdictNote,
 				React.createElement('div', { className: 'pg2-body' }, rows),
 			);
 		}
-		function ReadBlock({ data, onOpenFile, onOpenSidebar, onCollapse }) {
+		function ReadBlock({ data, onOpenFile, onOpenSidebar, onCollapse, onPickEnc }) {
 			const [copied, setCopied] = React.useState(false);
 			useLocaleTick();
 			const text = data.text || '';
@@ -1899,7 +2015,7 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { className: 'pg2-status-read', title: T('app.diffRead') }, 'R'),
 					React.createElement('span', { className: 'pg2-path', title: data.file, onClick: () => onOpenSidebar && onOpenSidebar(data.file) }, data.file),
 					React.createElement('span', { className: 'pg2-added' }, T('app.diffLines').replace('{n}', String(lines.length) + (topOmitted || bottomOmitted ? '+' : ''))),
-					encBadge(data),
+					encBadge(data, onPickEnc),
 					React.createElement('button', { className: 'pg2-copy', onClick: onCopy }, copied ? T('app.diffCopied') : T('app.diffCopy')),
 					(typeof onOpenFile === 'function')
 						? React.createElement('button', { className: 'pg2-expand', onClick: () => onOpenFile(data.file), title: T('app.diffExpand') }, T('app.diffExpand'))
@@ -1924,9 +2040,10 @@ window.__ModuleLoader__.load({
 			const fb = T('app.diffErr');
 			const boundaryProps = o.resetKey !== undefined ? { resetKey: o.resetKey, fallback: fb } : { fallback: fb };
 			// onOpenFile → permgate 的对比抽屉（「展开」用）；onOpenSidebar → DSH 右侧栏的 file tab（点路径/文件名用）
+			// onPickEnc → 编码徽标切换预览解码（DiffBlock/ReadBlock 才有；image 无编码概念）
 			if (data.kind === 'image') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ImageBlock, { data, onOpenSidebar: o.onOpenSidebar || null }));
-			if (data.kind === 'read') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ReadBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse }));
-			return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(DiffBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse, changesOnly: o.changesOnly }));
+			if (data.kind === 'read') return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(ReadBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse, onPickEnc: o.onPickEnc || null }));
+			return React.createElement(PGErrorBoundary, boundaryProps, React.createElement(DiffBlockMemo, { data, onOpenFile: o.onOpenFile || null, onOpenSidebar: o.onOpenSidebar || null, onCollapse: o.onCollapse, changesOnly: o.changesOnly, onPickEnc: o.onPickEnc || null }));
 		}
 
 		// 图片详情块：头部显示 格式 · 像素尺寸 · 体积，下面给缩略图；
@@ -1988,6 +2105,24 @@ window.__ModuleLoader__.load({
 				}).catch(() => { if (alive) setErr(T('app.diffErr')) });
 				return () => { alive = false };
 			}, [pin.id]);
+			// 抽屉里同样支持切换预览解码：自己持有 data 状态，故重取后直接 setData。
+			// 只改预览（宿主侧 tryDecode 只问不记），不影响工具实际写入。
+			const pickEncDrawer = (enc) => {
+				return call('permgate:file-diff', { id: pin.id, encoding: enc }).then((r) => {
+					const norm = (r && typeof r === 'object') ? r : { ok: false, error: '' };
+					if (!norm.ok) { setEditMsg({ ok: false, text: T('app.encSwitchFailed') + ': ' + (norm.error || '') }); return; }
+					// 与内联详情同一处理：手选后宿主不再下发候选，沿用旧 payload 的候选，
+					// 否则徽标退化为不可点、无法再切回（缓存已被覆盖，不会重取）
+					const prev = diffCache.get(pin.id);
+					if (!norm.encCandidates && prev && Array.isArray(prev.encCandidates) && prev.encCandidates.length) {
+						norm.encCandidates = prev.encCandidates;
+					}
+					diffCache.set(pin.id, norm);
+					setData(norm);
+					setErr(null);
+					setEditMsg(null);
+				}).catch(() => { setEditMsg({ ok: false, text: T('app.encSwitchFailed') }); });
+			};
 			// 左边缘拖动调整侧边栏宽度（面板固定在右侧，向左拖变宽）
 			const onResizeStart = (e) => {
 				if (e && e.preventDefault) e.preventDefault();
@@ -2024,7 +2159,7 @@ window.__ModuleLoader__.load({
 			let body;
 			if (data) {
 				// 抽屉里也要能点文件名/图片标题去开侧栏（pin 里带着会话 id 与项目根）
-				body = detailBody(data, { onCollapse: onClose, onOpenSidebar: (f) => openInSidebar(f, pin.sid, pin.projRoot) })
+				body = detailBody(data, { onCollapse: onClose, onOpenSidebar: (f) => openInSidebar(f, pin.sid, pin.projRoot), onPickEnc: pickEncDrawer })
 			} else if (err) {
 				body = React.createElement('div', { className: 'pg2-err' }, err);
 			} else {

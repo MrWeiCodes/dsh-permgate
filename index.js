@@ -280,9 +280,12 @@ function getFsEncodingService(ctx) {
 // 避免为一个注定超限的文件先付出一次完整读盘（readText 的失败判定本身已整读一次，
 // 不预检则 readBytes 会再整读一次，峰值达文件大小的两倍）。
 //
-// 返回 { ok:true, text, encoding, decided } 或 { ok:false, error }。
+// 返回 { ok:true, text, encoding, decided, candidates } 或 { ok:false, error }。
 // decided 取值：'utf8'（本就 UTF-8）/ 'bom'|'hint'|'guessed'（服务给出）/ null（未经服务）。
-async function readPreviewText(fsService, target, encService, size) {
+// candidates：服务在拒绝时给出的候选编码（[{encoding, sample, score}]，best first）。
+// 客户端据此渲染可切换的编码选择器；采用首候选时也一并带出，供用户改选。
+// wantEncoding：用户在详情里手选的编码（非空字符串时按它解，跳过猜测）。
+async function readPreviewText(fsService, target, encService, size, wantEncoding) {
   const readText = async (t) => {
     try { return { ok: true, text: await fsService.readText(t) } } catch (e) { return { ok: false, error: e } }
   }
@@ -341,24 +344,48 @@ async function readPreviewText(fsService, target, encService, size) {
   // 但文案要与上面的 catch 保持同一原则——带出「字节读不可用」而非退回 readText 的错误
   // （后者会把「读不到字节」说成「编码读不出」，审批者据此查编码却查不到真实原因）。
   if (!bytes || bytes.length === undefined) return { ok: false, error: readFail(new Error('byte read returned no content')) }
-  let out = null
-  try {
+  // 交给服务解码的单次调用（opts 组装单点）：displayPath 只在非空字符串时放入，
+  // encoding 只在调用方显式指定时放入——两者都必须"缺席"而不是传 null/undefined 之外
+  // 的假值，服务对 opts 做严格校验（见下方注释）。
+  const dp = target && typeof target.displayPath === 'string' && target.displayPath ? target.displayPath : null
+  const callDecode = async (encoding) => {
+    const opts = {}
+    if (dp) opts.displayPath = dp
+    if (typeof encoding === 'string' && encoding) opts.encoding = encoding
     // 服务文档承诺 tryDecode 对任意输入都不抛（refusal 是返回值），故这里不需要
     // 包一层 catch；但消费方是别人写的插件，仍兜住以防契约变化。
-    //
-    // 传 displayPath 让服务自己的 refusal 文案能指名文件（不传则永远是 "(unknown path)"，
-    // 审批者会以为读错了文件）。但**必须只在它是非空字符串时**才放进 opts：
-    // 上游对 opts 做严格校验，`{ displayPath: null }` 会被拒为
-    // `E_BAD_ENCODING: displayPath must be a string`，而那条内部参数错误会被下面的
-    // 「其余 refusal 原样带出」分支展示给用户——一个本可预览的文件变成无意义报错。
-    // （`target && target.displayPath` 在 target 为 null/undefined 或字段为 null 时
-    // 会产出 null/undefined，正是这个坑。）
-    const dp = target && typeof target.displayPath === 'string' && target.displayPath ? target.displayPath : null
-    out = dp
-      ? await encService.tryDecode(bytes, { displayPath: dp })
-      : await encService.tryDecode(bytes)
+    return Object.keys(opts).length ? await encService.tryDecode(bytes, opts) : await encService.tryDecode(bytes)
+  }
+  // wantEncoding：调用方（file-diff 路由）按用户在详情里手选的编码传入。传了就跳过猜测，
+  // 直接按该编码解（与服务 read 工具的 encoding 逃生口同一语义）。
+  let out = null
+  try {
+    out = await callDecode(wantEncoding)
   } catch (e) {
     return { ok: false, error: readFail(direct.error) }
+  }
+  // ③ 猜测关闭时的自动采用：服务在 autoGuessEncoding=false 下拒绝，但它**已经把候选算出来了**
+  // （refusal.candidates 带 encoding/score/sample）。审批详情是给人看的，服务文档明确说
+  // 「Consumers rendering for a human want to offer those candidates as a chooser」，故这里
+  // 用服务自己给出的首候选回灌一次显式编码——不是本插件自己猜：候选、排序、可采信判定
+  // （adoptable）全部来自服务。
+  //
+  // 只在 adoptable === true 时采用：服务文档把「ranked:true 但 adoptable:false」点名为危险
+  // 中间态（有排序，但首候选是服务明确判定为不可信的那一页），采用它会重现拒绝本要防止的
+  // 静默误解码。candidates 为空说明没有编码能干净解出（通常是二进制），保持原有报错。
+  //
+  // 采用后服务只会标 decided='hint'（= 调用方已指定编码，确定口径），故下面出口处要把
+  // 标注降级为 'guessed'——见出口注释。
+  let adopted = null
+  if (!out || out.ok !== true || !out.result) {
+    const rf = out && out.refusal
+    if (!wantEncoding && rf && rf.code === 'E_NOT_TEXT' && rf.adoptable === true
+      && Array.isArray(rf.candidates) && rf.candidates.length && rf.candidates[0] && rf.candidates[0].encoding) {
+      try {
+        const retry = await callDecode(rf.candidates[0].encoding)
+        if (retry && retry.ok === true && retry.result) { out = retry; adopted = rf }
+      } catch (e) {}
+    }
   }
   if (!out || out.ok !== true || !out.result) {
     const refusal = out && out.refusal
@@ -420,7 +447,26 @@ async function readPreviewText(fsService, target, encService, size) {
   // 这不会误伤合法文本：实测各 UTF BOM 变体（utf16le/utf16be/utf32le/utf8bom）与
   // GBK/Big5/Shift-JIS 的正常文件解出的文本都不含 U+0000。
   if (text.indexOf('\u0000') !== -1) return { ok: false, error: readFail(direct.error) }
-  return { ok: true, text, encoding: r.encoding || null, decided: r.decided || null }
+  // 候选编码随结果带出（供客户端渲染可切换的选择器）：
+  //  · 自动采用首候选时，用**拒绝里那份**候选（它才是完整的 best-first 列表）；
+  //  · 用户手选时服务按显式 encoding 解出，其 result.candidates 恒为空（见服务
+  //    encoding-state.js 的 hint 分支），而本函数是无状态的、拿不到上次那份拒绝，
+  //    故这里只能不下发；由**客户端**在覆盖缓存时沿用旧 payload 的 encCandidates
+  //    （否则用户切换一次后徽标就退化为不可点，再也切不回去）。
+  // 候选为空数组时不下发该字段：客户端据「有无 candidates」决定徽标是否可点。
+  const cands = adopted && Array.isArray(adopted.candidates) && adopted.candidates.length
+    ? adopted.candidates.map((c) => ({ encoding: c.encoding, sample: c.sample, score: c.score }))
+    : null
+  // 标注降级：自动采用时服务只会标 'hint'（= 调用方已指定编码，确定口径），但那条是
+  // **本插件替用户从候选里挑的猜测**——服务自己在 autoGuessEncoding=true 下对同一候选
+  // 标的是 'guessed' 并附「可能不准」警告。若原样透传 'hint'，关闭猜测的部署反而把
+  // 猜测呈现得更确定，而审批者正是照这段预览决定是否放行写盘。故 adopted 时降级为
+  // 'guessed'，让客户端保留「?」与警告文案。用户手选（wantEncoding）是用户自己的
+  // 显式选择，保持服务标注不改写。
+  const decided = adopted ? 'guessed' : (r.decided || null)
+  // adopted 一并带出：调用方（撤销预览）要据此判断「本次解码是本插件替用户挑的候选」
+  // ——那种解码不能用来对「撤销是否会执行」下结论（见 buildUndoDiffData）。
+  return { ok: true, text, encoding: r.encoding || null, decided, candidates: cands, adopted: !!adopted }
 }
 
 export default {
@@ -1906,7 +1952,7 @@ export default {
 
     // enc：本次请求的编码来源 holder（由 buildFileDiffData 创建）。给默认值是为了
     // 漏传时不崩（只是少一个标注），而不是静默接受缺参——调用点只有 buildFileDiffDataRaw 一处。
-    async function buildUndoDiffData(entry, fsService, fp, enc = { meta: null }) {
+    async function buildUndoDiffData(entry, fsService, fp, enc = { meta: null, want: null }) {
       if (!fp) return { ok: false, error: bi('缺少文件路径', 'Missing file path') }
       let row = null
       // 先 stat + size 预检，再读 DB：避免 >1MB 文件先全量载入 undo 大行（content/result_content 各约等于文件大小）
@@ -1942,11 +1988,11 @@ export default {
       try {
         // 撤销预览要拿磁盘当前内容与撤销目标比对，非 UTF-8 文件同样要能读出，
         // 否则撤销预览直接报 invalid UTF-8 text 而看不到将被恢复的内容。
-        const curRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size)
+        const curRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size, enc.want)
         if (!curRR.ok) return curRR
         const curText = curRR.text
         // 记录编码来源：撤销预览同样是「按解码文本生成的对比」，须让客户端能标注
-        enc.meta = { encoding: curRR.encoding, decided: curRR.decided }
+        enc.meta = { encoding: curRR.encoding, decided: curRR.decided, candidates: curRR.candidates }
         const after = row.content === null || row.content === undefined ? '' : String(row.content)
         if (overMaxChars(curText, after)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
         // 与 better-edit 的校验口径对齐：better-edit 用 undo 行的 bom/ending 做字节级精确比较，
@@ -1954,13 +2000,24 @@ export default {
         // 仅行尾（CRLF↔LF）或 BOM 差异的覆盖在 better-edit 会返回 E_UNDO_STALE，预览同步按 stale 处理。
         const resultContent = row.result_content === null || row.result_content === undefined ? '' : String(row.result_content)
         const normTxt = (s) => normEol(String(s || '').replace(/^\uFEFF/, ''))
-        if (normTxt(curText) !== normTxt(resultContent)) {
+        // 解码是否与**写盘内核实际使用的那份**同源：内核按它自己记录的编码解码后再做字节级
+        // 校验（better-edit 用 undo 行的 bom/ending），只有「服务自行判定」的解码才与该记录
+        // 同源。下面两种都不是，其 curText 与 result_content 必然不等：
+        //   · 用户在详情里手选预览编码（enc.want）——服务按我们给的编码解，内核不认这个选择；
+        //   · 本插件替用户采用了服务候选（curRR.adopted）——那恰恰是内核不会采用的那一页。
+        // 非同源时据此下结论不是「少一条提示」，而是**反向误导**：预览输出「撤销不会执行
+        // （无变化）」，审批者以为放行无副作用，实际撤销会执行并改盘——正是本插件要防的误判
+        // 放行。故非同源时只渲染对比、不对撤销是否执行下结论（宁可少说，不能说错；与上面
+        // 「无法预览」分支同一原则）。
+        const decodeMatchesKernel = !enc.want && !curRR.adopted
+        if (decodeMatchesKernel && normTxt(curText) !== normTxt(resultContent)) {
           return { ok: false, error: bi('文件在该次编辑后已被改动，撤销不会执行（无变化）', 'File changed after that edit; the undo will not run (no change)') }
         }
         const undoBom = row.bom === '\uFEFF' ? '\uFEFF' : ''
         const undoEnding = row.ending === '\r\n' || row.ending === '\r' ? row.ending : '\n'
         // 磁盘真实 BOM 状态：readText 经 TextDecoder 解码会剥离前导 BOM，故直接读前 3 字节比对
         // EF BB BF；读不到时回退到「stat.size 与文本字节数比对」的旧判据，与 undo.bom 不一致视为 stale
+        let bomCheckable = true
         if (typeof info.size === 'number') {
           let diskHasBom = false
           try {
@@ -1969,24 +2026,32 @@ export default {
             const head = (fsService.readByteRange && target) ? await fsService.readByteRange(target, { offset: 0, length: 3 }, undefined) : null
             diskHasBom = !!(head && head.length >= 3 && head[0] === 0xEF && head[1] === 0xBB && head[2] === 0xBF)
           } catch (e) {
-            diskHasBom = info.size === Buffer.byteLength(curText, 'utf8') + 3
+            // size 判据按 curText 的 UTF-8 字节数反推，依赖预览解码结果：解码与内核不同源时
+            // 该反推不成立（会得出错误的 BOM 结论），此时放弃这条复核而不是给出错误断言。
+            if (decodeMatchesKernel) diskHasBom = info.size === Buffer.byteLength(curText, 'utf8') + 3
+            else bomCheckable = false
           }
           const wantBom = undoBom !== ''
-          if (diskHasBom !== wantBom) {
+          if (bomCheckable && diskHasBom !== wantBom) {
             return { ok: false, error: bi('文件 BOM 在该次编辑后已被改动，撤销不会执行（无变化）', 'File BOM changed after that edit; the undo will not run (no change)') }
           }
         }
         // 内容与行尾精确比较：curText 保留原始 CRLF；resultContent 为 \n 规范化存储，按 undo.ending 还原
         // undoEnding 为 '\n'（LF 文件，最常见）时该 replace 是恒等变换，短路避免整串副本
         const exactResult = undoEnding === '\n' ? String(resultContent) : String(resultContent).replace(/\n/g, undoEnding)
-        if (curText !== exactResult) {
+        if (decodeMatchesKernel && curText !== exactResult) {
           return { ok: false, error: bi('文件行尾/编码在该次编辑后已被改动，撤销不会执行（无变化）', 'File line endings or encoding changed after that edit; the undo will not run (no change)') }
         }
         const oldLines = splitDiffLines(curText)
         const newLines = splitDiffLines(after)
         const p = commonPrefixLen(oldLines, newLines)
         const s = commonSuffixLen(oldLines, newLines, p)
-        return windowedDiffPayload(fp, oldLines, newLines, p + 1, oldLines.length - s - p, newLines.length - s - p, 200)
+        const out = windowedDiffPayload(fp, oldLines, newLines, p + 1, oldLines.length - s - p, newLines.length - s - p, 200)
+        // 上面跳过了 stale 判定时，必须让客户端把这件事显式说出来：不给提示等于让审批者
+        // 以为「没报 stale = 撤销会正常执行」，而这里其实什么都没判定。文案口径与
+        // 「无法预览」分支一致——只说明判断不了，不对撤销本身是否执行下结论。
+        if (out && out.ok === true && !decodeMatchesKernel) out.undoVerdictSkipped = true
+        return out
       } catch (e) {
         return { ok: false, error: readFail(e) }
       }
@@ -2033,19 +2098,21 @@ export default {
       }
     }
 
-    // 统一「预检 + readText」：返回 {ok:true,target,info,text,encoding,decided} 或 {ok:false,error}。
+    // 统一「预检 + readText」：返回 {ok:true,target,info,text,encoding,decided,candidates}
+    // 或 {ok:false,error}。
     // 写分支各读盘入口共用；preText 非空时直接复用（调用方已完成预检读盘，如 str_replace 唯一性检查），避免双读盘。
     // 注意：本函数不写编码来源——它拿不到本次请求的 holder，且 preText 短路时并未读盘，
-    // 编码来源由调用方按返回的 encoding/decided 自行记录（见 readTargetCheckedMeta）。
-    async function readTargetChecked(fp, projRoot, fsService, preText) {
+    // 编码来源由调用方按返回的 encoding/decided/candidates 自行记录（见 readTargetCheckedMeta）。
+    // want：用户在详情里手选的编码，由调用方从请求 holder 透传（本函数自己拿不到 holder）。
+    async function readTargetChecked(fp, projRoot, fsService, preText, want) {
       if (preText !== null && preText !== undefined) return { ok: true, target: null, info: null, text: preText }
       const st = await statTargetChecked(fp, projRoot, fsService)
       if (!st.ok) return st
       // 走 readPreviewText：UTF-8 直接读；非 UTF-8 且解码服务在场时由它判定。
       // 写类 diff 同样需要读到非 UTF-8 文件的既有内容，否则编辑预览会报 invalid UTF-8 text。
-      const rr = await readPreviewText(fsService, st.target, getFsEncodingService(ctx), st.info && st.info.size)
+      const rr = await readPreviewText(fsService, st.target, getFsEncodingService(ctx), st.info && st.info.size, want)
       if (!rr.ok) return rr
-      return { ok: true, target: st.target, info: st.info, text: rr.text, encoding: rr.encoding, decided: rr.decided }
+      return { ok: true, target: st.target, info: st.info, text: rr.text, encoding: rr.encoding, decided: rr.decided, candidates: rr.candidates, adopted: rr.adopted }
     }
 
     // 读盘并把编码来源记到**本次请求的** holder：写类 diff 的 payload 由
@@ -2054,8 +2121,8 @@ export default {
     // 文件真实内容展示）。故读盘处统一记录、buildFileDiffData 出口统一附加。
     // holder 由调用方按请求创建（不是 entry 属性），避免并发请求互相覆盖。
     async function readTargetCheckedMeta(enc, fp, projRoot, fsService, preText) {
-      const rd = await readTargetChecked(fp, projRoot, fsService, preText)
-      if (rd.ok && rd.encoding && rd.decided) enc.meta = { encoding: rd.encoding, decided: rd.decided }
+      const rd = await readTargetChecked(fp, projRoot, fsService, preText, enc.want)
+      if (rd.ok && rd.encoding && rd.decided) enc.meta = { encoding: rd.encoding, decided: rd.decided, candidates: rd.candidates }
       return rd
     }
 
@@ -2122,16 +2189,19 @@ export default {
       if (out && out.ok === true && meta && meta.encoding && meta.decided) {
         out.encoding = meta.encoding
         out.decided = meta.decided
+        // 候选编码列表（非 UTF-8 时才有）：客户端据此把编码徽标做成可点的切换器。
+        // 与 encoding/decided 同一单点附加，避免各 payload 构造分支逐个漏加。
+        if (Array.isArray(meta.candidates) && meta.candidates.length) out.encCandidates = meta.candidates
       }
       return out
     }
 
-    async function buildFileDiffData(entry, fsService) {
+    async function buildFileDiffData(entry, fsService, wantEncoding) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
       const fp = pathArg(args)
       // 每次请求各建一个 holder：请求内传递编码来源，请求间互不可见
-      const enc = { meta: null }
+      const enc = { meta: null, want: typeof wantEncoding === 'string' && wantEncoding ? wantEncoding : null }
       const r = await buildFileDiffDataRaw(entry, fsService, name, args, fp, enc)
       return withEncMeta(r, enc.meta)
     }
@@ -2220,8 +2290,12 @@ export default {
             out.length = 0
             outBytes = 0
             cut = false
-            const rr = await readPreviewText(fsService, target, getFsEncodingService(ctx), st.info && st.info.size)
+            const rr = await readPreviewText(fsService, target, getFsEncodingService(ctx), st.info && st.info.size, enc.want)
             if (!rr.ok) return { ok: false, error: rr.error }
+            // 记录编码来源到本次请求的 holder：read 详情同样要能标注编码，且要与
+            // undo/write 分支同口径带上候选——否则客户端拿不到 encCandidates，
+            // 编码徽标在 read 视图里恒为不可点的纯展示（同一文件在 diff 视图却能切）。
+            enc.meta = { encoding: rr.encoding, decided: rr.decided, candidates: rr.candidates }
             const lines = String(rr.text).split(/\r?\n/)
             // 尾随换行会多出一个空元素：它既不是真实行（不该被渲染成末行并占用行号），
             // 也不该参与「下方还有更多行」的比较（否则文件恰好结束在窗口边界时误报）
@@ -2530,11 +2604,11 @@ export default {
           if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           // 非 UTF-8 文件的编辑预览同样要能读出既有内容（否则直接报 invalid UTF-8 text）。
           // 这里只用于展示 diff；写盘编码由 DSH/编码插件按原编码处理，不受此解码影响。
-          const oldRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size)
+          const oldRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size, enc.want)
           if (!oldRR.ok) return oldRR
           const oldText = oldRR.text
           // 记录编码来源：write 全文对比同样按解码文本生成，须让客户端能标注
-          enc.meta = { encoding: oldRR.encoding, decided: oldRR.decided }
+          enc.meta = { encoding: oldRR.encoding, decided: oldRR.decided, candidates: oldRR.candidates }
           if (overMaxChars(oldText, content)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           return diffPayloadOrFallback(fp, oldText, content, 'modified')
         } catch (e) {
@@ -3815,7 +3889,10 @@ export default {
           const entry = pendingApprovals.get(a.id)
           if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
           try {
-            const r = await buildFileDiffData(entry, fs)
+            // a.encoding：用户在详情里手选的编码（编码徽标 → 候选列表 → 切换）。
+            // 只透传字符串，非字符串/空串一律当作"未指定"走猜测，避免把非法值交给服务
+            // （那会被拒为 E_BAD_ENCODING，一条内部参数错误会顶掉整个详情）。
+            const r = await buildFileDiffData(entry, fs, a.encoding)
             if (!r) return json(res, { ok: false, error: lang === 'en' ? 'Cannot build comparison' : '无法生成对比' })
             if (!r.ok) return json(res, { ok: false, error: typeof r.error === 'string' ? r.error : L(r.error, lang) })
             return json(res, r)
