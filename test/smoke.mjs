@@ -221,7 +221,6 @@ group('2. str_replace 唯一性（old_str 重复 → 提示将失败，不画假
   const r = await runApproval('str_replace_editor', { command: 'str_replace', path: 'dup.txt', old_str: 'same', new_str: 'Y' }, 'same\nsame\n', 'dup.txt')
   ok('file-diff 返回 ok:false', !!(r.diff && r.diff.data && r.diff.data.ok === false))
   const err = r.diff && r.diff.data && r.diff.data.error
-  const msg = typeof err === 'string' ? err : (err && (err.zh || err.message)) || ''
   ok('提示 old_str 多次出现', /出现多次|occurs multiple/.test(JSON.stringify(err || '')), JSON.stringify(err))
 }
 
@@ -1219,6 +1218,244 @@ group('18b. 撤销分类默认值 = allow（缺键回落），显式落盘的值
   const n5 = await freshUndo(legacy)
   ok('group18b: 缺 undo 键的存量配置回落 allow（影响面已如实标注）', n5.eff === 'allow' && n5.verdict === 'allow', JSON.stringify({ eff: n5.eff, verdict: n5.verdict }))
   ok('group18b: 缺 undo 键的存量配置里，显式的 edit:ask 仍存活', (n5.effective || {}).edit === 'ask', JSON.stringify(n5.effective))
+}
+
+// ─────────────────────────────────────────────────────────────
+group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
+// 背景：edit / insert / str_replace_editor 没有 encoding 参数，编码完全来自
+// dsh-fs-encoding 的 encoding memo；write 的基线读、read 未指定时也回落到它。
+// permgate 此前拿不到那份记录，只能自行判定，可能落在另一页上——预览描述的文本与工具
+// 实际要改的文本就不是同一份。该只读出口由较新的 dsh-fs-encoding 提供
+// （本插件按能力探测使用，不依赖它存在：缺失时只告警并退回原报错，功能降级但不影响正常使用）。
+//
+// 本组用**真实链路**（HTTP 路由 + 真实 LocalFileSystem + 桩服务）验证接线：
+// 记录存在时按记录解，记录缺失/过期时退回原行为，老版服务（无该方法）不崩。
+{
+  const GBK = Buffer.from([0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0xCA, 0xC0, 0xBD, 0xE7, 0x0A, 0x68, 0x69, 0x0A])
+
+  // 桩服务：记录表由用例注入；tryDecode 显式 encoding 时恒回 'hint'（与真实服务一致），
+  // 这正是「必须用记录的 provenance 覆盖」的理由。
+  //
+  // version 语义按 **1.4.0** 实现（与早期工作树相反）：省略/undefined 是 fail-closed
+  // （仍走 isStale，带版本的记录被判不可用），只有显式 null 才跳过判定。
+  // 桩必须照实实现，否则测的是「假契约」——perm gate 传真实版本时行为看似正常，
+  // 而一旦它漏传版本，桩会静默放行而真实服务会拒绝。
+  const mkSvc = (records) => ({
+    tryDecode: async (bytes, opts) => {
+      const enc = opts && opts.encoding
+      if (enc) return { ok: true, result: { text: 'DECODED-AS-' + enc + '\n', encoding: enc, decided: 'hint' } }
+      return { ok: false, refusal: { code: 'E_NOT_TEXT', message: '[E_NOT_TEXT] stub: guessing off', candidates: [] } }
+    },
+    recordedEncoding: (sessionId, target, version) => {
+      const key = sessionId + '|' + (target && (target.targetKey || target.displayPath))
+      const rec = records[key]
+      if (!rec) return undefined
+      // 1.4.0：null 才跳过；undefined 走 isStale（记录里没版本 → 判 stale）
+      if (version !== null && rec.version !== version) return undefined
+      return { encoding: rec.encoding, decided: rec.decided, hasBOM: false, lineEnding: '\n' }
+    },
+  })
+
+  const mk = async (label, records, opts) => {
+    const o = opts || {}
+    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-memo-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: o.svc !== undefined ? o.svc : mkSvc(records) })
+    const pre = h.hooks.get('tools/pre-execute')
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, o.bytes || GBK)
+    const tool = o.tool || 'read'
+    const category = tool === 'read' ? 'read' : 'edit'
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category, mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const args = o.args ? o.args(p) : { file_path: p }
+    // 等待逻辑复用文件内既有的 awaitPending（40×25ms 轮询 + hook 落定标记），
+    // 而不是固定睡眠：慢机器/CI 上固定 80ms 内审批可能尚未入表，会让断言以
+    // 「功能坏了」的形式假失败。host 非模块级，故必须显式传入（见该函数的 h 参数）。
+    const { done, mark } = settleFlag()
+    const pending = pre(makeExec(ws, tool, args), async () => ({ kind: 'allow' }))
+    pending.then(mark, mark)
+    const item = await awaitPending(tool, done, h)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await withTimeout(pending, label + ' settle')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    return { item, data: diff.data, sessionId: item && item.sessionId }
+  }
+
+  // ① edit 审批带 sessionId：记录查询的**前提**（本块只验证这个前提，不验证记录本身——
+  // 真正验证「有记录 → 按记录解码」的是下面第二块，它才构造了 records）。
+  {
+    const r = await mk('edit 带 sessionId', null, { tool: 'edit', args: (p) => ({ file_path: p, old_string: 'x', new_string: 'y' }) })
+    ok('group19: edit 审批带 sessionId（记录查询的前提）', !!r.sessionId, JSON.stringify(r.sessionId))
+  }
+  // 用真实 key（sessionId|targetKey）构造记录：targetKey 是 realpath，先算出来
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-k-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-memo-kh-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, GBK)
+    const h0 = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: undefined })
+    const resolved = await h0.fs.resolve(p)
+    const tk = resolved && (resolved.targetKey || resolved.displayPath)
+    // 记录的 version 必须与 permgate 预览时 stat 到的**真实**版本一致，
+    // 否则 1.4.0 的 fail-closed/stale 判定会把记录判为过期（这正是要测的语义）
+    const realVersion = (await h0.fs.stat(resolved)).version
+    const records = {}
+    records['sess-1|' + tk] = { encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n', version: realVersion }
+    // 用同一份 ws 重开一个带记录的宿主，走真实审批 → file-diff
+    const svc = mkSvc(records)
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: svc })
+    const pre = h.hooks.get('tools/pre-execute')
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'edit', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const { done, mark } = settleFlag()
+    const pending = pre(makeExec(ws, 'edit', { file_path: p, old_string: 'x', new_string: 'y' }), async () => ({ kind: 'allow' }))
+    pending.then(mark, mark)
+    const item = await awaitPending('edit', done, h)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    const d = diff.data
+    ok('group19: ★ 有记录时 edit 预览成功（此前只能报 invalid UTF-8 / E_NOT_TEXT）',
+      !!(d && d.ok === true), JSON.stringify(d && (d.error || d.ok)))
+    ok('group19: ★ 预览按记录里的 gbk 解码', !!(d && d.ok && d.encoding === 'gbk'), JSON.stringify(d && { enc: d.encoding, dec: d.decided }))
+    // 关键：服务对显式 encoding 只回 'hint'，而记录写的是 'guessed'。必须用记录的 provenance，
+    // 否则一条猜测记录会被呈现成确定编码（审批者正是照预览决定是否放行）。
+    ok('group19: ★ provenance 取记录的 guessed（未被服务的 hint 覆盖）',
+      !!(d && d.ok && d.decided === 'guessed'), JSON.stringify(d && { enc: d.encoding, dec: d.decided }))
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await withTimeout(pending, 'g19-1 settle')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+  // ② 无记录（服务回 undefined）→ 退回原行为：服务拒绝则原样报错，不崩
+  {
+    const r = await mk('edit 无记录', {})
+    ok('group19: 无记录时 edit 预览维持原报错（不自行猜编码）',
+      !!(r.data && r.data.ok === false && r.data.error), JSON.stringify(r.data && r.data.error))
+  }
+  // ③ 记录过期（服务对版本不符回 undefined）→ 同样退回原行为
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-s-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-memo-sh-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, GBK)
+    const h0 = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: undefined })
+    const resolved = await h0.fs.resolve(p)
+    const tk = resolved && (resolved.targetKey || resolved.displayPath)
+    // 桩：无论版本一律回 undefined，模拟 isStale 判过期
+    const svc = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: '[E_NOT_TEXT] stale', candidates: [] } }),
+      recordedEncoding: () => undefined,
+    }
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: svc })
+    const pre = h.hooks.get('tools/pre-execute')
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'edit', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const { done, mark } = settleFlag()
+    const pending = pre(makeExec(ws, 'edit', { file_path: p, old_string: 'x', new_string: 'y' }), async () => ({ kind: 'allow' }))
+    pending.then(mark, mark)
+    const item = await awaitPending('edit', done, h)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    ok('group19: 记录过期（服务回 undefined）时退回原报错',
+      !!(diff.data && diff.data.ok === false && diff.data.error), JSON.stringify(diff.data && diff.data.error))
+    ok('group19: 过期判定由服务负责（预览不自行比较 version）', !!tk)
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await withTimeout(pending, 'g19-3 settle')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+  // ④ 老版服务（只有 tryDecode，没有 recordedEncoding）→ 不崩、退回原行为
+  {
+    const oldSvc = { tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: '[E_NOT_TEXT] old service', candidates: [] } }) }
+    const r = await mk('老版服务', null, { tool: 'edit', args: (p) => ({ file_path: p, old_string: 'x', new_string: 'y' }), svc: oldSvc })
+    ok('group19: ★ 老版服务（无 recordedEncoding）不崩且退回原报错（可选依赖不被破坏）',
+      !!(r.data && r.data.ok === false && r.data.error), JSON.stringify(r.data && r.data.error))
+  }
+  // ④b ★ 1.4.0 的 fail-closed：perm gate **必须**把 stat 到的真实版本传下去。
+  // 若它漏传版本，服务会把记录判为过期 → 预览退回原报错（静默失效，不报错）。
+  // 这条用例让桩**照实**实现 1.4.0 语义（undefined → 判 stale），故能捕获"漏传版本"。
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-fc-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-memo-fch-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, GBK)
+    const h0 = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: undefined })
+    const resolved = await h0.fs.resolve(p)
+    const tk = resolved && (resolved.targetKey || resolved.displayPath)
+    const realVersion = (await h0.fs.stat(resolved)).version
+    // 记录带**正确**版本 → 应当取到并按 gbk 解（证明 permgate 确实传了版本）
+    const records = {}
+    records['sess-1|' + tk] = { encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n', version: realVersion }
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: mkSvc(records) })
+    const pre = h.hooks.get('tools/pre-execute')
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'edit', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const f1 = settleFlag()
+    const pending = pre(makeExec(ws, 'edit', { file_path: p, old_string: 'x', new_string: 'y' }), async () => ({ kind: 'allow' }))
+    pending.then(f1.mark, f1.mark)
+    const item = await awaitPending('edit', f1.done, h)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    const d = diff.data
+    ok('group19: ★★ 记录带正确版本时能取到（证明 permgate 确实把 stat 的版本传下去了）',
+      !!(d && d.ok === true && d.encoding === 'gbk'), JSON.stringify(d && { ok: d.ok, enc: d.encoding, err: d.error }))
+    // 对照：把记录的版本改错 → 服务判 stale → 退回原报错。两例成对，才能证明
+    // 「取到」不是因为桩忽略了版本（那样两例都会通过）。
+    const h2 = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: mkSvc({ ['sess-1|' + tk]: { encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n', version: 'wrong-version' } }) })
+    const pre2 = h2.hooks.get('tools/pre-execute')
+    await callRoute(h2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'edit', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const f2 = settleFlag()
+    const pending2 = pre2(makeExec(ws, 'edit', { file_path: p, old_string: 'x', new_string: 'y' }), async () => ({ kind: 'allow' }))
+    pending2.then(f2.mark, f2.mark)
+    const item2 = await awaitPending('edit', f2.done, h2)
+    const diff2 = await callRoute(h2.routes, 'POST', '/permgate/file-diff', { id: item2 && item2.id, lang: 'zh' })
+    ok('group19: ★★ 对照——版本不符时服务判 stale、退回原报错（证明上例真的走了版本判定）',
+      !!(diff2.data && diff2.data.ok === false), JSON.stringify(diff2.data && { ok: diff2.data.ok, enc: diff2.data.encoding }))
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    if (item2) await callRoute(h2.routes, 'POST', '/permgate/decide', { id: item2.id, action: 'deny', lang: 'zh' })
+    await withTimeout(pending, 'g19-4b settle')
+    await withTimeout(pending2, 'g19-4b2 settle')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+  // ⑤ read 审批 + AI 透传 encoding → 工具透传优先（这条路径不依赖记录）
+  {
+    const r = await mk('read 透传 encoding', {}, { tool: 'read', args: (p) => ({ file_path: p, encoding: 'big5' }) })
+    ok('group19: ★ read 透传 encoding 优先于记录（工具就按它解码）',
+      !!(r.data && r.data.ok === true && r.data.encoding === 'big5'), JSON.stringify(r.data && { ok: r.data.ok, enc: r.data.encoding }))
+    ok('group19: 透传时 decided=hint（调用方指定的，服务标注正确）',
+      !!(r.data && r.data.ok && r.data.decided === 'hint'), JSON.stringify(r.data && r.data.decided))
+  }
+  // ⑥ **优先级对照**：记录与透传**同时存在且不同**时，必须用透传的那一页。
+  // ⑤ 只有透传、没有记录，故证明不了优先级——实测把 wantEncoding 的顺序反过来
+  // （`recEnc || encodingHint`）后 ⑤ 照样通过。这一条才是有区分力的对照。
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-p-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-memo-ph-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    const p = join(ws, 'gbk.txt')
+    writeFileSync(p, GBK)
+    const h0 = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: undefined })
+    const resolved = await h0.fs.resolve(p)
+    const tk = resolved && (resolved.targetKey || resolved.displayPath)
+    // 记录写 gbk，工具透传 big5：两者不同，结果必须体现 big5
+    const realVersion = (await h0.fs.stat(resolved)).version
+    const records = {}
+    records['sess-1|' + tk] = { encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n', version: realVersion }
+    const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: mkSvc(records) })
+    const pre = h.hooks.get('tools/pre-execute')
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'read', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    const f6 = settleFlag()
+    const pending = pre(makeExec(ws, 'read', { file_path: p, encoding: 'big5' }), async () => ({ kind: 'allow' }))
+    pending.then(f6.mark, f6.mark)
+    const item = await awaitPending('read', f6.done, h)
+    const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
+    const d = diff.data
+    ok('group19: ★★ 记录=gbk 且透传=big5 时，必须用透传的 big5（优先级对照）',
+      !!(d && d.ok && d.encoding === 'big5'),
+      JSON.stringify(d && { ok: d.ok, enc: d.encoding, dec: d.decided }))
+    ok('group19: ★★ 此时 provenance 用服务的 hint（透传是调用方指定的），而非记录的 guessed',
+      !!(d && d.ok && d.decided === 'hint'), JSON.stringify(d && { enc: d.encoding, dec: d.decided }))
+    if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+    await withTimeout(pending, 'g19-6 settle')
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
 }
 
 if (fail.length) {

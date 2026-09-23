@@ -42,11 +42,12 @@
     "test": "node test/regressions.mjs && node test/smoke.mjs",
     "test:unit": "node test/regressions.mjs",
     "test:smoke": "node test/smoke.mjs",
-    "lint": "eslint index.js client.js"
+    "lint": "eslint ."
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-fs-local": ">=0.0.1-rc <1"
+    "@deepseek-ai/dsh-fs-local": ">=0.0.1-rc <1",
+    "eslint": "^9.0.0"
   },
   "license": "MIT"
 }

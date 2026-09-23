@@ -121,6 +121,36 @@ ok('store 回退只取主键列', src.includes("const keys = db.prepare('SELECT 
 ok('无遗留 projectsOnlyFromConfig/mergeMigratedConfig', !src.includes('projectsOnlyFromConfig') && !src.includes('mergeMigratedConfig'))
 
 // ─────────────────────────────────────────────────────────────
+group('6b. lint 工具链：配置声称的覆盖范围必须真的被跑')
+// 背景（实测踩到）：package.json 的 lint 脚本原为 `eslint index.js client.js`，而
+// eslint.config.mjs 的 files 声明是 ['index.js','client.js','test/**/*.mjs']——
+// **配置声称覆盖测试文件，脚本却没传它们**，等于 test/ 从未被 lint。
+// 另：本包不把 eslint 列为 devDependency（纯运行期插件，只发布三个文件），
+// 故 `npx eslint` 会解析**全局**那份；机器上 npm 全局是 8.46.0，读不了 flat config，
+// 报 "couldn't find a configuration file"，而 `npm run lint` 走 PATH 里另一份 9.x 却正常
+// ——同一个仓库出现「npx 报错、npm run 正常」的分裂。现统一为 `eslint .`。
+{
+  const pkg = JSON.parse(readFileSync(pathJoin(ROOT, 'package.json'), 'utf8'))
+  ok('lint 脚本用 `eslint .`（覆盖配置声称的全部文件，含 test/）',
+    pkg.scripts && pkg.scripts.lint === 'eslint .', String(pkg.scripts && pkg.scripts.lint))
+  ok('lint 脚本不再只传 index.js client.js（那会让 test/ 静默漏检）',
+    !/eslint index\.js client\.js/.test(String(pkg.scripts && pkg.scripts.lint)))
+  // 显式声明 eslint，否则版本取决于机器 PATH 顺序（全局 8.x 读不了 flat config）
+  ok('★ 显式声明 eslint devDependency（不依赖机器全局那份的版本）',
+    !!(pkg.devDependencies && pkg.devDependencies.eslint), JSON.stringify(pkg.devDependencies))
+  ok('eslint 版本要求 >= 9（flat config 需要 9+）',
+    /^\^?9\./.test(String(pkg.devDependencies && pkg.devDependencies.eslint)),
+    String(pkg.devDependencies && pkg.devDependencies.eslint))
+  // 配置的 files 必须仍覆盖 test/，否则上面的 `eslint .` 也只是跑了个寂寞
+  const cfg = readFileSync(pathJoin(ROOT, 'eslint.config.mjs'), 'utf8')
+  ok('配置的 files 覆盖 test/**/*.mjs', /files:\s*\[[^\]]*test\/\*\*\/\*\.mjs/.test(cfg))
+  // smoke.mjs 用 setImmediate 构造 mock 请求；缺声明会报 no-undef（实测确有此缺口）
+  ok('★ globals 声明 setImmediate（smoke.mjs 真的在用，缺则 no-undef）',
+    /setImmediate:\s*'readonly'/.test(cfg)
+    && readFileSync(pathJoin(ROOT, 'test/smoke.mjs'), 'utf8').includes('setImmediate('))
+}
+
+// ─────────────────────────────────────────────────────────────
 group('7. 浏览器半部分：清单以宿主下发为准')
 ok('client 清单为可变并保留默认', cli.includes("let CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'];") && cli.includes("let EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo'];"))
 ok('client applyStatusLists 覆盖清单', cli.includes('function applyStatusLists(s) {') && cli.includes('applyStatusLists(s);'))
@@ -353,7 +383,11 @@ if (mod) {
   } catch (e) {
     r5 = { ok: false, error: { zh: 'THREW: ' + ((e && e.message) || e) } }
   }
-  ok('服务抛异常时退回原报错（不崩）', r5.ok === false && /invalid UTF-8 text/.test(r5.error.zh), JSON.stringify(r5.error))
+  // 服务抛异常：不崩，且退回 ctx.fs 的原始报错。注意这里**无记录、无透传**（非 forceService），
+  // 此时 direct.error 是真实的 readText 失败，退回它与改动前逐字一致（failFromDirect 的
+  // 回落顺序刻意让直通原因优先）。forceService 下不得显示「读取失败: null」由第 26 组覆盖。
+  ok('服务抛异常时退回原报错（不崩）',
+    r5.ok === false && /invalid UTF-8 text/.test(r5.error.zh), JSON.stringify(r5.error))
 
   // ⑥ 字节读失败（体积超限/权限）→ 必须带出**字节读自己的**原因，而不是 readText 的
   // invalid UTF-8 text：后者会把「文件太大」谎报成「编码读不出」，审批者据此查编码却
@@ -692,32 +726,44 @@ ok('客户端标注编码来源并区分「猜的/确定的」，且两个键的
   cli.includes("'app.encHint': 'Not UTF-8; content decoded with this encoding'") &&
   cli.includes("'app.encGuessedHint': '该文件不是 UTF-8；编码是按内容猜测的（可能不准），请留意'") &&
   cli.includes("'app.encGuessedHint': 'Not UTF-8; the encoding was guessed from the content and may be wrong'"))
-// 防回退：编码徽标必须由**同一个**共用组件渲染，且三处渲染位都在。
+// 防回退：编码徽标必须由**同一个**共用函数渲染，且三处渲染位都在。
 // 只断言「源码里存在 encoding/decided 字符串」证明不了数据真的到了界面——曾实测把
 // withEncMeta 改成永不附加字段（徽标彻底消失），那种断言照样通过。故这里：
 //   ① 用**带尾逗号的渲染位形态** `encBadge(data,` 计数（恰为 3），与函数定义形参区分开
 //      （曾把形参与渲染点混在同一计数里：形参改名就误报失败，删一处+别处重复则漏判）；
 //   ② 把三处分别锚定在各自 header 块内，避免「删一处、别处重复一次」的守恒式绕过。
-// 第二个实参是切换预览解码的回调（有候选时徽标才可点）——计数只看**调用点**：
-// 先剔除函数定义行，再数剩余的三处渲染位。（直接把 `encBadge(data,` 计数会把定义行也算进去。）
-// 分派层（无状态）与带状态的 EncBadge 组件必须分开：把 hooks 写进被内联调用的普通函数，
-// open/busy 就归属整块 diff，开关一次浮层会重建全部行元素（最多 10 万行上下文）。
+// 徽标是**纯展示**（无候选、无下拉、不可点）：编码基准由工具自己透传，客户端不提供
+// 第二种选择——预览换一页就会与工具实际写入的那一页脱钩。
 ok('编码徽标单点渲染，且 fallback / 常规 diff / read 三处 header 都挂载',
   (cli.match(/function encBadge\(/g) || []).length === 1 &&
-  (cli.match(/function EncBadge\(/g) || []).length === 1 &&
-  (cli.replace(/function encBadge\(data,[^)]*\)\s*\{/g, '').match(/encBadge\(data,\s*[A-Za-z_$][\w$]*\)/g) || []).length === 3 &&
-  // 浮层状态必须落在真组件里（React.createElement(EncBadge, …)），不是内联普通函数调用
-  /React\.createElement\(EncBadge, \{ data, onPick \}\)/.test(cli) &&
+  // 不得再有带状态的浮层组件（下拉/候选已整块删除）
+  !/function EncBadge\(/.test(cli) &&
+  (cli.replace(/function encBadge\([^)]*\)\s*\{/g, '').match(/encBadge\(data\)/g) || []).length === 3 &&
   // fallback 视图：'-' + data.removed 之后紧跟徽标
-  /'-' \+ data\.removed\),\s*\n\s*encBadge\(data,/.test(cli) &&
+  /'-' \+ data\.removed\),\s*\n\s*encBadge\(data\)/.test(cli) &&
   // read 视图：diffLines 之后紧跟徽标
-  /T\('app\.diffLines'\)\.replace\([^\n]*\),\s*\n\s*encBadge\(data,/.test(cli))
+  /T\('app\.diffLines'\)\.replace\([^\n]*\),\s*\n\s*encBadge\(data\)/.test(cli))
+// 防回退：编码**不再可切换**。这是有意的设计决定，不是功能缺失：
+// 编辑预览要把磁盘内容与工具给的文本做匹配/比较，两侧编码基准必须一致；而工具用哪一页
+// 编码由它自己的 encoding memo 决定（io.js: `opts.encodingHint ?? memo?.encoding`），
+// 那个 memo 不经 ctx.fs / ctx.fsEncoding 暴露，本插件拿不到、无法据此对齐。故只认工具
+// 透传的 encoding（read 的 encoding 参数），其余情况把服务的拒绝原样带出。
+// 断言只列**历史上真实出现过**的符号（encCandidates/onPickEnc/pickEnc/encSwitch/EncBadge）
+// 与真实契约（路由不接受 encoding 入参，见下条）。刻意不写 encLocked/previewSwitchable 之类
+// 从未存在过的名字：那种「防回潮」断言恒为真、永不可能失败，只会让这条断言看起来比实际严密。
+ok('★ 编码不可切换：候选/下拉/切换回调整块不存在',
+  !/encCandidates/.test(cli) && !/onPickEnc/.test(cli) &&
+  !/pickEnc/.test(cli) && !/encSwitch/.test(cli) && !/EncBadge/.test(cli) &&
+  !/encCandidates/.test(src) && !/adopted/.test(src) && !/rf\.adoptable/.test(src))
+// 宿主也不得再接受客户端指定的编码：file-diff 路由只按 entry 生成
+ok('★ file-diff 路由不再接受客户端编码（编码基准只由工具透传）',
+  /buildFileDiffData\(entry, fs\)/.test(src) && !/buildFileDiffData\(entry, fs, a\.encoding\)/.test(src))
 // 防回退：服务判定结果必须从宿主透传到客户端（readPreviewText → holder → payload → badge）。
 // 写类 diff 与撤销预览的 payload 由多个构造器产出，故经**请求内局部 holder** 单点附加。
 // holder 必须是局部对象而非 entry 属性：file-diff 是 HTTP 路由且无按 id 串行化，
 // 挂 entry 上会让并发请求交错读写同一字段（实测：一次请求拿到另一次的编码）。
 ok('编码来源经请求内局部 holder 透传（不挂 entry，避免并发互相覆盖）',
-  src.includes('const enc = { meta: null, want:') &&
+  src.includes('const enc = { meta: null, want, sessionId: entry.sessionId || null }') &&
   src.includes('function withEncMeta(out, meta)') &&
   src.includes('return withEncMeta(r, enc.meta)') &&
   !/entry\.encMeta/.test(src))
@@ -2323,90 +2369,43 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
 }
 
 // ─────────────────────────────────────────────────────────────
-group('22. 非 UTF-8 预览：猜测关闭时采用服务给出的候选 + 可切换解码')
-// 背景：dsh-fs-encoding 的 autoGuessEncoding 默认 false，此时 ctx.fsEncoding.tryDecode
-// 拒绝（E_NOT_TEXT），但它**已经把候选算出来了**（refusal.candidates 带 encoding/score/sample，
-// 以及 adoptable/ranked）。permgate 原先只把面向模型的整句 message 塞进详情，用户看到的
-// 是 "[E_NOT_TEXT] … Re-read with read({ file_path: …, encoding: "gbk" })…" 而看不到任何内容。
-// 修法：拒绝时用服务自己给出的首候选回灌一次显式编码（不是本插件自己猜），并把候选列表
-// 下发给客户端，让编码徽标可点、可切换。切换只影响预览——服务文档明确 tryDecode 是
-// "只问不记"，不写会话编码记录，故 UI 必须写明这一点。
+group('22. 非 UTF-8 预览：编码只由工具透传（不自行采用候选、无切换）')
+// 背景与**设计决定**：dsh-fs-encoding 的 autoGuessEncoding 默认 false，此时
+// ctx.fsEncoding.tryDecode 拒绝（E_NOT_TEXT），但 refusal 里**已经带上了候选**
+// （encoding/score/sample，以及 adoptable/ranked）。
+//
+// 曾经的做法是：用 refusal.candidates[0] 回灌一次显式编码，让非 UTF-8 文件在审批详情里
+// 有内容可看，并把候选下发给客户端做切换器。**该做法已整块删除**，理由：
+//   工具真正写盘用的是它**自己的编码记录**（dsh-fs-encoding 的 encoding memo，
+//   io.js 里 `opts.encodingHint ?? memo?.encoding`），而那个 memo 不经 ctx.fs /
+//   ctx.fsEncoding 暴露（service.d.ts 明写「the recorded encoding is deliberately NOT
+//   part of this service」）。permgate 拿不到它，于是"预览按 A 页解、写盘按 B 页写"——
+//   而审批者正是照这段预览判断是否放行，比"没有预览"更危险。
+// 现在的口径：只认工具自己透传的 encoding（read 的 encoding 参数就是它会用的那一页），
+// 其余情况把服务的拒绝**原样**带出。宁可不显示，也不显示一页可能是错的编码。
 {
-  // 1) 宿主：采用逻辑的结构性约束
-  ok('拒绝时用服务给出的首候选回灌（不自己猜编码）',
-    /const retry = await callDecode\(rf\.candidates\[0\]\.encoding\)/.test(src)
-    && /rf\.code === 'E_NOT_TEXT'/.test(src))
-  ok('只在 adoptable === true 时采用（ranked 但不可信的首候选必须放弃）',
-    /rf\.adoptable === true/.test(src) && /rf\.candidates\.length/.test(src))
-  ok('用户手选的编码优先于猜测（wantEncoding 走同一 callDecode）',
-    /out = await callDecode\(wantEncoding\)/.test(src))
+  // 1) 宿主：不得再有任何编码决策
+  ok('★ 不再用服务候选回灌（本插件不做编码决策）',
+    !/callDecode\(rf\.candidates\[0\]\.encoding\)/.test(src)
+    && !/rf\.adoptable/.test(src)
+    && !/adopted/.test(src))
+  ok('★ 不再下发候选、不再标"可否切换"',
+    !/out\.encCandidates/.test(src) && !/candidates: (curRR|rd|oldRR|rr)\.candidates/.test(src))
+  ok('readPreviewText 返回体只有 text/encoding/decided（无 candidates/adopted）',
+    /return \{ ok: true, text, encoding: r\.encoding \|\| null, decided \}/.test(src))
   ok('opts 组装单点：displayPath/encoding 都只在有值时放入（服务严格校验 opts）',
     /const callDecode = async \(encoding\) => \{/.test(src)
     && /if \(dp\) opts\.displayPath = dp/.test(src)
     && /if \(typeof encoding === 'string' && encoding\) opts\.encoding = encoding/.test(src))
-  // 候选必须经 holder 单点透传到 payload（与 encoding/decided 同一出口）
-  // 五处：撤销（curRR）、readTargetChecked（rr）、readTargetCheckedMeta 经 holder（rd）、
-  // read 窗口回退（rr）、write（oldRR）——read 窗口回退那处曾漏掉，导致 ReadBlock 的徽标永远不可点。
-  ok('候选编码经 holder 单点透传到 payload（encCandidates）',
-    /out\.encCandidates = meta\.candidates/.test(src)
-    && (src.match(/candidates: (curRR|rd|oldRR|rr)\.candidates/g) || []).length === 5)
-  // 路由接受客户端手选的编码，且只透传字符串（非法值会顶掉整个详情）
-  ok('file-diff 路由透传 a.encoding（非字符串视为未指定）',
-    /buildFileDiffData\(entry, fs, a\.encoding\)/.test(src))
-  ok('readTargetChecked 把 want 透传给 readPreviewText（不是读不存在的 enc）',
-    /async function readTargetChecked\(fp, projRoot, fsService, preText, want\)/.test(src)
-    && /preText, enc\.want\)/.test(src))
+  // 拒绝分支必须保留三条分流：体积超限走项目口径、E_BAD_ENCODING 退回原始报错并记日志、
+  // 其余原样带出服务说明（它比 ctx.fs 的 invalid UTF-8 text 更准确）
+  ok('拒绝分流保留：E_TOO_LARGE / E_BAD_ENCODING / 其余原样带出',
+    /refusal\.code === 'E_TOO_LARGE'/.test(src)
+    && /refusal\.code === 'E_BAD_ENCODING'/.test(src)
+    && /fsEncoding rejected our opts/.test(src)
+    && /const msg = refusal && refusal\.message \? String\(refusal\.message\)/.test(src))
 
-  // 2) 客户端：可点击徽标 + 候选浮层 + 免责说明
-  ok('编码徽标在有候选时变成可点控件（无候选保持纯展示）',
-    /className: 'pg2-enc pg2-enc-btn'/.test(cli) && /role: 'button'/.test(cli)
-    && /if \(!cands\.length \|\| typeof onPick !== 'function'\)/.test(cli))
-  ok('候选浮层列出服务给出的编码与样本，并标出当前项',
-    /className: 'pg2-enc-opt' \+ \(c\.encoding === data\.encoding \? ' pg2-enc-opt-on' : ''\)/.test(cli)
-    && /className: 'pg2-enc-opt-sample'/.test(cli))
-  // 免责说明是**硬要求**：用户会照着预览判断是否放行，不能让他以为改这里会改变写入结果
-  ok('浮层写明「仅影响预览、不改变实际写入」',
-    cli.includes("'app.encPreviewOnly': '这里只改变预览的解码方式，不会改变工具实际写入的结果；文件按它自己记录的编码编辑。'")
-    && cli.includes("'app.encPreviewOnly': 'This only changes how the preview is decoded — it does NOT change what the tool actually writes. The file is edited with its own recorded encoding.'")
-    && /className: 'pg2-enc-note'/.test(cli))
-  ok('切换后重新拉取详情并覆盖缓存（内联详情与抽屉两条路径都有）',
-    /const pickEnc = \(p, enc\) => \{/.test(cli) && /const pickEncDrawer = \(enc\) => \{/.test(cli)
-    && (cli.match(/call\('permgate:file-diff', \{ id: [^}]*encoding: enc \}\)/g) || []).length === 2)
-  ok('onPickEnc 经 detailBody 分派到 DiffBlock/ReadBlock（否则徽标永远不可点）',
-    (cli.match(/onPickEnc: o\.onPickEnc \|\| null/g) || []).length === 2)
-  ok('切换失败有提示且不冲掉已渲染的预览',
-    /setEncErr\(\(m\) => Object\.assign\(\{\}, m, \{ \[p\.id\]: T\('app\.encSwitchFailed'\)/.test(cli)
-    && /encErr\[p\.id\] \? React\.createElement/.test(cli))
-  // 错误提示按审批 id 存：单条全局 state 会让一次失败同时显示在所有展开的卡片上且永不清除
-  ok('切换失败提示按审批 id 存，且成功时清除该条',
-    /const \[encErr, setEncErr\] = React\.useState\(\{\}\)/.test(cli)
-    && /setEncErr\(\(m\) => \{ const kept = Object\.assign\(\{\}, m\); delete kept\[p\.id\]; return kept; \}\)/.test(cli))
-  // 候选必须沿用旧 payload：服务对显式 encoding 只回 hint 且 result.candidates 恒为空，
-  // 宿主无状态、拿不到上次那份拒绝——不沿用则切换一次后徽标立刻退化为不可点
-  ok('★ 切换后沿用旧 payload 的候选列表（否则切一次就再也切不回去）',
-    (cli.match(/norm\.encCandidates = prev\.encCandidates;/g) || []).length === 2
-    && /Array\.isArray\(prev\.encCandidates\)/.test(cli))
-  // 只写不读的死 ref：注释声称「按审批 id 记、失败重试时沿用」，但没有任何读取点
-  ok('无只写不读的 encPickRef 死状态', !cli.includes('encPickRef'))
-  // 撤销预览在「预览解码与工具编码不同源」时跳过 stale 判定，必须显式告知，
-  // 否则「没报无变化」会被读成「撤销一定会执行」（那正是要防的误判放行）
-  ok('★ 撤销预览跳过判定时客户端显式提示',
-    /out\.undoVerdictSkipped = true/.test(src) && /undoVerdictSkipped/.test(cli)
-    && (cli.match(/undoVerdictNote,/g) || []).length === 2)
-  // 撤销预览的三项「撤销是否会执行」判定都必须被同源闸挡住：预览解码与写盘内核不同源时
-  // curText 与 result_content 必然不等，据此断言会输出「撤销不会执行（无变化）」，
-  // 而工具侧其实会执行并改盘——审批者据此以为放行无副作用，正是要防的误判放行。
-  ok('★ 撤销 stale 判定三项都被「解码与内核同源」闸挡住',
-    /const decodeMatchesKernel = !enc\.want && !curRR\.adopted/.test(src)
-    && /if \(decodeMatchesKernel && normTxt\(curText\) !== normTxt\(resultContent\)\)/.test(src)
-    && /if \(decodeMatchesKernel && curText !== exactResult\)/.test(src)
-    // BOM 的 size 回退判据按 curText 反推，解码不同源时该反推不成立，须放弃该复核
-    && /if \(decodeMatchesKernel\) diskHasBom = info\.size === Buffer\.byteLength\(curText, 'utf8'\) \+ 3\s*\n\s*else bomCheckable = false/.test(src)
-    && /if \(bomCheckable && diskHasBom !== wantBom\)/.test(src))
-  ok('浮层点外部/Esc 可关闭（absolute 定位不关会一直压住 diff）',
-    /document\.addEventListener\('mousedown', onDoc\)/.test(cli) && /e\.key === 'Escape'/.test(cli))
-
-  // 3) 行为断言：真实执行 readPreviewText，验证三种调用形态
+  // 2) 行为断言：真实执行 readPreviewText
   const sliceAsync = (name) => {
     const s = src.indexOf('async function ' + name + '(')
     if (s < 0) return ''
@@ -2417,7 +2416,6 @@ group('22. 非 UTF-8 预览：猜测关闭时采用服务给出的候选 + 可�
     }
     return ''
   }
-  const fakeEnc = (behavior) => ({ tryDecode: async (bytes, opts) => behavior(opts || {}) })
   const mkFs = () => ({
     readText: async () => { throw new Error('cannot read "x": invalid UTF-8 text') },
     readBytes: async () => Buffer.from([0x41, 0x42]),
@@ -2433,183 +2431,112 @@ group('22. 非 UTF-8 预览：猜测关闭时采用服务给出的候选 + 可�
   try { RPT = new Function(helpers)().readPreviewText } catch (e) { ok('readPreviewText 可独立求值：' + (e && e.message), false) }
   if (RPT) {
     const target = { displayPath: 'G:/x/gbk.txt' }
-    // ① 猜测关闭 + 可采信候选 → 自动采用首候选
-    const encOff = fakeEnc((opts) => {
-      if (opts.encoding) return { ok: true, result: { text: '中文', encoding: opts.encoding, decided: 'hint' } }
-      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: true, ranked: true, autoGuessEnabled: false, candidates: [{ encoding: 'gbk', sample: '中文', score: 100 }, { encoding: 'big5', sample: '?', score: 10 }] } }
-    })
-    const r1 = await RPT(mkFs(), target, encOff, 10)
-    ok('★ 猜测关闭时采用首候选（GBK 文件现在能出内容）',
-      r1.ok === true && r1.encoding === 'gbk' && r1.text === '中文',
-      JSON.stringify({ ok: r1.ok, enc: r1.encoding, dec: r1.decided }))
-    // 采用的是**本插件替用户挑的猜测**，服务对显式 encoding 只回 'hint'（确定口径）。
-    // 若原样透传，关闭猜测的部署反而把猜测呈现得比开启时更确定（服务自己采用时标
-    // 'guessed' 并带「可能不准」警告），而审批者正是照这段预览决定是否放行写盘。
-    ok('★ 自动采用时标注降级为 guessed（不得把猜测呈现成确定编码）',
-      r1.decided === 'guessed' && r1.adopted === true,
-      JSON.stringify({ dec: r1.decided, adopted: r1.adopted }))
-    ok('★ 候选列表随结果下发（客户端据此渲染切换器）',
-      Array.isArray(r1.candidates) && r1.candidates.length === 2 && r1.candidates[0].encoding === 'gbk'
-      && r1.candidates[0].score === 100 && r1.candidates[0].sample === '中文',
-      JSON.stringify(r1.candidates))
-    // ② adoptable=false（危险中间态）→ 不采用，保持原有报错。
-    // fake 必须「给显式 encoding 就返回成功」：否则重试必然同样失败，断言恒真——
-    // 实测把 `rf.adoptable === true` 整行删掉，恒真的写法依旧通过（守卫失去保护）。
-    let badRetries = 0
-    const encBad = fakeEnc((opts) => {
-      if (opts.encoding) { badRetries++; return { ok: true, result: { text: 'X', encoding: opts.encoding, decided: 'hint' } } }
-      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: false, ranked: true, candidates: [{ encoding: 'windows-1251', sample: 'x', score: 5 }], message: '[E_NOT_TEXT] nope' } }
-    })
-    const r2 = await RPT(mkFs(), target, encBad, 10)
-    ok('adoptable=false 时不采用（避免重现拒绝本要防止的静默误解码）',
-      r2.ok === false && !!r2.error && badRetries === 0 && r2.encoding === undefined,
-      JSON.stringify({ ok: r2.ok, retries: badRetries, enc: r2.encoding }))
-    // ②b adoptable=true（可采信）→ 采用，且确实发起了回灌重试。
-    // 与 ② 成对：单独看 ② 只能证明「没成功」，成对才能证明分歧点在 adoptable 上。
-    let goodRetries = 0
-    const encGood = fakeEnc((opts) => {
-      if (opts.encoding) { goodRetries++; return { ok: true, result: { text: '中文', encoding: opts.encoding, decided: 'hint' } } }
-      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: true, ranked: true, candidates: [{ encoding: 'gbk', sample: '中文', score: 100 }], message: '[E_NOT_TEXT] off' } }
-    })
-    const r2b = await RPT(mkFs(), target, encGood, 10)
-    ok('adoptable=true 时采用（与 ② 成对，证明分歧点是 adoptable）',
-      r2b.ok === true && r2b.encoding === 'gbk' && goodRetries === 1,
-      JSON.stringify({ ok: r2b.ok, enc: r2b.encoding, retries: goodRetries }))
-    // ③ 候选为空（二进制）→ 保持原有报错
-    let binRetries = 0
-    const encBin = fakeEnc((opts) => {
-      if (opts.encoding) { binRetries++; return { ok: true, result: { text: 'X', encoding: opts.encoding, decided: 'hint' } } }
-      return { ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: false, ranked: false, candidates: [], message: '[E_NOT_TEXT] binary' } }
-    })
-    const r3 = await RPT(mkFs(), target, encBin, 10)
-    ok('候选为空（二进制）时不采用', r3.ok === false && !!r3.error && binRetries === 0)
-    // ④ 用户手选编码 → 直接按它解，不再走猜测
-    let sawHint = null
-    const encPick = fakeEnc((opts) => { if (opts.encoding) sawHint = opts.encoding; return { ok: true, result: { text: 'T', encoding: opts.encoding || 'utf-8', decided: opts.encoding ? 'hint' : 'guessed' } } })
-    const r4 = await RPT(mkFs(), target, encPick, 10, 'big5')
-    ok('用户手选编码直接生效（不经猜测分支）', r4.ok === true && r4.encoding === 'big5' && sawHint === 'big5', JSON.stringify({ enc: r4.encoding, sawHint }))
-    ok('用户手选时保持服务的 hint 标注（用户自己的选择不改写为猜测）',
-      r4.decided === 'hint' && r4.adopted === false, JSON.stringify({ dec: r4.decided, adopted: r4.adopted }))
-    // ⑤ 无解码服务 → 保持原报错（不猜）
+    const mkEnc = (behavior) => {
+      const calls = []
+      return {
+        calls,
+        svc: { tryDecode: async (bytes, opts) => { calls.push((opts && opts.encoding) || null); return behavior(opts || {}) } },
+      }
+    }
+    // ① 猜测关闭 + 有可采信候选 → **不**采用，原样报错，且只解码一次（不回灌重试）
+    const a = mkEnc(() => ({
+      ok: false,
+      refusal: { code: 'E_NOT_TEXT', adoptable: true, ranked: true, autoGuessEnabled: false, message: '[E_NOT_TEXT] most likely gbk; re-read with encoding', candidates: [{ encoding: 'gbk', sample: '中文', score: 100 }] },
+    }))
+    const r1 = await RPT(mkFs(), target, a.svc, 10)
+    ok('★ 猜测关闭时不再自动采用候选（GBK 文件如实报错，不显示可能是错页的内容）',
+      r1.ok === false && !!r1.error, JSON.stringify({ ok: r1.ok, enc: r1.encoding }))
+    ok('★ 候选可采信（adoptable=true）也不再回灌重试：只解码一次',
+      a.calls.length === 1 && a.calls[0] === null, JSON.stringify(a.calls))
+    ok('★ 拒绝说明原样带出（含服务给出的候选线索，用户可据此让 AI 重读）',
+      typeof r1.error === 'object' && /most likely gbk/.test(r1.error.zh || '') && r1.error.zh === r1.error.en,
+      JSON.stringify(r1.error))
+    ok('拒绝时不产出 encoding/decided（不得把失败说成一次解码）',
+      r1.encoding === undefined && r1.decided === undefined)
+    // ② 二进制（无候选）→ 同样原样报错，且不重试
+    const b = mkEnc(() => ({ ok: false, refusal: { code: 'E_NOT_TEXT', adoptable: false, ranked: false, candidates: [], message: '[E_NOT_TEXT] binary' } }))
+    const r2 = await RPT(mkFs(), target, b.svc, 10)
+    ok('无候选（二进制）时原样报错，且不重试',
+      r2.ok === false && !!r2.error && b.calls.length === 1, JSON.stringify(b.calls))
+    // ③ 工具透传的编码 → 按它解，跳过猜测；服务标 hint 原样保留
+    const c = mkEnc((opts) => ({ ok: true, result: { text: '按 ' + opts.encoding + ' 解出', encoding: opts.encoding, decided: 'hint' } }))
+    const r3 = await RPT(mkFs(), target, c.svc, 10, 'euc-kr')
+    ok('★ 工具透传的 encoding 生效（按它解，不经猜测分支）',
+      r3.ok === true && r3.encoding === 'euc-kr' && c.calls[0] === 'euc-kr',
+      JSON.stringify({ enc: r3.encoding, calls: c.calls }))
+    ok('工具指定编码时保持服务的 hint 标注（确定口径，不改写为猜测）',
+      r3.decided === 'hint' && !('adopted' in r3), JSON.stringify({ dec: r3.decided }))
+    // ④ 未透传编码 → 交给服务自行判定，结果原样透传（含 autoGuessEncoding=true 的 guessed）
+    const d = mkEnc(() => ({ ok: true, result: { text: '自动解出', encoding: 'gbk', decided: 'guessed' } }))
+    const r4 = await RPT(mkFs(), target, d.svc, 10, null)
+    ok('未透传编码时交给服务判定，guessed 标注原样透传（保留「?」与警告）',
+      r4.ok === true && r4.decided === 'guessed' && r4.encoding === 'gbk', JSON.stringify(r4))
+    ok('未透传编码时只解码一次（不做二次回灌）', d.calls.length === 1 && d.calls[0] === null, JSON.stringify(d.calls))
+    // 空串/非字符串视同未指定
+    const e2 = mkEnc(() => ({ ok: true, result: { text: 'T', encoding: 'gbk', decided: 'guessed' } }))
+    await RPT(mkFs(), target, e2.svc, 10, '')
+    ok('空串编码视同未指定（不把空串当编码送去服务）', e2.calls[0] === null, JSON.stringify(e2.calls))
+    // ⑤ 无解码服务 → 保持原报错（不猜、不依赖）
     const r5 = await RPT(mkFs(), target, null, 10)
     ok('未装 dsh-fs-encoding 时保持原报错（可选依赖不被破坏）', r5.ok === false && !!r5.error)
     // ⑥ displayPath 只在非空字符串时传入（否则服务拒为 E_BAD_ENCODING）
     let sawDp = 'unset'
-    const encDp = fakeEnc((opts) => { sawDp = 'displayPath' in opts ? opts.displayPath : '(absent)'; return { ok: true, result: { text: '', encoding: 'utf-8', decided: 'utf8' } } })
-    await RPT(mkFs(), { displayPath: null }, encDp, 10)
+    const f = mkEnc((opts) => { sawDp = 'displayPath' in opts ? opts.displayPath : '(absent)'; return { ok: true, result: { text: '', encoding: 'utf-8', decided: 'utf8' } } })
+    await RPT(mkFs(), { displayPath: null }, f.svc, 10)
     ok('displayPath 为 null 时不放入 opts（否则被服务拒为 E_BAD_ENCODING）', sawDp === '(absent)', String(sawDp))
-  }
-
-  // 4) 行为断言：真实执行 encBadge，验证渲染形态
-  const sliceFn = (name) => {
-    const s = cli.indexOf('function ' + name + '(')
-    if (s < 0) return ''
-    let d = 0
-    for (let k = cli.indexOf('{', s); k < cli.length; k++) {
-      if (cli[k] === '{') d++
-      else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(s, k + 1) }
-    }
-    return ''
-  }
-  const mkReact = (openState) => {
-    let n = 0
-    return {
-      useState: (init) => { n++; const v = typeof init === 'function' ? init() : init; return [n === 1 ? openState : v, () => {}] },
-      useRef: (v) => ({ current: v }),
-      useEffect: () => {},
-      createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.filter((k) => k != null && k !== false) }),
-    }
-  }
-  const build = (name, openState, extra) => {
-    const body = sliceFn(name)
-    if (!body) return null
-    const names = ['React', 'T', 'useLocaleTick'].concat(Object.keys(extra || {}))
-    const vals = [mkReact(openState), (k) => k, () => {}].concat(Object.values(extra || {}))
-    return new Function(names.join(','), 'return (' + body + ')')(...vals)
-  }
-  // 徽标拆成两层：encBadge 只做「该不该显示 / 可否点」的分派（无状态），
-  // 带状态的浮层在 EncBadge 组件内——这样开关浮层只重渲染徽标，不再重建整块 diff。
-  // EncBadge 先求值出来，再作为绑定注入 encBadge（后者会 React.createElement(EncBadge, …)）。
-  const closed = build('EncBadge', false)
-  const opened = build('EncBadge', true)
-  const dispatch = build('encBadge', false, { EncBadge: closed })
-  if (dispatch && closed && opened) {
-    const data = { encoding: 'gbk', decided: 'hint', encCandidates: [{ encoding: 'gbk', sample: '中文', score: 100 }, { encoding: 'big5', sample: 'x', score: 10 }] }
-    ok('UTF-8 文件不显示徽标', dispatch({ encoding: 'utf-8', decided: 'utf8' }, () => {}) === null)
-    const t = dispatch(data, () => {})
-    ok('★ 有候选：分派到带状态的 EncBadge 组件（不是内联普通函数调用）',
-      t && t.type === closed && t.props.data === data)
-    const t2 = dispatch({ encoding: 'gbk', decided: 'hint' }, () => {})
-    ok('无候选：退化为纯展示（不给可点的错觉）',
-      t2 && t2.type === 'span' && t2.props.className === 'pg2-enc' && t2.props.role === undefined)
-    const t3 = dispatch(data, null)
-    ok('无 onPick 回调：同样退化为纯展示', t3 && t3.type === 'span' && t3.props.role === undefined)
-    // EncBadge 组件本体：可点徽标 + 浮层
-    const c = closed({ data, onPick: () => {} })
-    ok('★ 徽标可点（role=button + ▾）',
-      c && c.props.className === 'pg2-enc-wrap' && c.kids[0].props.role === 'button'
-      && c.kids[0].kids.join('').indexOf('▾') !== -1)
-    ok('未点开时不渲染浮层', c && c.kids[1] === undefined)
-    // 点开态：候选浮层
-    const o = opened({ data, onPick: () => {} })
-    const pop = o.kids.find((k) => k.props && k.props.className === 'pg2-enc-pop')
-    ok('点开后渲染候选浮层', !!pop)
-    if (pop) {
-      const flat = []
-      for (const k of pop.kids) { if (Array.isArray(k)) flat.push(...k); else flat.push(k) }
-      const opts = flat.filter((k) => k.props && typeof k.props.className === 'string' && k.props.className.indexOf('pg2-enc-opt') === 0)
-      ok('★ 候选按钮与服务下发的候选一一对应（含当前项高亮）',
-        opts.length === 2 && opts[0].props.className.indexOf('pg2-enc-opt-on') !== -1
-        && opts[0].kids[0].kids.join('') === 'gbk' && opts[1].kids[0].kids.join('') === 'big5',
-        JSON.stringify(opts.map((x) => x.kids[0].kids.join(''))))
-      const note = flat.find((k) => k.props && k.props.className === 'pg2-enc-note')
-      ok('★ 浮层带「仅影响预览」免责脚注', !!note && note.kids.join('') === 'app.encPreviewOnly')
-    }
-    const g = closed({ data: { encoding: 'big5', decided: 'guessed', encCandidates: [{ encoding: 'big5', sample: 'x', score: 5 }] }, onPick: () => {} })
-    ok('guessed 态保留 ? 标记（概率性选择必须显式区分）', g.kids[0].kids.join('').indexOf('?') !== -1)
+    // ⑦ 体积超限走项目既有口径（不把服务面向模型的整句与内部上限数字抛给审批者）
+    const g = mkEnc(() => ({ ok: false, refusal: { code: 'E_TOO_LARGE', message: 'Raise maxBytes (or the plugin\'s maxFileBytes) to decode it.' } }))
+    const r7 = await RPT(mkFs(), target, g.svc, 10)
+    ok('服务报体积超限时用项目口径（不泄露服务内部上限数字）',
+      r7.ok === false && r7.error && r7.error.zh === '文件过大，无法生成对比', JSON.stringify(r7.error))
+    // ⑧ E_BAD_ENCODING 是我方参数 bug：退回 ctx.fs 原始报错，不把内部错误说成文件的错
+    const h = mkEnc(() => ({ ok: false, refusal: { code: 'E_BAD_ENCODING', message: 'displayPath must be a string' } }))
+    const r8 = await RPT(mkFs(), target, h.svc, 10)
+    ok('E_BAD_ENCODING 时退回 ctx.fs 原始报错（不展示我方参数错误）',
+      r8.ok === false && r8.error && /invalid UTF-8 text/.test(r8.error.zh || ''), JSON.stringify(r8.error))
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-group('23. 编码切换浮层不被父容器裁剪（真实 Chrome 实测过的坑）')
-// 背景：浮层原先用 position:absolute，被 .pg2-block 的 overflow:hidden 裁剪——实测 diff
-// 只有两行时块高约 64px，而浮层需要 130px+，结果只看得见标题、候选与脚注全被切掉
-// （用户截图复现）。改为 position:fixed：包含块是视口，不受祖先 overflow 裁剪
-// （前提是祖先链上没有 transform/filter/will-change 之类会重建包含块的属性）。
-// 代价是坐标要自己算，且 fixed 用视口坐标，滚动/resize 后必须重算。
+group('23. 编码徽标为纯展示（无浮层，故无「被父容器裁剪」问题）')
+// 背景：编码徽标曾是**可点控件**（点开列出候选编码），浮层用 position:absolute 时被
+// .pg2-block 的 overflow:hidden 裁剪——实测只看得见标题、候选与脚注全被切掉（用户截图
+// 复现），后改为 position:fixed + 自行测量坐标。
+// 该控件已整块删除（编码不再可切换，见第 22 组的设计说明），故本组不再断言浮层定位，
+// 只锁定「不得回潮」：候选/下拉/浮层相关的 CSS 与状态都不应再出现。
 {
   const cssStart = cli.indexOf('const DIFF2_CSS = ')
   const css = cssStart >= 0 ? cli.slice(cssStart, cli.indexOf("';", cssStart)) : ''
-  ok('浮层用 position:fixed（absolute 会被 .pg2-block 的 overflow:hidden 裁掉）',
-    /\.pg2-enc-pop \{[^}]*position: fixed/.test(css) && !/\.pg2-enc-pop \{[^}]*position: absolute/.test(css))
-  ok('.pg2-block 仍保留 overflow:hidden（圆角裁剪是既有设计，改的是浮层不是它）',
+  ok('能切出 DIFF2_CSS 常量', css.length > 0)
+  ok('★ 候选浮层相关的 CSS 整块删除（无 .pg2-enc-pop / -opt / -note / -wrap / -btn）',
+    !/\.pg2-enc-(pop|opt|note|wrap|btn)/.test(css))
+  // 基础徽标样式必须保留：纯展示仍要显示编码名
+  ok('纯展示徽标样式保留（.pg2-enc）', /\.pg2-enc \{/.test(css))
+  // .pg2-block 的 overflow:hidden 是既有设计（圆角裁剪），不因删浮层而改
+  ok('.pg2-block 仍保留 overflow:hidden（圆角裁剪是既有设计）',
     /\.pg2-block \{[^}]*overflow: hidden/.test(css))
-  // fixed 的前提：**祖先链**上不能有会重建包含块的属性（transform/filter/perspective/
-  // will-change/contain 非 none 时，该祖先会顶替视口成为 fixed 的包含块，浮层随即退回被
-  // 祖先 overflow 裁剪、且代码写入的视口坐标整体错位）。
-  // 检查对象必须是**两份 CSS 常量里的祖先选择器**，不能只扫 DIFF2_CSS：浮层在审批弹窗里
-  // 的祖先 .pg-modal 定义在第 9 行的 CSS 常量中（detailBody 同时用于弹窗与抽屉两处），
-  // 只扫 DIFF2_CSS 会漏掉它——那样日后给 .pg-modal 加 transform 时本断言照样通过，
-  // 而浮层会退回被 .pg-modal{overflow-y:auto} 裁剪的状态，正是本组要防的回归。
-  // 反向也要注意：不能简单把两份常量合并全扫——第 9 行 CSS 里的 transform/filter 绑在
-  // .pg-action:active/.pg-btn:active 等**按钮自身伪类**上，并非浮层祖先，全扫会误报。
-  const cssMain = (() => {
-    const s = cli.indexOf('const CSS = "')
-    return s >= 0 ? cli.slice(s, cli.indexOf('";', s)) : ''
+  // 浮层状态（open/busy/pos + 坐标测量 + rAF 重算）必须整块消失。
+  // 不能裸测 measure/boxRef/requestAnimationFrame：Prism vendor 串（第 24 行的 PRISM_SRC）
+  // 里含 "measure"，Prism 的 idle 调度也合法用 rAF。故先切出 encBadge 的函数体再断言。
+  const encBadgeBody = (() => {
+    const s = cli.indexOf('function encBadge(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = cli.indexOf('{', s); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(s, k + 1) }
+    }
+    return ''
   })()
-  // 切片失败必须显性失败：cssMain 为空时祖先链只剩 DIFF2_CSS 那半，.pg-modal 会静默漏检
-  // （本断言存在的全部理由就是覆盖它）。与下面「能切出 measure 函数体」同一防御思路。
-  ok('能切出第 9 行 CSS 常量（切不到则 .pg-modal 祖先链静默漏检）',
-    cssMain.includes('.pg-modal {'))
-  const ancestorRules = (cssMain + ' ' + css).match(/[^{}]+\{[^{}]*\}/g) || []
-  const ancestorSel = /\b(pg-modal|pg2-drawer|pg2-drawer-body|pg2-block|pg2-header|pg2-enc-wrap)\b/
-  const badInAncestors = ancestorRules.filter((r) => ancestorSel.test(r.split('{')[0])
-    && /(transform|filter|perspective|will-change|contain)\s*:/.test(r))
-  ok('浮层祖先链（含 .pg-modal 与抽屉）无 transform/filter/will-change/contain（fixed 的前提）',
-    badInAncestors.length === 0, JSON.stringify(badInAncestors.map((r) => r.split('{')[0].trim())))
-  ok('浮层 z-index 高于 diff 内容（否则被后续行盖住）',
-    /\.pg2-enc-pop \{[^}]*z-index: 9999/.test(css))
-
+  ok('能切出 encBadge 函数体', encBadgeBody.length > 0)
+  ok('★ 客户端不再有任何浮层状态（open/busy/pos/测量/rAF 重算）',
+    !/setPos/.test(cli) && !/popRef/.test(cli) && !/boxRef/.test(cli)
+    && !/setOpen/.test(encBadgeBody) && !/measure/.test(encBadgeBody)
+    && !/requestAnimationFrame/.test(encBadgeBody) && !/getBoundingClientRect/.test(encBadgeBody))
+  // 纯展示：无 role=button、无 tabIndex、无 ▾ 指示、无 onClick
+  ok('★ 徽标不可点（无 role/tabIndex/▾/onClick）',
+    !/pg2-enc-btn/.test(cli) && !/role:|tabIndex|▾|onClick/.test(encBadgeBody), encBadgeBody.slice(0, 60))
+  // 行为断言：真实执行 encBadge，验证三种渲染形态
   const sliceFn = (name) => {
     const s = cli.indexOf('function ' + name + '(')
     if (s < 0) return ''
@@ -2620,171 +2547,627 @@ group('23. 编码切换浮层不被父容器裁剪（真实 Chrome 实测过的�
     }
     return ''
   }
-  const encBody = sliceFn('EncBadge')
-  ok('能切出 EncBadge 函数体', encBody.length > 0)
-  // 注：曾有一条断言禁止坐标变量叫 top/left，理由是「与 window 的同名只读宿主属性冲突」。
-  // 该归因不成立——函数作用域里的 let/const/var 是局部绑定，必然遮蔽 window.top，写 `let top`
-  // 完全安全；只有**全局**作用域的 `var top` 或无声明的裸赋值 `top = ...` 才会命中该坑，而本
-  // 文件全部代码都在 __ModuleLoader__.load 的回调里。故删除该断言，只验证坐标真的写进了 style。
-  ok('浮层坐标写进 style（且带 px 单位）',
-    /top: pos\.top \+ 'px'/.test(encBody) && /left: pos\.left \+ 'px'/.test(encBody))
-  // 首帧还没量到坐标时必须先隐藏占位，否则浮层会闪现在左上角
-  ok('未测量时隐藏占位（避免首帧闪现在左上角）',
-    /pos \? \{ left: pos\.left \+ 'px'/.test(encBody) && /visibility: 'hidden'/.test(encBody))
-  // 视口边界与翻转：下方放不下且上方更宽裕时翻上去
-  ok('横向越界时贴右边、纵向不足时翻到上方（不出屏）',
-    /popLeft \+ width > vw - 8/.test(encBody) && /popTop \+ need > vh - 8/.test(encBody)
-    && /popTop = r\.top - need - 4/.test(encBody))
-  // 滚动/resize 后重算坐标；且必须经 rAF 合并——scroll 是捕获阶段监听，页面内任意滚动容器
-  // 每滚动一次都会触发，measure 又要同步读几何，不合并则开销按事件数而非帧数增长。
-  // 处理器名不写死（\w+）：把 onMove 重命名成 handleMove 是无害重构，不该让断言失败。
-  // 关键在「同一个处理器同时挂在 scroll(capture) 与 resize 上、并被成对移除」这一行为。
-  ok('滚动/resize 时重算坐标（fixed 是视口坐标，不重算会脱位）',
-    /addEventListener\('scroll',\s*(\w+),\s*true\)/.test(encBody)
-    && /addEventListener\('resize',\s*(\w+)\)/.test(encBody)
-    && /removeEventListener\('scroll',\s*(\w+),\s*true\)/.test(encBody)
-    && (() => {
-      const add = encBody.match(/addEventListener\('scroll',\s*(\w+),\s*true\)/)
-      const addR = encBody.match(/addEventListener\('resize',\s*(\w+)\)/)
-      const rm = encBody.match(/removeEventListener\('scroll',\s*(\w+),\s*true\)/)
-      return add && addR && rm && add[1] === addR[1] && add[1] === rm[1]
-    })())
-  ok('滚动重算经 rAF 合并（否则每个滚动事件都强制一次同步布局）',
-    // 锚定真实调用而非特性检测：`typeof window.requestAnimationFrame !== 'function'` 这行
-    // 本身就含该标识符，只匹配标识符会让断言在去掉合并后依然通过（实测踩到过）。
-    // 变量名不写死（用 \w+）：把 raf 重命名成 rafId 是无害重构，不该让断言失败。
-    /\w+\s*=\s*window\.requestAnimationFrame\(/.test(encBody)
-    && /window\.cancelAnimationFrame\(\s*\w+\s*\)/.test(encBody))
-  // 上面的正则只能证明「调用了 rAF」，证明不了「真的做了合并」：把 `if (raf) return;` 删掉后
-  // 调用仍在、断言照样通过（实测变异 M4 漏检），而合并一旦失效就退回 O(事件数)。
-  // 故真实执行 onMove，断言同一帧内多次滚动只排队一次。
-  // 切片锚点不绑定具体变量名/声明形式：处理器可以是 const onMove = () => {}、
-  // const onMove = function () {} 或 function onMove() {}，名字任意。
-  // 定位方式是**按行为特征**而非靠长度猜：先取被 addEventListener('scroll'/'resize', X) 挂载的
-  // 那个处理器名 X（上面那条断言已保证两处挂的是同一个），再按名字切出它的定义。
-  // 不这样做的坑（实测踩到过）：若改用「取第一个含 requestAnimationFrame 的函数」会命中
-  // EncBadge 自身；若改用「取最短的」则在有人抽出更短的 rAF 辅助函数时选错对象而误报。
-  // 另外把紧邻其上的句柄声明（如 let raf = 0;，名字与 let/const/var 都不写死）一并带进切片，
-  // 否则切片内该变量未定义。
-  const rafMerge = (() => {
-    const hooked = encBody.match(/addEventListener\('scroll',\s*(\w+),\s*true\)/)
-      || encBody.match(/addEventListener\('resize',\s*(\w+)\)/)
-    if (!hooked) return null
-    const name = hooked[1]
-    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const defRe = new RegExp('(?:const|let|var)\\s+' + esc + '\\s*=\\s*(?:\\([^)]*\\)\\s*=>|function\\s*\\([^)]*\\))\\s*\\{|function\\s+' + esc + '\\s*\\([^)]*\\)\\s*\\{')
-    const m = encBody.match(defRe)
-    if (!m) return null
-    let d = 0
-    for (let k = encBody.indexOf('{', m.index); k < encBody.length; k++) {
-      if (encBody[k] === '{') d++
-      else if (encBody[k] === '}') {
-        d--
-        if (d === 0) {
-          const body = encBody.slice(m.index, k + 1)
-          // 把定义**之前**、且**在该处理器体内被引用**的句柄声明一并带进切片
-          // （不要求紧邻：中间可能插入了别的辅助函数；按「体内是否引用」筛选，
-          //   可避免中间出现其它声明时把无关变量拖进来、真正句柄反而缺失）。
-          // 初值不写死为 0：MDN 明确建议不要把 0 当哨兵值（rAF 的 ID 理论上可能为 0），
-          // 改成 let raf = null 是更正确的写法，不该让断言失败（实测踩到过）。
-          // 起点取**最早**那个被引用的声明（用 min，不是最后匹配的）：体内若引用了两个外部
-          // 声明，只取最后一个会让切片漏掉更早的，运行时假失败 "X is not defined"（实测踩到过）。
-          const before = encBody.slice(0, m.index)
-          let start = m.index
-          for (const dm of before.matchAll(/(?:let|const|var)\s+(\w+)\s*=\s*[^;\n]+;/g)) {
-            const v = dm[1]
-            if (new RegExp('\\b' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(body)) {
-              start = Math.min(start, dm.index)
-            }
-          }
-          return { name, seg: encBody.slice(start, k + 1) }
-        }
-      }
-    }
-    return null
+  const mkReact = () => ({
+    createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.filter((k) => k != null && k !== false) }),
+  })
+  const badge = (() => {
+    const body = sliceFn('encBadge')
+    if (!body) return null
+    try { return new Function('React', 'T', 'return (' + body + ')')(mkReact(), (k) => k) } catch (e) { return null }
   })()
-  ok('能切出滚动处理器（切不到则下面的合并行为断言失效）', !!rafMerge)
-  if (rafMerge) {
-    // 单次 ok：把执行结果收进变量，异常也计入失败（不在 catch 里再调一次 ok，否则失败输出会出现两条同名）
-    let queued = 0, seq = 0, err = null
-    const win = { requestAnimationFrame: () => { queued++; return ++seq } }
-    try {
-      const made = new Function('window', 'measure', rafMerge.seg + '\nreturn { h: ' + rafMerge.name + ' };')(win, () => {})
-      for (let k = 0; k < 10; k++) made.h()
-    } catch (e) { err = String(e && e.message) }
-    ok('★ 同一帧内 10 次滚动只排队 1 次 rAF（合并真的生效，而非仅调用了 rAF）',
-      !err && queued === 1, err || ('排队次数=' + queued))
-  }
-  ok('浮层与徽标都在 boxRef 内（外部点击关闭的判定依赖它）',
-    /className: 'pg2-enc-wrap', ref: boxRef/.test(encBody))
-
-  // 行为断言：真实执行 measure 的坐标计算。桩里的 setPos 具备 useState 的函数式更新语义
-  // （实现用它做相等性 bail-out，桩若只接受对象就测不到真实行为）。
-  // 切片锚点不绑定声明形式（箭头函数 / function 声明 / 赋值表达式都接受），
-  // 否则把 measure 改成 function 声明这类等价重构会让「能切出 measure」失败、误导为改坏了。
-  const measure = (() => {
-    const m = encBody.match(/(?:const|let|var)\s+measure\s*=\s*(?:\([^)]*\)\s*=>|function\s*\([^)]*\))\s*\{|function\s+measure\s*\([^)]*\)\s*\{/)
-    if (!m) return null
-    const i = m.index
-    let d = 0
-    for (let k = encBody.indexOf('{', i); k < encBody.length; k++) {
-      if (encBody[k] === '{') d++
-      else if (encBody[k] === '}') { d--; if (d === 0) return encBody.slice(i, k + 1) }
-    }
-    return null
-  })()
-  // 切不到就直接失败：否则下面四条行为断言会被整段跳过，测试仍显示 ALL PASS
-  ok('能切出 measure 函数体（切不到则坐标行为断言全部失效）', !!measure)
-  if (measure) {
-    const run = (rect, popSize, vp) => {
-      const boxRef = { current: { getBoundingClientRect: () => rect } }
-      const popRef = { current: { offsetWidth: popSize.w, offsetHeight: popSize.h } }
-      let got = null
-      const window = { innerWidth: vp.w, innerHeight: vp.h }
-      // 模拟 useState 的 setter：接受值或更新函数，并在引用相等时保持原引用（bail-out）
-      const setPos = (p) => { got = (typeof p === 'function') ? p(got) : p }
-      try {
-        new Function('boxRef', 'popRef', 'setPos', 'window', measure + '\nmeasure();')(boxRef, popRef, setPos, window)
-      } catch (e) { return { err: String(e && e.message) } }
-      return got
-    }
-    const r1 = run({ top: 236, bottom: 251, left: 233 }, { w: 238, h: 130 }, { w: 780, h: 805 })
-    ok('★ 中部位置：浮层贴在徽标下方且左对齐（下方空间充足时不翻转）',
-      r1 && r1.top === 255 && r1.left === 233, JSON.stringify(r1))
-    const r2 = run({ top: 760, bottom: 775, left: 233 }, { w: 238, h: 130 }, { w: 780, h: 805 })
-    ok('★ 底部位置：下方放不下时翻到上方（不出屏）',
-      r2 && r2.top === 626 && r2.left === 233, JSON.stringify(r2))
-    const r3 = run({ top: 236, bottom: 251, left: 700 }, { w: 238, h: 130 }, { w: 780, h: 805 })
-    ok('★ 右侧位置：横向越界时贴右边（不出屏）',
-      r3 && r3.left === 534 && r3.top === 255, JSON.stringify(r3))
-    const r4 = run({ top: 236, bottom: 251, left: 233 }, { w: 238, h: 130 }, { w: 0, h: 0 })
-    ok('视口尺寸取不到时仍给出可用坐标（不产出 NaN）',
-      r4 && r4.top === 255 && r4.left === 233, JSON.stringify(r4))
-    // 相等性 bail-out 也要行为断言：去掉 setPos 里的相等判断后，上面的正则仍会通过
-    // （实测变异 M6 漏检），而坐标未变的帧会退回「每次都重建元素树」。
-    // 桩按 useState 语义记录「返回原引用(bail-out) / 新对象(触发渲染)」。
-    const calls = []
-    let state = null
-    const setPos = (p) => {
-      const next = (typeof p === 'function') ? p(state) : p
-      calls.push(next === state ? 'bail' : 'render')
-      state = next
-    }
-    let err = null
-    try {
-      const { measure: m } = new Function('boxRef', 'popRef', 'setPos', 'window',
-        measure + '\nreturn { measure };')(
-        { current: { getBoundingClientRect: () => ({ top: 236, bottom: 251, left: 233 }) } },
-        { current: { offsetWidth: 238, offsetHeight: 130 } },
-        setPos,
-        { innerWidth: 780, innerHeight: 805 })
-      m(); m(); m()
-    } catch (e) { err = String(e && e.message) }
-    ok('★ 坐标未变时 setPos 返回原引用（相等性 bail-out 真的生效，不重建元素树）',
-      !err && calls.join(',') === 'render,bail,bail', err || calls.join(','))
+  ok('能切出 encBadge 函数体并求值', !!badge)
+  if (badge) {
+    ok('UTF-8 文件不显示徽标', badge({ encoding: 'utf-8', decided: 'utf8' }) === null)
+    ok('未经服务（无 decided）时不显示徽标', badge({ encoding: 'gbk' }) === null)
+    const t = badge({ encoding: 'gbk', decided: 'hint' })
+    ok('★ 非 UTF-8 显示纯展示徽标（span.pg2-enc，无 role/tabIndex）',
+      t && t.type === 'span' && t.props.className === 'pg2-enc'
+      && t.props.role === undefined && t.props.tabIndex === undefined
+      && t.kids.join('') === 'gbk', JSON.stringify(t && t.props))
+    ok('徽标带编码来源 tooltip（确定的与猜的分开）',
+      t && t.props.title === 'app.encHint', String(t && t.props.title))
+    const g2 = badge({ encoding: 'big5', decided: 'guessed' })
+    ok('★ guessed 态保留 ? 标记与警告文案（概率性选择必须显式区分）',
+      g2 && g2.kids.join('').indexOf('?') !== -1 && g2.props.title === 'app.encGuessedHint',
+      JSON.stringify(g2 && { label: g2.kids.join(''), title: g2.props.title }))
+    // 就算 payload 里混进了候选字段，徽标也不得变成可点控件（防回潮的第二道闸）
+    const withCands = badge({ encoding: 'gbk', decided: 'hint', encCandidates: [{ encoding: 'big5' }] })
+    ok('★ payload 带候选字段也不会变成可点控件（无回调、无浮层）',
+      withCands && withCands.type === 'span' && withCands.kids.length === 1,
+      JSON.stringify(withCands && withCands.type))
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+group('24. 工具透传编码时 preText 短路必须失效（不得复用来源不明的文本）')
+// 背景：str_replace 路径先读一次盘做 old_str 唯一性检查，把文本缓存进 sreText；
+// edit 分支随后调 readTargetCheckedMeta(enc, ..., sreText) 复用，避免双读盘。
+// readTargetChecked 无法自证 preText 是用哪个编码解出来的，故工具透传了编码时必须重新读盘，
+// 否则会返回一段与指定编码不符的文本。
+//
+// 注意（勿据此断言根因）：当前调用图下这条分支**不可达**——encodingHint 的唯一来源
+// toolDecodeEncoding 只对 read 返回非空，而 read 不走 readTargetChecked 这条路（本函数的
+// 调用点全在 isFileWrite 分支内）。故它不是热路径、也不产生额外读盘；本组用直接调用锁定的是
+// **函数契约本身**（日后把 toolDecodeEncoding 扩展到写类工具时的前提）。
+{
+  const i = src.indexOf('async function readTargetChecked(')
+  const j = src.indexOf('async function readTargetCheckedMeta', i)
+  const body = i >= 0 && j > i ? src.slice(i, j) : ''
+  ok('能切出 readTargetChecked 函数体', body.length > 0)
+  ok('★ preText 短路在透传编码时失效（不得复用来源不明的文本）',
+    /const hintGiven = typeof encodingHint === 'string' && encodingHint/.test(body)
+    && /if \(!hintGiven && preText !== null && preText !== undefined\) return \{ ok: true, target: null, info: null, text: preText \}/.test(body),
+    body.slice(0, 80))
+  // 反向：未透传编码时短路必须保留（那是既有的省读盘优化，不能一并去掉）
+  ok('未透传编码时短路保留（原有省读盘优化不被破坏）',
+    !/if \(preText !== null && preText !== undefined\) return \{ ok: true, target: null, info: null, text: preText \}/.test(body))
+  // 编码必须真的透传到 readPreviewText（否则重读也拿不到新编码）
+  ok('编码透传到 readPreviewText（否则重读也拿不到新编码）',
+    /readPreviewText\(fsService, st\.target, getFsEncodingService\(ctx\), st\.info && st\.info\.size, encodingHint, recorded\)/.test(body))
+
+  // 行为断言：真实执行 readTargetChecked，验证三种形态
+  const sliceAsync = (name) => {
+    const s = src.indexOf('async function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const sliceFn = (name) => {
+    const s = src.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  // 桩：readText 对非 UTF-8 抛错；解码服务按显式 encoding 返回不同文本（模拟真实服务），
+  // 并记录每次收到的 encoding，供「生产序列下多了一次解码」的代价断言使用。
+  const mk = () => {
+    const calls = []
+    const decode = (encoding) => encoding === 'big5' ? 'BIG5-DECODED' : 'GBK-DECODED'
+    const encService = {
+      tryDecode: async (bytes, opts) => {
+        calls.push((opts && opts.encoding) ? opts.encoding : null)
+        if (opts && opts.encoding) return { ok: true, result: { text: decode(opts.encoding), encoding: opts.encoding, decided: 'hint' } }
+        return { ok: true, result: { text: 'GBK-DECODED', encoding: 'gbk', decided: 'guessed' } }
+      },
+      // 本组聚焦 preText/编码透传，故记录恒为空（无记录路径）。
+      recordedEncoding: () => undefined,
+    }
+    const fsStub = {
+      resolve: async (p) => ({ targetKey: String(p), displayPath: String(p) }),
+      stat: async () => ({ type: 'file', size: 10 }),
+      readText: async () => { throw new Error('invalid UTF-8 text') },
+      readBytes: async () => Buffer.from([0x41]),
+    }
+    const helpers = [
+      'const ENC_READ_MAX_BYTES = 64 * 1024 * 1024',
+      'const FS_ENCODING_SERVICE = "fsEncoding"',
+      'const bi = (zh, en) => ({ zh, en })',
+      // readFail 桩与另两组同口径（保留 e.message）：readPreviewText 的错误出口都经它产出
+      // 文案，「文案须带出真实原因」是被测契约的一部分——丢掉 message 会让本组对错误文案
+      // 零覆盖（曾因此漏掉「读取失败: null」那类回归）。
+      "const readFail = (e) => ({ zh: 'read failed: ' + ((e && e.message) || e), en: 'read failed' })",
+      'const DIFF_MAX_CHARS = 1048576',
+      'const fileTooLarge = (info, max) => !!(info && info.size > max)',
+      'const resolveArgPath = (fp, base) => String(fp)',
+      'const ctx = { get: () => encService }',
+      sliceFn('getFsEncodingService'),
+      sliceFn('recordedEncodingOf'),
+      sliceAsync('readPreviewText'),
+      sliceAsync('statTargetChecked'),
+      sliceAsync('readTargetChecked'),
+      'return { readTargetChecked }',
+    ].join('\n')
+    // calls 不必传参：encService.tryDecode 的闭包已捕获它，函数内调用即写入同一数组
+    const mod = new Function('fsStub', 'encService', helpers)(fsStub, encService)
+    return { readTargetChecked: mod.readTargetChecked, calls }
+  }
+  const { readTargetChecked: RT, calls: decodeCalls } = mk()
+  // 签名：readTargetChecked(fp, projRoot, fsService, preText, encodingHint)
+  const FS = {
+    resolve: async (p) => ({ targetKey: String(p), displayPath: String(p) }),
+    stat: async () => ({ type: 'file', size: 10 }),
+    readText: async () => { throw new Error('invalid UTF-8 text') },
+    readBytes: async () => Buffer.from([0x41]),
+  }
+  const first = await RT('x.txt', 'G:/p', FS, null, null)
+  ok('首次读盘（无透传编码）解出服务判定的文本',
+    first.ok === true && first.text === 'GBK-DECODED', JSON.stringify(first.ok ? first.text : first.error))
+
+  // ── 契约断言：preText 的来源无法自证，故透传编码时必须重新读盘 ──
+  // 用「上一份文本」充当 preText，再以**不同**编码调用：模拟调用方缓存了一份来源不明的文本。
+  const stale = await RT('x.txt', 'G:/p', FS, first.text, 'big5')
+  ok('★ 透传编码时重新读盘，不复用来源不明的 preText',
+    stale.ok === true && stale.text === 'BIG5-DECODED' && stale.text !== first.text,
+    JSON.stringify({ ok: stale.ok, text: stale.text }))
+  ok('★ 重读后编码标注随之更新', stale.encoding === 'big5')
+
+  // ── 生产序列：preText 与透传编码同源时文本必须一致，且仍带编码标注 ──
+  // 这是当前唯一调用点（str_replace 预览）的真实形态：preText 由同一个 enc.want 解出。
+  decodeCalls.length = 0
+  const withWant = await RT('x.txt', 'G:/p', FS, null, 'big5')
+  const sameWant = await RT('x.txt', 'G:/p', FS, withWant.text, 'big5')
+  ok('生产序列下 preText 与编码同源：文本不变（改动不改变显示内容）',
+    sameWant.ok === true && sameWant.text === withWant.text,
+    JSON.stringify({ before: withWant.text, after: sameWant.text }))
+  // 契约：透传编码时返回值必须带 encoding/decided（短路分支返回的对象不含这两个字段，
+  // readTargetCheckedMeta 的 `rd.encoding && rd.decided` 判据会因此跳过记录）。
+  ok('★ 透传编码时返回值带 encoding/decided（返回值契约，供调用方记录标注）',
+    sameWant.ok === true && sameWant.encoding === 'big5' && !!sameWant.decided,
+    JSON.stringify({ encoding: sameWant.encoding, decided: sameWant.decided }))
+  // 注：本组用**直接调用**构造了「透传编码 + 有 preText」这一组合，而生产调用图里它不可达
+  // （toolDecodeEncoding 只对 read 返回非空，而 read 不走 readTargetChecked 这条路）。
+  // 故此断言锁定的是**函数契约**（日后把 toolDecodeEncoding 扩展到写类工具时的前提），
+  // 不代表当前存在这条热路径，也不能当作「该分支已被真实链路覆盖」。
+  ok('★ 同源时仍会按透传编码重新解码（契约：短路在指定编码时必须失效）',
+    decodeCalls.length === 2 && decodeCalls[0] === 'big5' && decodeCalls[1] === 'big5',
+    JSON.stringify(decodeCalls))
+
+  // 反向：无透传编码时仍短路复用（省读盘）
+  const third = await RT('x.txt', 'G:/p', FS, first.text, null)
+  ok('无透传编码时仍短路复用（target 为 null 即短路标志）',
+    third.ok === true && third.text === first.text && third.target === null)
+  // 空串视同未指定（避免把空串当有效编码送去服务）
+  const fourth = await RT('x.txt', 'G:/p', FS, first.text, '')
+  ok('编码为空串时视同未指定（仍短路，不把空串当编码）',
+    fourth.ok === true && fourth.text === first.text && fourth.target === null)
+}
+
+// ─────────────────────────────────────────────────────────────
+group('25. args.encoding 只对 read 生效 + 撤销判定与内核同源闸')
+// 背景：编码基准只由**工具自己透传**的参数决定（见第 22 组）。而"工具参数里有 encoding"
+// 这件事**只对 read 成立**：
+//   · read 的 encoding 是 "Reopen with Encoding" 语义，工具就按它解码 → 可以当磁盘侧基准；
+//   · write 的 encoding 只对**新建文件**有效，已存在文件时 tool-write.ts 直接抛
+//     E_ENCODING_NOT_APPLICABLE（operation === 'update'），且新建文件没有磁盘侧内容可解；
+//   · edit / insert 没有 encoding 参数，编码来自插件自己的 encoding memo；
+//   · str_replace_editor **也没有** encoding 参数（实测其 parameters 表只有
+//     command/path/file_text/insert_line/new_str/old_str/replace_all/view_range），
+//     view 子命令同样走 memo。
+{
+  // 判据必须是「工具名是否接受 encoding 参数」的白名单，**不是** isFileRead：
+  // 后者回答的是「这是不是文件读工具」（sre view 为真），混用会让模型多塞的 encoding
+  // 变成预览基准，而 sre 实际按 encoding memo 解码——两者脱钩。
+  ok('★ 只有 read 取 args.encoding（按工具名白名单判据，不借 isFileRead）',
+    /function toolDecodeEncoding\(name, args\) \{/.test(src)
+    && /const DECODE_ENCODING_TOOLS = \{ read: 1 \}/.test(src)
+    && /if \(!DECODE_ENCODING_TOOLS\[name\]\) return null/.test(src)
+    && !/if \(!isFileRead\(name, args\)\) return null/.test(src))
+  // want 只有一个来源：工具参数（且判据是「工具名是否接受 encoding 参数」，不是 isFileRead）
+  ok('★ want 只来自工具参数（无客户端指定分支）',
+    /const want = toolDecodeEncoding\(name, args\)/.test(src)
+    && /if \(!DECODE_ENCODING_TOOLS\[name\]\) return null/.test(src))
+  // 撤销预览的"解码是否与内核同源"闸：adopted 已不存在，改用 decided 判定
+  ok('★ 撤销 stale 判定仍被「解码与内核同源」闸挡住（adopted → decided 判定）',
+    /const decodeMatchesKernel = !enc\.want && curRR\.decided !== 'guessed'/.test(src)
+    && /if \(decodeMatchesKernel && normTxt\(curText\) !== normTxt\(resultContent\)\)/.test(src)
+    && /if \(decodeMatchesKernel && curText !== exactResult\)/.test(src)
+    // BOM 的 size 回退判据按 curText 反推，解码不同源时该反推不成立，须放弃该复核
+    && /if \(decodeMatchesKernel\) diskHasBom = info\.size === Buffer\.byteLength\(curText, 'utf8'\) \+ 3\s*\n\s*else bomCheckable = false/.test(src)
+    && /if \(bomCheckable && diskHasBom !== wantBom\)/.test(src))
+  // 撤销预览跳过判定时必须显式告知，否则「没报无变化」会被读成「撤销一定会执行」
+  ok('★ 撤销预览跳过判定时客户端显式提示',
+    /out\.undoVerdictSkipped = true/.test(src) && /undoVerdictSkipped/.test(cli)
+    && (cli.match(/undoVerdictNote,/g) || []).length === 2)
+
+  // 行为断言：真实执行 toolDecodeEncoding，逐类工具核对
+  const sliceFn = (name) => {
+    const s = src.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const tde = (() => {
+    try {
+      // 判据已改为模块级白名单常量（DECODE_ENCODING_TOOLS），故求值时把它一并注入；
+      // 不再注入 isFileRead 桩——判据已不依赖它（那正是本次修正的点）。
+      const constDecl = (src.match(/const DECODE_ENCODING_TOOLS = \{[^}]*\}/) || [''])[0]
+      if (!constDecl) return null
+      return new Function(constDecl + '\nreturn (' + sliceFn('toolDecodeEncoding') + ')')()
+    } catch (e) { return null }
+  })()
+  ok('能切出 toolDecodeEncoding 函数体并求值', !!tde)
+  if (tde) {
+    const encCases = [
+      ['read + encoding=gbk', 'read', { file_path: 'x', encoding: 'gbk' }, 'gbk'],
+      ['read + encoding=euc-kr', 'read', { file_path: 'x', encoding: 'euc-kr' }, 'euc-kr'],
+      ['read 无 encoding', 'read', { file_path: 'x' }, null],
+      ['read + encoding 空串', 'read', { file_path: 'x', encoding: '' }, null],
+      ['read + encoding 非字符串', 'read', { file_path: 'x', encoding: 123 }, null],
+      ['read + encoding null', 'read', { file_path: 'x', encoding: null }, null],
+      // sre view **没有** encoding 参数（其 parameters 表实测无该键），故取不到值。
+      // 判据是「工具名是否接受 encoding 参数」，**不是** isFileRead（后者回答的是
+      // 「这是不是文件读工具」，sre view 为真）——混用会让模型多塞的 encoding 变成
+      // 预览基准，而 sre 实际按 encoding memo 解码，两者脱钩。
+      ['sre view + encoding（无此参数）', 'str_replace_editor', { command: 'view', path: 'x', encoding: 'big5' }, null],
+      // 这几个是重点：它们的 encoding 参数**不能**当磁盘侧基准
+      ['sre str_replace + encoding', 'str_replace_editor', { command: 'str_replace', path: 'x', encoding: 'gbk' }, null],
+      ['write + encoding=gbk（仅新建文件有效）', 'write', { file_path: 'x', content: 'c', encoding: 'gbk' }, null],
+      ['edit + encoding=gbk（无此参数）', 'edit', { file_path: 'x', encoding: 'gbk' }, null],
+      ['insert + encoding=gbk（无此参数）', 'str_replace_editor', { command: 'insert', path: 'x', encoding: 'gbk' }, null],
+      ['独立 insert 工具 + encoding', 'insert', { file_path: 'x', insert_line: 1, new_string: 'n', encoding: 'gbk' }, null],
+      ['read_image + encoding', 'read_image', { file_path: 'x', encoding: 'gbk' }, null],
+      ['undo_last_edit + encoding', 'undo_last_edit', { file_path: 'x', encoding: 'gbk' }, null],
+    ]
+    const encBad = []
+    for (const [label, name, args, want] of encCases) {
+      const got = tde(name, args)
+      if (got !== want) encBad.push(label + ' got=' + JSON.stringify(got) + ' want=' + JSON.stringify(want))
+    }
+    ok('★ args.encoding 只对 read 生效（write/edit/insert/undo 一律不取）', encBad.length === 0, JSON.stringify(encBad))
+    // 畸形参数不得抛（审批路径上抛异常会让整个详情失败）
+    let threw = null
+    try { tde('read', null); tde('read', undefined); tde('read', 'not-an-object'); tde(null, {}) } catch (e) { threw = String(e && e.message) }
+    ok('畸形 args 不抛异常（审批详情不得因参数畸形整块失败）', !threw, String(threw))
+  }
+
+  // 行为断言：撤销同源闸必须真的按 decided 生效（真实执行判定表达式）
+  const gate = (want, decided) => new Function('enc', 'curRR', 'return (!enc.want && curRR.decided !== "guessed")')({ want }, { decided })
+  ok('★ 同源闸行为：未透传编码且服务确定为真（可下撤销结论）',
+    gate(null, 'utf8') === true && gate(null, 'bom') === true && gate(null, 'hint') === true)
+  ok('★ 同源闸行为：服务是猜的则为假（不下「撤销不会执行」的结论）',
+    gate(null, 'guessed') === false)
+  ok('★ 同源闸行为：透传了编码则为假（内核不认这个选择）',
+    gate('gbk', 'utf8') === false && gate('gbk', 'guessed') === false)
+}
+
+// ─────────────────────────────────────────────────────────────
+group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的编码基准')
+// 背景：edit / insert / str_replace_editor **没有** encoding 参数，它们的编码**完全**来自
+// dsh-fs-encoding 的 encoding memo（tool-edit 调 readFile 时不传 encodingHint）；write 的
+// 基线读、read 未指定时也都回落到它（io.js 的 `opts.encodingHint ?? memo?.encoding`）。
+// 此前 permgate 拿不到那份记录，只能自行判定——可能落在另一页上，于是预览描述的文本与
+// 工具实际要改的文本不是同一份。dsh-fs-encoding **1.4.0** 起提供只读出口
+// `recordedEncoding(sessionId, target, currentVersion?)`，本组锁定接线口径。
+//
+// 接口在 1.4.0 相对早期工作树有**两处实质变化**，本组按新语义锁定：
+//   ① currentVersion 省略 = **fail-closed**（仍走 isStale，未带版本的记录判不可用）；
+//      只有显式传 null 才跳过判定。早期工作树是反的（省略=跳过）。
+//   ② isFsEncodingService 增加 `...required` 变参；且服务侧 README 要求能力缺失时
+//      **告警而非静默降级**。
+{
+  ok('★ 走服务提供的只读出口（不自建记录、不自猜）',
+    /function recordedEncodingOf\(ctx, sessionId, target, version\) \{/.test(src)
+    && /svc\.recordedEncoding\(sessionId, target, version\)/.test(src))
+  // 本方法 1.4.0 才加入，更早的实例没有它。服务侧推荐 isFsEncodingService(svc,'recordedEncoding')，
+  // 但那是模块级导出、需要 import，而本插件把它当可选依赖、不 import，故按官方 README 给出的
+  // 等价手写式判定（"不能 import 本包的消费者手写 typeof fsEncoding?.recordedEncoding === 'function'"）。
+  ok('★ 显式能力判定 recordedEncoding（老实例会通过既有判定但没这个方法）',
+    /typeof svc\.recordedEncoding !== 'function'/.test(src))
+  // README 明确：能力缺失与「本会话确实没读过该文件」是两回事，前者应告警
+  ok('★ 能力缺失时告警（不静默降级）', /warnMissingRecordedEncoding\(\)/.test(src)
+    && /function warnMissingRecordedEncoding\(\)/.test(src))
+  ok('★ 告警只在进程内发一次（该路径每次预览都走，逐次告警会淹没日志）',
+    /let warnedMissingRecordedEncoding = false/.test(src)
+    && /if \(warnedMissingRecordedEncoding\) return/.test(src))
+  ok('服务**缺席**时不告警（没装 ≠ 太旧，两种情形分开）',
+    /const svc = getFsEncodingService\(ctx\)\s*\n\s*if \(!svc\) return null/.test(src))
+  ok('无会话 id 时不查（recordedEncoding(undefined,…) 读的是无 agent 匿名桶，不是本会话的）',
+    /if \(typeof sessionId !== 'string' \|\| !sessionId\) return null/.test(src))
+  ok('整段 try/catch（消费方是别人写的插件，契约说不抛仍兜住）',
+    /try \{\s*\n\s*if \(typeof sessionId !== 'string'[\s\S]*?\} catch \(e\) \{ return null \}/.test(src))
+  // provenance 白名单：只接受服务文档列出的四个取值，别的一律 null（不编造来源）
+  ok('★ provenance 白名单（只接受 utf8/bom/hint/guessed）',
+    /\(d === 'utf8' \|\| d === 'bom' \|\| d === 'hint' \|\| d === 'guessed'\) \? d : null/.test(src))
+  // ★ 1.4.0 新语义：永不传 null（那会跳过 stale 判定，让过期记录被当成工具要用的那一页）
+  ok('★ 永不传 null 给 currentVersion（null = 跳过 stale 判定，正是本功能要消除的失败）',
+    !/recordedEncoding\(sessionId, target, null\)/.test(src)
+    && /svc\.recordedEncoding\(sessionId, target, version\)/.test(src))
+  // 三个调用点都必须传**真实**版本（stat 拿到的），否则 fail-closed 会把记录全判过期、
+  // 功能静默完全失效（不报错，只是预览退回原报错）
+  ok('★ 三个调用点都传 stat 拿到的真实版本（传 undefined 会被 fail-closed 判过期）',
+    (src.match(/recordedEncodingOf\(ctx, [^)]*&& [a-z]+\.info\.version\)/g) || []).length === 2
+    && /recordedEncodingOf\(ctx, enc\.sessionId, target, info && info\.version\)/.test(src),
+    String((src.match(/recordedEncodingOf\(ctx, [^)]*&& [a-z]+\.info\.version\)/g) || []).length))
+
+  // 接线点：三个读盘入口都要带上记录
+  ok('★ readTargetChecked 取记录并传给 readPreviewText（edit/insert/sre 的入口）',
+    /const recorded = recordedEncodingOf\(ctx, sessionId, st\.target, st\.info && st\.info\.version\)/.test(src)
+    && /readPreviewText\(fsService, st\.target, getFsEncodingService\(ctx\), st\.info && st\.info\.size, encodingHint, recorded\)/.test(src))
+  ok('★ read 分支（流式回退）也带记录（read 未指定时工具同样回落 memo）',
+    /const rec = recordedEncodingOf\(ctx, enc\.sessionId, target, st\.info && st\.info\.version\)/.test(src))
+  ok('★ write 分支带记录（tool-write 的基线读不传 encodingHint，走的就是 memo）',
+    /const recW = recordedEncodingOf\(ctx, enc\.sessionId, target, info && info\.version\)/.test(src))
+  // 撤销**不得**带：buildUndoDiffData 读的是 dsh-better-edit 的 store，而 better-edit 有
+  // 它自己的编码状态（全仓零处引用 dsh-fs-encoding），两套记录互不相干。
+  // 用 A 插件的记录解释 B 插件的行为比不传更糟。
+  // 断言方式：**切出 buildUndoDiffData 的函数体**再查（不能全文件搜——write 分支也调
+  // recordedEncodingOf，全文件搜会把它误判成撤销带了记录）。
+  const undoBody = (() => {
+    const s = src.indexOf('async function buildUndoDiffData(')
+    if (s < 0) return ''
+    // 从**函数体的第一个 `{`** 起数：签名里有默认值对象（`enc = { meta: null, want: null }`），
+    // 直接从 s 起数会在那个 `}` 处提前收尾，切出 87 字符的残片（实测踩到过）。
+    const bodyStart = src.indexOf('{', src.indexOf(')', s))
+    if (bodyStart < 0) return ''
+    let d = 0
+    for (let k = bodyStart; k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(bodyStart, k + 1) }
+    }
+    return ''
+  })()
+  ok('能切出 buildUndoDiffData 函数体', undoBody.length > 1000, 'len=' + undoBody.length)
+  ok('★ 撤销分支**不**带记录（它读 better-edit 的 store，是另一套编码状态）',
+    !/recordedEncodingOf/.test(undoBody)
+    && /readPreviewText\(fsService, target, getFsEncodingService\(ctx\), info && info\.size, enc\.want\)/.test(undoBody),
+    'len=' + undoBody.length)
+  // 记录里的编码优先于「字节像不像 UTF-8」：基准（透传或记录）非 UTF-8 族时即使字节是
+  // 合法 UTF-8 也必须绕开直通。判定基于**基准**而非单一来源——只按记录判会让
+  // 「AI 指定了编码、记录仍是 utf8」时直通短路，预览与工具解码脱钩。
+  ok('★ 基准为非 UTF-8 族时强制走服务（否则双合法字节会被当 utf-8 展示）',
+    /const baseEnc = hintEnc \|\| recEnc/.test(src)
+    && /const forceService = !!baseEnc && !isUtf8Name\(baseEnc\) && !!encService/.test(src)
+    && /const direct = forceService \? \{ ok: false, error: null \} : await readText\(target\)/.test(src))
+  ok('基准为 utf8/utf8bom 时不强制走服务（直通更快且等价）',
+    /const isUtf8Name = \(enc\) => \{/.test(src)
+    && /k === 'utf8' \|\| k === 'utf8bom'/.test(src))
+  // 服务缺席时不强制走服务：那时无从按基准解码，退回直通（不影响正常使用）
+  ok('★ 服务缺席时不强制走服务（缺插件不得让本来能读的文件变成报错）',
+    /&& !!encService/.test(src))
+  // 工具透传的 encoding 优先于记录（工具自己指定的那一页才是它要用的）
+  ok('★ 工具透传的 encoding 优先于记录',
+    /const wantEncoding = \(typeof encodingHint === 'string' && encodingHint\) \? encodingHint : recEnc/.test(src))
+  // provenance：用记录解时服务只会回 'hint'，必须用记录自带的真实 provenance 覆盖，
+  // 否则一条 guessed 记录会被呈现成确定编码（正是本插件要防的）
+  ok('★ 用记录解时以记录的 provenance 覆盖服务的 hint',
+    /const usedRecord = !\(typeof encodingHint === 'string' && encodingHint\) && !!recEnc/.test(src)
+    && /const decided = usedRecord \? \(recorded\.decided \|\| 'guessed'\) : \(r\.decided \|\| null\)/.test(src))
+  // 记录未给可识别 provenance 时退 'guessed' 而非服务的 'hint'：这一页既不是调用方定的、
+  // 来源又未知，说成确定的就等于把未知当事实。宁可多显示一个「?」。
+  ok('★ provenance 不可识别时退 guessed（不采用服务的 hint）',
+    !/usedRecord && recorded\.decided\) \? recorded\.decided : \(r\.decided/.test(src))
+  // holder 必须带 sessionId，且取自 entry（审批发起时的会话快照，不是「当前会话」）
+  ok('★ holder 带 sessionId 且取自 entry（审批挂起期间用户可能切会话）',
+    /sessionId: entry\.sessionId \|\| null/.test(src))
+  ok('readTargetCheckedMeta 把 sessionId 透传下去',
+    /readTargetChecked\(fp, projRoot, fsService, preText, enc\.want, enc\.sessionId\)/.test(src))
+  // forceService 时 direct.error 为 null（没试过直通），故失败出口必须统一经 failFromDirect
+  // 回落（readFail(null) 会渲染成「读取失败: null」，让审批者看不到真实原因）
+  ok('★ 失败文案统一经 failFromDirect 出口（绝不把 null 交给 readFail）',
+    /const failFromDirect = \(e\) => readFail\(direct\.error \|\| e \|\| new Error\('not decodable text'\)\)/.test(src)
+    && !/readFail\(direct\.error\)/.test(src))
+
+  // ── 行为断言：真实执行 recordedEncodingOf 与 readPreviewText ──
+  const sliceFn = (name) => {
+    const s = src.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const sliceAsync = (name) => {
+    const s = src.indexOf('async function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  const helpers = [
+    'const ENC_READ_MAX_BYTES = 64 * 1024 * 1024',
+    'const FS_ENCODING_SERVICE = "fsEncoding"',
+    'const bi = (zh, en) => ({ zh, en })',
+    "const readFail = (e) => ({ zh: 'read failed: ' + ((e && e.message) || e), en: 'read failed' })",
+    // 告警去重状态必须一并带入：它是模块级 let，切片里只引用不定义会 ReferenceError
+    // （被 try/catch 吞掉 → 恒返回 null，告警断言就永远测不到）。
+    'let warnedMissingRecordedEncoding = false',
+    sliceFn('getFsEncodingService'),
+    sliceFn('warnMissingRecordedEncoding'),
+    sliceFn('recordedEncodingOf'),
+    sliceAsync('readPreviewText'),
+    'return { recordedEncodingOf, readPreviewText }',
+  ].join('\n')
+  // 注意：FS_ENCODING_SERVICE 只存在于注入的 helpers 字符串里（供 getFsEncodingService 用），
+  // 测试自身作用域没有它——这里写字面量，别引用那个常量（会 no-undef）。
+  const build = (svc) => new Function('ctx', helpers)({ get: (k) => (k === 'fsEncoding' ? svc : undefined) })
+  const target = { targetKey: 'G:/x/a.txt', displayPath: 'G:/x/a.txt' }
+
+  // ① recordedEncodingOf：正常取值 + provenance 白名单
+  {
+    const calls = []
+    const svc = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+      recordedEncoding: (sid, tgt, ver) => { calls.push([sid, tgt, ver]); return { encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' } },
+    }
+    const m = build(svc)
+    const r = m.recordedEncodingOf({ get: () => svc }, 'sess-1', target, 'v1')
+    ok('★ 正常取值：返回 encoding/decided，且把 sessionId/target/version 原样传给服务',
+      r && r.encoding === 'gbk' && r.decided === 'guessed'
+      && calls.length === 1 && calls[0][0] === 'sess-1' && calls[0][1] === target && calls[0][2] === 'v1',
+      JSON.stringify({ r, calls: calls.length }))
+    // provenance 不在白名单 → null（不编造来源）
+    // 桩必须带 tryDecode：getFsEncodingService 的能力判定要求它，缺了会让整个查询
+    // 提前返回 null，于是这条断言变成「恒真」而测不到白名单本身（实测踩到过）。
+    const svcBad = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+      recordedEncoding: () => ({ encoding: 'gbk', decided: 'weird-value' }),
+    }
+    const rBad = build(svcBad).recordedEncodingOf({ get: () => svcBad }, 's', target, 'v1')
+    ok('provenance 非白名单取值 → decided 为 null（不编造来源）', rBad && rBad.decided === null, JSON.stringify(rBad))
+    // 记录缺 encoding → null
+    const svcNoEnc = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+      recordedEncoding: () => ({ decided: 'hint' }),
+    }
+    ok('记录缺 encoding → null', build(svcNoEnc).recordedEncodingOf({ get: () => svcNoEnc }, 's', target, 'v1') === null)
+    // 服务返回 undefined（无记录/已过期）→ null
+    const svcUndef = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+      recordedEncoding: () => undefined,
+    }
+    ok('服务返回 undefined → null', build(svcUndef).recordedEncodingOf({ get: () => svcUndef }, 's', target, 'v1') === null)
+    // 服务返回 null（已过期）→ null
+    const svcNull = {
+      tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+      recordedEncoding: () => null,
+    }
+    ok('服务返回 null → null', build(svcNull).recordedEncodingOf({ get: () => svcNull }, 's', target, 'v1') === null)
+    // ★ 1.4.0 新语义：调用方**必须**把 version 原样透传，不得替换成 undefined/null。
+    // 用一个记录入参的桩，断言第三个实参就是调用方给的那个值（不是 undefined、不是 null）。
+    // 这条是「fail-closed 不会误伤」的行为保证：只要传真实版本，服务就能正常判定。
+    {
+      const seen = []
+      const svcSpy = {
+        tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }),
+        recordedEncoding: (sid, tgt, ver) => { seen.push(ver); return { encoding: 'gbk', decided: 'hint' } },
+      }
+      build(svcSpy).recordedEncodingOf({ get: () => svcSpy }, 's', target, 'v-real')
+      build(svcSpy).recordedEncodingOf({ get: () => svcSpy }, 's', target, undefined)
+      ok('★ version 原样透传（不擅自替换成 null——null 会跳过 stale 判定）',
+        seen.length === 2 && seen[0] === 'v-real' && seen[1] === undefined,
+        JSON.stringify(seen))
+      ok('★ 从不传 null（null 是"跳过判定"，只有展示历史才该用）',
+        !seen.includes(null), JSON.stringify(seen))
+    }
+  }
+  // ② 可选依赖：老版服务（无 recordedEncoding）必须返回 null 而不是抛
+  {
+    const oldSvc = { tryDecode: async () => ({ ok: false, refusal: { code: 'E_NOT_TEXT', message: 'x' } }) }
+    let threw = null
+    let r = null
+    try { r = build(oldSvc).recordedEncodingOf({ get: () => oldSvc }, 's', target, 'v1') } catch (e) { threw = String(e && e.message) }
+    ok('★ 老版服务（无 recordedEncoding）返回 null 且不抛（可选依赖不被破坏）',
+      r === null && !threw, threw || JSON.stringify(r))
+    // 如实记录一条**已知的不可观测性**（实测确认，勿据此写行为断言）：
+    // 去掉 `typeof svc.recordedEncoding !== 'function'` 这一条判定后，行为**完全相同**——
+    // 调用不存在的方法会抛 TypeError，而被外层 try/catch 吸收成 return null，返回值与抛出
+    // 都与带判定时一致。故该判定是**防御性/表意性**的（明确表达"这个方法是可选的"，
+    // 不依赖"异常被吞掉"来实现可选依赖），不是行为差异。
+    // 因此本组只能做文本断言锁定它存在，不能用行为断言——写了也是恒真。
+    ok('（说明）能力判定是表意性的：行为与"靠 catch 吞 TypeError"等价，故只能文本锁定',
+      /typeof svc\.recordedEncoding !== 'function'/.test(src))
+    // 服务整个缺席
+    ok('服务缺席时返回 null',
+      build(undefined).recordedEncodingOf({ get: () => undefined }, 's', target, 'v1') === null)
+    // 没有 ctx.get
+    let threw2 = null
+    try { build(oldSvc).recordedEncodingOf({}, 's', target, 'v1') } catch (e) { threw2 = String(e && e.message) }
+    ok('ctx.get 缺失时不抛', !threw2, String(threw2))
+    // ★ 1.4.0 新增要求（服务侧 README）：能力缺失要**告警而非静默降级**，
+    // 且要与「本会话没读过该文件」区分开。行为断言：真的调用了 console.warn，
+    // 且**只调一次**（该路径每次预览都走，逐次告警会淹没日志）。
+    {
+      const warns = []
+      const origWarn = console.warn
+      console.warn = (...a) => warns.push(a.join(' '))
+      try {
+        // 用独立的模块实例，避免与上面共享「已告警」状态
+        const mod = build(oldSvc)
+        mod.recordedEncodingOf({ get: () => oldSvc }, 's', target, 'v1')
+        mod.recordedEncodingOf({ get: () => oldSvc }, 's', target, 'v1')
+        mod.recordedEncodingOf({ get: () => oldSvc }, 's2', target, 'v2')
+      } finally { console.warn = origWarn }
+      ok('★ 能力缺失时发出告警（不静默降级）', warns.length === 1, 'warns=' + warns.length)
+      ok('★ 告警只发一次（进程内去重，不是每次预览都发）', warns.length === 1, JSON.stringify(warns))
+      // 文案只断言「点明后果」，**不**断言具体版本号：本插件拿不到服务版本，
+      // 无法知道是否存在可升级的版本，写死版本号会把一个无法执行的建议固化成契约。
+      ok('告警文案点明后果（非 UTF-8 预览退回原报错）',
+        !!warns[0] && /预览/.test(warns[0]) && /recordedEncoding/.test(warns[0]),
+        String(warns[0] || '').slice(0, 90))
+    }
+    // 服务**缺席**（没装）不告警：那是"没装"，不是"太旧"，两者后果不同
+    {
+      const warns = []
+      const origWarn = console.warn
+      console.warn = (...a) => warns.push(a.join(' '))
+      try { build(undefined).recordedEncodingOf({ get: () => undefined }, 's', target, 'v1') } finally { console.warn = origWarn }
+      ok('★ 服务缺席时不告警（没装 ≠ 太旧）', warns.length === 0, JSON.stringify(warns))
+    }
+  }
+  // ③ 恶意/畸形输入不得抛（契约承诺，消费方通常跳过自己的 try）
+  {
+    const evil = {
+      get tryDecode() { throw new Error('trap') },
+      get recordedEncoding() { throw new Error('trap') },
+    }
+    let threw = null
+    let r = null
+    try { r = build(evil).recordedEncodingOf({ get: () => evil }, 's', target, 'v1') } catch (e) { threw = String(e && e.message) }
+    ok('★ 服务的 getter 抛异常时不外泄（整段 try/catch 生效）', r === null && !threw, threw || JSON.stringify(r))
+    // 记录本身是 Proxy，取字段就抛
+    const proxyRec = { recordedEncoding: () => new Proxy({}, { get() { throw new Error('rec trap') } }) }
+    let threw2 = null
+    let r2 = null
+    try { r2 = build(proxyRec).recordedEncodingOf({ get: () => proxyRec }, 's', target, 'v1') } catch (e) { threw2 = String(e && e.message) }
+    ok('记录的字段访问抛异常时不外泄', r2 === null && !threw2, threw2 || JSON.stringify(r2))
+    // 畸形 sessionId / target
+    const svc = { recordedEncoding: () => ({ encoding: 'gbk', decided: 'hint' }) }
+    const m = build(svc)
+    ok('畸形 sessionId（非字符串/空串）一律 null',
+      m.recordedEncodingOf({ get: () => svc }, 123, target, 'v1') === null
+      && m.recordedEncodingOf({ get: () => svc }, '', target, 'v1') === null
+      && m.recordedEncodingOf({ get: () => svc }, undefined, target, 'v1') === null)
+  }
+  // ④ readPreviewText：记录驱动的解码与 provenance（桩服务显式 encoding 时恒回 hint）
+  {
+    const mkSvc = (behavior) => ({ tryDecode: async (bytes, opts) => behavior(opts || {}), recordedEncoding: () => undefined })
+    const fsNonUtf8 = { readText: async () => { throw new Error('invalid UTF-8 text') }, readBytes: async () => Buffer.from([0x41]) }
+    const fsUtf8 = { readText: async () => 'hello\n', readBytes: async () => Buffer.from('hello\n') }
+    const svc = mkSvc((o) => ({ ok: true, result: { text: 'T:' + (o.encoding || 'auto'), encoding: o.encoding || 'utf-8', decided: 'hint' } }))
+    const m = build(svc)
+    const R = m.readPreviewText
+    // 记录为 gbk → 按 gbk 解，且 decided 用记录的 guessed（不被服务的 hint 覆盖）
+    const a = await R(fsNonUtf8, target, svc, 10, null, { encoding: 'gbk', decided: 'guessed' })
+    ok('★ 记录为 gbk：按 gbk 解且 provenance 取记录的 guessed',
+      a.ok && a.encoding === 'gbk' && a.decided === 'guessed' && a.text === 'T:gbk', JSON.stringify(a))
+    // 工具透传优先于记录
+    const b = await R(fsNonUtf8, target, svc, 10, 'big5', { encoding: 'gbk', decided: 'guessed' })
+    ok('★ 工具透传 big5 优先于记录 gbk，且用服务的 hint（调用方指定的）',
+      b.ok && b.encoding === 'big5' && b.decided === 'hint', JSON.stringify(b))
+    // 记录为 gbk 但字节是合法 UTF-8 → 仍按记录解（forceService）
+    const c = await R(fsUtf8, target, svc, 10, null, { encoding: 'gbk', decided: 'hint' })
+    ok('★ 记录 gbk + 字节为合法 UTF-8 → 仍按记录解（不按字节直通）',
+      c.ok && c.encoding === 'gbk' && c.text === 'T:gbk', JSON.stringify(c))
+    // 记录为 utf8 → 直通，不调服务
+    let called = false
+    const spy = { tryDecode: async () => { called = true; return { ok: true, result: { text: 'X', encoding: 'gbk', decided: 'hint' } } }, recordedEncoding: () => undefined }
+    const d = await build(spy).readPreviewText(fsUtf8, target, spy, 10, null, { encoding: 'utf8', decided: 'utf8' })
+    ok('★ 记录为 utf8 时直通（不调服务，且 decided=utf8）',
+      d.ok && d.encoding === 'utf-8' && d.decided === 'utf8' && called === false, JSON.stringify({ d, called }))
+    // 无记录 → 服务自行判定
+    const e = await R(fsNonUtf8, target, svc, 10, null, null)
+    ok('无记录时交给服务判定（encoding/decided 原样透传）',
+      e.ok && e.decided === 'hint' && e.text === 'T:auto', JSON.stringify(e))
+    // 工具透传非 UTF-8 编码、但会话记录仍是 utf8 → 基准是透传的那一页，**不得**因记录为
+    // utf8 就走直通（这正是「只按记录判 forceService」的缺陷：直通短路后服务一次不调，
+    // 预览按 utf-8 展示而工具按 gbk 解，且 decided='utf8' 让客户端连徽标都不显示）
+    let hintCalled = false
+    const hintSvc = { tryDecode: async (b, o) => { hintCalled = true; return { ok: true, result: { text: 'T:' + ((o && o.encoding) || 'auto'), encoding: (o && o.encoding) || 'utf-8', decided: 'hint' } } }, recordedEncoding: () => undefined }
+    const g = await build(hintSvc).readPreviewText(fsUtf8, target, hintSvc, 10, 'gbk', { encoding: 'utf8', decided: 'utf8' })
+    ok('★ 透传 gbk + 记录 utf8 → 必须走服务按 gbk 解（基准优先于记录，不直通）',
+      g.ok && g.encoding === 'gbk' && g.text === 'T:gbk' && hintCalled === true, JSON.stringify({ g, hintCalled }))
+    // 透传的编码名大小写/标点变体也按 UTF-8 族处理（与服务 normalizeEncoding 同口径）
+    const h = await build(spy).readPreviewText(fsUtf8, target, spy, 10, 'UTF-8', null)
+    ok('★ 透传 "UTF-8"（别名）视同 UTF-8 族：直通，不误送服务',
+      h.ok && h.encoding === 'utf-8' && h.decided === 'utf8', JSON.stringify(h))
+    // 基准非 UTF-8 族但服务缺席 → 退回直通（缺插件不得让本来能读的文件变成报错）
+    const f = await R(fsUtf8, target, null, 10, null, { encoding: 'gbk', decided: 'hint' })
+    ok('★ 服务缺席时不强制走服务：按 UTF-8 尽力显示（不影响正常使用）',
+      f.ok === true && f.encoding === 'utf-8', JSON.stringify(f))
+    // forceService 下的失败文案不得退化成「读取失败: null」（本组 readFail 桩保留 message）
+    const badSvc = { tryDecode: async () => { throw new Error('boom') }, recordedEncoding: () => undefined }
+    const i2 = await build(badSvc).readPreviewText({ readText: async () => { throw new Error('invalid UTF-8 text') }, readBytes: async () => Buffer.from([0x41]) }, target, badSvc, 10, null, { encoding: 'gbk', decided: 'hint' })
+    ok('★ 强制走服务时失败文案带出真实原因（不得是「读取失败: null」）',
+      !i2.ok && !!i2.error && /boom/.test(i2.error.zh || '') && !/null/.test(i2.error.zh || ''), JSON.stringify(i2.error))
+  }
+}
 // ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')

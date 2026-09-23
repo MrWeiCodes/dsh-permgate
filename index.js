@@ -63,6 +63,14 @@ const SRE_WRITE_CMDS = { create: 1, str_replace: 1, insert: 1 }
 // str_replace_editor 的撤销子命令名：语义等同 undo_last_edit（恢复既有内容、不接受新内容）
 const SRE_UNDO_CMD = 'undo_edit'
 
+// 参数里接受 encoding 的工具（预览的磁盘侧基准来源）。当前只有 read：dsh-fs-encoding 的
+// read 提供 encoding 参数（"Reopen with Encoding" 语义，按它解码）。判据必须按**工具名**
+// 而非 isFileRead —— 后者回答的是「这是不是文件读工具」（str_replace_editor + view 也为真），
+// 而该工具的参数表里并没有 encoding（实测 dsh-fs-encoding/src/tool-str-replace-editor.ts），
+// 其 view 走 encoding memo。混用会让模型多塞的 encoding 被当成预览基准，而工具按 memo 解码，
+// 预览与工具所见脱钩——正是本功能要消除的失败。
+const DECODE_ENCODING_TOOLS = { read: 1 }
+
 // str_replace_editor 的内核：DSH 内置（官方语义，insert_line 0 基、插到该行之后）
 // 或 dsh-better-edit 的同名 shadow 覆盖（1 基、插到该行之前）。两者语义相反，
 // 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
@@ -269,6 +277,75 @@ function getFsEncodingService(ctx) {
   } catch (e) { return null }
 }
 
+// 「服务在场但没有 recordedEncoding」的告警，**进程内只发一次**。
+// 服务侧 README 明确要求：能力缺失应当告警，不能静默降级——它与「本会话确实没读过该文件」
+// （recordedEncoding 返回 undefined，属正常状态）是两回事，前者可由运维升级插件解决。
+// 只在进程内告警一次：这条路径每次预览都会走到，逐次告警会淹没日志。
+//
+// 文案只说「该实例没有这个方法」这一**可验证的事实**，不断言「升级即可恢复」：本插件不
+// import 该服务、也拿不到它的版本号，无法知道是否存在可升级的版本（实测 npm 上就长期没有
+// 带该方法的新版本）。断言一个运维无法执行的动作，比不提示更糟。
+let warnedMissingRecordedEncoding = false
+function warnMissingRecordedEncoding() {
+  if (warnedMissingRecordedEncoding) return
+  warnedMissingRecordedEncoding = true
+  try {
+    console.warn('[permgate] dsh-fs-encoding 的当前实例没有 recordedEncoding 方法：'
+      + '非 UTF-8 文件的编辑/写入预览无法按工具实际使用的编码解码，将退回原报错。'
+      + '（该只读出口由较新的 dsh-fs-encoding 提供；本插件不依赖它，功能降级但不影响正常使用。）')
+  } catch (e) {}
+}
+
+// 取「某会话为该文件记录的编码」——dsh-fs-encoding 的 encoding memo 的只读出口。
+//
+// 为什么必须走它、而不是自己判定：edit / insert / str_replace_editor **没有** encoding
+// 参数，它们的编码**完全**来自这份记录（tool-edit.js 调 readFile 时不传 encodingHint）；
+// read 未指定时也回落到它（io.js 的 `opts.encodingHint ?? memo?.encoding`）。本插件若自行
+// 判定，就可能落在另一页上，于是预览描述的文本与工具实际要改的文本不是同一份——而审批者
+// 正是照预览决定是否放行。这正是"宁可不显示，也不显示一页可能是错的编码"的落点。
+//
+// 三重防御，缺一不可：
+//   · **显式**能力判定 `typeof svc.recordedEncoding === 'function'`：本方法 1.4.0 才加入，
+//     更早的实例没有它。服务侧推荐的写法是 `isFsEncodingService(svc, 'recordedEncoding')`，
+//     但那是**模块级导出**、需要 import，而本插件把它当可选依赖、不 import，故按官方文档
+//     给出的等价手写式判定（README：不能 import 的消费者手写
+//     `typeof fsEncoding?.recordedEncoding === "function"`）。`!svc` 已先判，故此处不必再写 `?.`。
+//   · 没有会话 id 就**不查**：recordedEncoding(undefined, …) 读的是「无 agent」匿名桶，那是
+//     另一条记录；拿它当本会话的基准会张冠李戴。宁可退回报错。
+//   · 整段 try/catch：消费方是别人写的插件，契约说它不抛，仍兜住以防契约变化。
+//
+// version 的语义（1.4.0 起，与早期工作树**相反**，是本次接口调整的重点）：
+//   · 传 stat 拿到的当前版本 → 记录与文件版本不一致时服务返回 undefined。用的是与写盘
+//     路径**同一个** isStale 比较，故预览与工具不会对「这条记录还算不算数」产生分歧。
+//   · **省略该参数是 fail-closed**（仍走 isStale，未带版本的记录会被判不可用），不是
+//     "跳过判定"。这正是我们要的：拿不到版本就如实当"无法确认"，别把记录当新鲜用。
+//   · 只有显式传 `null` 才跳过判定。本插件**永不**传 null——那会让一条过期记录被当成
+//     工具将要用的那一页，正是本功能要消除的失败。版本号本身是内部记账细节，不解析。
+function recordedEncodingOf(ctx, sessionId, target, version) {
+  try {
+    if (typeof sessionId !== 'string' || !sessionId) return null
+    const svc = getFsEncodingService(ctx)
+    if (!svc) return null
+    if (typeof svc.recordedEncoding !== 'function') {
+      // 服务在场但没有这个方法 = 实例太旧（1.4.0 之前）。README 明确要求这种情形
+      // **告警而不是静默降级**：它与「本会话确实没读过该文件」（recordedEncoding 返回
+      // undefined）是两回事，前者可由运维升级插件解决，后者是正常状态。
+      // 只在进程内告警一次：这条路径每次预览都会走到，逐次告警会淹没日志。
+      warnMissingRecordedEncoding()
+      return null
+    }
+    const rec = svc.recordedEncoding(sessionId, target, version)
+    if (!rec || typeof rec !== 'object') return null
+    const encoding = typeof rec.encoding === 'string' && rec.encoding ? rec.encoding : null
+    if (!encoding) return null
+    const d = rec.decided
+    // provenance 白名单：只接受服务文档列出的四个取值（DecodeProvenance），别的一律当
+    // "未知"（null），由调用方按"未经服务"处理——不编造一个来源。
+    const decided = (d === 'utf8' || d === 'bom' || d === 'hint' || d === 'guessed') ? d : null
+    return { encoding, decided }
+  } catch (e) { return null }
+}
+
 // 预览用文本读取：UTF-8 优先（走原有 fsService.readText，快且不依赖服务）；
 // 失败时若解码服务在场，则改走「字节读 + 交给服务判定」。
 //
@@ -280,22 +357,57 @@ function getFsEncodingService(ctx) {
 // 避免为一个注定超限的文件先付出一次完整读盘（readText 的失败判定本身已整读一次，
 // 不预检则 readBytes 会再整读一次，峰值达文件大小的两倍）。
 //
-// 返回 { ok:true, text, encoding, decided, candidates } 或 { ok:false, error }。
+// 返回 { ok:true, text, encoding, decided } 或 { ok:false, error }。
 // decided 取值：'utf8'（本就 UTF-8）/ 'bom'|'hint'|'guessed'（服务给出）/ null（未经服务）。
-// candidates：服务在拒绝时给出的候选编码（[{encoding, sample, score}]，best first）。
-// 客户端据此渲染可切换的编码选择器；采用首候选时也一并带出，供用户改选。
-// wantEncoding：用户在详情里手选的编码（非空字符串时按它解，跳过猜测）。
-async function readPreviewText(fsService, target, encService, size, wantEncoding) {
+// encodingHint：工具自己透传的解码方式（read 的 encoding 参数；非空字符串时按它解，跳过猜测）。
+// recorded：该会话为该文件记录的编码（recordedEncodingOf 的返回值，或 null）。
+//   有它时必须按它解码——edit/insert 的编码**完全**来自这份记录，本插件自行判定就可能落到
+//   另一页上，预览描述的文本与工具要改的文本就不是同一份。没有它则维持原有行为（服务自行判定）。
+// 本函数**不做编码决策**：要么按调用方透传的编码解，要么把服务的判定/拒绝原样带出。
+async function readPreviewText(fsService, target, encService, size, encodingHint, recorded) {
   const readText = async (t) => {
     try { return { ok: true, text: await fsService.readText(t) } } catch (e) { return { ok: false, error: e } }
   }
+  // 基准编码（预览的磁盘侧口径）必须与工具会用的是**同一页**：
+  //   · 工具透传的 encoding 优先（read 的 "Reopen with Encoding" 语义，工具就按它解码）；
+  //   · 其次会话为该文件记录的编码（edit/insert/write 的编码完全来自它）。
+  // 基准不是 UTF-8 族时，**必须**绕开 ① 的直通走服务：直通只判「字节是不是合法 UTF-8」，
+  // 而这两个问题不等价。基准为 gbk 的文件其字节完全可能正是合法 UTF-8（AI 用
+  // read(encoding:'gbk') 读过一个 ASCII/双合法文件就会这样——服务的 hint 分支无条件胜过
+  // UTF-8 校验），此时直通会把内容当 utf-8 展示，而工具按 gbk 解码。两侧不一致正是本插件
+  // 要防的，故这里以基准为准，而不是以字节像不像 UTF-8 为准。
+  //
+  // 判定只看**基准**，不看单一来源：曾经只按「记录」判 forceService，而 ③ 段按「透传优先」
+  // 取解码编码——同一个「该不该走直通」的决策被写成两份口径且互相矛盾，于是「AI 指定了
+  // 编码、会话记录仍是 utf8」时直通短路、服务一次都不调，预览按 utf-8 展示而工具按指定
+  // 编码解码（正是本函数要消除的脱钩），且 decided='utf8' 还会让客户端连编码徽标都不显示。
+  const recEnc = recorded && typeof recorded.encoding === 'string' && recorded.encoding ? recorded.encoding : null
+  const hintEnc = (typeof encodingHint === 'string' && encodingHint) ? encodingHint : null
+  const baseEnc = hintEnc || recEnc
+  // 编码名归一化只用于判「是不是 UTF-8 族」，口径与服务 normalizeEncoding 一致
+  // （trim + 转小写 + 去 - _ 空格）。本插件不 import 该服务，故这里**不**承担「识别任意
+  // 编码」的职责：认不出的一律按「需要服务」处理——走服务只会更准确，不会更差。
+  const isUtf8Name = (enc) => {
+    if (typeof enc !== 'string') return false
+    const k = enc.trim().toLowerCase().replace(/[-_\s]/g, '')
+    return k === 'utf8' || k === 'utf8bom'
+  }
+  // 解码服务**缺席**时不强制走服务：那时无从按基准解码，退回直通（与引入本功能前的行为
+  // 一致）——宁可按 UTF-8 尽力显示，也不把一个本来能读的文件变成「缺插件」的报错。
+  const forceService = !!baseEnc && !isUtf8Name(baseEnc) && !!encService
   // ① UTF-8 正常路径：绝大多数文件走这里，且不需要任何服务。
   // 这里也要查 NUL：ctx.fs 的 readText 只对**前 8192 字节**采样判二进制
   // （dsh-fs-local 的 BINARY_SAMPLE_BYTES），NUL 落在采样窗口之后时它会成功返回一段
   // 含 U+0000 的文本。若不在这里查，同一份含 NUL 的内容会因 NUL 的位置不同而行为不同
   // （窗口内→被 readText 拒→走服务路径→被下面的检查拦下；窗口外→直接放行并渲染）。
   // 两条路径口径统一，判据也一致：解出的文本含 U+0000 即按二进制处理。
-  const direct = await readText(target)
+  const direct = forceService ? { ok: false, error: null } : await readText(target)
+  // 「读取失败」文案的统一出口：forceService 时 direct.error 恒为 null（我们根本没试直通），
+  // 而 readFail(null) 会渲染成字面量「读取失败: null」——审批者据此既看不到真实原因，
+  // 也无法区分「按基准解码后是二进制」与「服务出错」。故各回退点统一经此出口，按
+  // 「直通的原因 → 本次调用的原因 → 通用文案」依次回落，**绝不**把 null 交给 readFail。
+  // 顺序上直通原因优先，是为了让非 forceService 路径的错误文案与引入本功能前逐字一致。
+  const failFromDirect = (e) => readFail(direct.error || e || new Error('not decodable text'))
   if (direct.ok) {
     const t0 = String(direct.text == null ? '' : direct.text)
     // 文案与 ctx.fs 的二进制拒绝保持一致（用户看到的语义是「这是二进制，不预览」）
@@ -305,8 +417,10 @@ async function readPreviewText(fsService, target, encService, size, wantEncoding
     }
     return { ok: true, text: t0, encoding: 'utf-8', decided: 'utf8' }
   }
-  // ② 非 UTF-8：只有解码服务在场时才继续。没有就维持原报错（不猜）
-  if (!encService) return { ok: false, error: readFail(direct.error) }
+  // ② 非 UTF-8：只有解码服务在场时才继续。没有就维持原报错（不猜）。
+  // 注：forceService 已要求服务在场，故走到这里时 direct.error 一定来自真实的 readText 失败
+  // （直通的原因），failFromDirect 会如实带出它。
+  if (!encService) return { ok: false, error: failFromDirect(null) }
   // 已知体积且已超本插件的硬保护上限：直接给「文件过大」文案，不再整读一次
   // （readBytes 也会以 FS_TOO_LARGE 拒绝，这里只是省掉那次无用的整读）
   if (typeof size === 'number' && size > ENC_READ_MAX_BYTES) {
@@ -356,37 +470,28 @@ async function readPreviewText(fsService, target, encService, size, wantEncoding
     // 包一层 catch；但消费方是别人写的插件，仍兜住以防契约变化。
     return Object.keys(opts).length ? await encService.tryDecode(bytes, opts) : await encService.tryDecode(bytes)
   }
-  // wantEncoding：调用方（file-diff 路由）按用户在详情里手选的编码传入。传了就跳过猜测，
-  // 直接按该编码解（与服务 read 工具的 encoding 逃生口同一语义）。
+  // ③ 单次解码。优先级：
+  //   ① 工具自己透传的 encoding（read 的 "Reopen with Encoding" 语义，工具就按它解码）；
+  //   ② 会话为该文件**记录的**编码（edit/insert 的编码完全来自它；read 未指定时也回落到它）；
+  //   ③ 都没有 → 交给服务自行判定（服务拒绝就把说明原样带出，见 ④）。
+  //
+  // 本插件**不做编码决策**，这条是刻意的：曾经在服务拒绝（E_NOT_TEXT，猜测关闭）时用
+  // refusal.candidates[0] 回灌一次显式编码，好让非 UTF-8 文件在审批详情里有内容可看。
+  // 那等于本插件替用户挑了一页编码，而工具真正写盘用的是它**自己的编码记录**
+  // （dsh-fs-encoding 的 encoding memo：io.js 里 `opts.encodingHint ?? memo?.encoding`）。
+  // 于是预览可能是 A 页、写盘按 B 页，而审批者正是照这段预览判断是否放行——比"没有预览"
+  // 更危险。现在只认**工具会用**的那一页：工具透传的参数，或它将要读取的那份记录。
+  const wantEncoding = (typeof encodingHint === 'string' && encodingHint) ? encodingHint : recEnc
   let out = null
   try {
     out = await callDecode(wantEncoding)
   } catch (e) {
-    return { ok: false, error: readFail(direct.error) }
+    // 带出**本次调用**的原因：forceService 下 direct.error 为 null，退回它会显示
+    // 「读取失败: null」，把「服务抛了」谎报成空原因。
+    return { ok: false, error: failFromDirect(e) }
   }
-  // ③ 猜测关闭时的自动采用：服务在 autoGuessEncoding=false 下拒绝，但它**已经把候选算出来了**
-  // （refusal.candidates 带 encoding/score/sample）。审批详情是给人看的，服务文档明确说
-  // 「Consumers rendering for a human want to offer those candidates as a chooser」，故这里
-  // 用服务自己给出的首候选回灌一次显式编码——不是本插件自己猜：候选、排序、可采信判定
-  // （adoptable）全部来自服务。
-  //
-  // 只在 adoptable === true 时采用：服务文档把「ranked:true 但 adoptable:false」点名为危险
-  // 中间态（有排序，但首候选是服务明确判定为不可信的那一页），采用它会重现拒绝本要防止的
-  // 静默误解码。candidates 为空说明没有编码能干净解出（通常是二进制），保持原有报错。
-  //
-  // 采用后服务只会标 decided='hint'（= 调用方已指定编码，确定口径），故下面出口处要把
-  // 标注降级为 'guessed'——见出口注释。
-  let adopted = null
-  if (!out || out.ok !== true || !out.result) {
-    const rf = out && out.refusal
-    if (!wantEncoding && rf && rf.code === 'E_NOT_TEXT' && rf.adoptable === true
-      && Array.isArray(rf.candidates) && rf.candidates.length && rf.candidates[0] && rf.candidates[0].encoding) {
-      try {
-        const retry = await callDecode(rf.candidates[0].encoding)
-        if (retry && retry.ok === true && retry.result) { out = retry; adopted = rf }
-      } catch (e) {}
-    }
-  }
+  // ④ 拒绝原样带出。候选编码（refusal.candidates）不再下发：没有切换 UI 就不需要它，
+  // 而留着它只会诱使调用方再去做一次本插件无权做的编码决策。
   if (!out || out.ok !== true || !out.result) {
     const refusal = out && out.refusal
     // 服务自己的体积超限要走项目既有的「文件过大」口径，不能把它的 message 原样抛给用户：
@@ -404,7 +509,7 @@ async function readPreviewText(fsService, target, encService, size, wantEncoding
     // 不记日志的话，我方 opts 参数错误会在用户侧伪装成「读取失败」而运维侧零线索。
     if (refusal && refusal.code === 'E_BAD_ENCODING') {
       try { console.error('[permgate] fsEncoding rejected our opts:', refusal.message) } catch (e) {}
-      return { ok: false, error: readFail(direct.error) }
+      return { ok: false, error: failFromDirect(null) }
     }
     // 其余拒绝（E_NOT_TEXT 二进制 / 猜测关闭）：把服务的说明原样带出——
     // 它比 ctx.fs 的 invalid UTF-8 text 更准确（能区分「没尝试猜」与「猜了但失败」）
@@ -446,27 +551,27 @@ async function readPreviewText(fsService, target, encService, size, wantEncoding
   // 0x00」一刀切——合法 UTF-16/32 文本的字节里全是 0x00，那正是本功能存在的理由。
   // 这不会误伤合法文本：实测各 UTF BOM 变体（utf16le/utf16be/utf32le/utf8bom）与
   // GBK/Big5/Shift-JIS 的正常文件解出的文本都不含 U+0000。
-  if (text.indexOf('\u0000') !== -1) return { ok: false, error: readFail(direct.error) }
-  // 候选编码随结果带出（供客户端渲染可切换的选择器）：
-  //  · 自动采用首候选时，用**拒绝里那份**候选（它才是完整的 best-first 列表）；
-  //  · 用户手选时服务按显式 encoding 解出，其 result.candidates 恒为空（见服务
-  //    encoding-state.js 的 hint 分支），而本函数是无状态的、拿不到上次那份拒绝，
-  //    故这里只能不下发；由**客户端**在覆盖缓存时沿用旧 payload 的 encCandidates
-  //    （否则用户切换一次后徽标就退化为不可点，再也切不回去）。
-  // 候选为空数组时不下发该字段：客户端据「有无 candidates」决定徽标是否可点。
-  const cands = adopted && Array.isArray(adopted.candidates) && adopted.candidates.length
-    ? adopted.candidates.map((c) => ({ encoding: c.encoding, sample: c.sample, score: c.score }))
-    : null
-  // 标注降级：自动采用时服务只会标 'hint'（= 调用方已指定编码，确定口径），但那条是
-  // **本插件替用户从候选里挑的猜测**——服务自己在 autoGuessEncoding=true 下对同一候选
-  // 标的是 'guessed' 并附「可能不准」警告。若原样透传 'hint'，关闭猜测的部署反而把
-  // 猜测呈现得更确定，而审批者正是照这段预览决定是否放行写盘。故 adopted 时降级为
-  // 'guessed'，让客户端保留「?」与警告文案。用户手选（wantEncoding）是用户自己的
-  // 显式选择，保持服务标注不改写。
-  const decided = adopted ? 'guessed' : (r.decided || null)
-  // adopted 一并带出：调用方（撤销预览）要据此判断「本次解码是本插件替用户挑的候选」
-  // ——那种解码不能用来对「撤销是否会执行」下结论（见 buildUndoDiffData）。
-  return { ok: true, text, encoding: r.encoding || null, decided, candidates: cands, adopted: !!adopted }
+  if (text.indexOf('\u0000') !== -1) {
+    // 文案要与直通路径的二进制拒绝同口径（用户看到的语义是「这是二进制，不预览」），
+    // 而 forceService 下 direct.error 为 null，不能退回它（会显示「读取失败: null」）。
+    const dp1 = (target && typeof target.displayPath === 'string' && target.displayPath) || 'file'
+    return { ok: false, error: readFail(new Error('cannot read "' + dp1 + '": binary file')) }
+  }
+  // decided 的取值，按「这次解码是谁定的」如实标注：
+  //   · 工具透传了 encoding → 'hint' 是服务给的正确标注（调用方指定了编码），原样透传；
+  //   · 用**记录**里的编码解 → 服务只会回 'hint'（"调用方指定了编码"），但那一页不是本插件
+  //     或调用方定的，而是**记录**里的。记录自带真实 provenance（'guessed' 表示当初是猜的），
+  //     必须用它覆盖，否则一条猜测记录会被呈现成确定编码——审批者正是照这段预览决定是否
+  //     放行，把猜的显示成确定的正是本插件要防的。这正是 recordedEncoding 返回 decided 的
+  //     理由（服务文档：重解码拿不回真实 provenance）。
+  //   · 服务自行判定（无透传、无记录）→ 原样透传（'guessed' 时客户端显示「?」与警告）。
+  // usedRecord 时若记录没给出可识别的 provenance（recordedEncodingOf 只放行服务文档列出的
+  // 四个取值），退回 'guessed' 而**不是** r.decided：后者恒为 'hint'（"调用方指定了编码"），
+  // 而这一页既不是调用方定的、来源又未知——把它说成确定的就是本插件要防的"把猜测当事实"。
+  // 宁可多显示一个「?」，也不能让审批者以为这一页已经确定。
+  const usedRecord = !(typeof encodingHint === 'string' && encodingHint) && !!recEnc
+  const decided = usedRecord ? (recorded.decided || 'guessed') : (r.decided || null)
+  return { ok: true, text, encoding: r.encoding || null, decided }
 }
 
 export default {
@@ -1988,11 +2093,17 @@ export default {
       try {
         // 撤销预览要拿磁盘当前内容与撤销目标比对，非 UTF-8 文件同样要能读出，
         // 否则撤销预览直接报 invalid UTF-8 text 而看不到将被恢复的内容。
+        //
+        // **这里刻意不传 recordedEncoding 的记录**：本函数读的是 dsh-better-edit 的 sqlite
+        // store（见上面 betterEditStoreFor），而 better-edit 有**它自己**的编码状态
+        // （dsh-better-edit 的 file-encoding-state.ts，全仓零处引用 dsh-fs-encoding），
+        // 与 fs-encoding 的 memo 是两套互不相干的记录。把 fs-encoding 的 memo 当成本撤销
+        // 内核的基准，等于用 A 插件的记录去解释 B 插件的行为——比不传更糟。
         const curRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size, enc.want)
         if (!curRR.ok) return curRR
         const curText = curRR.text
         // 记录编码来源：撤销预览同样是「按解码文本生成的对比」，须让客户端能标注
-        enc.meta = { encoding: curRR.encoding, decided: curRR.decided, candidates: curRR.candidates }
+        enc.meta = { encoding: curRR.encoding, decided: curRR.decided }
         const after = row.content === null || row.content === undefined ? '' : String(row.content)
         if (overMaxChars(curText, after)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
         // 与 better-edit 的校验口径对齐：better-edit 用 undo 行的 bom/ending 做字节级精确比较，
@@ -2000,16 +2111,20 @@ export default {
         // 仅行尾（CRLF↔LF）或 BOM 差异的覆盖在 better-edit 会返回 E_UNDO_STALE，预览同步按 stale 处理。
         const resultContent = row.result_content === null || row.result_content === undefined ? '' : String(row.result_content)
         const normTxt = (s) => normEol(String(s || '').replace(/^\uFEFF/, ''))
-        // 解码是否与**写盘内核实际使用的那份**同源：内核按它自己记录的编码解码后再做字节级
-        // 校验（better-edit 用 undo 行的 bom/ending），只有「服务自行判定」的解码才与该记录
-        // 同源。下面两种都不是，其 curText 与 result_content 必然不等：
-        //   · 用户在详情里手选预览编码（enc.want）——服务按我们给的编码解，内核不认这个选择；
-        //   · 本插件替用户采用了服务候选（curRR.adopted）——那恰恰是内核不会采用的那一页。
+        // 解码是否与**写盘内核实际使用的那份**同源：内核按它自己记录的编码（encoding memo）
+        // 解码后再做字节级校验（better-edit 用 undo 行的 bom/ending）。本插件的预览拿不到
+        // 那个 memo（service.d.ts 明写「the recorded encoding is deliberately NOT part of
+        // this service」），只能靠「服务的判定是否确定」间接对齐：
+        //   · 'utf8' / 'bom' 是确定性判定（严格 UTF-8 校验、BOM 权威），与 memo 必然一致
+        //     ——memo 首次也是由同一套 admission 记录的；
+        //   · 'guessed' 是概率性选择（autoGuessEncoding=true），可能与 memo 记的那一页不同；
+        //   · enc.want 是工具透传的编码，与内核的 memo 未必同源（撤销预览当前恒为 null，
+        //     因为 undo 类工具没有 encoding 参数；此处保留判断以免日后新增调用方时失守）。
         // 非同源时据此下结论不是「少一条提示」，而是**反向误导**：预览输出「撤销不会执行
         // （无变化）」，审批者以为放行无副作用，实际撤销会执行并改盘——正是本插件要防的误判
         // 放行。故非同源时只渲染对比、不对撤销是否执行下结论（宁可少说，不能说错；与上面
         // 「无法预览」分支同一原则）。
-        const decodeMatchesKernel = !enc.want && !curRR.adopted
+        const decodeMatchesKernel = !enc.want && curRR.decided !== 'guessed'
         if (decodeMatchesKernel && normTxt(curText) !== normTxt(resultContent)) {
           return { ok: false, error: bi('文件在该次编辑后已被改动，撤销不会执行（无变化）', 'File changed after that edit; the undo will not run (no change)') }
         }
@@ -2102,17 +2217,35 @@ export default {
     // 或 {ok:false,error}。
     // 写分支各读盘入口共用；preText 非空时直接复用（调用方已完成预检读盘，如 str_replace 唯一性检查），避免双读盘。
     // 注意：本函数不写编码来源——它拿不到本次请求的 holder，且 preText 短路时并未读盘，
-    // 编码来源由调用方按返回的 encoding/decided/candidates 自行记录（见 readTargetCheckedMeta）。
-    // want：用户在详情里手选的编码，由调用方从请求 holder 透传（本函数自己拿不到 holder）。
-    async function readTargetChecked(fp, projRoot, fsService, preText, want) {
-      if (preText !== null && preText !== undefined) return { ok: true, target: null, info: null, text: preText }
+    // 编码来源由调用方按返回的 encoding/decided 自行记录（见 readTargetCheckedMeta）。
+    // encodingHint：工具自己透传的解码方式（read 的 encoding 参数），由调用方从 holder 透传
+    // （本函数自己拿不到 holder）。
+    // sessionId：审批发起时的会话，用来取该会话为此文件**记录的**编码（edit/insert 的编码
+    // 完全来自它）。由调用方从 holder 透传，理由同上。
+    async function readTargetChecked(fp, projRoot, fsService, preText, encodingHint, sessionId) {
+      // preText 短路（str_replace 唯一性检查已读盘）只在**未指定编码**时成立：
+      // 本函数无法自证 preText 是用哪个编码解出来的，指定编码时若照样短路，
+      // 就会返回一段与指定编码不符的文本（编辑预览的磁盘侧内容与编码标注不一致）。
+      // 故 encodingHint 非空时一律重新读盘，让该编码真正生效。
+      //
+      // 当前调用图下 encodingHint 恒为空：它的唯一来源是 holder 的 enc.want =
+      // toolDecodeEncoding(...)，而该函数只对 read 返回非空；本函数的调用点全部位于
+      // isFileWrite 分支内，read 走的是另一条预览路径。故这个重读分支是**为日后把
+      // toolDecodeEncoding 扩展到写类工具预留的契约**，当前不产生额外读盘（勿据「会多读一次」
+      // 误判热路径开销）。保留它是因为「preText 与本函数的编码同源」是调用点的性质、
+      // 不是本函数能验证的前提——真要扩展时，短路必须失效才不会拿错文本。
+      const hintGiven = typeof encodingHint === 'string' && encodingHint
+      if (!hintGiven && preText !== null && preText !== undefined) return { ok: true, target: null, info: null, text: preText }
       const st = await statTargetChecked(fp, projRoot, fsService)
       if (!st.ok) return st
+      // 记录里的编码（edit/insert 的编码来源）。version 传 stat 拿到的当前版本，让服务用与
+      // 写盘路径同一个 isStale 比较，避免预览与工具对「这条记录还算不算数」产生分歧。
+      const recorded = recordedEncodingOf(ctx, sessionId, st.target, st.info && st.info.version)
       // 走 readPreviewText：UTF-8 直接读；非 UTF-8 且解码服务在场时由它判定。
       // 写类 diff 同样需要读到非 UTF-8 文件的既有内容，否则编辑预览会报 invalid UTF-8 text。
-      const rr = await readPreviewText(fsService, st.target, getFsEncodingService(ctx), st.info && st.info.size, want)
+      const rr = await readPreviewText(fsService, st.target, getFsEncodingService(ctx), st.info && st.info.size, encodingHint, recorded)
       if (!rr.ok) return rr
-      return { ok: true, target: st.target, info: st.info, text: rr.text, encoding: rr.encoding, decided: rr.decided, candidates: rr.candidates, adopted: rr.adopted }
+      return { ok: true, target: st.target, info: st.info, text: rr.text, encoding: rr.encoding, decided: rr.decided }
     }
 
     // 读盘并把编码来源记到**本次请求的** holder：写类 diff 的 payload 由
@@ -2121,8 +2254,8 @@ export default {
     // 文件真实内容展示）。故读盘处统一记录、buildFileDiffData 出口统一附加。
     // holder 由调用方按请求创建（不是 entry 属性），避免并发请求互相覆盖。
     async function readTargetCheckedMeta(enc, fp, projRoot, fsService, preText) {
-      const rd = await readTargetChecked(fp, projRoot, fsService, preText, enc.want)
-      if (rd.ok && rd.encoding && rd.decided) enc.meta = { encoding: rd.encoding, decided: rd.decided, candidates: rd.candidates }
+      const rd = await readTargetChecked(fp, projRoot, fsService, preText, enc.want, enc.sessionId)
+      if (rd.ok && rd.encoding && rd.decided) enc.meta = { encoding: rd.encoding, decided: rd.decided }
       return rd
     }
 
@@ -2189,19 +2322,55 @@ export default {
       if (out && out.ok === true && meta && meta.encoding && meta.decided) {
         out.encoding = meta.encoding
         out.decided = meta.decided
-        // 候选编码列表（非 UTF-8 时才有）：客户端据此把编码徽标做成可点的切换器。
-        // 与 encoding/decided 同一单点附加，避免各 payload 构造分支逐个漏加。
-        if (Array.isArray(meta.candidates) && meta.candidates.length) out.encCandidates = meta.candidates
+        // 不下发候选、不设"可否切换"标记：客户端只把编码名与来源显示出来，没有任何
+        // 选择/下拉交互。编码基准由**工具自己透传**（read 的 encoding 参数），本插件
+        // 不提供第二种选择——预览换一页编码就会与工具实际写入的那一页脱钩，而审批者
+        // 正是照这段预览判断是否放行（详见 readPreviewText 的 ③ 注释）。
       }
       return out
     }
 
-    async function buildFileDiffData(entry, fsService, wantEncoding) {
+    // 工具参数里显式指定的解码方式（预览的磁盘侧基准）。
+    // 只有 read 有这个概念：dsh-fs-encoding 的 read 提供 encoding 参数（"Reopen with
+    // Encoding" 语义，按它解码）。其余工具的参数**不能**拿来当磁盘侧基准：
+    //   · write 的 encoding 只对**新建文件**有效——已存在文件时它会直接抛
+    //     E_ENCODING_NOT_APPLICABLE（实测其 tool-write.ts：operation === 'update' 即抛），
+    //     而新建文件没有磁盘侧内容可解，故对预览无意义；
+    //   · edit / insert **没有** encoding 参数，它们的编码来自插件自己的 encoding memo
+    //     （源码注释：Read through the plugin's own path so the encoding memo is populated
+    //     and the file is decoded under its real encoding）——那个 memo 不经 ctx.fs 暴露，
+    //     permgate 拿不到，故无法据此对齐；
+    //   · str_replace_editor **也没有** encoding 参数（实测其 parameters 表只有
+    //     command/path/file_text/insert_line/new_str/old_str/replace_all/view_range，
+    //     见 dsh-fs-encoding/src/tool-str-replace-editor.ts），其 view 子命令的编码同样走
+    //     memo（该文件调 readFile 时不传 encodingHint）。故 **不能**复用 isFileRead 当判据：
+    //     那个函数回答的是「这是不是文件读工具」（含 sre view 这一支），而这里要问的是
+    //     「该工具是否接受 encoding 参数」。两者混用会让 sre view 上模型多塞的 encoding
+    //     被当成预览基准，而 sre 实际按 memo 解码——预览与工具所见脱钩，正是本功能要消除的。
+    // 判据因此**只看工具名**：当前只有 read 有该参数（新增带 encoding 的工具时才加进这里）。
+    function toolDecodeEncoding(name, args) {
+      try {
+        if (!DECODE_ENCODING_TOOLS[name]) return null
+        const e = args && typeof args === 'object' ? args.encoding : null
+        return typeof e === 'string' && e ? e : null
+      } catch (err) { return null }
+    }
+
+    async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
       const fp = pathArg(args)
-      // 每次请求各建一个 holder：请求内传递编码来源，请求间互不可见
-      const enc = { meta: null, want: typeof wantEncoding === 'string' && wantEncoding ? wantEncoding : null }
+      // 每次请求各建一个 holder：请求内传递编码来源，请求间互不可见。
+      // want 只有一个来源：**工具参数里的 encoding**（read 的 "Reopen with Encoding" 语义，
+      // 工具按它解码，预览就该按它解，否则标注与内容都不是工具实际看到的那份）。
+      // 没有它时回落到**会话为该文件记录的**编码（edit/insert/write 的编码完全来自那份记录，
+      // read 未指定时也回落到它）；再没有就交给解码服务自行判定，服务拒绝就原样报错。
+      // 客户端**不能**指定编码：预览换一页就会与工具实际写入的那一页脱钩。
+      //
+      // sessionId 取自 entry（审批发起时快照的会话），不是「当前会话」：审批可能挂起很久、
+      // 期间用户会切会话，而这份记录必须来自**发起该审批的那个会话**——工具用的是它的记录。
+      const want = toolDecodeEncoding(name, args)
+      const enc = { meta: null, want, sessionId: entry.sessionId || null }
       const r = await buildFileDiffDataRaw(entry, fsService, name, args, fp, enc)
       return withEncMeta(r, enc.meta)
     }
@@ -2290,12 +2459,15 @@ export default {
             out.length = 0
             outBytes = 0
             cut = false
-            const rr = await readPreviewText(fsService, target, getFsEncodingService(ctx), st.info && st.info.size, enc.want)
+            // read 分支：read 未指定 encoding 时工具也会回落到会话记录（io.js 的
+            // `opts.encodingHint ?? memo?.encoding`），故这里同样要带上记录，否则同一份
+            // 文件在「AI 指定了编码」与「AI 没指定但会话已记录」两种情况下会解出不同文本。
+            const rec = recordedEncodingOf(ctx, enc.sessionId, target, st.info && st.info.version)
+            const rr = await readPreviewText(fsService, target, getFsEncodingService(ctx), st.info && st.info.size, enc.want, rec)
             if (!rr.ok) return { ok: false, error: rr.error }
-            // 记录编码来源到本次请求的 holder：read 详情同样要能标注编码，且要与
-            // undo/write 分支同口径带上候选——否则客户端拿不到 encCandidates，
-            // 编码徽标在 read 视图里恒为不可点的纯展示（同一文件在 diff 视图却能切）。
-            enc.meta = { encoding: rr.encoding, decided: rr.decided, candidates: rr.candidates }
+            // 记录编码来源到本次请求的 holder：read 详情同样要能标注编码。
+            // read 分支的流式路径在非 UTF-8 文件上必然失败，故只有回退分支会走到这里。
+            enc.meta = { encoding: rr.encoding, decided: rr.decided }
             const lines = String(rr.text).split(/\r?\n/)
             // 尾随换行会多出一个空元素：它既不是真实行（不该被渲染成末行并占用行号），
             // 也不该参与「下方还有更多行」的比较（否则文件恰好结束在窗口边界时误报）
@@ -2604,11 +2776,14 @@ export default {
           if (fileTooLarge(info, DIFF_MAX_CHARS)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           // 非 UTF-8 文件的编辑预览同样要能读出既有内容（否则直接报 invalid UTF-8 text）。
           // 这里只用于展示 diff；写盘编码由 DSH/编码插件按原编码处理，不受此解码影响。
-          const oldRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size, enc.want)
+          // 记录：write 的整文件覆盖同样按**会话记录**里的编码读写既有内容（tool-write 的
+          // 基线读不传 encodingHint，走的就是这份记录），故预览必须按同一页解。
+          const recW = recordedEncodingOf(ctx, enc.sessionId, target, info && info.version)
+          const oldRR = await readPreviewText(fsService, target, getFsEncodingService(ctx), info && info.size, enc.want, recW)
           if (!oldRR.ok) return oldRR
           const oldText = oldRR.text
           // 记录编码来源：write 全文对比同样按解码文本生成，须让客户端能标注
-          enc.meta = { encoding: oldRR.encoding, decided: oldRR.decided, candidates: oldRR.candidates }
+          enc.meta = { encoding: oldRR.encoding, decided: oldRR.decided }
           if (overMaxChars(oldText, content)) return { ok: false, error: bi('文件过大，无法生成对比', 'File too large to compare') }
           return diffPayloadOrFallback(fp, oldText, content, 'modified')
         } catch (e) {
@@ -3889,10 +4064,9 @@ export default {
           const entry = pendingApprovals.get(a.id)
           if (!entry) return json(res, { ok: false, error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
           try {
-            // a.encoding：用户在详情里手选的编码（编码徽标 → 候选列表 → 切换）。
-            // 只透传字符串，非字符串/空串一律当作"未指定"走猜测，避免把非法值交给服务
-            // （那会被拒为 E_BAD_ENCODING，一条内部参数错误会顶掉整个详情）。
-            const r = await buildFileDiffData(entry, fs, a.encoding)
+            // a.encoding 不再接受：编码基准只由**工具自己透传**（read 的 encoding 参数），
+            // 客户端指定一页就会与工具实际写入的那一页脱钩（详见 readPreviewText 的 ③）。
+            const r = await buildFileDiffData(entry, fs)
             if (!r) return json(res, { ok: false, error: lang === 'en' ? 'Cannot build comparison' : '无法生成对比' })
             if (!r.ok) return json(res, { ok: false, error: typeof r.error === 'string' ? r.error : L(r.error, lang) })
             return json(res, r)
