@@ -73,7 +73,43 @@ ok('isFileRead 走 sreCommand', src.includes("return sreCommand(args) === 'view'
 ok('isPreviewableFileTool 定义并组合四类（含图片）', src.includes('function isPreviewableFileTool(name, args, undoWrites) {') && src.includes('return !!(isFileWrite(name, args) || isFileRead(name, args) || isFileImage(name) || isUndo(name, args, undoWrites))'))
 ok('hasDiff 使用 isPreviewableFileTool（经内核探测包装）', src.includes('hasDiff: isPreviewableFileToolNow(exec.name, exec.arguments, exec)'))
 ok('系统打开入口已移除（改走 DSH 右侧栏的 file tab）', !src.includes("pathname === '/permgate/open-file'") && !src.includes('const OPEN_TEXT_EXTS') && cli.includes("'permgate:open-file'") === false && cli.includes('openInSidebar(file,'))
-ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id）', cli.includes('props.useSessions((st) => (st ? st.current : undefined))') && cli.includes('(props && props.sessionId) || (p && p.sessionId)'))
+// 防回退：root 作用域槽（shell.overlay / settings.section）拿不到平台注入的 props.sessionId，
+// 会话 id 必须经 pgCurrentSessionId 自取，且该函数要同时覆盖两版平台的权威口径：
+//   ① 0.1.5 的 SessionListState.current
+//   ② 0.1.7 起改用 retainedBy.mainView > 0 的行（current 字段已被移除）
+// 早先两处各自内联 (st) => (st ? st.current : undefined)，在 0.1.7 上恒为 undefined，
+// 使 pgReviewSid/pgCurrentSid 恒为 null、pgView() 永远回落到全局新会话默认 —— 未开启
+// 审查的会话会被改写成审查名。故这里既钉调用点，也行为复算取 id 的两条路径。
+ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id）', cli.includes('props.useSessions(pgCurrentSessionId)') && cli.includes('(props && props.sessionId) || (p && p.sessionId)'))
+{
+  const iCur = cli.indexOf('function pgCurrentSessionId(st) {')
+  const iCurEnd = cli.indexOf('function pgTriggerLabel', iCur)
+  ok('能定位 pgCurrentSessionId 函数体', iCur > 0 && iCurEnd > iCur)
+  const curBody = iCur > 0 && iCurEnd > iCur ? cli.slice(iCur, iCurEnd) : ''
+  // 两版口径都必须被认，且都不得依赖已移除的字段作为唯一来源
+  ok('pgCurrentSessionId 兼容 0.1.5 的 current 与 0.1.7 的 retainedBy.mainView',
+    curBody.includes('st.current') && curBody.includes('retainedBy') && curBody.includes('mainView'))
+  // 两个 root 作用域消费者都必须经它取 id（不得再有内联 st.current）
+  ok('root 作用域两处都经 pgCurrentSessionId 取会话 id',
+    (cli.match(/useSessions\(pgCurrentSessionId\)/g) || []).length === 2 &&
+    !cli.includes('useSessions((st) => (st ? st.current : undefined))'))
+  const api2 = (() => {
+    const m = { exports: {} }
+    new Function('module', 'exports', curBody + '\nmodule.exports = { pgCurrentSessionId };')(m, m.exports)
+    return m.exports
+  })()
+  // ① 0.1.5 形状：current 直接给值
+  ok('0.1.5 形状（有 current）能取到会话 id', api2.pgCurrentSessionId({ current: 's-old', byId: {} }) === 's-old')
+  // ② 0.1.7 形状：无 current，只有 byId + retainedBy.mainView
+  ok('0.1.7 形状（无 current，靠 retainedBy.mainView）能取到会话 id',
+    api2.pgCurrentSessionId({ ids: ['s1'], byId: { s1: { id: 's1', retainedBy: { mainView: 1 } } }, phase: 'ready', projectionsBySession: {} }) === 's1')
+  // ③ 只有保留计数为 0 的行（非主视图会话，如 subagent）→ 不得误认
+  ok('保留计数为 0 的行不被当作当前会话',
+    api2.pgCurrentSessionId({ byId: { s1: { id: 's1', retainedBy: { mainView: 0 } } } }) === undefined)
+  // ④ 形状完全不认识（无 current、无 byId）→ undefined，由调用方按「无会话」保守处理
+  ok('快照形状不认识时返回 undefined（不冒充有会话）',
+    api2.pgCurrentSessionId({ phase: 'ready' }) === undefined && api2.pgCurrentSessionId(undefined) === undefined)
+}
 ok('normTarget 定义 + 五个设置路由统一使用（含 set-category / set-quick）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 5)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
@@ -836,8 +872,17 @@ ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /i
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
 ok('缩略图有体积上限', src.includes('const IMAGE_MAX_BYTES = 2 * 1024 * 1024'))
 ok('读图的文本预览分支已移除', !src.includes('图片内容不在此预览'))
-ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ data, onOpenSidebar })') && cli.includes("'app.imageTooLarge'") && cli.includes('catS.image'))
-ok('面板 chips 含 image', cli.includes("chip(catShort('image'), eff.image)"))
+ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ data, onOpenSidebar })') && cli.includes("'app.imageTooLarge'") && cli.includes("'cat.image'"))
+// 面板按 CATS 全量渲染分类块（含 image），用 catLabel 取完整名。
+// 早先这里断言的是 chip(catShort('image'), …) —— 那是作曲区徽标（DockBar）的紧凑标签，
+// 该组件已整体删除（DSH 0.1.7 起槽位与原生 ContextMeter 同处一个横向 flex 行），
+// 故改锚到设置面板这条真正保留的渲染路径。
+// 注意：'cat.image' 只是 i18n 字典字面量，而面板取分类名走 catLabel(c) = T('cat.' + c)
+// 的运行时拼接，渲染侧源码里没有这个字面量。故断言必须锚在渲染路径本身（catBlock 内
+// 确实用 catLabel 取名、且被 CATS.map 全量渲染），否则「catBlock 跳过 image」这类回归
+// 会静默通过。image 是否在 CATS 清单内由上面第 7 组「client 清单为可变并保留默认」钉住。
+ok('面板按 CATS 全量渲染分类块且经 catLabel 取名',
+  cli.includes('CATS.map(catBlock)') && /const catBlock = \(c\) => \{[\s\S]{0,2000}?catLabel\(c\)/.test(cli))
 // 防回退：image 不套用老模式迁移（off/permissive→ask、locked→deny），不能变回 allow
 ok('迁移不把老模式套到 image 上', src.includes("c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask')") && !src.includes('for (const c of CATS) cfg.global[c].mode = map[oldMode] || \'allow\''))
 // 防回退：imagePreview 字段已废弃（客户端不再据它分流，详情看 hasDiff），不得回潮
@@ -1834,10 +1879,11 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
 // 背景：平台把「新会话界面」判为 hero 有两种成因（dsh-client-ui-conversation:14868）：
 //   const hero = sessionId === void 0 || shellPhase === "blank" && (openState === "open" || summaryBlank === true)
 // ① sessionId 为 undefined（刚启动）  ② sessionId 有值但界面 blank（点侧边栏「新对话」）
-// 两种情况下 DockBar 都不渲染（其槽位要求 variant === "composer"，hero 时是 "hero"），
-// 于是审查态缓存拿不到值 → pgScanCustom 按「平台态未知」保守不动 → 选择器恒显示 Custom。
+// 两种情况下挂在 conversation.composer.dock 的徽标都不渲染（其槽位要求
+// variant === "composer"，hero 时是 "hero"），于是审查态缓存拿不到值 →
+// pgScanCustom 按「平台态未知」保守不动 → 选择器恒显示 Custom。
 // 曾经按 sessionId 过滤兜底分支，恰好漏掉成因 ②（实测即此，重启后仍无效）。
-// 现改为两个独立槽位：会话态（DockBar 按会话写）优先，为空时回落到新会话默认值。
+// 现改为两个独立槽位：会话态（OverlayRoot 按会话写）优先，为空时回落到新会话默认值。
 {
   // 宿主侧：defaultView 由「新会话默认预设」推导（index.js）
   ok('宿主下发 defaultView 字段', src.includes('defaultView,'))
@@ -1895,9 +1941,9 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
     const scan = (b) => api.pgScanCustom(doc([b]), 'zh')
     const DV = { defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'danger-full-access' } }
 
-    // ① 点「新对话」（blank hero）：无 DockBar，只有 OverlayRoot 写新会话槽位
+    // ① 点「新对话」（blank hero）：无会话登记，只有 OverlayRoot 写新会话槽位
     api.pgSetDefaultView(DV)
-    ok('新会话槽位写入后会话态仍为空（DockBar 未登记）', api.sid === null)
+    ok('新会话槽位写入后会话态仍为空（未登记任何会话）', api.sid === null)
     {
       const v = api.pgView()
       ok('pgView 回落到新会话默认值（active/platform/sandbox）',
@@ -1961,11 +2007,11 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
       ok('新对话 + read-only：同样受限', b.getAttribute('data-pg-sandbox') === 'read-only')
     }
 
-    // ⑦ 有会话但会话态为空（hero 界面 DockBar 卸载）时不得回落到新会话默认槽位：
+    // ⑦ 有会话但会话态为空（查询未返回 / 会话态被清空）时不得回落到新会话默认槽位：
     //    否则会把「全局新会话默认」冒充成该会话的真实权限态 —— 未开审查的会话被显示
     //    成开着审查。这是本次修复要防的核心误报，必须有行为断言钉住。
     {
-      // 当前有会话（cur 非空），会话态被 DockBar 卸载清空，新会话槽位仍在（审查开着）
+      // 当前有会话（cur 非空），会话态被清空（OverlayRoot 的 else 分支/切会话），新会话槽位仍在（审查开着）
       api.pgSetCurrentSession('sess-live')
       api.pgEndReviewSession('sess-live')
       api.pgSetDefaultView({ defaultView: { platformPreset: 'custom', activeForSession: true, sandbox: 'workspace-write' } })
@@ -1990,10 +2036,12 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
     }
 
     // ⑧ 兜底分支必须按「平台 hero 的两种成因」分流，且不得拿全局新会话默认冒充真实会话
-    //    （成因 ② 的会话真实存在，其权限态才是权威值；DockBar 在 hero 不渲染，无人纠正）
+    //    （成因 ② 的会话真实存在，其权限态才是权威值）
+    //    边界用 Panel：DockBar 已随作曲区徽标一并删除（DSH 0.1.7 起该槽位与原生
+    //    ContextMeter 同处一个横向 flex 行，徽标无法独占一行），不能再当切片锚点。
     {
       const iOv = cli.indexOf('function OverlayRoot(props)')
-      const iOvEnd = cli.indexOf('function DockBar(props)')
+      const iOvEnd = cli.indexOf('function Panel(props)')
       ok('能定位 OverlayRoot 函数体', iOv > 0 && iOvEnd > iOv)
       const ovBody = iOv > 0 && iOvEnd > iOv ? cli.slice(iOv, iOvEnd) : ''
       // 有会话时登记会话态（否则 pgView 会一直回落到全局默认槽位）
@@ -2008,19 +2056,19 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
       ok('OverlayRoot 不按 sessionId 早退', !/if\s*\(\s*sessionId\s*\)\s*\{?\s*return/.test(ovBody))
       // effect 必须随 sessionId 重查（切换/新建会话后判据要跟着走）
       ok('OverlayRoot 的 effect 依赖 sessionId', /}\s*,\s*\[sessionId\]\s*\)\s*;/.test(ovBody))
-      // 序号必须在「发起查询时」领取（与 DockBar 同一纪律）。若走 pgSetReviewState 的
-      // seq 缺省分支（响应到达才领号），本路径会领到比 DockBar 更大的号，把 DockBar 的
-      // 新响应误判为过期丢弃 —— 与「只接受最新一次」的意图正好相反。
+      // 序号必须在「发起查询时」领取（全局乱序保护的纪律）。若走 pgSetReviewState 的
+      // seq 缺省分支（响应到达才领号），后发起的查询可能领到较小的号，把自己更新的
+      // 响应误判为过期丢弃 —— 与「只接受最新一次」的意图正好相反。
       ok('OverlayRoot 的查询在发起时领号并传 seq', /const seq = \+\+pgReviewSeq;/.test(ovBody))
       ok('OverlayRoot 写入会话态时传 seq（不用缺省领号分支）',
         /pgSetReviewState\(sessionId, s, seq\)/.test(ovBody))
       // 渲染期同步「当前显示的会话」：界面在 composer/hero 间切换时 sessionId 可能不变，
-      // 但 DockBar 会卸载并清空会话态，pgView 需要靠它区分「确实无会话」与「有会话但
-      // DockBar 不在」，否则会把全局新会话默认冒充成该会话的真实权限态。
+      // 而会话态缓存的收敛有窗口期，pgView 需要靠它区分「确实无会话」与「有会话但状态
+      // 还没到」，否则会把全局新会话默认冒充成该会话的真实权限态。
       ok('OverlayRoot 渲染期同步当前会话标记', /pgSetCurrentSession\(sessionId\)/.test(ovBody))
-      // apply 写入前必须补登记：DockBar 卸载（composer → hero）会清空会话态，而 sessionId
-      // 未变、effect 不重跑；不补登记则后续 SSE 刷新被 pgSetReviewState 的归属校验挡掉，
-      // hero 界面再也收敛不回来。
+      // apply 写入前必须补登记：本 effect 依赖 sessionId，同一会话内的 SSE 刷新不会
+      // 重跑 effect，故不能假定登记一定还在；不补登记则后续刷新被 pgSetReviewState 的
+      // 归属校验挡掉，界面再也收敛不回来。
       {
         const iApply = ovBody.indexOf('const apply = (s, seq) =>')
         const iApplyEnd = ovBody.indexOf('};', iApply)
@@ -2036,8 +2084,9 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
       const iVEnd = cli.indexOf('function pgSetDefaultView(')
       ok('能定位 pgView 函数体', iV > 0 && iVEnd > iV)
       const viewBody = iV > 0 && iVEnd > iV ? cli.slice(iV, iVEnd) : ''
-      // 回落必须同时要求 pgCurrentSid === null；只看 pgDefaultSet 会在 hero 界面
-      // （有会话、DockBar 卸载）误报「审查开着」
+      // 回落必须同时要求 pgCurrentSid === null；只看 pgDefaultSet 会在「有会话但
+      // 状态未到」时误报「审查开着」。注意本守卫只在 pgCurrentSid 真能取到会话 id 时
+      // 才有意义 —— 取 id 的兼容性由第 7 组的 pgCurrentSessionId 行为断言钉住。
       ok('pgView 回落到新会话默认槽位要求确实无会话',
         /pgCurrentSid === null && pgDefaultSet/.test(viewBody))
       ok('pgView 仍以会话态优先', /pgReviewSid !== null/.test(viewBody))

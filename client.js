@@ -375,11 +375,12 @@ window.__ModuleLoader__.load({
 		//    「其底层沙箱是什么」。不能靠猜显示名——实测 315 个显示 Custom 的会话里
 		//    有 48 个 preset=null（从没选过审查），无条件改写会让用户误以为审查开着。
 		//    权威来源是宿主的 permgate:status（activeForSession 走 permission/preset
-		//    事件，是按会话的），与 DockBar 用的是同一个接口。
+		//    事件，是按会话的）。写入方是 OverlayRoot（挂在 root 作用域、始终挂载）；
+		//    早先还有作曲区下方的 DockBar 也写同一份缓存，该组件已整体删除。
 		//    仅缓存「审查是否生效」与「沙箱」两个标量，按会话 id 分键，避免跨会话串。 ──
 		let pgReviewActive = false;
 		let pgReviewSandbox = null;
-		// 缓存归属会话（= 当前正在显示的会话）：写入方 DockBar 是按会话查询的，消费者
+		// 缓存归属会话（= 当前正在显示的会话）：写入方 OverlayRoot 是按会话查询的，消费者
 		// pgScanCustom 却作用于全文档触发器 —— 不校验归属就会在切会话的窗口期（或查询
 		// 失败时）把上一个会话的审查态套到当前会话上。下面两个标量只对 pgReviewSid 有效。
 		let pgReviewSid = null;
@@ -402,11 +403,9 @@ window.__ModuleLoader__.load({
 		//   const hero = sessionId === void 0 || shellPhase === "blank" && (openState === "open" || summaryBlank === true)
 		// ① sessionId 为 undefined（刚启动、还没会话）
 		// ② sessionId 有值但界面为 blank —— 点侧边栏「新对话」就是这一种
-		// 两种情况下 DockBar 都不渲染：它的槽位条件是 variant === "composer" &&
-		// sessionId !== undefined，而 hero 时 variant 是 "hero"。
-		// 注意本槽位只服务成因①（确实没有会话可查）。成因②背后是一个真实存在的会话，
-		// 必须按该会话查询其真实权限态（见 OverlayRoot），绝不能拿本槽位（全局新会话
-		// 默认）冒充 —— 两者在「恢复的空白会话」「在 hero 里改过预设」等情形下会分叉。
+		// 成因②背后是一个真实存在的会话，必须按该会话查询其真实权限态（见 OverlayRoot），
+		// 绝不能拿本槽位（全局新会话默认）冒充 —— 两者在「恢复的空白会话」「在 hero 里
+		// 改过预设」等情形下会分叉。
 		// 因此本槽位的读取还额外要求「确实没有当前会话」（pgCurrentSid 为空）。
 		let pgDefaultActive = false;
 		let pgDefaultSandbox = null;
@@ -414,11 +413,16 @@ window.__ModuleLoader__.load({
 		let pgDefaultSet = false;
 		// 当前正在显示的会话 id（由 OverlayRoot 维护；它挂在 root 作用域，始终存在）。
 		// 用途：区分「会话态为空」的两种成因 —— ① 确实没有会话（刚启动）② 会话仍存在
-		// 但 DockBar 未挂载（hero 界面）。只有 ① 才允许回落到新会话默认槽位；② 若回落，
-		// 就是把「全局新会话默认」冒充成该会话的真实权限态（误报审查开着）。
-		// 不能改用 pgReviewSid 判断：DockBar 卸载时会清空它，而界面从 composer 变 hero
-		// 并不改变 sessionId，OverlayRoot 的 effect（依赖 sessionId）不会重跑补登记，
-		// 于是「有会话」与「无会话」在该判据下无法区分。
+		// 但界面处于 hero（此时 OverlayRoot 仍会登记该会话，故 ② 下 pgReviewSid 非空）。
+		// 只有 ① 才允许回落到新会话默认槽位；② 若回落，就是把「全局新会话默认」冒充成
+		// 该会话的真实权限态（误报审查开着）。
+		// 保留本标记而不复用 pgReviewSid 判断：pgReviewSid 是「缓存归属」，会随查询
+		// 失败/清空而变，而 pgCurrentSid 是「界面当前显示哪个会话」这一独立事实，
+		// 两者在查询未返回的窗口期并不一致。
+		// 注意：本标记只在「会话 id 确实取得到」时才有意义。root 作用域槽拿不到平台注入的
+		// props.sessionId，只能经 pgCurrentSessionId 自取；一旦该函数返回 undefined（快照
+		// 形状不认识），这里就是 null，回落守卫会失效 —— 故 pgCurrentSessionId 必须覆盖
+		// 平台实际使用的口径（见其定义处的两版兼容说明）。
 		let pgCurrentSid = null;
 		function pgSetCurrentSession(sid) {
 			try {
@@ -428,16 +432,40 @@ window.__ModuleLoader__.load({
 				if (typeof pgRescan === 'function') pgRescan();
 			} catch (e) {}
 		}
-		// 读取合并视图：会话态优先（DockBar / OverlayRoot 按会话写入），确实无会话时
-		// 才用新会话默认值。
+		// 从会话列表快照派生「当前主视图会话」id：root 作用域槽（shell.overlay /
+		// settings.section）拿不到平台注入的 props.sessionId，只能自取，这是唯一来源。
+		// 两种权威口径，按平台版本兼容：
+		//   ① 0.1.5：SessionListState 直接带 current 字段；
+		//   ② 0.1.7 起：该字段被移除（只剩 ids/byId/phase/projectionsBySession），平台
+		//      自身改用「retainedBy.mainView > 0」的行作为当前主视图会话 —— 见
+		//      dsh-client-ui-layout 的 DocumentTitle 与 dsh-client-ui-workspace 的
+		//      containsCurrent，三处同款表达式。
+		// 只认这两种口径：都取不到就返回 undefined，由调用方按「无会话」保守处理
+		// （宁可不显示，也不把别的会话的权限态冒充成当前会话的）。
+		function pgCurrentSessionId(st) {
+			try {
+				if (!st) return undefined;
+				if (typeof st.current === 'string' && st.current) return st.current;
+				if (!st.byId) return undefined;
+				const rows = Object.values(st.byId);
+				for (const row of rows) {
+					if (!row || !row.retainedBy) continue;
+					if ((row.retainedBy.mainView || 0) > 0) return row.id || undefined;
+				}
+				return undefined;
+			} catch (e) {
+				return undefined;
+			}
+		}
+		// 读取合并视图：会话态优先（OverlayRoot 按会话写入），确实无会话时才用新会话默认值。
 		// pgScanCustom / pgEnsureMenuIcon 一律经此读取，避免各处各自判断而漏掉回落。
 		function pgView() {
 			if (pgReviewSid !== null) {
 				return { active: pgReviewActive, sandbox: pgReviewSandbox, platform: pgPlatformPreset };
 			}
 			// 会话态为空：仅「确实没有当前会话」时才用新会话默认槽位。有会话却取不到它的
-			// 状态（hero 界面 DockBar 不在、查询未返回/失败）时保守不动 —— 平台态未知
-			// 的代价（退回显示 Custom）远小于误报（把没开审查的会话显示成开着）。
+			// 状态（查询未返回/失败）时保守不动 —— 平台态未知的代价（退回显示 Custom）
+			// 远小于误报（把没开审查的会话显示成开着）。
 			if (pgCurrentSid === null && pgDefaultSet) {
 				return { active: pgDefaultActive, sandbox: pgDefaultSandbox, platform: pgDefaultPlatform };
 			}
@@ -1105,10 +1133,7 @@ window.__ModuleLoader__.load({
 				'app.openFile': '在侧栏打开',
 				'app.openFileFailed': '无法在侧栏打开（当前 DSH 未提供右侧栏服务）',
 				'app.diffResize': '拖动调整宽度',
-				'dock.title': '● 权限网关',
 				'settings.title': '权限网关',
-				'dock.refresh': '刷新',
-				'dock.loading': '加载中…',
 				'cat.directory': '目录访问（工作区外）',
 				'cat.command': '执行命令',
 				'cat.read': '读取文件',
@@ -1117,14 +1142,6 @@ window.__ModuleLoader__.load({
 				'cat.undo': '撤销操作（恢复上次编辑前的内容）',
 				'cat.subagent': '启动子代理',
 				'cat.doomloop': '重复操作(Doom Loop)',
-				'catS.directory': '目录',
-				'catS.command': '命令',
-				'catS.read': '读取',
-				'catS.image': '图片',
-				'catS.edit': '编辑',
-				'catS.undo': '撤销',
-				'catS.subagent': '子代理',
-				'catS.doomloop': '循环',
 				'mode.ask': '询问',
 				'mode.allow': '允许',
 				'mode.deny': '拒绝',
@@ -1294,10 +1311,7 @@ window.__ModuleLoader__.load({
 				'app.openFile': 'Open in sidebar',
 				'app.openFileFailed': 'Cannot open in the sidebar (this DSH build has no right-sidebar service)',
 				'app.diffResize': 'Drag to resize',
-				'dock.title': '● Permission Gate',
 				'settings.title': 'Permissions',
-				'dock.refresh': 'Refresh',
-				'dock.loading': 'Loading…',
 				'cat.directory': 'Directory access (outside workspace)',
 				'cat.command': 'Run command',
 				'cat.read': 'Read file',
@@ -1306,14 +1320,6 @@ window.__ModuleLoader__.load({
 				'cat.undo': 'Undo edit (revert last edit)',
 				'cat.subagent': 'Spawn subagent',
 				'cat.doomloop': 'Doom Loop',
-				'catS.directory': 'Dir',
-				'catS.command': 'Cmd',
-				'catS.read': 'Read',
-				'catS.image': 'Image',
-				'catS.edit': 'Edit',
-				'catS.undo': 'Undo',
-				'catS.subagent': 'Sub',
-				'catS.doomloop': 'Loop',
 				'mode.ask': 'Ask',
 				'mode.allow': 'Allow',
 				'mode.deny': 'Deny',
@@ -1446,7 +1452,8 @@ window.__ModuleLoader__.load({
 			return T;
 		}
 		function catLabel(c) { return T('cat.' + c); }
-		function catShort(c) { return T('catS.' + c); }
+		// catShort（'catS.*' 短名）随 DockBar 一并删除：它是那条徽标专用的紧凑标签，
+		// 设置面板一律用完整名 catLabel，删除后已无调用者。
 		function modeLabel(m) { return T('mode.' + m); }
 		// 快捷工具的用途说明：仅当 i18n 有对应文案时显示（用户自加的工具名不显示说明）
 		function quickDesc(t) {
@@ -2100,25 +2107,30 @@ window.__ModuleLoader__.load({
 			// shell.overlay 是 root 作用域槽：不直接给 sessionId，但注入 useSessions（与 settings.section 同款）。
 			// 打开 DSH 右侧栏必须用「当前 GUI 会话」身份 —— 宿主下发的 exec.session.id 不是它，
 			// 用它会让 DSH 的 workspaceFileScope 解析不到工作区（readAll 报 did not resolve identity）。
+			// 取会话 id 走 pgCurrentSessionId（兼容 0.1.5 的 current 与 0.1.7 的 retainedBy.mainView）。
 			const sessionId = (props && typeof props.useSessions === 'function')
-				? props.useSessions((st) => (st ? st.current : undefined))
+				? props.useSessions(pgCurrentSessionId)
 				: undefined;
-			// 新会话界面的权限态：DockBar 挂在 conversation.composer.dock 上，而该槽位仅在
-			// variant === "composer" && sessionId !== undefined 时渲染（平台 client.js:16259），
-			// 新会话界面（hero）根本没有 DockBar，审查态缓存拿不到值，pgScanCustom 按
-			// 「平台态未知」保守不动，于是选择器一直显示 Custom。这里在 root 作用域补一条
-			// 查询路径，并按平台 hero 判定的两种成因分开处理（平台 client.js:14868）：
+			// 审查态缓存的唯一写入路径。挂 shell.overlay（root 作用域、始终挂载），
+			// 按平台 hero 判定的两种成因分开处理（平台 client.js:14868）：
 			//   ① sessionId 为空（刚启动、确实没有会话）→ 无会话可查，用宿主下发的
 			//      defaultView（由「新会话默认预设」推出）填新会话槽位；
 			//   ② sessionId 有值但界面 blank（点侧边栏「新对话」）→ 会话真实存在，它的
 			//      权限态才是权威值，必须按该会话查询并登记会话态。绝不能拿「全局新会话
 			//      默认」冒充它的真实值：两者在「恢复的空白会话」「在 hero 里改过预设」
-			//      等情形下会分叉，而 DockBar 在 hero 不渲染、没人登记，冒充了无人纠正。
+			//      等情形下会分叉。
+			// 本组件始终挂载，故其覆盖范围是完备的：早先挂在 conversation.composer.dock
+			// 的 DockBar 也写过同一份缓存，但那个槽位仅在 composer 界面渲染（hero 下
+			// 拿不到值），已随徽标一并删除。
+			// 但它是否**真的**能写到会话态，取决于 sessionId 能否取到：DockBar 当年是靠
+			// 平台给 session 作用域槽注入的 props.sessionId，而本组件挂在 root 作用域、
+			// 只能经 pgCurrentSessionId 自取。故该函数的版本兼容（0.1.5 的 current /
+			// 0.1.7 的 retainedBy.mainView）是本缓存能否工作的前提，不是可选优化。
 			React.useEffect(() => {
 				let cancelled = false;
 				if (sessionId) {
-					// 成因②：DockBar 在 hero 不渲染、无人登记，这里补登记本会话。与 DockBar
-					// 同一纪律「先登记再查询」：登记即把判据清为「平台态未知」，响应到达前
+					// 成因②：本 effect 是会话态的唯一写入路径，先登记本会话。纪律是
+					// 「先登记再查询」：登记即把判据清为「平台态未知」，响应到达前
 					// pgScanCustom 保守不动，不会把上一个会话的判据套到本会话的触发器上。
 					pgBeginReviewSession(sessionId);
 				} else {
@@ -2129,10 +2141,10 @@ window.__ModuleLoader__.load({
 				const apply = (s, seq) => {
 					if (cancelled) return;
 					if (sessionId) {
-						// 写入前确保已登记：DockBar 卸载（composer → hero）会清空会话态，
-						// 而 sessionId 未变、本 effect 不会重跑；不在此补登记的话，后续 SSE
-						// 刷新会被 pgSetReviewState 的归属校验挡掉（pgReviewSid 为 null），
-						// hero 界面就再也收敛不回来。幂等：同会话时保留已有缓存。
+						// 写入前确保已登记（幂等：同会话时保留已有缓存）。本 effect 依赖
+						// sessionId，同一会话内的 SSE 刷新不会重跑 effect，故这里不能假定
+						// 登记一定还在；不补登记的话，后续刷新会被 pgSetReviewState 的
+						// 归属校验挡掉（pgReviewSid 为 null），界面就再也收敛不回来。
 						pgBeginReviewSession(sessionId);
 						pgSetReviewState(sessionId, s, seq);
 					} else pgSetDefaultView(s);
@@ -2140,10 +2152,11 @@ window.__ModuleLoader__.load({
 				// 带 sessionId 查询：宿主据它按会话解析项目根（index.js 的 ensureTarget），
 				// 不带会让宿主回退到 agentRef/末位会话并就地改写全局 root，使 defaultView
 				// 的沙箱取自别的项目。
-				// 序号在「发起查询时」领取，与 DockBar 共用同一套乱序保护：晚发起的查询号
-				// 更大，乱序返回的旧响应才会被丢弃。若等响应到达才领号（pgSetReviewState
-				// 的 seq 缺省分支），本路径的号会晚于 DockBar 已领的号，把 DockBar 的**新**
-				// 响应误判为过期而丢弃 —— 与「只接受最新一次」的意图正好相反。
+				// 序号在「发起查询时」领取，是全局乱序保护（pgReviewSeq 与
+				// pgSetReviewState 共用）：晚发起的查询号更大，乱序返回的旧响应才会被
+				// 丢弃。若等响应到达才领号（pgSetReviewState 的 seq 缺省分支），
+				// 后发起的查询可能领到较小的号，把自己更新的响应误判为过期而丢弃 ——
+				// 与「只接受最新一次」的意图正好相反。
 				const refresh = () => {
 					const seq = ++pgReviewSeq;
 					call('permgate:status', sessionId ? { sessionId } : {})
@@ -2159,9 +2172,9 @@ window.__ModuleLoader__.load({
 				// 沿用上一个会话的判据会让选择器张冠李戴。
 			}, [sessionId]);
 			// 每次渲染同步「当前显示的会话」（渲染期赋值，不受 effect 依赖数组限制）：
-			// 界面在 composer/hero 之间切换（如点「新对话」）时 sessionId 可能不变，但
-			// DockBar 会卸载并清空会话态；pgView() 靠本标记区分「确实无会话」与「有会话
-			// 但 DockBar 不在」，从而不会把全局新会话默认冒充成该会话的真实权限态。
+			// 界面在 composer/hero 之间切换（如点「新对话」）时 sessionId 可能不变，
+			// 而会话态缓存的收敛有窗口期；pgView() 靠本标记区分「确实无会话」与
+			// 「有会话但状态还没到」，从而不会把全局新会话默认冒充成该会话的真实权限态。
 			pgSetCurrentSession(sessionId);
 			const sidOf = (p) => sessionId || (p && p.sessionId) || null;
 			return React.createElement('div', null,
@@ -2175,53 +2188,25 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function DockBar(props) {
-			// 槽为 session 作用域：props.sessionId 是当前会话（标准 props），
-			// 状态按会话查询，切换对话后各 DockBar 只反映自己的会话
-			const sessionId = props && props.sessionId;
-			const [status, setStatus] = React.useState(null);
-			useLocaleTick();
-			// 查询序号：同一会话内若有多次重查（SSE status/refresh 广播）乱序返回，
-			// pgSetReviewState 只接受最新一次，避免旧响应把新状态覆盖回去
-			const refresh = () => {
-				const seq = ++pgReviewSeq;
-				call('permgate:status', { sessionId: sessionId || undefined })
-					.then((s) => { setStatus(s); pgSetReviewState(sessionId || null, s, seq); })
-					.catch(() => { setStatus(null); pgSetReviewState(sessionId || null, null, seq); });
-			};
-			React.useEffect(() => {
-				// 登记本实例为「当前会话」：审查态缓存是全局单例，不登记归属就会在
-				// 切会话的窗口期把上一个会话的状态套到当前会话的触发器上
-				pgBeginReviewSession(sessionId || null);
-				refresh();
-				const off = subscribeEvents((ev) => {
-					if (ev.type === 'status' || ev.type === 'refresh') refresh();
-				});
-				return () => {
-					off();
-					pgEndReviewSession(sessionId || null);
-				};
-				// sessionId 变化（切换对话）必须重查：审查态是「按会话」的，
-				// 沿用上一个会话的状态会让触发器的图标/名称张冠李戴。
-			}, [sessionId]);
-			// 仅当前会话选中「自定义审查」时显示分类徽标（只读展示，无开关）
-			if (!status || status.activeForSession !== true) return null;
-			const eff = status.effective || {};
-			const chip = (label, m) => React.createElement('span', { key: label, style: { color: MODE_COLORS[m] || '#888' } }, label + ':' + modeLabel(m));
-			return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'rgba(128,128,128,0.95)', padding: '2px 0' } },
-				React.createElement('span', { style: { fontWeight: 600 } }, T('dock.title')),
-				React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-					chip(catShort('directory'), eff.directory), chip(catShort('command'), eff.command), chip(catShort('read'), eff.read), chip(catShort('image'), eff.image), chip(catShort('edit'), eff.edit), chip(catShort('undo'), eff.undo), chip(catShort('subagent'), eff.subagent), chip(catShort('doomloop'), eff.doomloop),
-				),
-				React.createElement('span', { style: { cursor: 'pointer', padding: '0 4px' }, onClick: refresh, title: T('dock.refresh') }, '↻'),
-			);
-		}
+		// DockBar（作曲区下方的「● 权限网关 …」分类徽标）已整体删除。
+		// 删除理由：DSH 0.1.7 把 conversation.composer.dock 槽位与原生 ContextMeter
+		// （上下文占用圆环）一起放进了同一个横向 flex 行（InputBar 的 .dock），徽标因此
+		// 与圆环并排显示，不再是独占一行；而该槽位同时还有原生 stats 占用，无论怎么调整
+		// 都躲不开并排。徽标本身只是只读展示，删掉不损失功能。
+		//
+		// 关键：DockBar 曾经是「审查态缓存」的写入方之一，但**不是唯一**写入方 ——
+		// OverlayRoot（挂在 shell.overlay，root 作用域、始终挂载）用同一个
+		// permgate:status 接口、同一套 seq 乱序保护写了同样的两个标量，且覆盖范围是
+		// DockBar 的超集（DockBar 只在 variant === "composer" && sessionId !== undefined
+		// 时挂载，OverlayRoot 还额外覆盖 hero 界面与「确实无会话」的 defaultView 分支）。
+		// 故删除后 pgScanCustom 拿到的数据不降级。
 
 		function Panel(props) {
 			// settings.section 是 root 作用域槽：不直接给 sessionId，但注入 useSessions
-			// 标准 hook。用它订阅当前活动会话（SessionListState.current），会话切换时
-			// 选择器变化触发重渲染 + 重新查询，面板始终显示当前会话的项目配置。
-			const sessionId = (props && typeof props.useSessions === 'function') ? props.useSessions((st) => (st ? st.current : undefined)) : undefined;
+			// 标准 hook。用它订阅当前活动会话，会话切换时选择器变化触发重渲染 + 重新查询，
+			// 面板始终显示当前会话的项目配置。取会话 id 走 pgCurrentSessionId（兼容 0.1.5
+			// 的 SessionListState.current 与 0.1.7 的 retainedBy.mainView）。
+			const sessionId = (props && typeof props.useSessions === 'function') ? props.useSessions(pgCurrentSessionId) : undefined;
 			const [status, setStatus] = React.useState(null);
 			const [busy, setBusy] = React.useState(false);
 			const [msg, setMsg] = React.useState('');
@@ -3013,16 +2998,15 @@ window.__ModuleLoader__.load({
 			}, 'permgate: permission selector compat');
 			const slots = ctx.slots;
 			// 注意：槽注册必须直接传组件（不能包一层 () => createElement(X, null) 工厂 —
-			// 那样会丢弃槽系统注入的 props，DockBar 就拿不到 sessionId，状态无法按会话区分）
+			// 那样会丢弃槽系统注入的 props，组件就拿不到 sessionId，状态无法按会话区分）
 			slots.inject('settings.section', () => slots.register(
 				// label 用 thunk：每次投影时重新求值，跟随当前语言（locale.bind 读取活动语言）
 				{ name: 'settings.section', id: 'permgate', order: 30, label: () => T('settings.title') },
 				Panel,
 			));
-			slots.inject('conversation.composer.dock', () => slots.register(
-				{ name: 'conversation.composer.dock', id: 'permgate', order: 10 },
-				DockBar,
-			));
+			// conversation.composer.dock 不再注册：那里的分类徽标（DockBar）已删除，
+			// 理由见其原位置留下的注释（DSH 0.1.7 起该槽位与原生 ContextMeter 同处一个
+			// 横向 flex 行，徽标无法独占一行；且徽标只是只读展示，删除不损失功能）。
 			slots.inject('shell.overlay', () => slots.register(
 				{ name: 'shell.overlay', id: 'permgate-approval', order: 100 },
 				OverlayRoot,

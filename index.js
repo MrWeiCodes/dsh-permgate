@@ -3896,7 +3896,7 @@ export default {
       // 新会话（尚未创建）时没有会话可查：权限状态由「新会话默认预设」唯一决定，
       // 平台在 pinInitialPermission 里正是用它 seed 新会话。浏览器半据此判断
       // 新会话界面的选择器该显示什么 —— 不提供的话它会按「平台态未知」保守不动，
-      // 新会话就永远显示内置未匹配态 Custom（新会话界面没有 DockBar，见客户端注释）。
+      // 新会话就永远显示内置未匹配态 Custom（新会话界面拿不到会话态，见客户端注释）。
       let defaultView = null
       try {
         const pp = ctx.permissionPresets
@@ -4031,7 +4031,7 @@ export default {
         // 语言参数归一化：缺失/空/非法一律中文；同时更新 uiLang 供宿主即时文案
         const lang = normLang(method === 'GET' ? (search ? search.get('lang') : null) : a.lang)
         uiLang = lang
-        // 按会话解析（设置面板/DockBar 传 sessionId）：后续所有项目解析跟随该会话，
+        // 按会话解析（设置面板/OverlayRoot 传 sessionId）：后续所有项目解析跟随该会话，
         // 切换会话后面板显示与写入的都是当前会话的项目配置
         let exec = null
         const sid = method === 'POST' ? a.sessionId : (search ? search.get('sessionId') : null)
@@ -4078,7 +4078,7 @@ export default {
         }
         if (pathname === '/permgate/status' && method === 'GET') {
           await init(exec)
-          // 按会话查询：web 端 DockBar/设置面板传 sessionId，状态只反映该会话的权限；
+          // 按会话查询：web 端 OverlayRoot/设置面板传 sessionId，状态只反映该会话的权限；
           // 缺失时走全局回退（最近权限事件会话 / 最后创建会话）
           return json(res, statusView(exec, lang))
         }
@@ -4542,7 +4542,7 @@ export default {
     // ── 预执行审查 ──────────────────────────────────────────────────────────────
 
     // 会话权限/沙箱/审批变化（DSH 侧写入，不经 permgate）→ 推送浏览器刷新，
-    // 让快捷栏/设置页在选择器切换权限后立即联动。
+    // 让设置页/权限选择器在选择器切换权限后立即联动。
     ctx.on('session/event', async (session, event) => {
       try {
         if (!event) return
@@ -4550,7 +4550,7 @@ export default {
           if (agentRef === null && session) agentRef = { session }
           broadcast({ type: 'status' })
         }
-        // 自动同步：用户在设置页/快捷栏切换权限预设（仅「自定义审查」）后，
+        // 自动同步：用户在设置页/权限选择器切换权限预设（仅「自定义审查」）后，
         // 立即把 permgate 配置解析出的沙箱模式推给该会话，无需再手动去拨沙箱开关。
         // sandbox/mode 是我们 setSandboxMode 自己的回声，跳过以杜绝同步环。
         if (event.type === 'permission/preset' && session) {

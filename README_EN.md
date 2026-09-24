@@ -183,13 +183,13 @@ dsh plugin --profile web remove @mrweicodes/dsh-permgate
 
 ## Language and preset-name display
 
-- The plugin's own UI strings (modal, panel, dock) are registered with DSH's locale service and follow the interface language; missing/invalid language parameters default to Chinese.
+- The plugin's own UI strings (modal, panel) are registered with DSH's locale service and follow the interface language; missing/invalid language parameters default to Chinese.
 
 ## Compatibility & conflicts
 
 - **Zero-intrusion, trace-free plug & unplug**: the plugin uses only DSH's public interfaces (plugin loading, `webServer` routes, the `tools` pre-execute review chain, `locale`/`slots` services, …) and does **not** modify native DSH code or internals via hooks or patching. Uninstalling removes it completely from the process; after a page refresh nothing remains in the browser.
 - **HTTP routes**: all endpoints live under `/permgate/*` (including the SSE endpoint `/permgate/events`); collision with other plugins is very unlikely.
-- **Slot ids**: the settings page, dock bar and modal use distinct ids (`permgate`, `permgate-approval`, …). A clash with another plugin's slot id fails loudly (it throws), never silently breaks.
+- **Slot ids**: the settings page and modal use distinct ids (`permgate`, `permgate-approval`, …). A clash with another plugin's slot id fails loudly (it throws), never silently breaks.
 - **`permission` preset-table override**: the `permission` block in the patch uses whole-table override semantics (restates every preset). If another patch overrides the same config they will clobber each other — do not combine with other patches that modify the `permission` config.
 - **Similar permission plugins**: installing another pre-execute review plugin (e.g. dsh-auto-approve) alongside means both review chains run and may double-prompt — keep only one.
 - **Native approval service**: permgate's pre-review uses its own modal (not DSH's approval service); the sandbox-upgrade approval uses the native `approval.request` — no conflict.

@@ -183,13 +183,13 @@ dsh plugin --profile web remove @mrweicodes/dsh-permgate
 
 ## 语言与名称显示
 
-- 插件自身的界面文案（弹窗、面板、快捷栏）通过 DSH locale 服务注册，跟随界面语言自动切换；缺失/非法语言参数默认中文。
+- 插件自身的界面文案（弹窗、面板）通过 DSH locale 服务注册，跟随界面语言自动切换；缺失/非法语言参数默认中文。
 
 ## 兼容性与冲突
 
 - **零侵入、无痕插拔**：插件仅使用 DSH 的公开接口（插件装载、`webServer` 路由、`tools` pre-execute 审查链、`locale`/`slots` 服务等），**未通过 hook、补丁等手段修改原生 DSH 代码或内部实现**；卸载即从进程中完全移除，刷新页面后浏览器侧不留任何痕迹。
 - **HTTP 路由**：接口全部位于 `/permgate/*`（含 SSE `/permgate/events`），与其他插件冲突概率极低。
-- **槽位 id**：设置页、快捷栏、弹窗分别使用 `permgate`、`permgate-approval` 等独立 id；若与其他插件撞 id 会直接报错（不会静默破坏）。
+- **槽位 id**：设置页、弹窗分别使用 `permgate`、`permgate-approval` 等独立 id；若与其他插件撞 id 会直接报错（不会静默破坏）。
 - **`permission` 预设表覆盖**：补丁中的 `permission` 整行是**全表覆盖**语义（重述全部预设）。若第三方补丁同时覆盖同一配置会互相覆盖——不要与其它修改 `permission` 配置的补丁并存。
 - **同类权限插件**：若同时安装其它 pre-execute 审查插件，两个审查链都会生效、可能重复弹窗——建议只保留一个。
 - **原生 approval 服务**：permgate 的前置审查使用自己的弹窗（不经 DSH approval 服务）；沙箱升级审批使用原生 `approval.request`，互不冲突。
