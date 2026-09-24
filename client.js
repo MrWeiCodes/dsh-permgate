@@ -332,6 +332,11 @@ window.__ModuleLoader__.load({
 		const PG_PERMISSION_LABELS = new Set(['Read Only', 'Workspace Write', '自定义审查', 'Custom Review', 'Full access', '仅可查看', '工作区内修改', '完全权限']);
 		const PG_TRIGGER_PREFIXES = ['访问模式，当前：', 'Access mode, current: '];
 		const PG_TRIGGER_SELECTOR = ['button[aria-label^="访问模式，当前："]', 'button[aria-label^="Access mode, current: "]'].join(',');
+		// 设置页导航行：平台把每个 settings.section 渲染成对话框内 <nav> 里的 <button>
+		// （SettingsPanel）。用语义结构而非 CSS Module 类名（那串 VOzbGW_ 前缀是构建期
+		// 哈希，DSH 升级会变），与 dshmarket 的 NAV_ROW_SELECTOR 同口径。
+		const PG_NAV_ICON_ATTR = 'data-pg-nav-icon';
+		const PG_NAV_ROW_SELECTOR = '[role="dialog"] nav button';
 		// 图标绘制语言对齐平台内置图标（dsh-client-ui-conversation 的 permissionGlyphs）：
 		// 盾牌轮廓用 stroke-width 1.31831，内部符号一律用「实心 fill」——
 		// 仅可查看是对勾、工作区内修改是线条、完全权限是两根 1.5 宽的实心条。
@@ -351,6 +356,19 @@ window.__ModuleLoader__.load({
 			'%3Ccircle cx=%228%22 cy=%226.6%22 r=%221.55%22 fill=%22black%22/%3E' +
 			'%3Cpath d=%22M7.32%207.65L8.68%207.65L8.48%2010.7L7.52%2010.7Z%22 fill=%22black%22/%3E' +
 			PG_SVG_CLOSE;
+		// 设置页导航图标（盾牌 + 闸门）：盾牌轮廓已被上面两个图标占用
+		// （放大镜=审查、锁孔=受限沙箱），导航再用同款内部符号会三者难辨，
+		// 故改用「顶梁 + 三根栅条」的闸门/栅栏形——呼应「权限网关」与插件名
+		// permgate 的 gate。绘制语言同上：内部符号一律实心 fill + 小圆角。
+		// 形状是逐个渲染比对后定的（16px 实际尺寸下）：单柱+斜杆读成「7」、
+		// 双柱+斜杆读成「H」、两立柱+顶梁的门框读成「门牙」、三横杠读成「≡」
+		// （与汉堡菜单撞义）、单横杠读成「−」；只有「顶梁+三栅」稳定读作闸门。
+		const PG_NAV_MASK = PG_SVG_OPEN + PG_SHIELD +
+			'%3Crect x=%224.6%22 y=%225.3%22 width=%226.8%22 height=%221.3%22 rx=%220.4%22 fill=%22black%22/%3E' +
+			'%3Crect x=%225.2%22 y=%226.6%22 width=%221.1%22 height=%224.6%22 rx=%220.3%22 fill=%22black%22/%3E' +
+			'%3Crect x=%227.45%22 y=%226.6%22 width=%221.1%22 height=%224.6%22 rx=%220.3%22 fill=%22black%22/%3E' +
+			'%3Crect x=%229.7%22 y=%226.6%22 width=%221.1%22 height=%224.6%22 rx=%220.3%22 fill=%22black%22/%3E' +
+			PG_SVG_CLOSE;
 		// 平台内置的「未匹配态」显示名：预设表按 (sandbox, approval) 反查不到任何表项时，
 		// 客户端（dsh-client-connection 的 fixture 预设表）兜底渲染这个字符串。
 		const PG_CUSTOM_BUILTIN = 'Custom';
@@ -369,7 +387,16 @@ window.__ModuleLoader__.load({
 			'button[data-pg-sandbox][aria-label^="Access mode, current: 自定义审查"]::before,' +
 			'button[data-pg-sandbox][aria-label^="访问模式，当前：Custom Review"]::before,' +
 			'button[data-pg-sandbox][aria-label^="Access mode, current: Custom Review"]::before' +
-			' { -webkit-mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; }\n';
+			' { -webkit-mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; mask: ' + PG_MASK_LOCK + ' center / contain no-repeat; }\n' +
+			// 设置页导航图标：平台按 section id 从**闭集**里挑 glyph（models / agent-presets /
+			// plugins），其余 id 一律回落到它自己的齿轮；settings.section 只投影
+			// id/order/label，注册方**没有 icon 可传** —— 所以每个第三方 section 都是齿轮
+			// （「权限网关」与「网络代理」都如此）。这里用 JS 给自己的那一行打标记，
+			// 再用 CSS 藏掉齿轮、画上道闸。dshmarket / dsh-better-sidebar 用同一手法。
+			// 只按 `> svg` 隐藏（不删节点）：那是 React 管理的元素，删了重渲染会出错。
+			'[' + PG_NAV_ICON_ATTR + '] > svg { display: none; }\n' +
+			'[' + PG_NAV_ICON_ATTR + ']::before' +
+			' { content: ""; flex: 0 0 auto; width: 16px; height: 16px; background-color: currentColor; -webkit-mask: ' + PG_NAV_MASK + ' center / contain no-repeat; mask: ' + PG_NAV_MASK + ' center / contain no-repeat; }\n';
 		const pgNoop = () => {};
 		// ── 会话审查态缓存：DOM 兼容层要知道「当前会话是否真的选了自定义审查」以及
 		//    「其底层沙箱是什么」。不能靠猜显示名——实测 315 个显示 Custom 的会话里
@@ -793,6 +820,17 @@ window.__ModuleLoader__.load({
 				return typeof node.closest === 'function' && node.closest(PG_TRIGGER_SELECTOR) !== null;
 			} catch (e) { return false; }
 		}
+		// 设置页导航行内部：语言切换时 React 走 nodeValue 更新 label 文本
+		// （characterData 突变）。zh 下若不认这一支，重扫不会发生，导航图标就会
+		// 停在切换前的行上（与 dshmarket 的「label 与 glyph 永不失配」同一考虑）。
+		function pgInsideNavRow(node) {
+			try {
+				if (!node) return false;
+				if (node.nodeType === 3) node = node.parentElement || node.parentNode;
+				if (!node || node.nodeType !== 1) return false;
+				return typeof node.closest === 'function' && node.closest(PG_NAV_ROW_SELECTOR) !== null;
+			} catch (e) { return false; }
+		}
 		// 用户输入区（Lexical 的 contenteditable / 原生输入框）：打字时每条 characterData
 		// 突变都落在这里，必须单独排除。en 语言下 characterData 需要全局扫描（设置页行、
 		// 弹层菜单等不位于触发器内），但若把输入区也算进去，用户每按一个键就会触发一次
@@ -829,12 +867,18 @@ window.__ModuleLoader__.load({
 						if (pgInsideInput(record.target)) continue;
 						if (pgActiveLang() === 'en') return true;
 						if (pgInsideTrigger(record.target)) return true;
+						if (pgInsideNavRow(record.target)) return true;
 						continue;
 					}
 					if (record.type !== 'childList') continue;
 					// en 语言下需要全局扫描（设置页行、弹层菜单等不位于 composer seat）
 					if (pgActiveLang() === 'en') return true;
 					if (pgInsideComposer(record.target)) return true;
+					// 设置对话框不在 composer seat 内、也不含权限触发器，zh 下打开它
+					// 不会命中上面任何一支 —— 不补这条，导航图标要等到下一次无关突变
+					// 才被画上（表现为「打开设置页仍是齿轮」）。
+					if (record.target && typeof record.target.closest === 'function'
+						&& record.target.closest('[role="dialog"]') !== null) return true;
 					for (const node of record.addedNodes || []) { if (pgTouchesSurface(node)) return true; }
 					for (const node of record.removedNodes || []) { if (pgTouchesSurface(node)) return true; }
 				}
@@ -939,9 +983,26 @@ window.__ModuleLoader__.load({
 				}
 			} catch (e) {}
 		}
+		// 设置页导航图标：只认「可见文本 === 本插件 section label」的那一行。
+		// label 用与 slots.register 同一个 thunk（T('settings.title')），所以语言切换后
+		// 重扫会自动改认新文本的行，并把旧标记摘掉 —— 文字与图标永不失配。
+		// 空 label 直接返回：语言尚未解析时不能把整个 nav 都标记上。
+		function pgScanNavIcon(document) {
+			try {
+				const wanted = String(T('settings.title') || '').trim();
+				if (!wanted) return;
+				const rows = document.querySelectorAll(PG_NAV_ROW_SELECTOR);
+				for (const row of Array.from(rows)) {
+					const text = row.textContent ? row.textContent.trim() : '';
+					if (text === wanted) row.setAttribute(PG_NAV_ICON_ATTR, '');
+					else if (row.getAttribute(PG_NAV_ICON_ATTR) !== null) row.removeAttribute(PG_NAV_ICON_ATTR);
+				}
+			} catch (e) {}
+		}
 		function pgScanAll(document) {
 			try { pgScanText(document); } catch (e) {}
 			try { pgScanIcons(document); } catch (e) {}
+			try { pgScanNavIcon(document); } catch (e) {}
 		}
 		function pgInstallCompat() {
 			const document = window.document;
