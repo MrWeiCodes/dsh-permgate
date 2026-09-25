@@ -31,11 +31,22 @@ const group = (t) => console.log('\n— ' + t)
 const plugin = (await import(pathToFileURL(join(ROOT, 'index.js')).href)).default
 
 // ── 宿主 mock ────────────────────────────────────────────────
-function makeReq(method, url, body) {
+function makeReq(method, url, body, headers) {
   const req = new EventEmitter()
   req.method = method
   req.url = url
-  req.headers = { host: '127.0.0.1:3080', 'content-type': 'application/json' }
+  // 不传 headers = 模拟**真实浏览器同源请求**（Host 回环 + Fetch Metadata + 同源 Origin），
+  // 路由的信任栅栏要求这组头（见 index.js 的 trustRouteRequest）。
+  // 传了 headers = **整组替换**，不再与默认值合并 —— 栅栏测试需要构造「完全不带
+  // Sec-Fetch-*」的 curl 形态，而 Object.assign 合并是删不掉键的（早先的写法因此
+  // 让「curl」用例实际带着 same-origin，栅栏看起来失效，还污染了后续用例的配置）。
+  req.headers = headers !== undefined ? Object.assign({}, headers) : {
+    host: '127.0.0.1:3080',
+    'content-type': 'application/json',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'cors',
+    origin: 'http://127.0.0.1:3080',
+  }
   setImmediate(() => {
     if (body !== undefined) req.emit('data', Buffer.from(JSON.stringify(body), 'utf8'))
     req.emit('end')
@@ -51,7 +62,7 @@ function makeRes() {
   }
 }
 
-function createHost({ workspaceRoot, dshHome, fsEncoding }) {
+function createHost({ workspaceRoot, dshHome, fsEncoding, connection }) {
   const registered = new Map()
   const routes = []
   const hooks = new Map()
@@ -73,18 +84,25 @@ function createHost({ workspaceRoot, dshHome, fsEncoding }) {
     sessions: { list: () => [], get: () => null },
     effect: (fn) => { let d = null; try { d = fn && fn() } catch (e) {} return () => { try { d && d() } catch (e) {} } },
     on: (evt, fn) => { hooks.set(evt, fn); return () => {} },
-    // fsEncoding 可选：不传时 ctx.get('fsEncoding') 返回 undefined，即「未安装该插件」的部署
-    get: (k) => (k === 'subprocess' ? null : (k === 'fsEncoding' ? fsEncoding : undefined)),
+    // connection 可选：传了就模拟 DSH 官方的 Host/Origin 栅栏 + 浏览器会话令牌认证
+    // （真部署里由 dsh-client-connection 提供，是路由的第一层防线）。
+    // 不传 = 该 service 不可用（Electron/shell 载体形态），路由退到兜底栅栏。
+    get: (k) => {
+      if (k === 'subprocess') return null
+      if (k === 'fsEncoding') return fsEncoding
+      if (k === 'connection') return connection
+      return undefined
+    },
   }
   process.env.DSH_HOME = dshHome
   plugin.apply(ctx)
   return { ctx, registered, routes, hooks, fs }
 }
 
-async function callRoute(routes, method, url, body) {
+async function callRoute(routes, method, url, body, headers) {
   const entry = routes.find((r) => url.startsWith(r.path))
   if (!entry) throw new Error('no route for ' + url)
-  const req = makeReq(method, url, body)
+  const req = makeReq(method, url, body, headers)
   const res = makeRes()
   await entry.handler(req, res)
   const trimmed = String(res.body || '').trim()
@@ -115,6 +133,261 @@ ok('apply 只注册 perm_status（其余 perm_* 写工具已移除）',
   host.registered.size === 1 && host.registered.has('perm_status'), 'registered=' + host.registered.size + ' [' + [...host.registered.keys()].join(',') + ']')
 ok('apply 注册了 /permgate 路由', host.routes.length >= 1 && host.routes[0].path === '/permgate')
 ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-execute') === 'function')
+
+// ── 路由信任栅栏 ────────────────────────────────────────────────────────────
+// 背景：webServer 不提供鉴权，故 permgate 自建栅栏。它分两层：
+//   第一层（真凭据）：DSH 的 connection service 做 Host/Origin 栅栏 + 浏览器会话令牌认证。
+//   第二层（兜底）：拿不到 connection 时退到请求头判据（Host 回环 + Fetch Metadata + 同源 Origin）。
+// 本宿主**没有** connection service，因此下面整块测的是第二层兜底栅栏 —— 必须明确它的真实强度：
+// 它**不是认证**，只防 DNS rebinding 与跨站请求。请求头由客户端完全控制，本机进程补一个
+// Sec-Fetch-Site 就能通过（见下方「诚实边界」用例）。不要把它当成「挡住了 AI」的保证。
+{
+  // 用**独立宿主**：本块要发真实的写请求（set-category），若打在共享的 host 上，
+  // 会把 edit 分类的默认值改掉，后面所有依赖「edit 默认 ask 才会弹审批」的用例
+  // 都会被静默短路（group 1 的 insert 预览就是这样挂掉的）。
+  const fh = createHost({
+    workspaceRoot: mkdtempSync(join(tmpdir(), 'pg-fence-ws-')),
+    dshHome: mkdtempSync(join(tmpdir(), 'pg-fence-home-')),
+  })
+  const browserHdr = { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' }
+  const allow = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, browserHdr)
+  ok('★ 栅栏：浏览器同源请求放行', allow.status === 200 && !!(allow.data && allow.data.configPath), 'status=' + allow.status)
+
+  // curl / pwsh：无 Fetch Metadata（不伪装的最朴素形态）
+  const curl = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080' })
+  ok('★ 栅栏：无 Fetch Metadata 的请求被拒 403', curl.status === 403, 'status=' + curl.status + ' body=' + curl.body)
+
+  // 只带 Origin 但补不上 Sec-Fetch-Site —— 仍拒
+  const spoof = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' })
+  ok('★ 栅栏：仅伪造 Origin（无 Sec-Fetch-Site）仍被拒', spoof.status === 403, 'status=' + spoof.status)
+
+  // 恶意网页跨站：Origin 取**同源**值，使这条只能被 sec-fetch-site 判据拦下 ——
+  // 若 Origin 用 evil.example，403 会由「Origin 与 Host 不同源」产生，cross-site 分支
+  // 就完全没有回归保护（删掉那行测试仍全绿）。
+  const cross = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site', origin: 'http://127.0.0.1:3080' })
+  ok('★ 栅栏：sec-fetch-site: cross-site 被拒（同源 Origin 下只能由该判据拦下）', cross.status === 403, 'status=' + cross.status)
+
+  // 跨站且 Origin 不同源
+  const liar = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://evil.example' })
+  ok('★ 栅栏：谎报 same-origin 但 Origin 不同源 → 拒', liar.status === 403, 'status=' + liar.status)
+
+  // DNS rebinding：Host 是攻击者域名
+  const rebind = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: 'evil.example', 'sec-fetch-site': 'same-origin', origin: 'http://evil.example' })
+  ok('★ 栅栏：DNS rebinding（Host 非回环）被拒', rebind.status === 403, 'status=' + rebind.status)
+
+  // 非回环局域网 IP
+  const lan = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '192.168.1.5:3080', 'sec-fetch-site': 'same-origin' })
+  ok('★ 栅栏：非回环地址被拒', lan.status === 403, 'status=' + lan.status)
+
+  // 无 Host 头
+  const nohost = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { 'sec-fetch-site': 'same-origin' })
+  ok('★ 栅栏：缺 Host 头被拒', nohost.status === 403, 'status=' + nohost.status)
+
+  // localhost / IPv6 变体照常放行（整组替换：Origin 需与 Host 同源，故一并给出）
+  const lh = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: 'localhost:3080', 'sec-fetch-site': 'same-origin', origin: 'http://localhost:3080' })
+  ok('栅栏：localhost 变体放行', lh.status === 200, 'status=' + lh.status)
+  const v6 = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '[::1]:3080', 'sec-fetch-site': 'same-origin', origin: 'http://[::1]:3080' })
+  ok('栅栏：IPv6 回环放行', v6.status === 200, 'status=' + v6.status)
+
+  // authority 规范化走 WHATWG（与官方同口径），故等价写法不再互相打架：
+  // Host 的默认端口可省、IPv6 可展开写，Origin 侧由浏览器序列化 —— 两边都收敛到同一 host。
+  const defPort = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: 'localhost:80', 'sec-fetch-site': 'same-origin', origin: 'http://localhost' })
+  ok('栅栏：Host 默认端口省略与 Origin 等价 → 放行（WHATWG 规范化）', defPort.status === 200, 'status=' + defPort.status)
+  const v6expand = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '[0:0:0:0:0:0:0:1]:3080', 'sec-fetch-site': 'same-origin', origin: 'http://[::1]:3080' })
+  ok('栅栏：IPv6 展开写法与压缩写法等价 → 放行（WHATWG 规范化）', v6expand.status === 200, 'status=' + v6expand.status)
+  // 不同 authority（同机不同写法）仍须拒：规范化只收敛等价形式，不把 127.0.0.1 与 localhost 视同
+  const mix = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: 'localhost:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' })
+  ok('栅栏：Host 与 Origin 确属不同 authority → 拒', mix.status === 403, 'status=' + mix.status)
+
+  // ★ 诚实边界：兜底栅栏挡不住有意伪造者。这条用例把真实强度钉进测试 ——
+  // 本机进程（AI 走 pwsh/curl 就是这种形态）补上浏览器会带的头即可通过并写盘。
+  // 真正的防线是第一层的令牌认证（connection service 可用时），不是这里。
+  const forgedWrite = await callRoute(fh.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'edit', mode: 'allow', lang: 'zh' }, browserHdr)
+  ok('★ 诚实边界：兜底栅栏可被伪造请求头绕过（写请求返回 200）——它不是认证',
+    forgedWrite.status === 200, 'status=' + forgedWrite.status + ' body=' + forgedWrite.body)
+  // 既已写盘，就用它验证「栅栏确实位于所有分支之前」的另一面：合法写请求真的生效
+  const stAfter = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, browserHdr)
+  ok('★ 兜底栅栏：合法写请求确实改到了配置（对照上一条，说明 200 是真写盘而非空转）',
+    !!(stAfter.data && stAfter.data.effective && stAfter.data.effective.edit === 'allow'),
+    'edit=' + (stAfter.data && stAfter.data.effective && stAfter.data.effective.edit))
+
+  // 被拒请求不得读取 body / 不得触碰配置：先复位成 deny，再用「不带 Fetch Metadata」的写请求打，
+  // 然后确认配置没被改动。注意顺序 —— 必须放在上面的合法写之后，否则前一条已把 edit 写成 allow。
+  await callRoute(fh.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'edit', mode: 'deny', lang: 'zh' }, browserHdr)
+  const writeByPlain = await callRoute(fh.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'edit', mode: 'allow', lang: 'zh' }, { host: '127.0.0.1:3080' })
+  ok('★ 栅栏：无 Fetch Metadata 的写请求被拒 403', writeByPlain.status === 403, 'status=' + writeByPlain.status + ' body=' + writeByPlain.body)
+  const st = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, browserHdr)
+  ok('★ 栅栏：被拒的写请求未改动配置（edit 仍为 deny）',
+    !!(st.data && st.data.effective && st.data.effective.edit === 'deny'),
+    'edit=' + (st.data && st.data.effective && st.data.effective.edit))
+  // createHost 会把 process.env.DSH_HOME 设成自己那个 home（模块级全局）。本块用了独立宿主，
+  // 必须在这里复位回主 host 的 home —— 否则后面所有用 `host` 的用例首次 init 时会去读
+  // 本块那个临时 home（实测：主 host 的 configPath 会指向 pg-fence-home-*），
+  // 属于「测试之间互相串台」，排查起来极其费时。
+  process.env.DSH_HOME = dshHome
+}
+
+// ── 历史预设默认值的收敛（QUICK_DEFAULTS 变更对存量配置必须生效）────────────
+// 背景：旧版 freshConfig 会把当时的 QUICK_DEFAULTS 全量 seed 落盘，而 quickAction 的优先级是
+// 「项目键 → 全局键 → 预设默认 → 兜底」—— 落盘的显式值会永久压过新默认。于是 cordis_define
+// 由 allow 收紧为 ask 时，存量配置里那个显式 allow 会让收紧**完全失效**（面板显示 ask、
+// 实际裁决 allow，且此后每次 persist 都把 allow 固化）。这里钉住收敛行为：
+// 仅当「值恰好等于历史默认」且「当前默认已不同」时才丢弃该键，让新默认接管。
+{
+  const ws = mkdtempSync(join(tmpdir(), 'pg-retired-ws-'))
+  const home = mkdtempSync(join(tmpdir(), 'pg-retired-home-'))
+  mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+  // 存量配置：cordis_define 显式 allow（旧默认）、cordis_run 显式 deny（用户改过的值，不得动）、
+  // 以及一个用户手填的自定义工具名（同样不得动）
+  const legacy = {
+    global: {
+      quickTools: {
+        cordis_define: { action: 'allow' },
+        cordis_run: { action: 'deny' },
+        my_custom_tool: { action: 'allow' },
+      },
+      custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask',
+    },
+    projects: {},
+  }
+  writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(legacy, null, 2))
+  const h = createHost({ workspaceRoot: ws, dshHome: home })
+  const pre = h.hooks.get('tools/pre-execute')
+  const probe = async (name) => {
+    let nexted = false
+    const exec = makeExec(ws, name, {}, { id: 'sess-1' })
+    const p = pre(exec, () => { nexted = true })
+    await Promise.race([Promise.resolve(p).catch(() => {}), new Promise((r) => setTimeout(r, 1500))])
+    return nexted
+  }
+  // 收敛发生在 load 期，先触一次路由让配置加载完成
+  await callRoute(h.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' })
+
+  ok('★ 收敛：存量配置的 cordis_define=allow 被丢弃，回落新默认 ask（不再静默放行）',
+    (await probe('cordis_define')) === false)
+  ok('★ 收敛：用户改过的值不受影响（cordis_run 仍按其显式 deny 裁决）',
+    (await probe('cordis_run')) === false)
+  ok('★ 收敛：手填的自定义工具名不被清理（my_custom_tool 仍按显式 allow 放行）',
+    (await probe('my_custom_tool')) === true)
+  // 收敛必须落盘：否则每次加载都要重算，面板行仍来自磁盘旧值
+  const savedCfg = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  ok('★ 收敛：结果已落盘（磁盘上不再有 cordis_define 的显式 allow）',
+    !(savedCfg.global.quickTools && savedCfg.global.quickTools.cordis_define),
+    JSON.stringify(savedCfg.global.quickTools))
+  ok('★ 收敛：落盘内容不含内部计数字段（retiredQuickDefaults 不得写进配置）',
+    savedCfg.retiredQuickDefaults === undefined && Object.keys(savedCfg).sort().join(',') === 'global,migrations,projects',
+    Object.keys(savedCfg).join(','))
+  ok('★ 收敛：落盘写入迁移名单（供后续加载判断该迁移是否已跑过）',
+    Array.isArray(savedCfg.migrations) && savedCfg.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
+    JSON.stringify(savedCfg.migrations))
+
+  // ★ 收敛必须**只跑一次**：用户升级后完全可能主动把 cordis_define 设回 allow，那是他的明确意图。
+  // 若判据只看「值是否等于历史默认」，每次加载都会把这次显式设置再删一遍 ——
+  // 表现为「用户改完、一重新加载就被静默回滚」，比不收敛更糟。故用迁移名单钉住。
+  await callRoute(h.routes, 'POST', '/permgate/set-quick', { target: 'global', tool: 'cordis_define', action: 'allow', lang: 'zh' })
+  const afterSet = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  ok('★ 一次性：用户显式设回 allow 能正常落盘',
+    !!(afterSet.global.quickTools && afterSet.global.quickTools.cordis_define && afterSet.global.quickTools.cordis_define.action === 'allow'),
+    JSON.stringify(afterSet.global.quickTools && afterSet.global.quickTools.cordis_define))
+  await callRoute(h.routes, 'POST', '/permgate/reload', { lang: 'zh' })
+  const afterReload = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  ok('★★ 一次性：重新加载后该显式 allow 不被静默回滚（收敛已跑过就不再动它）',
+    !!(afterReload.global.quickTools && afterReload.global.quickTools.cordis_define && afterReload.global.quickTools.cordis_define.action === 'allow'),
+    JSON.stringify(afterReload.global.quickTools && afterReload.global.quickTools.cordis_define))
+
+  // ★ 闸门必须按**迁移 ID** 判定，而不是全局版本号：否则将来为别的迁移升版本时，
+  // 本条会被判为「未跑过」而重新执行，把用户的显式 allow 再删一次（已实测复现）。
+  // 这里直接在磁盘配置里追加一个「别的迁移」的名单项，模拟那种升级，再加载一次。
+  const other = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  other.migrations = (other.migrations || []).concat(['some-future-migration'])
+  writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(other, null, 2))
+  await callRoute(h.routes, 'POST', '/permgate/reload', { lang: 'zh' })
+  const afterFuture = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  ok('★★ 一次性：新增别的迁移名单项后，用户的显式 allow 仍不被回滚（按 ID 判定，不牵连）',
+    !!(afterFuture.global.quickTools && afterFuture.global.quickTools.cordis_define && afterFuture.global.quickTools.cordis_define.action === 'allow'),
+    JSON.stringify(afterFuture.global.quickTools && afterFuture.global.quickTools.cordis_define))
+  ok('★ 一次性：原有迁移名单项不被覆盖丢弃（只补不删）',
+    Array.isArray(afterFuture.migrations) && afterFuture.migrations.indexOf('some-future-migration') !== -1 &&
+    afterFuture.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
+    JSON.stringify(afterFuture.migrations))
+
+  // ★ 名单必须在**首次加载**时就落盘，而不是等用户后续某次写操作顺带补上。
+  // 否则「加载 → 用户把 cordis_define 设为 allow → 再次加载」这条链上，第二次加载时
+  // 名单仍为空 → 该显式 allow 会被当成待收敛值删掉。上面各用例都带写操作，
+  // 写操作会顺带落盘而掩盖这个缺陷，故这里用「只加载、不写任何东西」的干净场景单独钉住。
+  {
+    const ws2 = mkdtempSync(join(tmpdir(), 'pg-gate-ws-'))
+    const home2 = mkdtempSync(join(tmpdir(), 'pg-gate-home-'))
+    mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
+    // 配置里该键已是新默认 ask（无需收敛），但 migrations 名单为空 —— 升级后的真实形态
+    writeFileSync(join(home2, 'dsh-permgate', 'config.json'), JSON.stringify({
+      global: { quickTools: { cordis_define: { action: 'ask' } }, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask' },
+      projects: {},
+    }, null, 2))
+    const h2 = createHost({ workspaceRoot: ws2, dshHome: home2 })
+    await callRoute(h2.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' })
+    const g = JSON.parse(readFileSync(join(home2, 'dsh-permgate', 'config.json'), 'utf8'))
+    ok('★★ 一次性：首次加载（无任何写操作）就把迁移名单落盘，不必等后续写操作顺带补',
+      Array.isArray(g.migrations) && g.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
+      JSON.stringify(g.migrations))
+    process.env.DSH_HOME = dshHome
+  }
+  // 同栅栏块：本块也用了独立宿主，收尾时把 DSH_HOME 复位回主 host 的 home，避免测试串台
+  process.env.DSH_HOME = dshHome
+}
+
+// ── 第一层：官方 connection service 的令牌认证（真正的防线）────────────────────
+// 上面那块测的是「拿不到 connection 时的兜底栅栏」，而兜底栅栏可被伪造请求头绕过。
+// 真部署里 dsh-client-connection 一定在（web GUI 靠它承载 /api），所以真正拦住
+// 「AI 用 pwsh 自行调路由改权限」的是这一层：Host/Origin 栅栏 + HttpOnly 会话 cookie。
+// 这里用与官方 requestRejection 同构的桩验证路由**确实**把它当第一判据，
+// 且不再退回兜底（否则伪造头又能写盘，等于修复失效）。
+{
+  const fh = createHost({
+    workspaceRoot: mkdtempSync(join(tmpdir(), 'pg-conn-ws-')),
+    dshHome: mkdtempSync(join(tmpdir(), 'pg-conn-home-')),
+    // 桩：与官方 requestRejection 同构 —— 非回环 Host 或 cross-site → 403；
+    // 有 Host 但无有效会话 cookie → 401；两者都过 → undefined（放行）
+    connection: {
+      requestRejection: ({ headers }) => {
+        const h = headers || {}
+        const host = String(h.host || '')
+        if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) return 403
+        if (h['sec-fetch-site'] === 'cross-site') return 403
+        return (h.cookie && String(h.cookie).indexOf('dsh-auth-') !== -1) ? undefined : 401
+      },
+    },
+  })
+  const hdr = { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' }
+  const authed = Object.assign({}, hdr, { cookie: 'dsh-auth-abc=xyz' })
+
+  // 带凭据的浏览器照常可用（不能把合法调用方挡掉）
+  const okStatus = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, authed)
+  ok('★ 第一层：带会话凭据的浏览器放行', okStatus.status === 200 && !!(okStatus.data && okStatus.data.configPath), 'status=' + okStatus.status)
+
+  // ★ 核心：伪造全部浏览器头但无凭据 —— 兜底栅栏会放行，第一层必须拦下
+  const forged = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, hdr)
+  ok('★★ 第一层：伪造浏览器头但无凭据 → 401（兜底栅栏挡不住的那种请求）',
+    forged.status === 401, 'status=' + forged.status + ' body=' + forged.body)
+  ok('★ 第一层：401 带可识别 code（客户端据此提示重新认证，而不是渲染假配置）',
+    !!(forged.data && forged.data.code === 'unauthenticated'), JSON.stringify(forged.data))
+
+  // 写路由同样拦下：这是「移除 perm_* 工具的安全收益」的真正保障
+  const forgedWrite = await callRoute(fh.routes, 'POST', '/permgate/set-category',
+    { target: 'global', category: 'command', mode: 'allow', lang: 'zh' }, hdr)
+  ok('★★ 第一层：无凭据的写请求被拦（不再能改权限配置）', forgedWrite.status === 401, 'status=' + forgedWrite.status)
+  const stAfter = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, authed)
+  ok('★ 第一层：被拒的写请求未改动配置（command 仍为 ask）',
+    !!(stAfter.data && stAfter.data.effective && stAfter.data.effective.command !== 'allow'),
+    'command=' + (stAfter.data && stAfter.data.effective && stAfter.data.effective.command))
+
+  // Host/Origin 栅栏仍生效（403 与 401 语义区分：来源不可信 vs 缺凭据）
+  const badHost = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: 'evil.example', 'sec-fetch-site': 'same-origin' })
+  ok('★ 第一层：非回环 Host → 403（与缺凭据的 401 区分）', badHost.status === 403, 'status=' + badHost.status)
+  const crossSite = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site', cookie: 'dsh-auth-abc=xyz' })
+  ok('★ 第一层：cross-site → 403（即便带凭据）', crossSite.status === 403, 'status=' + crossSite.status)
+  process.env.DSH_HOME = dshHome
+}
 
 // 模拟「内置 str_replace_editor」的工具定义，供内核探测
 host.ctx.tools.get = (name) => {

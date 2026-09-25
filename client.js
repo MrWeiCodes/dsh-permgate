@@ -327,17 +327,46 @@ window.__ModuleLoader__.load({
 				}
 				path = path + (path.indexOf('?') === -1 ? '?' : '&') + q.join('&');
 			}
-			return fetch(path, opts).then((r) => r.json());
+			// 信任栅栏拒绝（403/401）不是业务数据：宿主在这条路径上只回 { error, code }，没有 status 视图。
+			// 若照旧把它当普通响应交给调用方，/permgate/status 的 403 body 会被 applyStatus 当成一份
+			// 「全 ask/inherit」的假配置渲染（它只判 if(!s) return），/permgate/pending 的 403 body 经
+			// Array.isArray 兜底变成空数组 —— 审批卡片凭空消失、用户点不到任何按钮，而这类审批按设计
+			// 会一直等下去。故统一在此转成可识别的错误，让各调用方已有的 catch / r.error 分支去报。
+			function fenceErrorOf(r) {
+				if (!r || typeof r !== 'object') return null;
+				if (r.code === 'untrusted-origin') return T('panel.fenceUntrusted');
+				if (r.code === 'unauthenticated') return T('panel.fenceUnauthenticated');
+				return null;
+			}
+			// 非 2xx 一律 reject：调用方走各自已有的错误分支（报错、不误渲染），
+			// 而不是把一个错误体当成合法 status/pending 数据消化掉。
+			// 消息优先取宿主给的文案：宿主有若干非 2xx 是带真实原因的
+			// （decide 失败 500、未知路由 404、路由异常 500），只回 'HTTP 500'
+			// 会把这些原因吞掉，用户看到的信息量比改动前还少。
+			return fetch(path, opts).then((r) => {
+				if (!r.ok) {
+					return r.json().catch(() => null).then((body) => {
+						const err = new Error(fenceErrorOf(body) || (body && body.error) || ('HTTP ' + r.status));
+						err.status = r.status;
+						err.code = (body && body.code) || null;
+						throw err;
+					});
+				}
+				return r.json();
+			});
 		}
 
 		// SSE 事件订阅：/permgate/events 长连接推送（状态/待审批变化即时刷新，替代轮询）
 		let eventSource = null;
 		const eventListeners = new Set();
+		// 栅栏拒绝的会话级标记：置位后不再反复建连（EventSource 对 403 会一直自动重连，
+		// 而每次重连都被拒 —— 既是日志噪音，也让面板永远停在「没有待审批」的假象里）。
+		let fenceBlocked = null;
 		function notifyEvents(data) {
 			for (const fn of Array.from(eventListeners)) { try { fn(data); } catch (e) {} }
 		}
 		function ensureEventSource() {
-			if (eventSource) return;
+			if (eventSource || fenceBlocked) return;
 			eventSource = new EventSource('/permgate/events');
 			eventSource.onmessage = (ev) => {
 				let data = null;
@@ -345,9 +374,23 @@ window.__ModuleLoader__.load({
 				if (data) notifyEvents(data);
 			};
 			// 首连与断线重连成功都会触发：全量刷新兜底，收敛重连期间丢失的事件
-			eventSource.onopen = () => notifyEvents({ type: 'refresh' });
-			eventSource.onerror = () => { /* EventSource 自动重连 */ };
+			eventSource.onopen = () => { fenceBlocked = null; notifyEvents({ type: 'refresh' }); };
+			// EventSource 不暴露状态码，无法直接区分「普通断线」与「被栅栏拒绝」。
+			// 用一次轻量探测判定：只有确实是栅栏错误才停掉重连并上报，
+			// 普通断线仍交给 EventSource 自动重连（否则会把网络抖动当成权限问题）。
+			eventSource.onerror = () => {
+				if (fenceBlocked) return;
+				call('permgate:status', {}).catch((e) => {
+					if (!e || (e.code !== 'untrusted-origin' && e.code !== 'unauthenticated')) return;
+					fenceBlocked = e.code;
+					if (eventSource) { try { eventSource.close(); } catch (err) {} eventSource = null; }
+					notifyEvents({ type: 'fence', code: e.code, message: String((e && e.message) || '') });
+				});
+			};
 		}
+		// 供面板读取当前栅栏状态（面板据此报错而不是渲染一份空配置）
+		function fenceState() { return fenceBlocked; }
+		function retryEvents() { fenceBlocked = null; ensureEventSource(); }
 		function subscribeEvents(fn) {
 			eventListeners.add(fn);
 			ensureEventSource();
@@ -1351,6 +1394,8 @@ window.__ModuleLoader__.load({
 				'panel.stats': '最近统计：拦截 {d} · 审批 {a}',
 				'panel.loadErr': '加载错误：',
 				'panel.saveErr': '保存错误：',
+				'panel.fenceUntrusted': '请求来源不受信任，已被权限网关拒绝（403）。请从 dsh web 打印的本机地址重新打开本页面。',
+				'panel.fenceUnauthenticated': '浏览器凭据缺失或已过期（401）。请从 dsh web 打印的地址重新打开本页面以完成认证。',
 				'panel.tabGlobal': '全局',
 				'panel.tabProject': '项目',
 				'panel.editGlobal': '正在编辑全局设置（所有项目的默认）。',
@@ -1539,6 +1584,8 @@ window.__ModuleLoader__.load({
 				'panel.stats': 'Recent: {d} denied · {a} asked',
 				'panel.loadErr': 'Load error: ',
 				'panel.saveErr': 'Save error: ',
+				'panel.fenceUntrusted': 'Request origin is not trusted; rejected by the permission gateway (403). Reopen this page from the local URL printed by dsh web.',
+				'panel.fenceUnauthenticated': 'Browser credentials are missing or expired (401). Reopen this page from the URL printed by dsh web to authenticate.',
 				'panel.tabGlobal': 'Global',
 				'panel.tabProject': 'Project',
 				'panel.editGlobal': 'Editing global settings (default for all projects).',

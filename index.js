@@ -24,7 +24,15 @@ const QUICK_DEFAULTS = {
   get_goal: 'allow', create_goal: 'allow', update_goal: 'allow',
   send_message: 'allow', interrupt_agent: 'allow',
   present: 'allow', exit_plan_mode: 'allow',
-  cordis_define: 'allow', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
+  // cordis_define 默认 ask（曾为 allow）：它在宿主进程内定义并执行任意代码，
+  // 能力等价于 cordis_run（后者本就是 ask），而它比 run 更靠前——定义阶段即可
+  // 执行模块顶层代码。allow 意味着这条路径全程无弹窗，是本清单里唯一「可执行代码
+  // 却默认放行」的项，与「元操作一律先问」的口径自相矛盾，故收紧为 ask。
+  // 注意：只改这一行对**存量配置**是无效的 —— 旧版 freshConfig 已把当时的 allow
+  // seed 落盘，显式键优先于预设默认。真正让收紧生效的是 QUICK_RETIRED_DEFAULTS
+  // 那次一次性收敛，改本表时必须同步考虑它（否则等于没改）。
+  // 三个 inspect_* 是只读检视，维持 allow。
+  cordis_define: 'ask', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
   // 改权限配置类工具（已整体移除）曾一律先问；现仅 perm_status 只读查询，默认放行（想看随时能看）
   // 其余 9 个写工具（perm_set_category / perm_set_fallback / perm_set_editor_kernel /
   // perm_add_exception / perm_remove_exception / perm_set_quick / perm_add_rule /
@@ -61,6 +69,24 @@ const REMOVED_WRITE_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set
   'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule',
   'perm_remove_rule', 'perm_reload']
 const REMOVED_WRITE_TOOL_SET = new Set(REMOVED_WRITE_TOOLS)
+// 预设默认值的历史值：旧版 freshConfig 会把**当时**的 QUICK_DEFAULTS 全量 seed 进配置并落盘
+// （1.5.1–1.5.8 一直如此），而 quickAction 的优先级是「项目键 → 全局键 → 预设默认 → 兜底」，
+// 落盘的显式值会永久压过新默认 —— 于是「只改 QUICK_DEFAULTS」对存量配置零效果：
+// 面板显示新默认（quickDefaults 下发的是新值），实际裁决却仍按旧值走，且此后任何一次
+// persist 都会把旧值固化。cordis_define 由 allow 收紧为 ask 正是这种情况。
+// 故加载时按「精确名单 + 精确旧值」做一次性收敛：值恰好等于历史默认、且新默认已不同时丢弃该键，
+// 使其回落新默认。与 REMOVED_WRITE_TOOLS 同一口径，只删这份精确名单，用户手填的自定义工具名不受影响。
+// 代价（有意接受）：升级前**特意**把该工具设为旧默认值的用户，需在设置页重设一次；
+// 否则收紧等于白改，而「以为收紧了、其实没有」比「需要重设一次」危险得多。
+// 仅作用于全局层：旧版 freshConfig 只 seed 全局，项目层出现该键必是用户显式设置，不动。
+const QUICK_RETIRED_DEFAULTS = { cordis_define: 'allow' }
+// 该收敛的迁移 ID：写进配置的 migrations 名单，表示「这条迁移已经评估过」。
+// 为什么需要它（而不是只比一个全局版本号）：收敛判据是「值等于历史默认」，而用户升级后
+// 完全可能主动把 cordis_define 设回 allow（那是他的明确意图）。若只看值，每次加载都会
+// 把这次显式设置再删一遍；若只看**全局**版本号，则将来为别的迁移把版本从 1 升到 2 时，
+// 本条会被判为「未跑过」而重新执行，同样静默回滚用户设置（已实测复现）。
+// 故按「迁移 ID 是否已在名单里」判断，各条迁移互不牵连。
+const RETIRE_QUICK_DEFAULTS_MIGRATION = 'retire-quick-defaults-cordis_define'
 // eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
@@ -625,6 +651,10 @@ export default {
     let dshHomeFailAt = 0
     const HOME_FAIL_TTL_MS = 200
     let config = freshConfig()
+    // 本次加载收敛掉的历史预设默认值键数（见 QUICK_RETIRED_DEFAULTS）：由 buildConfig 的
+    // 返回值经 load 写入。刻意放在 config 之外——config 会被 JSON.stringify 整体落盘，
+    // 把该计数挂在 config 上会让它变成配置文件里的一个字段，被下次加载读回并原样写下去。
+    let retiredQuickDefaults = 0
     let loadError = null
     let saveError = null
     const decisions = []
@@ -702,7 +732,9 @@ export default {
       const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask' }
       for (const c of CATS) g[c] = freshCategory(c, false)
       for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = { action: QUICK_DEFAULTS[k] }
-      return { global: g, projects: {} }
+      // 新建配置：历史默认值收敛无对象可收敛（本来就用新默认值 seed），
+      // 直接把它标记为已跑过，避免首次加载白跑一次迁移判定。
+      return { migrations: [RETIRE_QUICK_DEFAULTS_MIGRATION], global: g, projects: {} }
     }
 
     function freshProject() {
@@ -784,7 +816,10 @@ export default {
       return out
     }
 
-    function normalizeQuick(q) {
+    // applyRetiredDefaults 仅对**全局层**为真：项目层的同名键必是用户显式设置（旧版 freshConfig
+    // 只 seed 全局），收敛它等于篡改用户的项目级意图。
+    // stats.retired 记录本次收敛掉的键数，供 load 判断是否需要落盘（判据只此一处，不在别处重写）。
+    function normalizeQuick(q, applyRetiredDefaults, stats) {
       const out = {}
       if (!q || typeof q !== 'object') return out
       for (const k of Object.keys(q)) {
@@ -792,7 +827,16 @@ export default {
         // 只删这份精确名单，用户手填的自定义工具名不受影响。
         if (REMOVED_WRITE_TOOL_SET.has(k)) continue
         const e = normalizeQuickEntry(q[k])
-        if (e) out[k] = e
+        if (e) {
+          // 历史预设默认值的收敛（理由见 QUICK_RETIRED_DEFAULTS 处注释）：仅当落盘值恰好等于
+          // 该键的历史默认、且当前默认已不同时才丢弃，使其回落新默认。值被用户改过就不动。
+          if (applyRetiredDefaults && Object.prototype.hasOwnProperty.call(QUICK_RETIRED_DEFAULTS, k) &&
+            QUICK_RETIRED_DEFAULTS[k] === e.action && QUICK_DEFAULTS[k] !== e.action) {
+            if (stats) stats.retired++
+            continue
+          }
+          out[k] = e
+        }
       }
       return out
     }
@@ -808,10 +852,21 @@ export default {
       return rule
     }
 
-    function buildConfig(parsed) {
+    // stats 由调用方传入（形如 { retired: 0 }），normalizeQuick 往里累加本次收敛掉的键数
+    // （见 QUICK_RETIRED_DEFAULTS）。刻意走独立参数而不是返回值：返回值是 config 本体，
+    // 会被 JSON.stringify 整体落盘，把计数挂上去就会变成配置文件里的一个字段。
+    function buildConfig(parsed, stats) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
       const gFb = MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask'
-      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
+      // 迁移闸门：按「该迁移 ID 是否已在本配置的 migrations 名单里」判断，而不是比一个全局版本号。
+      // 全局版本号会让「为别的迁移升版本」连带把本条重新执行一遍，从而静默回滚用户的显式设置
+      // （已实测复现）。名单式判定下各条迁移互不牵连。
+      const doneMigrations = Array.isArray(parsed.migrations) ? parsed.migrations.filter((m) => typeof m === 'string') : []
+      const needRetire = doneMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1
+      // 名单本身需要更新（本次首次评估该迁移）时也要落盘：否则下次加载会再判定一遍，
+      // 而那时用户可能已显式设回旧值——又会被当成「待收敛」删掉。
+      if (stats && needRetire) stats.pending = true
+      const global = { quickTools: normalizeQuick(g.quickTools, needRetire, stats), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
       // 兜底拒绝原因：与分类同口径，只在 deny 时保留
       if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
@@ -820,12 +875,16 @@ export default {
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
         const pFb = ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit'
-        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
+        const pb = { quickTools: normalizeQuick(p.quickTools, false), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
         if (pFb === 'deny') { const t = normalizeText(p.fallbackReason); if (t) pb.fallbackReason = t }
         for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
         projects[key] = pb
       }
-      return { global, projects }
+      // migrations 落盘：把本次评估过的迁移 ID 记入名单，使各条迁移都只跑一次
+      // （理由见 RETIRE_QUICK_DEFAULTS_MIGRATION）。保留原有名单项，只补不删。
+      const nextMigrations = doneMigrations.slice()
+      if (nextMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1) nextMigrations.push(RETIRE_QUICK_DEFAULTS_MIGRATION)
+      return { migrations: nextMigrations, global, projects }
     }
 
     function migrateOld(parsed) {
@@ -3929,11 +3988,18 @@ export default {
         const parsed = JSON.parse(text)
         if (!parsed || typeof parsed !== 'object') throw new Error('根节点必须是对象')
         const isOld = parsed.global && typeof parsed.global === 'object' && parsed.global.mode !== undefined && parsed.global.directory === undefined
-        config = isOld ? migrateOld(parsed) : buildConfig(parsed)
+        // retired 收集本次收敛的历史预设默认值键数与「名单是否需更新」（见 QUICK_RETIRED_DEFAULTS）
+        const retired = { retired: 0, pending: false }
+        config = isOld ? migrateOld(parsed) : buildConfig(parsed, retired)
+        retiredQuickDefaults = retired.retired
         lastDiskJson = String(text).trim()
         loadError = null
         saveError = null
-        if (isOld || migratedFromProject) {
+        // 历史预设默认值被收敛过就必须落盘（理由见 QUICK_RETIRED_DEFAULTS）：
+        // 只改内存会让「面板显示 / 磁盘值 / 生效值」三者长期不一致，且下次加载还要再算一遍。
+        // 落盘失败也不阻断加载——内存里已是收敛后的值，本次运行行为正确，persist 会设
+        // saveError 供面板显示（与既有写盘失败路径同口径）。
+        if (isOld || migratedFromProject || retiredQuickDefaults > 0 || retired.pending) {
           const saved = await persist(exec)
           // 迁移成功落盘后才删除项目残留文件，避免写盘失败导致配置丢失
           if (saved && migratedFromPath) removeMigratedSource(migratedFromPath, rootOf(exec))
@@ -4116,8 +4182,116 @@ export default {
       res.on('error', done)
     }
 
+    // ── 路由信任栅栏 ─────────────────────────────────────────────────────────
+    // 为什么需要：/permgate/* 是**写权限配置**的入口（set-category / add-rule …），
+    // 而 webServer 不提供任何鉴权（其包文档明说「It knows no harness concepts」）。
+    // 于是本路由此前对任何能连上端口的客户端都无条件执行——实测
+    // `POST /permgate/set-category` 无凭据即返回 200 并改掉配置。
+    // 后果：AI 有 pwsh 工具，`curl http://127.0.0.1:3080/permgate/set-category` 就能
+    // 改自己的权限约束——把「移除 9 个权限写工具」的安全收益整个抵消。
+    //
+    // 两层，按可靠性从高到低：
+    //
+    // 【第一层 · 真凭据】DSH 的 `connection` service 暴露 requestRejection()，内部是
+    // 官方的 Host/Origin 栅栏 + **浏览器会话令牌认证**（HttpOnly/SameSite=Strict 的签名
+    // cookie，Path=/ 故本路由也收得到；未认证返回 401）。它同时接受官方认可的
+    // trustedHosts（LAN 字面量、`--trusted-host`），因此 LAN/反代部署不会被误伤。
+    // 能用就用它——这是唯一真正区分「操作员浏览器」与「本机任意进程」的东西。
+    // 用 ctx.get('connection') 可选获取而非写进 inject：Electron/shell 载体与测试宿主
+    // 可能没有该 service，硬 inject 会让插件整体加载失败。
+    //
+    // 【第二层 · 兜底栅栏】拿不到 connection 时退到下面这套请求头判据。必须说清它的
+    // 真实强度：**它不是认证，只防 DNS rebinding 与跨站请求**。官方 isTrustedApiRequest
+    // 的文档自陈「not an auth layer」，本兜底同理——请求头由客户端完全控制，
+    // 本机进程补一个 `Sec-Fetch-Site: same-origin` 就能通过（实测）。
+    // 故它挡不住「AI 用 pwsh 自行调路由」，只提高了一点门槛；真正的防线是第一层。
+    // 判据（全部满足才放行）：
+    //   ① Host 必须是回环地址（防 DNS rebinding：攻击者域名解析到本机时 Host 是攻击者域名）；
+    //   ② 不得带 `sec-fetch-site: cross-site`（浏览器明确标记的跨站请求）；
+    //   ③ 带 Origin 时必须与 Host 同源；
+    //   ④ 必须带 `sec-fetch-site`（拦掉不伪装的最朴素 curl）。
+    // 第 ④ 条的代价：非浏览器客户端（脚本/CI）不能再直接调这些路由，且这条**挡不住
+    // 有意伪造者**。若将来需要脚本化，应走第一层的令牌而非放开此栅栏。
+    //
+    // 只读路由（status/pending/file-diff/events）也一并设栅栏：status 会下发例外
+    // reason/note 与绝对路径，属部署内部信息，同样不该对本机任意进程敞开。
+    //
+    // authority 规范化只此一处：两套写法（如 Host `localhost:80` vs Origin `http://localhost`、
+    // IPv6 `[0:0:0:0:0:0:0:1]` vs `[::1]`）交给 WHATWG URL 收敛，避免①与③对同一请求
+    // 得出相反结论——那种冲突会让白名单里的某些写法在带 Origin 的写路径上永远不可达。
+    function parseAuthority(hostHeader) {
+      try {
+        const raw = String(hostHeader || '').trim()
+        if (!raw) return null
+        // 借 WHATWG 归一化：默认端口省略、IPv6 压缩、大小写都按同一口径收敛
+        const u = new URL('http://' + raw)
+        return { hostname: u.hostname.toLowerCase(), host: u.host.toLowerCase() }
+      } catch (e) { return null }
+    }
+    function isLoopbackAuthority(authority) {
+      if (!authority) return false
+      // WHATWG 把 IPv6 hostname 连方括号一起返回（形如 "[::1]"）
+      const h = authority.hostname
+      return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
+    }
+    function trustRouteRequest(req) {
+      try {
+        const host = req.headers && req.headers.host
+        const authority = parseAuthority(host)
+        if (!isLoopbackAuthority(authority)) return false
+        const site = req.headers['sec-fetch-site']
+        if (site === 'cross-site') return false
+        const origin = req.headers.origin
+        if (origin !== undefined && origin !== null && origin !== '') {
+          // 同源比较走同一套规范化：Origin 的 host 与 Host 的 host 都取自 WHATWG URL
+          if (new URL(origin).host.toLowerCase() !== authority.host) return false
+        }
+        // 必须带 Fetch Metadata：浏览器对 fetch 与 EventSource 都会带，最朴素的 curl 不带
+        if (site === undefined || site === null || site === '') return false
+        return true
+      } catch (e) { return false }
+    }
+    // 第一层：官方 connection service 的 Host/Origin 栅栏 + 令牌认证。
+    // 返回 401/403 表示拒绝，undefined 表示放行；null 表示「该 service 不可用，请走兜底」。
+    function officialRejection(req) {
+      try {
+        const conn = ctx.get('connection')
+        if (!conn || typeof conn.requestRejection !== 'function') return null
+        const r = conn.requestRejection({ headers: req.headers || {} })
+        return r === 401 || r === 403 ? r : undefined
+      } catch (e) { return null }
+    }
+    // 被拒日志限速：EventSource 对 403 会持续自动重连，若每个请求都打一行，
+    // 一个打开着的设置页就能刷满日志。按「来源 + 判定结果」在时间窗内只记首条。
+    const FENCE_LOG_WINDOW_MS = 60000
+    let fenceLogAt = 0
+    let fenceLogSuppressed = 0
+    function logFenceRejection(req, status) {
+      const now = Date.now()
+      if (now - fenceLogAt < FENCE_LOG_WINDOW_MS) { fenceLogSuppressed++; return }
+      const extra = fenceLogSuppressed > 0 ? ' (+' + fenceLogSuppressed + ' suppressed)' : ''
+      fenceLogAt = now
+      fenceLogSuppressed = 0
+      console.warn('[permgate] route rejected by trust fence:', status, (req.method || '?'), req.url || '?', extra)
+    }
+
     async function routePermgate(req, res) {
       try {
+        // 信任栅栏先于一切分支：拒绝的请求不解析路径、不读 body、不触碰配置。
+        // 状态码语义与官方 /api 对齐：403 = 来源不可信（Host/Origin 栅栏），
+        // 401 = 来源可信但缺浏览器凭据（需从 dsh web 打印的 URL 重新进入）。
+        const official = officialRejection(req)
+        if (official) {
+          logFenceRejection(req, official)
+          return json(res, official === 401
+            ? { error: 'unauthorized: reopen the URL printed by dsh web to authenticate this browser', code: 'unauthenticated' }
+            : { error: 'forbidden: request is not from the trusted browser origin', code: 'untrusted-origin' }, official)
+        }
+        // 兜底路径：connection 不可用（如 Electron/shell 载体或测试宿主）时才走请求头判据
+        if (official === null && !trustRouteRequest(req)) {
+          logFenceRejection(req, 403)
+          return json(res, { error: 'forbidden: request is not from the trusted browser origin', code: 'untrusted-origin' }, 403)
+        }
         let pathname = '/permgate'
         let search = null
         try {

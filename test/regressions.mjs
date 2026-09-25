@@ -3671,6 +3671,68 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
 }
 
 // ─────────────────────────────────────────────────────────────
+group('23. 路由信任栅栏：两层结构 + 迁移一次性（防回退）')
+// 这组是静态断言，与 smoke 的运行时断言互补：smoke 验证「行为对不对」，
+// 这里验证「结构还在不在」——两者都需要的理由是：栅栏的强度完全取决于
+// 「第一层是否真的被调用」，而这一点一旦被改回兜底，smoke 也可能因为
+// 兜底恰好放行而看不出来（实测过）。
+{
+  // 第一层必须存在且是首选判据：官方 connection service 的令牌认证
+  ok('★ 栅栏：优先走官方 connection 的 requestRejection（真凭据，不是请求头指纹）',
+    src.includes("const conn = ctx.get('connection')") && src.includes('conn.requestRejection({ headers: req.headers || {} })'))
+  // connection 必须可选获取而非硬 inject：Electron/shell 载体与测试宿主可能没有它，
+  // 写进 inject 会让插件整体加载失败
+  ok('★ 栅栏：connection 走 ctx.get 可选获取（硬 inject 会让无该 service 的宿主加载失败）',
+    src.includes("ctx.get('connection')") && !/inject:\s*\[[^\]]*'connection'/.test(src))
+  // 兜底栅栏必须只在第一层不可用时生效（否则伪造头又能写盘，等于修复失效）
+  ok('★★ 栅栏：兜底判据只在 connection 不可用时生效（official === null）',
+    src.includes('if (official === null && !trustRouteRequest(req))'))
+  // 401 与 403 语义必须区分：403=来源不可信，401=缺凭据
+  ok('★ 栅栏：401/403 语义区分且带可识别 code（客户端据此提示，而不是渲染假配置）',
+    src.includes("code: 'unauthenticated'") && src.includes("code: 'untrusted-origin'") && src.includes('official === 401'))
+  // 被拒日志必须限速：EventSource 对 403 会持续重连，无限速会刷满日志
+  ok('★ 栅栏：被拒日志限速（避免 EventSource 重连刷屏）',
+    src.includes('FENCE_LOG_WINDOW_MS') && src.includes('fenceLogSuppressed'))
+  // 栅栏必须在一切分支之前：拒绝的请求不得读 body / 不得触碰配置
+  ok('★ 栅栏：位于 routePermgate 首条语句（先于 readBody/init/persist）',
+    (function () {
+      const i = src.indexOf('async function routePermgate')
+      const j = src.indexOf('officialRejection(req)', i)
+      const k = src.indexOf('readBody(req)', i)
+      return i >= 0 && j > i && k > j
+    })())
+  // authority 规范化必须只有一套（Host 与 Origin 走同一 WHATWG 口径），
+  // 否则等价写法（默认端口省略、IPv6 展开）会在带 Origin 的写路径上永远不可达
+  ok('★ 栅栏：Host/Origin 共用一套 WHATWG authority 规范化（不再两套写法互相打架）',
+    src.includes('function parseAuthority(hostHeader)') && src.includes('new URL(origin).host.toLowerCase() !== authority.host') &&
+    !src.includes('function hostOfHeader'))
+  // 历史默认值收敛必须带**迁移名单**闸门（而不是全局版本号）：否则用户升级后主动设回旧值
+  // 会被每次加载静默回滚；而若用全局版本号，将来为别的迁移升版本又会把本条重新执行一遍
+  // （实测复现过）。按迁移 ID 判定才能让各条迁移互不牵连。
+  ok('★★ 迁移：历史预设默认值收敛带迁移名单闸门（只跑一次，不回滚用户显式设置）',
+    src.includes('RETIRE_QUICK_DEFAULTS_MIGRATION') &&
+    src.includes('doneMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1') &&
+    !src.includes('CONFIG_VERSION'))
+  ok('★ 迁移：收敛只作用于全局层（项目层同名键是用户显式设置，不得动）',
+    src.includes('normalizeQuick(g.quickTools, needRetire, stats)') &&
+    src.includes('normalizeQuick(p.quickTools, false)'))
+  ok('★ 迁移：收敛结果与迁移名单都落盘（否则每次加载重算、面板与生效值不一致）',
+    src.includes('retired.pending') && src.includes('return { migrations: nextMigrations, global, projects }') &&
+    src.includes("if (nextMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1) nextMigrations.push"))
+  // 客户端必须能识别栅栏错误：非 2xx 转 reject，且不丢宿主给的错误文案
+  ok('★ 客户端：非 2xx 转 reject（不再把错误体当 status/pending 数据渲染）',
+    cli.includes('if (!r.ok)') && cli.includes('fenceErrorOf(body)'))
+  ok('★ 客户端：非栅栏的非 2xx 仍透传宿主错误文案（decide 500 / 未知路由 404 的真实原因不能丢）',
+    cli.includes("fenceErrorOf(body) || (body && body.error) || ('HTTP ' + r.status)"))
+  ok('★ 客户端：栅栏文案中英齐备', cli.includes("'panel.fenceUntrusted'") && cli.includes("'panel.fenceUnauthenticated'") &&
+    cli.includes('Request origin is not trusted') && cli.includes('Browser credentials are missing'))
+  // EventSource 对栅栏拒绝必须停止重连并上报（否则面板永远停在「没有待审批」的假象里）
+  ok('★ 客户端：SSE 被栅栏拒绝时停止重连并上报（普通断线仍交给自动重连）',
+    cli.includes('fenceBlocked') && cli.includes("e.code !== 'untrusted-origin' && e.code !== 'unauthenticated'") &&
+    cli.includes("notifyEvents({ type: 'fence'"))
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)
