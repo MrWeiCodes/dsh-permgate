@@ -3403,10 +3403,37 @@ export default {
       return out
     }
 
-    function askUser(exec, d) {
+    // 审批弹窗。opts（可选）：
+    //   opts.timeoutMs  超时时长（毫秒）。0 / 未传 = 永不超时（默认，现有行为）。
+    //   opts.onTimeout  超时后的动作，只能是 'allow' | 'deny'。
+    //   opts.note       附加说明（异常原因等），随弹窗下发，供人判断「为什么走到这一步」。
+    // 机制本身是通用的（不写死为 auto 专用），但**当前仓库内没有任何调用方传入 opts**
+    // （唯一调用点是本文件 tools/pre-execute 的 askUser(exec, d)）：auto 的异常回落路径
+    // 目前只存在于 .plan/auto-approval-plan.md（尚未实现）。所以超时是给 auto 预留的能力，
+    // 接线前它在生产中不可达。onTimeout 只能是 allow/deny 的论证：能走到超时机制的配置，
+    // 其 autoFallback 必然不是 ask（若为 ask，异常与正常失败本来就都弹窗，不需要超时），
+    // 故落点必然二选一。
+    function askUser(exec, d, opts) {
+      const o = opts || {}
+      // 必须同时校验「有限」与「正数」，并把上界钳到 32 位有符号整数上限：
+      // setTimeout 的延迟超出该范围时，Node 只发 TimeoutOverflowWarning 并把延迟**改成 1ms**。
+      // 于是 Infinity（调用方想表达「永不超时」）或任意超大值会让定时器几乎立刻触发 ——
+      // 若 onTimeout === 'allow'，那就是一次无人在环的立即自动放行（fail-open）。
+      // 非法/超范围值一律回退 0（= 不建定时器 = 永不超时），保证失败方向是「更安全」。
+      const TIMEOUT_MAX = 2147483647
+      const timeoutMs = Number.isFinite(o.timeoutMs) && o.timeoutMs > 0 ? Math.min(o.timeoutMs, TIMEOUT_MAX) : 0
+      const onTimeout = o.onTimeout === 'allow' ? 'allow' : 'deny'
       return new Promise((resolve) => {
         let settled = false
         let onAbort = null
+        let timer = null
+        // 清定时器单点：cleanup（结案）与 cancelTimeout（用户点「停止倒计时」）共用。
+        // 不写成两份内联副本 —— 漏改其中一份时不会有任何断言变红，而漏改 cancelTimeout
+        // 那份的后果是：界面已按宿主回执承诺「不再自动结案」，宿主定时器却仍在，
+        // 到点照常结案（onTimeout === 'allow' 时即一次用户已明确拒绝的自动放行）。
+        const clearTimer = () => {
+          if (timer !== null) { try { timer() } catch (e) {} timer = null }
+        }
         const id = 'p' + Math.random().toString(36).slice(2, 10)
         const argsJson = safeJson(exec.arguments)
         const taskText = argDescription(exec.arguments) || recentUserText(exec)
@@ -3422,6 +3449,19 @@ export default {
           ts: Date.now(),
           candidates: [],
           argLines: humanArgsPreview(exec.name, exec.arguments, exec),
+          // 超时相关：deadline 是**绝对时间戳**，客户端据此本地倒数（不用服务端每秒推送）；
+          // 服务端 setTimeout 才是超时的权威作者，浏览器只负责显示。
+          // 这样即使后台标签被节流，超时也照常按时发生，且客户端不会累计漂移。
+          // 不另存 timeoutMs：客户端只认绝对 deadline（倒计时）与 onTimeout（落点文案），
+          // 「有没有超时」已由 deadline 是否为 null 表达；多存一份只写不读的状态，
+          // 日后改动时无法判断它是否还有人依赖。
+          deadline: timeoutMs ? Date.now() + timeoutMs : null,
+          onTimeout: timeoutMs ? onTimeout : null,
+          // note 与同文件的 reason/例外 note 同口径（normalizeText：trim + 截断 200 +
+          // 非字符串丢弃）。早先这里是裸 String(o.note)，是全文件唯一无上界的弹窗文本通道：
+          // 该字段会经 /permgate/pending 原样下发并渲染进卡片（卡片只有 max-height:82vh），
+          // 超长文本会把「允许/拒绝」按钮挤出可视区。
+          note: normalizeText(o.note) || null,
           // 审批发起时的项目根：审批可能挂起很久、期间用户会切会话，故必须把发起时的
           // 根快照下来 —— 打相对路径/对比/打开侧栏/落盘例外都用它，不能用「当前会话」的根。
           projRoot: rootOf(exec),
@@ -3441,22 +3481,68 @@ export default {
           // 详情预览按发起时的实际内核解释，避免中途判别漂移
           editorKernel: resolveEditorKernel(exec, rootOf(exec)).kernel,
           resolve,
+          // 结案认领单点：置 settled + 清定时器 + 摘 abort 监听 + 移出待审批池。
+          // 所有结束路径（用户操作 / 超时 / abort）都必须经过它，否则定时器泄漏。
+          //
+          // claim() 与 cleanup() 分开的原因：`/permgate/decide` 路由在结案前还有
+          // `await init(exec)` 这个真实 I/O 挂起点（fs.resolve/stat/readText），而
+          // `entry.resolve()` 对已 settle 的 Promise 是静默无效的。若用户恰在倒计时
+          // 末尾点「允许」，超时回调会在该 await 期间抢先结案：用户点的是允许，本次
+          // 调用却被拒绝、审计补记成 timeout-deny（与用户动作相反），而路由照常返回
+          // {ok:true}。故路由必须在**第一个 await 之前**先 claim()，把定时器摘掉。
+          claim() {
+            if (settled) return false
+            settled = true
+            clearTimer()
+            return true
+          },
+          // 结案收尾单点（幂等）：cleanup + resolve。认领成功之后必须保证走到这里 ——
+          // 认领只负责「抢占」，真正把条目移出待审批池并让 askUser 的 Promise settle
+          // 是这一句。cleanup 本身幂等（clearTimer 有守卫、Map.delete 幂等、广播无害），
+          // resolve 对已 settle 的 Promise 是 no-op，故重复调用安全。
+          settle(out) {
+            entry.cleanup()
+            resolve(out)
+          },
           cleanup() {
+            clearTimer()
             if (onAbort && exec.signal) { try { exec.signal.removeEventListener('abort', onAbort) } catch (e) {} }
             pendingApprovals.delete(id)
+            broadcast({ type: 'pending' })
+          },
+          // 「停止倒计时」单点：清掉定时器并把本条转为永不超时（等同普通 ask 的等待语义）。
+          // 客户端只改本地 state 是不够的 —— 超时的权威作者是宿主，定时器不取消，
+          // 到点仍会自动结案（onTimeout === 'allow' 时即自动放行），而按钮文案向用户
+          // 承诺的正是「不再自动结案，一直等你决定」。故必须提供这条宿主侧通道。
+          // 结案时 deadline/onTimeout 一并置空，客户端据此收起倒计时条。
+          cancelTimeout() {
+            clearTimer()
+            entry.deadline = null
+            entry.onTimeout = null
             broadcast({ type: 'pending' })
           },
         }
         entry.candidates = buildCandidates(entry)
         pendingApprovals.set(id, entry)
         broadcast({ type: 'pending' })
-        // 永不超时：审批完全由用户在弹窗中决定，不会自动拒绝。
-        // 唯一结束路径：用户允许/拒绝，或执行被取消（abort，见下）。
+        // 默认永不超时：审批完全由用户在弹窗中决定。传了 timeoutMs 才启动倒计时。
+        // abort 与 timeout 都走 claim() 单点认领：只有第一个认领者能结案，避免双结案。
         onAbort = () => {
-          if (settled) return
-          settled = true
-          entry.cleanup()
-          resolve({ kind: 'deny', reason: uiLang === 'en' ? 'Approval request cancelled' : '审批请求已取消' })
+          if (!entry.claim()) return
+          entry.settle({ kind: 'deny', reason: uiLang === 'en' ? 'Approval request cancelled' : '审批请求已取消' })
+        }
+        if (timeoutMs) {
+          try {
+            timer = ctx.timer.setTimeout(() => {
+              // 定时器已触发，先置空引用（此时 disposer 已是 no-op，置空只为语义清晰）
+              timer = null
+              if (!entry.claim()) return
+              // 超时落点由调用方指定（只能是 allow/deny）。理由见函数头注释。
+              entry.settle(onTimeout === 'allow'
+                ? { kind: 'allow', reason: uiLang === 'en' ? 'Approval timed out; allowed' : '审批超时，已自动允许', timedOut: true }
+                : { kind: 'deny', reason: uiLang === 'en' ? 'Approval timed out; denied' : '审批超时，已自动拒绝', timedOut: true })
+            }, timeoutMs)
+          } catch (e) { timer = null }
         }
         if (exec.signal && exec.signal.addEventListener) {
           try { exec.signal.addEventListener('abort', onAbort, { once: true }) } catch (e) {}
@@ -4056,7 +4142,12 @@ export default {
             // 折算成工作区相对路径（工作区外的绝对路径则原样进地址），与上游 fileAddressFor 同口径
             // projRoot/sessionId 下发给客户端：打开 DSH 右侧栏的 file tab 需要它们来构造
             // dsh-resource://file/session/<sessionId>/<path> 地址（工作区内的绝对路径还依赖 projRoot 折算）
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null })
+            //
+            // cat/deadline/onTimeout/note 也必须在白名单里：客户端缩小方块要按 cat 选图标与
+            // 标签（缺失则永远回落通用扳手图标 + 裸工具名），倒计时条要按 deadline 倒数、
+            // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位。
+            // 白名单式投影漏字段不会报错，只会让客户端静默退化，故新增 entry 字段时必须同步此处。
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null })
           }
           return json(res, out)
         }
@@ -4096,64 +4187,104 @@ export default {
               if (s) exec = { agent: { session: s } }
             } catch (e) {}
           }
-          // 与其余写盘路由一致：先确保配置已加载、target 已解析，再落盘。
-          await init(exec)
-          let allow = false
-          let ruleCount = 0
-          // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
-          // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
-          // root 用 entry.projRoot（审批发起时的快照）：弹窗可能挂起很久、期间用户会切会话，
-          // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 ePicDLL 点的写进了 MCP）。
-          const entryRoot = entry.projRoot || rootOf(exec)
-          const writeException = (cat, kind, value, decision) => {
-            if (decision === 'deny' && cat === 'directory') return
-            addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })
-            ruleCount++
+          // 载荷校验提前到认领之前：纯检查、无副作用。若放在认领之后，非法选择走错误
+          // 分支时本条会「已认领但未结案」—— 既不结案也不再超时，永久挂在待审批池里。
+          // 判定只此一份，下面的分支不再重复校验（避免两处清单漂移）。
+          const direct = typeof a.action === 'string' && (a.action === 'allow' || a.action === 'deny')
+          if (!direct && DECIDE_CHOICES.indexOf(a.choice) === -1) {
+            return json(res, { error: lang === 'en' ? 'Invalid choice' : '非法选择' })
           }
-          const writeCandidate = (cand, decision) => {
-            for (const w of cand.writes) writeException(w.cat, w.kind || 'path', String(w.value), decision)
+          // 先认领再 await：`init` 内部有真实 I/O 挂起点（fs.resolve/stat/readText），
+          // 期间事件循环会让出到 timers 阶段。若用户恰在倒计时末尾点「允许」，超时回调
+          // 会抢先结案（resolve 对已 settle 的 Promise 静默无效），结果是「用户点允许、
+          // 本次调用却被拒绝」，且审计补记成 timeout-deny —— 与用户动作相反。
+          // claim() 与 get() 之间没有 await，定时器回调不可能插进来，故此处认领即彻底关闭竞态。
+          // 认领失败 = 已被超时/abort 结案（正常情况下列表里也已无此条，走上面的 not found）。
+          if (typeof entry.claim === 'function' && !entry.claim()) {
+            return json(res, { error: lang === 'en' ? 'Approval request already settled' : '该审批已结案' })
           }
-          if (typeof a.action === 'string' && (a.action === 'allow' || a.action === 'deny')) {
-            allow = a.action === 'allow'
-            if (Array.isArray(a.rules)) {
-              for (const r of a.rules) {
-                if (!r || (r.decision !== 'allow' && r.decision !== 'deny')) continue
-                // 整体为拒绝时不接受 allow 方向的规则：前端可能残留「允许此项」的勾选，
-                // 若不拦就会变成「本次拒绝 + 持久化一条 allow 例外」，与用户显式拒绝的意图相反。
-                if (!allow && r.decision === 'allow') continue
-                const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null
-                if (cand && Array.isArray(cand.writes) && cand.writes.length) {
-                  writeCandidate(cand, r.decision)
-                  continue
-                }
-                if (r.value) {
-                  // 旧形态（无候选 id）：按 value 反查候选，复用它的 writes，避免只落一条例外而导致同一文件反复弹窗
-                  const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))
-                  if (byValue && Array.isArray(byValue.writes) && byValue.writes.length) {
-                    writeCandidate(byValue, r.decision)
-                    continue
-                  }
-                  writeException(entry.cat, r.kind || null, String(r.value), r.decision)
-                }
-              }
-            }
-          } else {
-            const choice = a.choice
-            if (DECIDE_CHOICES.indexOf(choice) === -1) return json(res, { error: lang === 'en' ? 'Invalid choice' : '非法选择' })
-            const m = /^(allow|deny)-(global|project)$/.exec(choice)
-            if (m) {
-              addRememberedRule(entry, m[1], m[2])
+          // 认领之后必须保证以 settle 收尾：认领只负责「抢占」，而 cleanup + resolve 在其后。
+          // 这里包 try/catch 的原因 —— `await init(exec)`（及 `await persist`）是真实 I/O，
+          // 抛错会被 routePermgate 最外层 catch 转成 500，若不做收尾，该条目会停在
+          // 「已 settled、定时器已清、但未 cleanup 未 resolve」的终态：卡片永久留在
+          // /permgate/pending 里、用户再点任何按钮都被判「该审批已结案」而无法重试、
+          // 连 abort 兜底（onAbort 里的 claim）也失效，askUser 的 Promise 永不 settle，
+          // 对应工具调用永久挂起。fail-closed：异常一律按拒绝结案（宁可拒绝也不静默放行）。
+          try {
+            // 与其余写盘路由一致：先确保配置已加载、target 已解析，再落盘。
+            await init(exec)
+            let allow = false
+            let ruleCount = 0
+            // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
+            // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
+            // root 用 entry.projRoot（审批发起时的快照）：弹窗可能挂起很久、期间用户会切会话，
+            // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 ePicDLL 点的写进了 MCP）。
+            const entryRoot = entry.projRoot || rootOf(exec)
+            const writeException = (cat, kind, value, decision) => {
+              if (decision === 'deny' && cat === 'directory') return
+              addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })
               ruleCount++
             }
-            allow = choice === 'allow' || choice === 'allow-global' || choice === 'allow-project'
+            const writeCandidate = (cand, decision) => {
+              for (const w of cand.writes) writeException(w.cat, w.kind || 'path', String(w.value), decision)
+            }
+            // 复用上面 `direct` 的判定结果：该集合只能有一份，否则放宽一处会让载荷
+            // 先通过校验并 claim()，再落到 else 读 a.choice（undefined）→ 静默当成普通 deny 结案，
+            // 用户的 action 被丢弃，且没有任何断言会变红。
+            if (direct) {
+              allow = a.action === 'allow'
+              if (Array.isArray(a.rules)) {
+                for (const r of a.rules) {
+                  if (!r || (r.decision !== 'allow' && r.decision !== 'deny')) continue
+                  // 整体为拒绝时不接受 allow 方向的规则：前端可能残留「允许此项」的勾选，
+                  // 若不拦就会变成「本次拒绝 + 持久化一条 allow 例外」，与用户显式拒绝的意图相反。
+                  if (!allow && r.decision === 'allow') continue
+                  const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null
+                  if (cand && Array.isArray(cand.writes) && cand.writes.length) {
+                    writeCandidate(cand, r.decision)
+                    continue
+                  }
+                  if (r.value) {
+                    // 旧形态（无候选 id）：按 value 反查候选，复用它的 writes，避免只落一条例外而导致同一文件反复弹窗
+                    const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))
+                    if (byValue && Array.isArray(byValue.writes) && byValue.writes.length) {
+                      writeCandidate(byValue, r.decision)
+                      continue
+                    }
+                    writeException(entry.cat, r.kind || null, String(r.value), r.decision)
+                  }
+                }
+              }
+            } else {
+              const choice = a.choice
+              // 合法性已在认领之前统一校验（那里是唯一一份判定）
+              const m = /^(allow|deny)-(global|project)$/.exec(choice)
+              if (m) {
+                addRememberedRule(entry, m[1], m[2])
+                ruleCount++
+              }
+              allow = choice === 'allow' || choice === 'allow-global' || choice === 'allow-project'
+            }
+            const customReason = typeof a.reason === 'string' ? a.reason.trim().slice(0, 500) : ''
+            if (ruleCount > 0) await persist(exec)
+            entry.settle(allow
+              ? { kind: 'allow', ruleAdded: ruleCount > 0 }
+              : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')) })
+            return json(res, { ok: true, ruleAdded: ruleCount > 0 })
+          } catch (e) {
+            // 已认领但中途失败：必须以结案收尾，否则该审批永久卡死（见上方注释）。
+            console.error('[permgate] decide failed after claim:', e)
+            entry.settle({ kind: 'deny', reason: uiLang === 'en' ? 'Approval failed to complete; denied' : '审批处理失败，已拒绝' })
+            return json(res, { error: (e && e.message) ? e.message : String(e) }, 500)
           }
-          const customReason = typeof a.reason === 'string' ? a.reason.trim().slice(0, 500) : ''
-          entry.cleanup()
-          if (ruleCount > 0) await persist(exec)
-          entry.resolve(allow
-            ? { kind: 'allow', ruleAdded: ruleCount > 0 }
-            : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')) })
-          return json(res, { ok: true, ruleAdded: ruleCount > 0 })
+        }
+        if (pathname === '/permgate/cancel-timeout' && method === 'POST') {
+          const entry = pendingApprovals.get(a.id)
+          // 已结案/不存在时按幂等成功处理：用户的意图（别再自动结案）已经达成，
+          // 返回错误只会让客户端弹出无意义的失败提示。
+          if (!entry) return json(res, { ok: true, cancelled: false })
+          if (typeof entry.cancelTimeout === 'function') entry.cancelTimeout()
+          return json(res, { ok: true, cancelled: true })
         }
         if (pathname === '/permgate/set-sandbox' && method === 'POST') {
           await init(exec)
@@ -4576,6 +4707,15 @@ export default {
         console.log('[permgate]', d.action, exec.name, L(d.reason, uiLang) || '')
         if (d.action === 'ask') {
           const out = await askUser(exec, d)
+          // 超时自动结案必须留痕：recordDecision 在审批**之前**执行且只记 d.action === 'ask'，
+          // 若此处不补记，事后无法区分「人工批准」与「超时自动放行」——尤其 onTimeout === 'allow'
+          // 是一条无人在环的放行路径，审计缺失会让它彻底不可追溯。
+          // 走 recordDecision 单点（不自行 push+splice）：截断口径与字段形状只有一份实现，
+          // 否则日后改 MAX_DECISIONS 或给记录增补字段时，这里会静默按旧语义走。
+          if (out.timedOut) {
+            recordDecision({ action: out.kind === 'allow' ? 'timeout-allow' : 'timeout-deny', ruleId: null, reason: out.reason || '' }, exec)
+            console.warn('[permgate] approval timed out ->', out.kind, exec.name)
+          }
           if (out.kind !== 'allow') return { kind: 'deny', reason: out.reason || (uiLang === 'en' ? 'User denied' : '用户拒绝') }
         } else if (d.action === 'deny') {
           return { kind: 'deny', reason: L(d.reason, uiLang) }

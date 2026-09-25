@@ -7,6 +7,44 @@ window.__ModuleLoader__.load({
 		let React = require("react");
 
 		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
+
+		// ── 审批卡片：拖动柄 + 缩略按钮 + 缩小方块（计划 §3/§4）───────────────
+		// 标题栏整条是拖动柄（cursor:move 给出可拖暗示）；缩略按钮在柄内，需自身拦掉
+		// 指针事件。方块与弹窗同一坐标系（shell.overlay 是 fixed 层，不受父容器裁剪），
+		// 默认位置由 CSS 给（右上角），拖动后改用显式 left/top。
+		// 脉动只动 opacity：跑在合成线程，不触发 layout/paint，多个方块同时闪也不卡。
+		//
+		// 尺寸常量必须声明在 PG_CARD_CSS **之前**：下面这个数组在模块顶层立即求值，
+		// 数组项里直接拼接了这些常量。若把它们放在后面的「卡片外壳」区块（原先的位置），
+		// 顶层求值会命中 const 的暂时性死区（TDZ）抛 ReferenceError，整个客户端插件
+		// 加载失败 —— 不是样式错乱，是 factory 一进去就崩。
+		const PG_MIN_W = 132;   // 缩小方块宽（图标 16 + 间距 + 文字）
+		const PG_MIN_H = 30;    // 缩小方块高（图标 16 + 上下内边距）
+		const PG_MIN_GAP = 8;
+		const PG_MIN_EDGE = 16;
+		const PG_CARD_CSS = [
+			'.pg-modal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; cursor: move; touch-action: none; user-select: none; }',
+			'.pg-modal-head .pg-modal-title { flex: 1; min-width: 0; margin-bottom: 0; }',
+			'.pg-modal-min { flex: none; width: 22px; height: 22px; padding: 0; line-height: 1; font-size: 14px; cursor: pointer; color: var(--dsw-alias-label-secondary, #57606a); background: transparent; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 5px; }',
+			'.pg-modal-min:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.12)); }',
+			'.pg-min { position: fixed; z-index: 9999; display: flex; align-items: center; gap: 6px; box-sizing: border-box; width: ' + PG_MIN_W + 'px; height: ' + PG_MIN_H + 'px; padding: 0 9px; cursor: move; touch-action: none; user-select: none; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.28); font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; animation: pgMinPulse 2.2s ease-in-out infinite; }',
+			'.pg-min-icon { flex: none; width: 16px; height: 16px; background-color: currentColor; -webkit-mask-position: center; mask-position: center; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-size: contain; mask-size: contain; }',
+			'.pg-min-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+			'@keyframes pgMinPulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.55 } }',
+			// 倒计时条：与弹窗同色系，用警告色区分「这条会自己结案」。
+			'.pg-count { display: flex; align-items: center; gap: 8px; margin: 6px 0 8px; padding: 5px 8px; border-radius: 6px; font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-state-warning-primary, #e65100); color: var(--dsw-alias-state-warning-primary, #e65100); }',
+			'.pg-count-text { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }',
+			'.pg-count-stop { flex: none; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 5px; }',
+			'.pg-count-stop:hover { background: rgba(230,81,0,0.1); }',
+			// 取消失败提示：与倒计时条同色系，紧跟在按钮后
+			'.pg-count-err { flex: none; font-size: 11px; }',
+			// 异常原因（auto 专用）：灰色小字，只作说明不抢视线
+			'.pg-note { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; line-height: 1.5; word-break: break-word; }',
+			// 无障碍：系统偏好「减少动态效果」时关掉脉动，改用静态强调色边框 ——
+			// 该偏好针对的是「动态」，不是「不要提示」，故仍保留可见的存在感。
+			'@media (prefers-reduced-motion: reduce) { .pg-min { animation: none; border-color: var(--dsw-alias-state-warning-primary, #e65100); box-shadow: 0 0 0 1px var(--dsw-alias-state-warning-primary, #e65100), 0 6px 20px rgba(0,0,0,0.28); } }',
+		].join(' ');
+
 		// radio 禁用态的视觉提示：主 CSS 里 .pg-radio 没有 :disabled 规则，
 		// 原先靠内联 style 兜底，去掉后禁用按钮看起来仍可点。
 		const RADIO_DISABLED_CSS = '.pg-radio:disabled { opacity: 0.5; cursor: not-allowed; }';
@@ -253,6 +291,10 @@ window.__ModuleLoader__.load({
 			'permgate:pending': ['GET', '/permgate/pending'],
 			'permgate:file-diff': ['POST', '/permgate/file-diff'],
 			'permgate:decide': ['POST', '/permgate/decide'],
+			// 取消本条审批的自动结案倒计时（宿主清定时器 → 转永不超时）。
+			// 「停止倒计时」必须走这条通道：超时的权威作者是宿主，只改本地 state
+			// 拦不住到点自动结案（onTimeout === 'allow' 时即自动放行）。
+			'permgate:cancel-timeout': ['POST', '/permgate/cancel-timeout'],
 			'permgate:set-sandbox': ['POST', '/permgate/set-sandbox'],
 			'permgate:set-categories': ['POST', '/permgate/set-categories'],
 			'permgate:set-category': ['POST', '/permgate/set-category'],
@@ -372,6 +414,67 @@ window.__ModuleLoader__.load({
 		// 平台内置的「未匹配态」显示名：预设表按 (sandbox, approval) 反查不到任何表项时，
 		// 客户端（dsh-client-connection 的 fixture 预设表）兜底渲染这个字符串。
 		const PG_CUSTOM_BUILTIN = 'Custom';
+		// ── 审批方块（缩小态）的分类图标 ─────────────────────────────────────
+		// decide() 的 cat 不只 8 个分类，还有 custom/quick/fallback 三个特殊值
+		// 与 null（未选审查 / 命令全命中例外 / 兜底 allow），共 11 种，全部要图标。
+		// 自绘内联 mask（不 require 平台 ui-primitives）：平台图标集没有图片类图标，
+		// 混用会两套绘制语言并存；且新增 require 会引入「平台改导出名即崩」的风险。
+		// 绘制语言：16×16 视口、圆角 rx。**外框**沿用盾牌的描边画法（stroke 1.3 ≈ 盾牌的
+		// 1.31831），**内部符号**尽量用实心 fill —— 但注意本表并非全部合规：
+		// command 的提示符、undo 的双箭头、doomloop 的圆环、custom 的对勾仍是描边
+		// （1.2/1.3/1.4）。上面 380-385 行的约定（「内部符号一律实心 fill」）记录了
+		// 「细描边在菜单里与实心图标并列会显得细弱发灰」，故这几处属于**已知偏离**：
+		// 线状字形（折线/箭头/圆环）改成实心需重绘几何，未在无视觉验证的情况下改动。
+		// 若后续统一，优先按 PG_MASK 放大镜的做法（evenodd 双圆相减）处理圆环。
+		const PG_CAT_ICON = (function () {
+			// 每条是「内部符号」的 SVG 片段，外层共用 PG_SVG_OPEN/CLOSE
+			const shapes = {
+				// 编辑：铅笔（斜杆 + 笔尖三角）
+				edit: '%3Cpath d=%22M10.9 2.6l2.5 2.5-7.4 7.4-3.1.6.6-3.1z%22 fill=%22black%22/%3E',
+				// 读取：文档（外框 + 三行文本）
+				read: '%3Cpath d=%22M4.4 2.2h5l3.2 3.2v8.4H4.4z%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M6.2 7.4h4.6v1.1H6.2zM6.2 9.6h4.6v1.1H6.2z%22 fill=%22black%22/%3E',
+				// 命令：终端（外框 + 提示符折线）
+				command: '%3Crect x=%222.2%22 y=%223.2%22 width=%2211.6%22 height=%229.6%22 rx=%221.6%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22/%3E' +
+					'%3Cpath d=%22M4.8 6.4l1.9 1.7-1.9 1.7%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M8.4 10.2h3.1v1.1H8.4z%22 fill=%22black%22/%3E',
+				// 目录：文件夹
+				directory: '%3Cpath d=%22M2.2 4.6c0-.7.6-1.3 1.3-1.3h2.6l1.3 1.4h5.1c.7 0 1.3.6 1.3 1.3v5.7c0 .7-.6 1.3-1.3 1.3H3.5c-.7 0-1.3-.6-1.3-1.3z%22 fill=%22black%22/%3E',
+				// 图片：山峦 + 太阳（平台图标集没有图片类图标，必须自绘）
+				image: '%3Crect x=%222.2%22 y=%223.2%22 width=%2211.6%22 height=%229.6%22 rx=%221.6%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22/%3E' +
+					'%3Ccircle cx=%225.6%22 cy=%226.4%22 r=%221.1%22 fill=%22black%22/%3E' +
+					'%3Cpath d=%22M3.4 11.6l3.2-3.4 2.3 2.4 1.7-1.8 2 2.1z%22 fill=%22black%22/%3E',
+				// 撤销：逆时针回转箭头
+				undo: '%3Cpath d=%22M6.2 4.2H3.1V1.1%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M3.4 4.6a5.2 5.2 0 1 1-1.1 3.4%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linecap=%22round%22/%3E',
+				// 子代理：两个人形
+				subagent: '%3Ccircle cx=%226.1%22 cy=%225.9%22 r=%221.9%22 fill=%22black%22/%3E' +
+					'%3Cpath d=%22M2.3 12.6c0-2.1 1.7-3.4 3.8-3.4s3.8 1.3 3.8 3.4z%22 fill=%22black%22/%3E' +
+					'%3Ccircle cx=%2211.4%22 cy=%226.6%22 r=%221.4%22 fill=%22black%22/%3E' +
+					'%3Cpath d=%22M10.1 12.6c0-1.5.6-2.5 1.5-2.9 1.3.2 2.2 1.3 2.2 2.9z%22 fill=%22black%22/%3E',
+				// 重复操作：环形箭头（doom loop）
+				doomloop: '%3Cpath d=%22M13 8a5 5 0 1 1-1.6-3.7%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.4%22 stroke-linecap=%22round%22/%3E' +
+					'%3Cpath d=%22M12.9 2.1l.3 3.1-3.1.3z%22 fill=%22black%22/%3E',
+				// 自定义规则命中：清单 + 对勾
+				custom: '%3Cpath d=%22M3 2.4h7.2v11.2H3z%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M4.7 5.6l1 1 1.8-1.9%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.2%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M8.4 5.2h1.3v1.1H8.4zM4.7 9.1h5v1.1h-5z%22 fill=%22black%22/%3E',
+				// 快捷工具：闪电
+				quick: '%3Cpath d=%22M9.1 1.4L3.6 8.6h3.2l-1 6 5.6-7.3H8.2z%22 fill=%22black%22/%3E',
+				// 兜底策略：问号
+				fallback: '%3Cpath d=%22M8 2.2a3.5 3.5 0 0 1 1.5 6.6c-.6.3-.9.7-.9 1.3v.5H7.1v-.7c0-1.2.6-1.9 1.5-2.4A2.1 2.1 0 1 0 5.9 5.6H4.4A3.5 3.5 0 0 1 8 2.2z%22 fill=%22black%22/%3E' +
+					'%3Ccircle cx=%228%22 cy=%2213%22 r=%221.1%22 fill=%22black%22/%3E',
+				// 通用（cat 为 null 时用；文字改显示工具名）：扳手
+				generic: '%3Cpath d=%22M10.9 1.9a3.9 3.9 0 0 0-3.4 5.8L2.2 13l1.4 1.4 5.3-5.3a3.9 3.9 0 0 0 4.9-5l-2.2 2.2-1.9-.4-.4-1.9z%22 fill=%22black%22/%3E',
+			};
+			const out = {};
+			for (const k of Object.keys(shapes)) out[k] = PG_SVG_OPEN + shapes[k] + PG_SVG_CLOSE;
+			return out;
+		})();
+		// 分类短名不在这里另存一份：它们是 UI 文案，统一放 I18N 的 catS.* 键、经 T() 取用
+		// （见 pgCatText）。此前这里有一份 PG_CAT_LABEL 平行表 + 一个零引用的
+		// PG_CAT_ICON_KEYS，与 I18N 的 cat.* 长名三份清单各自维护 —— 改名或新增分类时
+		// 必然漂移，且漂移不报错（只静默换文案或回落工具名）。
 		const PG_CSS = '\n' +
 			// 触发器徽标：纯 CSS 按 aria-label 选择（平台 t() 本地化前缀 + 两种语言的
 			// 预设名，四个变体全覆盖）。无需 JS 打标，跟随语言/预设自动显示，重渲染不丢失。
@@ -1101,7 +1204,9 @@ window.__ModuleLoader__.load({
 		const diffFetching = new Set();
 		let ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
 		let MODES = ['ask', 'allow', 'deny'];
-		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888' };
+		// 颜色键集必须覆盖 decisions 里所有可能的 action（含宿主超时自动结案的
+		// timeout-allow/timeout-deny），否则「最近决策」会回落灰色 #888，与人工决策无从区分。
+		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888', 'timeout-allow': '#e65100', 'timeout-deny': '#c62828' };
 		// 快捷工具预设清单与默认动作都由宿主下发（permgate:status 的 quickPreset/quickDefaults），
 		// 与 CATS/MODES 同口径，避免宿主与浏览器各存一份清单、新增工具时漂移；
 		// 未显式配置的工具按「项目键 → 全局键 → 预设默认 → 会话兜底」显示，与服务端 quickAction 同链。
@@ -1151,6 +1256,12 @@ window.__ModuleLoader__.load({
 		const I18N = {
 			zh: {
 				'app.title': '权限审批',
+				'app.collapse': '收起为小方块',
+				'app.resetPos': '复位到默认位置（右上角）',
+				'app.timeoutIn': '⏳ {n} 秒后自动{act}',
+				'app.timeoutStop': '停止倒计时',
+				'app.timeoutStopHint': '停止后本审批不再自动结案，一直等你决定',
+				'app.timeoutStopFailed': '取消失败：倒计时仍在运行',
 				'app.fromSession': '来自对话：',
 				'app.request': '{tool} 请求执行',
 				'app.intent': '意图说明',
@@ -1203,10 +1314,28 @@ window.__ModuleLoader__.load({
 				'cat.undo': '撤销操作（恢复上次编辑前的内容）',
 				'cat.subagent': '启动子代理',
 				'cat.doomloop': '重复操作(Doom Loop)',
+				// 缩小方块的短名（cat.* 是设置页的长名，两者用途不同故分开；
+				// 但都放 I18N 走 T()，不再另存平行表）。custom/quick/fallback 是
+				// decide() 的三个特殊 cat 值，也要有短名。
+				'catS.directory': '目录',
+				'catS.command': '命令',
+				'catS.read': '读取',
+				'catS.image': '图片',
+				'catS.edit': '编辑',
+				'catS.undo': '撤销',
+				'catS.subagent': '子代理',
+				'catS.doomloop': '重复',
+				'catS.custom': '规则',
+				'catS.quick': '快捷',
+				'catS.fallback': '兜底',
 				'mode.ask': '询问',
 				'mode.allow': '允许',
 				'mode.deny': '拒绝',
 				'mode.inherit': '继承全局',
+				// 审计专用动作值（宿主超时自动结案）：不在设置页下拉里，只出现在「最近决策」。
+				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
+				'mode.timeout-allow': '超时自动允许',
+				'mode.timeout-deny': '超时自动拒绝',
 				'panel.status': '状态',
 				'panel.sessionPerm': '当前会话权限',
 				'panel.customReview': '自定义审查',
@@ -1329,6 +1458,12 @@ window.__ModuleLoader__.load({
 			},
 			en: {
 				'app.title': 'Permission Review',
+				'app.collapse': 'Collapse to a small block',
+				'app.resetPos': 'Reset to default position (top right)',
+				'app.timeoutIn': '⏳ auto-{act} in {n}s',
+				'app.timeoutStop': 'Stop countdown',
+				'app.timeoutStopHint': 'After stopping, this request waits for you indefinitely',
+				'app.timeoutStopFailed': 'Could not stop: the countdown is still running',
 				'app.fromSession': 'From conversation: ',
 				'app.request': '{tool} requests to run',
 				'app.intent': 'Intent',
@@ -1381,10 +1516,23 @@ window.__ModuleLoader__.load({
 				'cat.undo': 'Undo edit (revert last edit)',
 				'cat.subagent': 'Spawn subagent',
 				'cat.doomloop': 'Doom Loop',
+				'catS.directory': 'Directory',
+				'catS.command': 'Command',
+				'catS.read': 'Read',
+				'catS.image': 'Image',
+				'catS.edit': 'Edit',
+				'catS.undo': 'Undo',
+				'catS.subagent': 'Subagent',
+				'catS.doomloop': 'Repeat',
+				'catS.custom': 'Rule',
+				'catS.quick': 'Quick',
+				'catS.fallback': 'Fallback',
 				'mode.ask': 'Ask',
 				'mode.allow': 'Allow',
 				'mode.deny': 'Deny',
 				'mode.inherit': 'Inherit global',
+				'mode.timeout-allow': 'Auto-allowed (timeout)',
+				'mode.timeout-deny': 'Auto-denied (timeout)',
 				'panel.status': 'Status',
 				'panel.sessionPerm': 'Current session permission',
 				'panel.customReview': 'Custom Review',
@@ -1550,6 +1698,293 @@ window.__ModuleLoader__.load({
 		const small = { fontSize: 12, color: 'rgba(128,128,128,0.95)', marginRight: 6 };
 		const h = () => ({ fontSize: 13, fontWeight: 600, margin: '0 0 8px' });
 
+		// ── 审批卡片外壳：拖动 + 缩小 ─────────────────────────────────────────
+		// 位置与缩小态是**每个卡片各自的视图状态**，只活在前端（宿主只认审批内容），
+		// 且刻意不持久化（计划 §3.2：不记忆，每次回默认位置）。
+		// 拖动用 Pointer Events 统一鼠标/触摸/笔；shell.overlay 是 click-through 层，
+		// 只有卡片本体接收指针事件，故不会挡住下层 UI。
+		// 注：PG_MIN_W/PG_MIN_H/PG_MIN_GAP/PG_MIN_EDGE 已在文件顶部（PG_CARD_CSS 之前）
+		// 声明 —— 那里是唯一一份，勿在此重复声明。
+		// 槽位登记：只决定「新方块放哪」，永不重排（计划 §4.5）。
+		// 条目随卡片卸载删除，于是空出的槽位会被下一个新方块自然复用。
+		const pgMinSlots = new Map();   // id -> { col, row }
+		function pgTakeMinSlot(id) {
+			const prev = pgMinSlots.get(id);
+			if (prev) return prev;
+			const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+			const perCol = Math.max(1, Math.floor((vh - PG_MIN_EDGE * 2 + PG_MIN_GAP) / (PG_MIN_H + PG_MIN_GAP)));
+			const taken = new Set();
+			for (const s of pgMinSlots.values()) taken.add(s.col + ':' + s.row);
+			for (let col = 0; col < 8; col++) {
+				for (let row = 0; row < perCol; row++) {
+					if (!taken.has(col + ':' + row)) {
+						const slot = { col: col, row: row };
+						pgMinSlots.set(id, slot);
+						return slot;
+					}
+				}
+			}
+			// 槽位用尽（现实中到不了）：退回右上角叠放，仍可拖开
+			const slot = { col: 0, row: 0 };
+			pgMinSlots.set(id, slot);
+			return slot;
+		}
+		function pgSlotXY(slot) {
+			const vw = (typeof window !== 'undefined' && window.innerWidth) || 1200;
+			return {
+				x: vw - PG_MIN_EDGE - PG_MIN_W - slot.col * (PG_MIN_W + PG_MIN_GAP),
+				y: PG_MIN_EDGE + slot.row * (PG_MIN_H + PG_MIN_GAP),
+			};
+		}
+		// 夹取：保证**可抓取区**至少露出 PG_GRAB_MIN 像素，避免「拖丢」找不回来。
+		// 注意：保留的必须是可抓取区，不是「元素边缘」—— 卡片的拖动柄只有标题栏，
+		// 而标题栏右端是「⌖ / —」两个按钮（onPointerDown 里 stopPropagation，不启动拖动）。
+		// 早先按元素边缘保留固定像素，拖到左侧时露出的正好是这一串按钮：可拖动标题可见 0px，
+		// 卡片卡死拿不回来。故改为按 pgGrabBox() 量出的可抓取区做夹取。
+		const PG_GRAB_MIN = 40;   // 可抓取区至少露出这么多像素
+		// 量出「可抓取区」相对元素左上角的局部范围 { gl, gt, gr, gb }（右/下为边界）。
+		// 卡片 = 标题栏里「第一个按钮之前」的那段（按钮不可拖）；方块 = 整块（无标题栏）。
+		function pgGrabBox(el) {
+			if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+			const r = el.getBoundingClientRect();
+			const full = { gl: 0, gt: 0, gr: r.width, gb: r.height };
+			if (typeof el.querySelector !== 'function') return full;
+			const head = el.querySelector('.pg-modal-head');
+			if (!head || typeof head.getBoundingClientRect !== 'function') return full;
+			const hr = head.getBoundingClientRect();
+			const btn = head.querySelector ? head.querySelector('.pg-modal-min') : null;
+			// 有按钮时以按钮左边缘为界，没有则以标题栏右边缘为界
+			const right = btn && typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect().left : hr.right;
+			return { gl: hr.left - r.left, gt: hr.top - r.top, gr: Math.max(hr.left - r.left, right - r.left), gb: hr.bottom - r.top };
+		}
+		function pgClampXY(x, y, w, h, grab) {
+			const vw = (typeof window !== 'undefined' && window.innerWidth) || 1200;
+			const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+			// 未传可抓取区时退化为「整块都可抓」（缩小方块就是这种情况）
+			const g = grab || { gl: 0, gt: 0, gr: w, gb: h };
+			// 局部坐标钳进元素范围，避免调用方传入越界值
+			const gl = Math.max(0, Math.min(g.gl, w));
+			const gr = Math.max(gl, Math.min(g.gr, w));
+			const gt = Math.max(0, Math.min(g.gt, h));
+			const gb = Math.max(gt, Math.min(g.gb, h));
+			// 需要的可见量不得超过可抓取区自身尺寸（矮元素否则会算出反向区间）
+			const needX = Math.max(1, Math.min(PG_GRAB_MIN, gr - gl));
+			const needY = Math.max(1, Math.min(PG_GRAB_MIN, gb - gt));
+			// 水平：往左拖时保留可抓取区的右端，往右拖时保留左端
+			const minX = needX - gr;
+			const maxX = vw - needX - gl;
+			// 垂直：让可抓取区（标题栏）始终完整可见 —— 卡片上边界因此可为负
+			// （顶部内边距被切掉一点，但标题栏整条仍在视口内，随时可抓）。
+			const minY = needY - gb;
+			const maxY = vh - needY - gt;
+			return { x: Math.min(Math.max(x, minX), Math.max(minX, maxX)), y: Math.min(Math.max(y, minY), Math.max(minY, maxY)) };
+		}
+		// 缩小方块要显示的图标与文字：cat 为 null 时改用工具名（此时「分类」本就不存在，
+		// 工具名是唯一有意义的标识）。
+		function pgCatIcon(cat) {
+			return PG_CAT_ICON[cat] || PG_CAT_ICON.generic;
+		}
+		function pgCatText(cat, tool) {
+			// 短名走 I18N（catS.*）与 T()，与弹窗其余部分同一语言来源；
+			// T 对未知键返回键名本身，故用 catS.<cat> 是否存在来判定「这是已知分类」。
+			if (!cat) return String(tool || '');
+			const key = 'catS.' + cat;
+			const label = T(key);
+			return label === key ? String(tool || '') : label;
+		}
+		// 倒计时（仅在宿主下发了 deadline 时启用）。
+		// 剩余秒数由**绝对截止时间戳**算出，不用递减计数器：后台标签被浏览器节流时
+		// 定时器会延迟，但每次跑起来算出的都是正确值，因此不会累计漂移。
+		// 超时的权威作者是宿主（Node 进程不受浏览器节流影响），这里只负责显示。
+		function useCountdown(deadline, enabled) {
+			const [left, setLeft] = React.useState(() => (deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : null));
+			React.useEffect(() => {
+				if (!deadline || !enabled) { setLeft(null); return undefined; }
+				const tick = () => setLeft(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+				tick();
+				const h = setInterval(tick, 500);
+				return () => clearInterval(h);
+			}, [deadline, enabled]);
+			return left;
+		}
+		function PgApprovalCard(props) {
+			const p = props.p;
+			// null = 用 CSS 默认位置（右上角）；拖动后变成显式坐标
+			const [pos, setPos] = React.useState(null);
+			const [min, setMin] = React.useState(false);
+			const [minPos, setMinPos] = React.useState(null);
+			// 用户点「停止倒计时」后转为永不超时（等同普通 ask 的等待语义）。
+			// 注意：只有在**宿主确认已清掉定时器**后才置 true（见按钮 onClick），
+			// 否则会出现「界面说已停止、宿主照常自动结案」的分叉。
+			const [stopped, setStopped] = React.useState(false);
+			// 取消请求失败（宿主未确认）：保持倒计时条可见并给出提示，而不是假装已停止
+			const [stopFailed, setStopFailed] = React.useState(false);
+			const drag = React.useRef(null);
+			// 「本次按下是否真的拖动过」：用于区分单击（还原方块）与拖动（只挪位置）。
+			// 不能用 drag.current 判断 —— onUp 在 pointerup 时已把它置 null，
+			// 而 click 是在 pointerup **之后**才派发的，届时 drag.current 恒为 null，
+			// 结果「拖一下就自动展开」。
+			const moved = React.useRef(false);
+			// 卡片/方块根节点：resize 时要用它量实际尺寸重新夹取（位置是固定像素坐标，
+			// 窗口一缩小，原本贴边的卡片就会整块跑到视口外，见下面的 effect）。
+			const rootRef = React.useRef(null);
+			const left = useCountdown(p.deadline, !stopped);
+			// 卸载时释放槽位（空槽由下一个新方块复用）。语言切换要重算方块文字，
+			// 故订阅 locale tick（与弹窗其余部分同一机制）。
+			React.useEffect(() => () => { pgMinSlots.delete(p.id); }, [p.id]);
+			useLocaleTick();
+			const slot = min ? pgTakeMinSlot(p.id) : null;
+			const base = min ? (minPos || (slot ? pgSlotXY(slot) : null)) : pos;
+			// 视口变小后重新夹取：位置是拖出来的绝对像素坐标，窗口一缩小就可能整块
+			// 落到视口外（实测 1200×800 拖到右下角、缩到 800×600 时可见区域为 0×0，
+			// 卡片彻底拿不回来）。这里在 resize 时按新视口与元素实际尺寸再夹一次；
+			// 未被拖动过（base 为 null，走 CSS 默认右上角）的卡片不参与，避免平白改变布局。
+			React.useEffect(() => {
+				if (typeof window === 'undefined' || !window.addEventListener) return undefined;
+				const reclamp = () => {
+					const el = rootRef.current;
+					if (!el || !base) return;
+					const rect = el.getBoundingClientRect();
+					const next = pgClampXY(rect.left, rect.top, rect.width, rect.height, pgGrabBox(el));
+					if (next.x === rect.left && next.y === rect.top) return;
+					if (min) setMinPos(next); else setPos(next);
+				};
+				window.addEventListener('resize', reclamp);
+				return () => { try { window.removeEventListener('resize', reclamp) } catch (e) {} };
+			}, [min, base && base.x, base && base.y]);
+			const onDown = (kind) => (e) => {
+				// 只响应主键：鼠标左键 / 触摸 / 笔。右键与中键留给浏览器。
+				if (e.button !== undefined && e.button !== 0) return;
+				// 拖动柄只覆盖标题栏/方块本体：若指针落在交互控件（按钮/输入框/下拉/链接）
+				// 上，直接放行，不启动拖动。否则根节点上的 setPointerCapture 会把后续
+				// pointer 事件重定向到捕获元素，使 click 的最近公共祖先变成卡片本身 ——
+				// 子按钮的 onClick 不在事件路径上，允许/拒绝等按钮将全部点不动。
+				const t = e.target;
+				if (t && typeof t.closest === 'function' && t.closest('button, input, select, textarea, a, [role="button"]')) return;
+				const el = e.currentTarget;
+				// 手柄是标题栏，但拖动的是整张卡片：位置基准必须取卡片本身的 rect。
+				// 标题栏在卡片内边距（14px）之内，直接用它的 rect.top 会让卡片在
+				// 起拖瞬间向下跳 14px，且夹取用的宽度会少算左右内边距。
+				const box = kind === 'card' && typeof el.closest === 'function' ? (el.closest('.pg-modal') || el) : el;
+				const rect = box.getBoundingClientRect();
+				moved.current = false;
+				drag.current = {
+					kind: kind, pointerId: e.pointerId,
+					startX: e.clientX, startY: e.clientY,
+					origX: rect.left, origY: rect.top,
+					w: rect.width, h: rect.height,
+					// 可抓取区在起拖时量一次并随拖动沿用：夹取必须保证「能抓的那一段」
+					// 留在视口内，否则拖到左侧只剩按钮区时卡片会卡死（见 pgClampXY 注释）。
+					grab: pgGrabBox(box),
+				};
+				// 捕获指针：拖出元素范围后仍能收到 move/up（否则快速拖动会「掉线」）
+				try { el.setPointerCapture(e.pointerId) } catch (err) {}
+				// 取消 pointerdown 的默认动作以抑制拖拽选中；但输入类控件的聚焦依赖
+				// mousedown 的默认动作，故对它们不 preventDefault（上面已提前 return，
+				// 此处只处理非交互区域）。
+				try { e.preventDefault() } catch (err) {}
+			};
+			const onMove = (e) => {
+				const d = drag.current;
+				if (!d || d.pointerId !== e.pointerId) return;
+				const dx = e.clientX - d.startX;
+				const dy = e.clientY - d.startY;
+				// 超过阈值才算拖动（触屏轻点常有几像素抖动，否则会被误判成拖动而无法还原）
+				if (!moved.current && Math.abs(dx) + Math.abs(dy) > 3) moved.current = true;
+				const next = pgClampXY(d.origX + dx, d.origY + dy, d.w, d.h, d.grab);
+				if (d.kind === 'min') setMinPos(next); else setPos(next);
+			};
+			const onUp = (e) => {
+				const d = drag.current;
+				if (!d || d.pointerId !== e.pointerId) return;
+				drag.current = null;
+				try { e.currentTarget.releasePointerCapture(e.pointerId) } catch (err) {}
+			};
+			const dragHandlers = (kind) => ({
+				onPointerDown: onDown(kind),
+				onPointerMove: onMove,
+				onPointerUp: onUp,
+				onPointerCancel: onUp,
+			});
+			if (min) {
+				const label = pgCatText(p.cat, p.tool);
+				const icon = pgCatIcon(p.cat);
+				return React.createElement('div', Object.assign({
+					ref: rootRef,
+					className: 'pg-min',
+					title: (label ? label + ' · ' : '') + String(p.tool || ''),
+					style: base ? { left: base.x + 'px', top: base.y + 'px' } : undefined,
+					// 拖动整块；单击（未移动）还原。用 click 而非 pointerup：拖动后
+					// 浏览器仍会派发 click，故必须靠 moved 区分「拖动」与「单击」。
+					onClick: () => { if (!moved.current) setMin(false) },
+				}, dragHandlers('min')),
+					React.createElement('span', { className: 'pg-min-icon', style: { WebkitMaskImage: icon, maskImage: icon } }),
+					React.createElement('span', { className: 'pg-min-label' }, label),
+				);
+			}
+			return React.createElement('div', {
+				ref: rootRef,
+				className: 'pg-modal',
+				style: pos ? { left: pos.x + 'px', top: pos.y + 'px', right: 'auto' } : undefined,
+			},
+				// 标题栏 = 拖动柄（计划 §3.2：手柄限定在标题栏这个非交互区域）。
+				// 拖动事件**只绑在这一条上**，不能绑卡片根节点：根节点捕获指针会让
+				// 卡内所有按钮的 click 目标变成卡片本身（见 onDown 注释）。
+				React.createElement('div', Object.assign({ className: 'pg-modal-head' }, dragHandlers('card')),
+					React.createElement('span', { className: 'pg-modal-title' }, T('app.title')),
+					// 复位位置：拖到只剩一条边（或拖动中被意外卡住）时的兜底出口。
+					// 只在用户拖过（pos 非空）后**可见**，默认位置的卡片看不到这个按钮。
+					//
+					// 但它必须**始终占位**（未拖动时只是 visibility: hidden），不能条件渲染成 null：
+					// pgGrabBox 以「标题栏里第一个 .pg-modal-min 的左边缘」为可抓取区右界，
+					// 而本按钮在 DOM 里排在「—」之前。若首次拖动时它还不存在，量到的右界会
+					// 偏右 32px（按钮 24 + 间距 8）；拖动一开始 pos 非空、它随即出现，
+					// 真实可抓取区就只剩 8px —— 与「至少留 40px 可抓」的承诺不符（实测复现）。
+					// 恒定占位让起拖时量到的基准在整个拖动过程中始终有效，顺带避免标题宽度跳变。
+					React.createElement('button', {
+						className: 'pg-modal-min', title: T('app.resetPos'),
+						// visibility: hidden 仍保留布局盒（故可被量到），且不接收指针事件、不进无障碍树
+						style: pos ? undefined : { visibility: 'hidden' },
+						onPointerDown: (e) => { e.stopPropagation() },
+						onClick: (e) => { e.stopPropagation(); if (pos) setPos(null) },
+					}, '⌖'),
+					React.createElement('button', {
+						className: 'pg-modal-min', title: T('app.collapse'),
+						onPointerDown: (e) => { e.stopPropagation() },
+						onClick: (e) => { e.stopPropagation(); setMin(true) },
+					}, '—'),
+				),
+				// 倒计时条：只在宿主下发了 deadline 且用户未点「停止倒计时」时出现。
+				// 显示剩余秒数与超时后的落点（allow/deny），让人能判断「要不要现在处理」。
+				(left !== null) ? React.createElement('div', { className: 'pg-count' },
+					React.createElement('span', { className: 'pg-count-text' },
+						T('app.timeoutIn').replace('{n}', String(left)).replace('{act}', p.onTimeout === 'allow' ? T('app.allow') : T('app.deny'))),
+					React.createElement('button', {
+						className: 'pg-count-stop', title: T('app.timeoutStopHint'),
+						onPointerDown: (e) => { e.stopPropagation() },
+						// 必须先拿到宿主回执再隐藏倒计时条：超时的权威作者是宿主，
+						// 只改本地 state 拦不住到点自动结案（onTimeout === 'allow' 时即自动放行）。
+						// 三种回执分别处理（不能只看「请求没抛错」——call 不校验 HTTP 状态，
+						// 宿主返回 4xx/5xx 且 body 合法时 promise 依然 resolve）：
+						//   cancelled:true  → 已清定时器，收起倒计时条
+						//   cancelled:false → 审批已结案（卡片即将随 poll 消失），无需报错
+						//   其它/失败       → 保持倒计时条可见并提示，避免「界面说已停止、宿主照常结案」
+						onClick: (e) => {
+							e.stopPropagation();
+							call('permgate:cancel-timeout', { id: p.id }).then((r) => {
+								if (r && r.ok === true) { if (r.cancelled === true) setStopped(true) }
+								else setStopFailed(true);
+							}).catch(() => { setStopFailed(true) });
+						},
+					}, T('app.timeoutStop')),
+					stopFailed ? React.createElement('span', { className: 'pg-count-err' }, T('app.timeoutStopFailed')) : null,
+				) : null,
+				// 异常原因（auto 专用）：让人知道「为什么模型没用上」
+				p.note ? React.createElement('div', { className: 'pg-note' }, p.note) : null,
+				props.children,
+			);
+		}
+
 		function ApprovalOverlay(props) {
 			const [pending, setPending] = React.useState([]);
 			const [busyId, setBusyId] = React.useState(null);
@@ -1679,8 +2114,7 @@ window.__ModuleLoader__.load({
 					: React.createElement('span', null, p.args),
 			);
 			return React.createElement('div', null,
-				pending.map((p) => React.createElement('div', { key: p.id, className: 'pg-modal' },
-					React.createElement('div', { className: 'pg-modal-title' }, T('app.title')),
+				pending.map((p) => React.createElement(PgApprovalCard, { key: p.id, p: p },
 					// 标题下的小字：这条审批来自哪个对话。多个会话同时开着时，弹窗样式一模一样，
 					// 只有这里能区分「是哪个对话在要权限」。
 					// 标题取不到就回落到会话 id 前 8 位；两者都没有（拿不到会话）时整行不渲染，
@@ -3012,7 +3446,7 @@ window.__ModuleLoader__.load({
 				const tag = document.createElement('style');
 				tag.dataset.plugin = 'dsh-permgate';
 				tag.dataset.pluginCss = 'dsh-permgate';
-				tag.textContent = CSS + RADIO_DISABLED_CSS;
+				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS;
 				document.head.appendChild(tag);
 				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
 			}

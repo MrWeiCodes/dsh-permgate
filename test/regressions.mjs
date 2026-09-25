@@ -2579,8 +2579,11 @@ group('23. 编码徽标为纯展示（无浮层，故无「被父容器裁剪」
   })()
   ok('能切出 encBadge 函数体', encBadgeBody.length > 0)
   ok('★ 客户端不再有任何浮层状态（open/busy/pos/测量/rAF 重算）',
-    !/setPos/.test(cli) && !/popRef/.test(cli) && !/boxRef/.test(cli)
-    && !/setOpen/.test(encBadgeBody) && !/measure/.test(encBadgeBody)
+    // setPos 改为**限定在 encBadge 函数体内**断言：审批卡片（PgApprovalCard）的拖动
+    // 合法使用 setPos 记录弹窗位置，全文件级检查会误伤它。编码徽标本身仍必须无位置
+    // 状态（下面的 encBadgeBody 组已覆盖），故防护力度不变。
+    !/popRef/.test(cli) && !/boxRef/.test(cli)
+    && !/setPos/.test(encBadgeBody) && !/setOpen/.test(encBadgeBody) && !/measure/.test(encBadgeBody)
     && !/requestAnimationFrame/.test(encBadgeBody) && !/getBoundingClientRect/.test(encBadgeBody))
   // 纯展示：无 role=button、无 tabIndex、无 ▾ 指示、无 onClick
   ok('★ 徽标不可点（无 role/tabIndex/▾/onClick）',
@@ -3217,6 +3220,363 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       !i2.ok && !!i2.error && /boom/.test(i2.error.zh || '') && !/null/.test(i2.error.zh || ''), JSON.stringify(i2.error))
   }
 }
+// ─────────────────────────────────────────────────────────────
+// 27. 审批弹窗改造：拖动 / 缩小方块 / 超时机制（.plan/approval-dialog-plan.md）
+{
+  console.log('\n— 27. 审批弹窗改造：拖动 / 缩小方块 / 超时机制')
+
+  // ── 27a. 客户端：卡片外壳与缩小方块 ──────────────────────────
+  ok('客户端定义 PgApprovalCard（拖动 + 缩小的外壳）', /function PgApprovalCard\(/.test(cli))
+  ok('卡片用 Pointer Events（鼠标 + 触屏统一）',
+    /onPointerDown/.test(cli) && /onPointerMove/.test(cli) && /onPointerUp/.test(cli))
+  ok('★ 用 setPointerCapture（快速拖出元素后不掉线）', /setPointerCapture/.test(cli))
+  ok('拖动只响应主键（右键/中键留给浏览器）', /e\.button !== undefined && e\.button !== 0/.test(cli))
+  ok('★ 位置不持久化：无 localStorage/sessionStorage 写入位置',
+    !/localStorage|sessionStorage/.test(cli))
+  ok('缩小态按卡片各自持有（useState 在 PgApprovalCard 内）', /const \[min, setMin\] = React\.useState\(false\)/.test(cli))
+
+  // 槽位分配：只定初始位置、永不重排；空槽复用
+  ok('★ 槽位登记表存在（只决定初始位置）', /const pgMinSlots = new Map\(\)/.test(cli))
+  ok('★ 同一 id 重复取槽返回同一格（永不重排）',
+    /const prev = pgMinSlots\.get\(id\);\s*\n\s*if \(prev\) return prev;/.test(cli))
+  ok('★ 卸载时释放槽位（空槽由下一个新方块复用）',
+    /pgMinSlots\.delete\(p\.id\)/.test(cli))
+  ok('排列方向：先从上到下、再往左开列（col 外层、row 内层）',
+    /for \(let col = 0; col < 8; col\+\+\) \{\s*\n\s*for \(let row = 0; row < perCol; row\+\+\)/.test(cli))
+
+  // 边界夹取
+  // 判据必须绑**真正生效**的符号与**取值**：早先这里断言的是 PG_KEEP_VISIBLE ——
+  // 一个已被 PG_GRAB_MIN 取代、全文件零引用的死常量。那种写法对夹取的实质破坏完全不敏感
+  // （把 PG_GRAB_MIN 改成 0、或删掉 onMove 里的 pgClampXY 调用，断言依旧通过），
+  // 却把死常量钉住，使删除死代码反而让测试失败。
+  // 故这里做三件事：① 取出 PG_GRAB_MIN 的**实际数值**并校验下限；
+  // ② 断言它确实参与 needX/needY 的算式；③ 断言移动时确实调用了夹取。
+  // 只匹配符号名是不够的（`Math.min(PG_GRAB_MIN, …)` 在 PG_GRAB_MIN = 0 时照样匹配）。
+  const grabMin = (() => {
+    const m = /const PG_GRAB_MIN = (\d+)/.exec(cli)
+    return m ? Number(m[1]) : null
+  })()
+  ok('★ PG_GRAB_MIN 有真实下限（≥ 24px，够抓住；为 0 等于不夹取）',
+    grabMin !== null && grabMin >= 24, 'PG_GRAB_MIN=' + String(grabMin))
+  ok('★ 拖动有边界夹取（不能拖丢）',
+    /function pgClampXY\(/.test(cli)
+    && /const needX = Math\.max\(1, Math\.min\(PG_GRAB_MIN, gr - gl\)\)/.test(cli)
+    && /const needY = Math\.max\(1, Math\.min\(PG_GRAB_MIN, gb - gt\)\)/.test(cli)
+    && /const next = pgClampXY\(d\.origX \+ dx, d\.origY \+ dy, d\.w, d\.h, d\.grab\)/.test(cli))
+  // 已删除的死常量不得复活：它零引用，且会诱导后人以为它在参与夹取
+  ok('★ 不残留零引用的 PG_KEEP_VISIBLE（旧「按元素边缘保留」的遗留常量）',
+    !/PG_KEEP_VISIBLE/.test(cli))
+  ok('窄视口不产生反向区间（min/max 用 Math.max 兜底）',
+    /Math\.min\(Math\.max\(x, minX\), Math\.max\(minX, maxX\)\)/.test(cli))
+  // 夹取必须保证「可抓取区」可见，而不是「元素边缘」可见：
+  // 卡片拖动柄只有标题栏，而标题栏右端是「⌖/—」按钮（stopPropagation，不启动拖动）。
+  // 早先按元素边缘保留 56px，拖到左侧时露出的正好是这串按钮 —— 可拖动标题可见 0px，
+  // 卡片卡死拿不回来（实测：局部 396~452 全在按钮簇与右内边距内）。
+  ok('★ 可抓取区由 pgGrabBox 量出（排除不可拖的按钮区）',
+    /function pgGrabBox\(el\)/.test(cli)
+    && /el\.querySelector\('\.pg-modal-head'\)/.test(cli)
+    && /head\.querySelector\('\.pg-modal-min'\)/.test(cli))
+  ok('★ 夹取以可抓取区为基准（拖到任一侧都留得下可抓的一段）',
+    /const minX = needX - gr/.test(cli)
+    && /const maxX = vw - needX - gl/.test(cli)
+    && /const minY = needY - gb/.test(cli)
+    && /const maxY = vh - needY - gt/.test(cli))
+  ok('★ 需要的可见量不超过可抓取区自身尺寸（矮元素不产生反向区间）',
+    /const needX = Math\.max\(1, Math\.min\(PG_GRAB_MIN, gr - gl\)\)/.test(cli)
+    && /const needY = Math\.max\(1, Math\.min\(PG_GRAB_MIN, gb - gt\)\)/.test(cli))
+  ok('★ 起拖时量一次可抓取区并随拖动沿用（拖到一半不会换基准）',
+    /grab: pgGrabBox\(box\),/.test(cli)
+    && /pgClampXY\(d\.origX \+ dx, d\.origY \+ dy, d\.w, d\.h, d\.grab\)/.test(cli))
+  // 位置是绝对像素坐标，窗口缩小后必须重新夹取，否则贴边的卡片会整块跑到视口外
+  // （实测 1200x800 拖到右下角、缩到 800x600 时可见区域为 0x0，彻底拿不回来）。
+  ok('★ resize 时按新视口重新夹取（窗口缩小后卡片不会留在视口外）',
+    /window\.addEventListener\('resize', reclamp\)/.test(cli)
+    && /window\.removeEventListener\('resize', reclamp\)/.test(cli)
+    && /pgClampXY\(rect\.left, rect\.top, rect\.width, rect\.height, pgGrabBox\(el\)\)/.test(cli))
+  ok('★ 卡片/方块根节点挂了 ref（resize 重夹要量实际尺寸）',
+    /const rootRef = React\.useRef\(null\)/.test(cli)
+    && (cli.match(/ref: rootRef,/g) || []).length === 2)
+  ok('★ 提供「复位到默认位置」兜底出口（拖丢后仍能一键拉回）',
+    /'app\.resetPos'/.test(cli) && /setPos\(null\)/.test(cli)
+    && (cli.match(/'app\.resetPos':/g) || []).length === 2)
+  // 复位按钮必须**始终占位**（未拖动时仅 visibility: hidden），不能条件渲染成 null：
+  // pgGrabBox 以标题栏里第一个 .pg-modal-min 的左边缘为可抓取区右界，而该按钮排在
+  // 「—」之前。若首次拖动时它不存在，量到的右界偏右 32px；拖动一开始它随即出现，
+  // 真实可抓取区只剩 8px（实测），与「至少留 40px」的承诺不符。
+  ok('★ 复位按钮始终占位（否则起拖量到的可抓取区会在拖动中失效）',
+    /style: pos \? undefined : \{ visibility: 'hidden' \}/.test(cli)
+    && !/pos \? React\.createElement\('button', \{\s*\n\s*className: 'pg-modal-min', title: T\('app\.resetPos'\)/.test(cli))
+  // 行为级验证（不是匹配源码）：切出**真实的** pgGrabBox / pgClampXY 执行，断言
+  // 「无论拖到哪一侧，可抓取区都至少留得下 PG_GRAB_MIN」这一不变量。
+  // 这条能捕获纯正则捕获不到的错误：算式写反、下限被改小、量取基准与夹取基准不一致。
+  {
+    const sliceFnBody = (name) => {
+      const s = cli.indexOf('function ' + name + '(')
+      if (s < 0) return ''
+      let d = 0
+      for (let i = cli.indexOf('{', s); i < cli.length; i++) {
+        if (cli[i] === '{') d++
+        else if (cli[i] === '}') { d--; if (d === 0) return cli.slice(s, i + 1) }
+      }
+      return ''
+    }
+    let grabCheck = null
+    try {
+      const f = new Function('PG_GRAB_MIN', 'window',
+        sliceFnBody('pgGrabBox') + '\n' + sliceFnBody('pgClampXY') + '\nreturn { pgGrabBox: pgGrabBox, pgClampXY: pgClampXY }')
+      const api = f(grabMin, { innerWidth: 1200, innerHeight: 800 })
+      // 卡片真实几何（content-box）：卡片 420 + padding 32 + border 2 = 454
+      // 标题栏局部 [17, 437]；两个按钮各 24 宽 + 8 间距，都排在标题之后
+      const X = 100, Y = 100, CARD_W = 454, CARD_H = 300
+      const mk = (r, q) => ({ getBoundingClientRect: () => r, querySelector: (s) => q[s] || null })
+      const head = { left: X + 17, top: Y + 15, right: X + 437, bottom: Y + 37, width: 420, height: 22 }
+      const modal = { left: X, top: Y, right: X + CARD_W, bottom: Y + CARD_H, width: CARD_W, height: CARD_H }
+      // 第一个按钮 = 复位按钮（恒定占位），左边缘 = 437 - 24 - 8 - 24 - 8 = 373
+      const btn1 = { left: X + 373, top: Y + 15, right: X + 397, bottom: Y + 37, width: 24, height: 22 }
+      const el = mk(modal, { '.pg-modal-head': mk(head, { '.pg-modal-min': mk(btn1, {}) }) })
+      const grab = api.pgGrabBox(el)
+      // 可抓取区 = 标题栏左内边距 .. 第一个按钮左边缘
+      const realGl = 17, realGr = 373
+      const visibleGrab = (x) => {
+        const l = Math.max(Math.max(x, 0), x + realGl)
+        const r = Math.min(Math.min(x + CARD_W, 1200), x + realGr)
+        return Math.max(0, r - l)
+      }
+      const results = []
+      for (const x of [-9999, -400, 0, 400, 9999]) {
+        const c = api.pgClampXY(x, Y, CARD_W, CARD_H, grab)
+        results.push(visibleGrab(c.x))
+      }
+      grabCheck = { grab: grab, results: results, min: Math.min.apply(null, results) }
+    } catch (e) { grabCheck = { err: String(e && e.message) } }
+    ok('★ 夹取不变量：拖到任一侧，可抓取区都留得下 PG_GRAB_MIN（真实执行 pgClampXY）',
+      grabCheck && !grabCheck.err && grabCheck.min >= grabMin,
+      grabCheck && grabCheck.err ? grabCheck.err : JSON.stringify(grabCheck))
+  }
+
+  // 缩小方块：图标 + 文字、cat 为 null 时用工具名
+  // 切片边界用 shapes 之后的锚点（PG_CAT_ICON 声明在 shapes **之前**，不能当结束边界）
+  const shapesBody = cli.slice(cli.indexOf('const shapes = {'), cli.indexOf('for (const k of Object.keys(shapes))'))
+  ok('能切出 shapes 表', shapesBody.length > 0)
+  // 键集**从实现派生**（不再硬编码字面量）：硬编码会让「加了图标但漏加短名」这类漂移
+  // 照样通过 —— 两份副本各自与自己比对，等于没有集合校验。
+  const shapeKeys = [...shapesBody.matchAll(/^\s*([a-zA-Z]+):/gm)].map((m) => m[1]).filter((k) => k !== 'generic')
+  const catSKeys = [...new Set([...cli.matchAll(/'catS\.([a-zA-Z]+)':/g)].map((m) => m[1]))]
+  ok('能派生 shapes 键集（非空）', shapeKeys.length > 0, JSON.stringify(shapeKeys))
+  ok('★ shapes 与 catS.* 的键集完全一致（互相比对，而非各自硬编码）',
+    JSON.stringify(shapeKeys.slice().sort()) === JSON.stringify(catSKeys.slice().sort()),
+    'shapes=' + JSON.stringify(shapeKeys.sort()) + ' catS=' + JSON.stringify(catSKeys.sort()))
+  // 与宿主 CATS 的包含关系：宿主新增分类时，图标与短名都必须同步补齐
+  ok('★ 宿主 CATS 的每个分类在 shapes 与 catS.* 中都有对应项',
+    mod.CATS.every((c) => shapeKeys.indexOf(c) !== -1 && catSKeys.indexOf(c) !== -1),
+    'CATS=' + JSON.stringify(mod.CATS))
+  // 三个特殊 cat 值（decide() 会返回，不在 CATS 里）也必须齐全
+  ok('★ 特殊 cat 值 custom/quick/fallback 也都有图标与短名',
+    ['custom', 'quick', 'fallback'].every((c) => shapeKeys.indexOf(c) !== -1 && catSKeys.indexOf(c) !== -1))
+  ok('★ catS.* 中英各一份（键数 = 分类数 × 2）',
+    (cli.match(/'catS\.[a-zA-Z]+':/g) || []).length === catSKeys.length * 2,
+    '出现 ' + (cli.match(/'catS\.[a-zA-Z]+':/g) || []).length + ' 次，期望 ' + (catSKeys.length * 2))
+  // 审计动作值也要有文案：否则设置页「最近决策」会显示裸键名 mode.timeout-allow。
+  // 字面量**从宿主源码派生**，再要求客户端两份清单都含它们 —— 不能用硬编码数组只与
+  // 客户端源码比对：那样是「两份副本各自与自己比对」，宿主侧改名或新增第三种超时落点
+  // 时，界面会静默显示裸键名 mode.timeout-xxx 且 MODE_COLORS 回落灰色 #888，测试却全绿。
+  const hostTimeoutActions = [...new Set(
+    [...src.matchAll(/action:\s*out\.kind === 'allow' \? '([a-z-]+)' : '([a-z-]+)'/g)]
+      .flatMap((m) => [m[1], m[2]])
+  )]
+  ok('能从宿主源码派生出超时审计 action 字面量（非空）',
+    hostTimeoutActions.length > 0, JSON.stringify(hostTimeoutActions))
+  ok('★ 宿主写入的审计 action 值在客户端都有 mode.* 文案与颜色（派生式交叉断言）',
+    hostTimeoutActions.length > 0
+    && hostTimeoutActions.every((a) => cli.includes("'mode." + a + "'") && new RegExp("'" + a + "':\\s*'#").test(cli)),
+    '宿主字面量=' + JSON.stringify(hostTimeoutActions))
+  // 反向：客户端不该存在宿主从不写入的 timeout-* 文案（避免改名后留下孤儿键）
+  const clientTimeoutKeys = [...new Set([...cli.matchAll(/'mode\.(timeout-[a-z-]+)':/g)].map((m) => m[1]))]
+  ok('★ 客户端 mode.timeout-* 键与宿主字面量集合一致（双向，防改名留孤儿）',
+    JSON.stringify(clientTimeoutKeys.slice().sort()) === JSON.stringify(hostTimeoutActions.slice().sort()),
+    '客户端=' + JSON.stringify(clientTimeoutKeys.sort()) + ' 宿主=' + JSON.stringify(hostTimeoutActions.sort()))
+  ok('★ cat 为 null/未知时回落到通用图标 + 工具名',
+    /PG_CAT_ICON\[cat\] \|\| PG_CAT_ICON\.generic/.test(cli)
+    && /return label === key \? String\(tool \|\| ''\) : label/.test(cli))
+  ok('方块用内联 SVG mask（不 require 平台 ui-primitives）',
+    !/dsh-client-ui-primitives/.test(cli))
+  ok('方块横向排列：图标 + 文字（.pg-min 用 flex + gap）',
+    /\.pg-min \{[^}]*display: flex/.test(cli) && /\.pg-min \{[^}]*gap: 6px/.test(cli))
+
+  // 呼吸灯 + 无障碍退化
+  ok('★ 缩小方块有持续呼吸灯（pgMinPulse 只动 opacity）',
+    /@keyframes pgMinPulse \{ 0%, 100% \{ opacity: 1 \} 50% \{ opacity: 0\.55 \} \}/.test(cli))
+  ok('★ prefers-reduced-motion 时关闭动画并退化为静态强调色边框',
+    /@media \(prefers-reduced-motion: reduce\) \{ \.pg-min \{ animation: none; border-color:/.test(cli))
+
+  // 倒计时：基于绝对截止时间戳，不用递减计数器
+  ok('★ 倒计时按绝对 deadline 计算（不累计漂移）',
+    /function useCountdown\(deadline, enabled\)/.test(cli)
+    && /Math\.ceil\(\(deadline - Date\.now\(\)\) \/ 1000\)/.test(cli))
+  ok('倒计时条含「停止倒计时」按钮', /pg-count-stop/.test(cli) && /app\.timeoutStop/.test(cli))
+  ok('停止后转永不超时（stopped 参与 enabled）', /useCountdown\(p\.deadline, !stopped\)/.test(cli))
+  ok('★ 「停止倒计时」必须通知宿主清定时器（只改本地 state 拦不住自动结案）',
+    /call\('permgate:cancel-timeout', \{ id: p\.id \}\)/.test(cli)
+    && /'permgate:cancel-timeout': \['POST', '\/permgate\/cancel-timeout'\]/.test(cli)
+    && /cancelTimeout\(\) \{/.test(src)
+    && /pathname === '\/permgate\/cancel-timeout' && method === 'POST'/.test(src))
+  ok('异常原因 note 有独立展示位', /p\.note \? React\.createElement\('div', \{ className: 'pg-note' \}/.test(cli))
+
+  // 拖动只绑标题栏，不绑卡片根节点 —— 根节点捕获指针会让卡内按钮的 click 失效。
+  // 断言方式：切出卡片根节点的 **props 参数**（第二个参数，即 children 之前那一段），
+  // 再断言其中不含任何拖动接线。不能只匹配某一种收尾形态（如 Object.assign + }))）：
+  // spread（...dragHandlers('card')）、作为第三参、或直接传 dragHandlers 都会漏检。
+  const modalRootProps = (() => {
+    const anchor = cli.indexOf("className: 'pg-modal',")
+    if (anchor < 0) return null
+    const callStart = cli.lastIndexOf("React.createElement('div'", anchor)
+    if (callStart < 0) return null
+    let p = cli.indexOf("'div'", callStart) + 5
+    while (p < cli.length && (cli[p] === ',' || /\s/.test(cli[p]))) p++
+    // 跟踪括号深度，遇到顶层逗号即停 → 第二个参数（props）结束
+    let depth = 0
+    for (let i = p; i < cli.length; i++) {
+      const ch = cli[i]
+      if (ch === '{' || ch === '(' || ch === '[') depth++
+      else if (ch === '}' || ch === ')' || ch === ']') { if (depth === 0) return null; depth-- }
+      else if (ch === ',' && depth === 0) return cli.slice(p, i)
+    }
+    return null
+  })()
+  ok('能切出卡片根节点的 props 参数', modalRootProps !== null)
+  ok('★ 拖动事件只绑标题栏（卡片根节点的 props 里没有任何拖动接线）',
+    /Object\.assign\(\{ className: 'pg-modal-head' \}, dragHandlers\('card'\)\)/.test(cli)
+    && modalRootProps !== null
+    && !/dragHandlers|onPointerDown|onPointerMove|onPointerUp|onPointerCancel/.test(modalRootProps),
+    modalRootProps ? modalRootProps.replace(/\s+/g, ' ').slice(0, 140) : 'null')
+  ok('★ 拖动柄放过交互控件（button/input/select/textarea/a）',
+    /closest\('button, input, select, textarea, a, \[role="button"\]'\)/.test(cli))
+  ok('★ 单击还原用 moved 判定（drag\.current 在 pointerup 已置 null，不能用作判据）',
+    /const moved = React\.useRef\(false\)/.test(cli)
+    && /onClick: \(\) => \{ if \(!moved\.current\) setMin\(false\) \}/.test(cli))
+
+  // ── 27b. 宿主：askUser 的超时参数 ────────────────────────────
+  const ask = (() => {
+    const s = src.indexOf('function askUser(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  })()
+  ok('能切出 askUser 函数体', ask.length > 0)
+  ok('★ askUser 增加可选 opts 参数（向后兼容：不传即旧行为）',
+    /function askUser\(exec, d, opts\) \{/.test(ask))
+  ok('★ timeoutMs 未传/为 0/非法/超范围 → 不建定时器或钳到上界（失败方向是「更安全」）',
+    /const timeoutMs = Number\.isFinite\(o\.timeoutMs\) && o\.timeoutMs > 0 \? Math\.min\(o\.timeoutMs, TIMEOUT_MAX\) : 0/.test(ask)
+    && /const TIMEOUT_MAX = 2147483647/.test(ask)
+    && /if \(timeoutMs\) \{/.test(ask))
+  // Infinity 必须被拦下：Node 对超出 32 位有符号整数范围的延迟只发警告并把延迟改成 1ms，
+  // 于是 Infinity（调用方想表达「永不超时」）会让定时器几乎立刻触发 —— onTimeout === 'allow'
+  // 时就是一次立即自动放行。此断言固定「必须用 Number.isFinite 而非 typeof number」。
+  ok('★ timeoutMs 用 Number.isFinite 拦截 Infinity/NaN（防 setTimeout 溢出成 1ms 立即放行）',
+    /Number\.isFinite\(o\.timeoutMs\)/.test(ask) && !/typeof o\.timeoutMs === 'number' && o\.timeoutMs > 0/.test(ask))
+  ok('★ onTimeout 只接受 allow/deny（ask 不在其中）',
+    /const onTimeout = o\.onTimeout === 'allow' \? 'allow' : 'deny'/.test(ask))
+  ok('★ 清定时器收成 clearTimer 单点（cleanup 与 cancelTimeout 共用一份）',
+    /const clearTimer = \(\) => \{\s*\n\s*if \(timer !== null\) \{ try \{ timer\(\) \} catch \(e\) \{\} timer = null \}\s*\n\s*\}/.test(ask)
+    && /cleanup\(\) \{\s*\n\s*clearTimer\(\)/.test(ask)
+    && /cancelTimeout\(\) \{\s*\n\s*clearTimer\(\)/.test(ask)
+    // 不允许任何一处再写内联副本：漏改其中一份不会让别的断言变红
+    && (ask.match(/if \(timer !== null\)/g) || []).length === 1)
+  ok('★ 结案走 claim() 单点认领（只有第一个认领者能结案，不会双结案）',
+    /claim\(\) \{\s*\n\s*if \(settled\) return false\s*\n\s*settled = true\s*\n\s*clearTimer\(\)\s*\n\s*return true/.test(ask)
+    && /onAbort = \(\) => \{\s*\n\s*if \(!entry\.claim\(\)\) return/.test(ask)
+    && /if \(!entry\.claim\(\)\) return/.test(ask))
+  // 结案收尾必须是「cleanup + resolve」的单点，且认领后的失败路径也要走到它。
+  ok('★ 结案收尾收成 settle() 单点（cleanup + resolve 只此一份）',
+    /settle\(out\) \{\s*\n\s*entry\.cleanup\(\)\s*\n\s*resolve\(out\)\s*\n\s*\}/.test(ask)
+    && /onAbort = \(\) => \{\s*\n\s*if \(!entry\.claim\(\)\) return\s*\n\s*entry\.settle\(/.test(ask)
+    && /if \(!entry\.claim\(\)\) return\s*\n\s*\/\/[^\n]*\n\s*entry\.settle\(/.test(ask))
+  // 竞态：/permgate/decide 在结案前有 await init(exec)（真实 I/O 挂起点），超时回调
+  // 会在此期间抢先结案 —— 用户点「允许」却被拒绝，且审计记成 timeout-deny（与用户动作相反）。
+  // 故路由必须在第一个 await 之前先 claim()，把定时器摘掉。
+  // 顺序断言必须在 **decide 路由自己的切片**里比较：askUser 里也有 !entry.claim()
+  // （onAbort / 超时回调），用全文件 indexOf 会取到那一处，让断言恒真而失去意义。
+  const decideRoute = (() => {
+    const s = src.indexOf("pathname === '/permgate/decide'")
+    if (s < 0) return ''
+    const e = src.indexOf("pathname === '/permgate/cancel-timeout'", s)
+    return e > s ? src.slice(s, e) : src.slice(s, s + 6000)
+  })()
+  ok('能切出 decide 路由', decideRoute.length > 0)
+  ok('★ /permgate/decide 在首个 await 之前认领（防超时回调抢先结案反转用户决定）',
+    /!entry\.claim\(\)/.test(decideRoute)
+    && decideRoute.indexOf('!entry.claim()') < decideRoute.indexOf('await init(exec)'))
+  // 载荷校验必须在认领之前：否则非法选择走错误分支时，本条会「已认领但未结案」——
+  // 既不结案也不再超时，永久挂在待审批池里。
+  ok('★ decide 的载荷校验排在认领之前（否则非法选择会让审批永久挂起）',
+    decideRoute.indexOf('DECIDE_CHOICES.indexOf(a.choice) === -1') !== -1
+    && decideRoute.indexOf('DECIDE_CHOICES.indexOf(a.choice) === -1') < decideRoute.indexOf('!entry.claim()'))
+  ok('★ decide 的载荷校验只此一份（不重复维护同一份合法性清单）',
+    (decideRoute.match(/DECIDE_CHOICES\.indexOf\(a\.choice\)/g) || []).length === 1)
+  // 「合法 action」判定同样只能有一份：放宽新增的 direct 而未改下面那份时，载荷会先通过
+  // 校验并 claim()，再落到 else 读 a.choice（undefined）→ 静默当成普通 deny 结案，
+  // 用户的 action 被丢弃，且没有任何断言会变红。
+  ok('★ decide 的「合法 action」判定只此一份（else 分支复用 direct）',
+    (decideRoute.match(/typeof a\.action === 'string' && \(a\.action === 'allow' \|\| a\.action === 'deny'\)/g) || []).length === 1
+    && /if \(direct\) \{/.test(decideRoute))
+  // 认领之后若 await init/persist 抛错，必须仍以结案收尾，否则条目永久卡死：
+  // 卡片留在 /permgate/pending、重试被判「该审批已结案」、abort 兜底也失效、
+  // askUser 的 Promise 永不 settle → 工具调用永久挂起。
+  ok('★ decide 认领后的区段包在 try/catch 内（init 抛错不再让审批永久挂起）',
+    /try \{[\s\S]{0,300}?await init\(exec\)/.test(decideRoute)
+    && /\} catch \(e\) \{[\s\S]{0,500}?entry\.settle\(\{ kind: 'deny'/.test(decideRoute),
+    'decideRoute 长度=' + decideRoute.length)
+  // 反向：catch 里必须 fail-closed（拒绝），不得静默放行
+  ok('★ decide 的异常兜底是 fail-closed（拒绝，而非放行）',
+    /\} catch \(e\) \{[\s\S]{0,500}?entry\.settle\(\{ kind: 'deny'/.test(decideRoute)
+    && !/\} catch \(e\) \{[\s\S]{0,500}?entry\.settle\(\{ kind: 'allow'/.test(decideRoute))
+  ok('★ 超时回调先认领再结案（不会双结案）',
+    /timer = null\s*\n\s*if \(!entry\.claim\(\)\) return\s*\n\s*\/\/[^\n]*\n\s*entry\.settle\(/.test(ask))
+  ok('超时结案带 timedOut 标记（供上层区分「自动」与「人工」）', /timedOut: true/.test(ask))
+  ok('★ timedOut 真的有消费方（落审计，而非只写不读）',
+    /if \(out\.timedOut\) \{/.test(src) && /'timeout-allow' : 'timeout-deny'/.test(src))
+  ok('entry 下发 deadline/onTimeout/note（客户端据此本地倒数）',
+    /deadline: timeoutMs \? Date\.now\(\) \+ timeoutMs : null/.test(ask)
+    && /onTimeout: timeoutMs \? onTimeout : null/.test(ask))
+  // note 必须与同文件的 reason/例外 note 同口径（normalizeText：trim + 截断 200）。
+  // 裸 String(o.note) 是全文件唯一无上界的弹窗文本通道，会经 pending 原样下发并渲染进
+  // 卡片（卡片只有 max-height:82vh），超长文本会把允许/拒绝按钮挤出可视区。
+  ok('★ note 走 normalizeText（与 reason/例外 note 同口径，不会无界下发）',
+    /note: normalizeText\(o\.note\) \|\| null/.test(ask)
+    && !/note: o\.note \? String\(o\.note\) : null/.test(ask))
+  // timeoutMs 只写不读会被误当成「还有人依赖」：客户端只认绝对 deadline。
+  ok('★ 不存只写不读的 entry.timeoutMs（有无超时由 deadline 表达）',
+    !/timeoutMs: timeoutMs \|\| null/.test(ask) && !/entry\.timeoutMs = null/.test(ask))
+  ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note（白名单漏字段即静默退化）',
+    /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \|\| null \}\)/.test(src))
+
+  // ── 27c. 客户端 factory 真实求值（本组唯一「执行」而非「匹配」的断言）──
+  // 起因：PG_CARD_CSS 在模块顶层拼接了声明在其后的 const，命中 TDZ 抛 ReferenceError，
+  // 导致整个客户端插件加载失败。当时 27a/27b 全是对源码做正则匹配、从不求值，
+  // 因此 ALL PASS 却整包崩。这条断言把「client.js 能真正加载」固定下来。
+  {
+    let factoryErr = null
+    let loaded = null
+    try {
+      const win = { __ModuleLoader__: { load: (m) => { loaded = m } } }
+      new Function('window', cli)(win)
+      if (!loaded || typeof loaded.factory !== 'function') throw new Error('未捕获到 factory')
+      // React 只需最小桩：factory 体在加载期不渲染组件，只建立定义与常量。
+      // 但 PGErrorBoundary extends React.Component，故 Component 必须是个真类。
+      class ComponentStub { constructor(props) { this.props = props || {} } setState() {} render() { return null } }
+      const reactStub = { createElement: () => null, memo: (c) => c, Component: ComponentStub, useState: (v) => [typeof v === 'function' ? v() : v, () => {}], useEffect: () => {}, useRef: () => ({ current: null }), useMemo: (f) => f(), useCallback: (f) => f() }
+      const requireStub = (name) => (name === 'react' ? reactStub : {})
+      loaded.factory(requireStub)
+    } catch (e) { factoryErr = e }
+    ok('★ client.js factory 可真实求值（无 TDZ / ReferenceError 等加载期错误）',
+      factoryErr === null, factoryErr ? (factoryErr.name + ': ' + factoryErr.message) : '')
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
