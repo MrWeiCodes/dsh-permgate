@@ -8,18 +8,15 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync
 import { homedir as osHomedir } from 'node:os'
 const CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop']
 const EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo']
-// 分类枚举清单派生：三处工具 schema 的 enum 直接引用，避免新增分类时逐处漏改
-const CATEGORY_ENUM = CATS.slice()
-const EXC_CATEGORY_ENUM = EXC_CATS.slice()
 const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 const MAX_DECISIONS = 30
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
-// 其余工具默认询问（ask）：mcp__*（外装 MCP）、改权限配置的 perm_*（只读的 perm_status 除外）、
-// 以及管理动态插件的 cordis_run/stop/undefine —— perm_* 曾经被 decide 无条件放行，等于
-// 「AI 可自我提权、且全程无弹窗」；纳入本清单后统一按 ask 裁决，只有用户在设置页显式改成 allow
-// 才会静默放行（预设默认优先于兜底策略，改兜底也不会漏）。
+// 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
+// —— perm_* 曾经被 decide 无条件放行，等于「AI 可自我提权、且全程无弹窗」；纳入本清单后
+// 统一按 ask 裁决，只有用户在设置页显式改成 allow 才会静默放行（预设默认优先于兜底策略，
+// 改兜底也不会漏）。权限写工具已整体移除，本清单里的 perm_* 只剩只读的 perm_status（allow）。
 const QUICK_DEFAULTS = {
   web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
   ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
@@ -28,16 +25,42 @@ const QUICK_DEFAULTS = {
   send_message: 'allow', interrupt_agent: 'allow',
   present: 'allow', exit_plan_mode: 'allow',
   cordis_define: 'allow', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
-  // 改权限配置 = 元操作，一律先问；只有 perm_status 是只读查询，默认放行（想看随时能看）
-  perm_status: 'allow', perm_set_category: 'ask', perm_set_fallback: 'ask', perm_set_editor_kernel: 'ask',
-  perm_add_exception: 'ask', perm_remove_exception: 'ask', perm_set_quick: 'ask',
-  perm_add_rule: 'ask', perm_remove_rule: 'ask', perm_reload: 'ask',
+  // 改权限配置类工具（已整体移除）曾一律先问；现仅 perm_status 只读查询，默认放行（想看随时能看）
+  // 其余 9 个写工具（perm_set_category / perm_set_fallback / perm_set_editor_kernel /
+  // perm_add_exception / perm_remove_exception / perm_set_quick / perm_add_rule /
+  // perm_remove_rule / perm_reload）已整体移除，理由：
+  //   ① 与设置页 UI 重复 —— 除编辑器内核外，其余能力均由 /permgate/* 路由覆盖，工具没有独占能力；
+  //      编辑器内核（builtin/shadow 判别）本就无面板入口，配置项 editorKernel 与工具已一并移除，
+  //      判别恒为 detectEditorKernel 自动探测：config.json 里手写该键不会生效（buildConfig 不再
+  //      读取它，且会在下次保存时被抹掉）。探测失准时的纠正手段只剩调整工具描述；
+  //   ② 它们构成自我提权面 —— AI 可主动请求放宽约束自己的规则，而弹窗看起来只是普通
+  //      工具调用，不会告诉用户「这是 AI 在请求放宽约束」；用户在现场勾「允许此项」时
+  //      信息量完全不同，两者却共用同一个弹窗；
+  //   ③ 成本常驻 —— 9 个工具约 1200 字符描述 + 30 个参数，每轮请求都带，且无 deferLoading
+  //      （而 deferLoading 需要额外的激活通道才可用，平台注释明确「延迟基线工具只能在
+  //      首次被 addition 之后才可见」，不是低成本方案）；
+  //   ④ 无使用证据 —— 中英文 README 均未提及，实测决策记录零调用。
+  // 保留 perm_status：只读、不改配置（下发内容含例外 reason/note 与绝对路径，属既有设计，
+  // 且代码注释与面板文案均已声明 note 不是保密字段），提供 UI 给不了的对话价值（AI 能回答
+  // 「为什么这次被拦」「现在是什么配置」）。
+  perm_status: 'allow',
   // cordis_run 在宿主进程里执行代码、stop/undefine 管理（可移除）动态插件 —— 同属元操作，一律先问
   cordis_run: 'ask', cordis_stop: 'ask', cordis_undefine: 'ask',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
 const QUICK_PRESET = Object.keys(QUICK_DEFAULTS)
+// 已移除的权限写工具名：旧配置里可能残留它们的 quickTools 键（1.5.1–1.5.8 的 freshConfig
+// 会把当时 QUICK_DEFAULTS 的每个键都 seed 进配置并落盘），加载时按名单丢弃，理由：
+//   · 这些工具已不再注册，残留键永远命不中，却会继续占用每次 decide 的键扫描，
+//     并在设置页渲染成没有用途说明的孤儿行（对应 i18n 标签已随工具删除）；
+//   · 更关键的是 fail-open 隐患：残留的 { action: 'allow' } 优先级高于预设默认，
+//     一旦将来重新引入同名写工具，它会在不弹窗的情况下被静默放行（即 issue #3 那条老路）。
+// 只按这份精确名单删，不做「未知键一律清理」——用户手填的自定义工具名必须保留。
+const REMOVED_WRITE_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set_editor_kernel',
+  'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule',
+  'perm_remove_rule', 'perm_reload']
+const REMOVED_WRITE_TOOL_SET = new Set(REMOVED_WRITE_TOOLS)
 // eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
@@ -74,8 +97,8 @@ const DECODE_ENCODING_TOOLS = { read: 1 }
 // str_replace_editor 的内核：DSH 内置（官方语义，insert_line 0 基、插到该行之后）
 // 或 dsh-better-edit 的同名 shadow 覆盖（1 基、插到该行之前）。两者语义相反，
 // 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
-const EDITOR_KERNELS = ['auto', 'builtin', 'shadow']
-const EDITOR_KERNEL_VALUES = ['auto', 'builtin', 'shadow', 'inherit']
+// 判别**只由 detectEditorKernel 自动探测**：原先还支持配置项 editorKernel 人工指定
+// （auto/builtin/shadow），但那个设置只有 AI 工具能写、无面板入口，已随权限写工具一并移除。
 
 // str_replace_editor 命令名提取统一：isFileWrite/isFileRead 与各预览分支共用同一解析口径，
 // 避免命令字符串解析在多处独立演化（create 等命令的判定曾在两处各写一份）
@@ -676,14 +699,14 @@ export default {
     }
 
     function freshConfig() {
-      const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask', editorKernel: 'auto' }
+      const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask' }
       for (const c of CATS) g[c] = freshCategory(c, false)
       for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = { action: QUICK_DEFAULTS[k] }
       return { global: g, projects: {} }
     }
 
     function freshProject() {
-      const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit', editorKernel: 'inherit' }
+      const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit' }
       for (const c of CATS) pb[c] = freshCategory(c, true)
       return pb
     }
@@ -765,6 +788,9 @@ export default {
       const out = {}
       if (!q || typeof q !== 'object') return out
       for (const k of Object.keys(q)) {
+        // 已移除的权限写工具：丢弃残留键（理由见 REMOVED_WRITE_TOOLS 处注释）。
+        // 只删这份精确名单，用户手填的自定义工具名不受影响。
+        if (REMOVED_WRITE_TOOL_SET.has(k)) continue
         const e = normalizeQuickEntry(q[k])
         if (e) out[k] = e
       }
@@ -785,7 +811,7 @@ export default {
     function buildConfig(parsed) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
       const gFb = MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask'
-      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb, editorKernel: EDITOR_KERNELS.indexOf(g.editorKernel) !== -1 ? g.editorKernel : 'auto' }
+      const global = { quickTools: normalizeQuick(g.quickTools), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
       // 兜底拒绝原因：与分类同口径，只在 deny 时保留
       if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
@@ -794,7 +820,7 @@ export default {
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
         const pFb = ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit'
-        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb, editorKernel: EDITOR_KERNEL_VALUES.indexOf(p.editorKernel) !== -1 ? p.editorKernel : 'inherit' }
+        const pb = { quickTools: normalizeQuick(p.quickTools), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
         if (pFb === 'deny') { const t = normalizeText(p.fallbackReason); if (t) pb.fallbackReason = t }
         for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
         projects[key] = pb
@@ -1337,10 +1363,10 @@ export default {
       return config.projects[k]
     }
 
-    // 分类默认值写入单点（面板路由与 perm_set_category 共用）。
+    // 分类默认值写入单点（设置页面板路由专用）。
     // reason 是「拒绝原因」：只在 mode=deny 时有意义，切成别的动作时一并清掉——
     // 否则配置里会留着一条对当前动作无效的僵尸文字，面板再切回 deny 时又冒出来，看着像没保存成功。
-    // 但「没传 reason」不等于「要清掉」：perm_set_category 与 HTTP 直连可能只想重设动作或确认当前值，
+    // 但「没传 reason」不等于「要清掉」：面板与 HTTP 直连可能只想重设动作或确认当前值，
     // 一律删除会让用户写好的原因在一次无关写入后静默消失。故 reason 的三种语义分开：
     //   未提供（undefined）—— 保留原值；空串/纯空白 —— 显式清除；有内容 —— 覆盖。
     function setCategoryMode(root, targetKey, cat, mode, reason) {
@@ -1357,7 +1383,7 @@ export default {
       return true
     }
 
-    // 快捷工具写入单点（面板路由、perm_set_quick 与弹窗「记住此决定」共用）。
+    // 快捷工具写入单点（设置页面板路由与弹窗「记住此决定」共用）。
     // action=inherit 表示删除该键（回落到下一级：全局键 → 预设默认 → 兜底）。
     // reason 语义与 setCategoryMode 一致：未提供（undefined）保留该键原有原因、空串显式清除、有内容覆盖。
     function setQuickAction(root, targetKey, tool, action, reason) {
@@ -1379,15 +1405,6 @@ export default {
     function firstEffective(projVal, globalVal, def) {
       if (projVal && projVal !== 'inherit') return projVal
       return globalVal || def
-    }
-
-    // 编辑器内核判别：str_replace_editor 可能被 dsh-better-edit 的同名 shadow 实现覆盖，
-    // 两者 insert 的 insert_line 语义相反（内置 0 基、插到该行之后 / shadow 1 基、插到该行之前），
-    // 预览必须按实际生效的那个算，否则会把插入位置画到错误的地方。
-    // 判别顺序：显式配置 > 工具描述探测 > 回退内置（内置始终存在）。
-    function editorKernelSetting(root) {
-      const proj = projectBlock(root)
-      return firstEffective(proj && proj.editorKernel, config.global.editorKernel, 'auto')
     }
 
     // str_replace_editor 工具定义的文字描述（顶层 + 相关参数）：内核判别与 undo_edit 判别共用
@@ -1455,20 +1472,14 @@ export default {
       return isPreviewableFileTool(name, args, sreUndoWrites(exec))
     }
 
+    // 内核判别恒为自动探测：不再接受人工指定（原 editorKernel 配置项与 perm_set_editor_kernel
+    // 工具已移除 —— 那个设置只有 AI 能写、无面板入口，无人使用）。
+    // root 参数保留：调用点统一按「函数收显式 root」的约定传参（见 regressions 的根参数守卫），
+    // 且将来若要恢复项目级覆盖，签名不必再改。
     function resolveEditorKernel(exec, root) {
-      const setting = editorKernelSetting(root)
-      if (setting === 'builtin' || setting === 'shadow') return { kernel: setting, source: 'config' }
       const detected = detectEditorKernel(exec)
       if (detected) return { kernel: detected, source: 'detected' }
       return { kernel: 'builtin', source: 'fallback' }
-    }
-
-    function setEditorKernel(root, targetKey, mode) {
-      const allowed = targetKey === 'global' ? EDITOR_KERNELS : EDITOR_KERNEL_VALUES
-      if (allowed.indexOf(mode) === -1) return false
-      const block = targetKey === 'global' ? config.global : ensureProject(root)
-      block.editorKernel = mode
-      return true
     }
 
     // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）。
@@ -3056,9 +3067,12 @@ export default {
         return ''
       }
       // 注意：perm_* 曾在此被无条件放行，等于给 AI 留了一条「自我提权且无弹窗」的后门
-      // （perm_set_category / perm_set_fallback / perm_add_exception … 改动即生效）。
-      // 现在不再特判，统一走下面的正常判定链（自定义规则 → 分类 → 快捷工具 → 兜底），
+      // （当时 perm_set_category / perm_set_fallback / perm_add_exception … 改动即生效）。
+      // 后来改为不再特判、统一走下面的正常判定链（自定义规则 → 分类 → 快捷工具 → 兜底），
       // 其默认动作由 QUICK_DEFAULTS 钉成 ask；设置面板走 /permgate/* HTTP 路由、不经这里，不受影响。
+      // 现在那 9 个写工具已整体移除（理由见 QUICK_DEFAULTS 处注释），只剩只读的 perm_status
+      // （QUICK_DEFAULTS 钉为 allow）；这条注释保留为历史记录 —— 若将来重新引入权限写工具，
+      // 必须回到「不特判、由 QUICK_DEFAULTS 钉动作」的做法，绝不能在此无条件放行。
       if (sessionPresetName(exec) !== 'custom-review') {
         return { action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null }
       }
@@ -3633,7 +3647,7 @@ export default {
       }
     }
 
-    // 例外删除单点（/permgate/remove-exception 路由与 perm_remove_exception 工具共用）：
+    // 例外删除单点（/permgate/remove-exception 路由专用）：
     // 判定只取数组首个匹配，故同一 path 上可能并存方向相反的多条（最新在前生效）。
     // 删除严格按 id：只删用户点的那一行。同值同向的其它条目（方向交替写入可能累积）留给用户
     // 自行逐条清理，否则删一条历史行会连带删掉正在生效的那条，权限会静默变化。
@@ -4048,7 +4062,7 @@ export default {
         stats,
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
         cats: CATS,
-        editorKernel: { setting: editorKernelSetting(root), ...resolveEditorKernel(exec, root) },
+        editorKernel: resolveEditorKernel(exec, root),
         fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
         excCats: EXC_CATS,
         modes: MODES,
@@ -4301,13 +4315,6 @@ export default {
           await persist(exec)
           return json(res, statusView(exec))
         }
-        if (pathname === '/permgate/set-editor-kernel' && method === 'POST') {
-          await init(exec)
-          const target = normTarget(a)
-          if (!setEditorKernel(rootOf(exec), target, a.mode)) return json(res, { error: '非法内核参数: target=' + target + ' mode=' + a.mode })
-          await persist(exec)
-          return json(res, statusView(exec))
-        }
         if (pathname === '/permgate/set-categories' && method === 'POST') {
           await init(exec)
           for (const t of ['global', 'project']) {
@@ -4464,15 +4471,6 @@ export default {
     function registerTool(definition) {
       onDispose(ctx.tools.register(defineTool(definition)))
     }
-    // ── 工具注册 ────────────────────────────────────────────────────────────────
-
-    function renderer() {
-      return function (_a, v) { return [{ type: 'text', text: JSON.stringify(v, null, 2) }] }
-    }
-
-    function registerTool(definition) {
-      onDispose(ctx.tools.register(defineTool(definition)))
-    }
 
     registerTool({
       name: 'perm_status',
@@ -4480,175 +4478,6 @@ export default {
       parameters: {},
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(_args, exec) { await init(exec); return statusView(exec) },
-    })
-
-    registerTool({
-      name: 'perm_set_category',
-      description: '设置一个权限分类的默认动作。分类: directory=目录访问(工作区外), command=执行命令, read=读取文件, image=读取图片, edit=编辑文件, undo=撤销操作(恢复上次编辑前的内容), subagent=启动子代理, doomloop=重复操作。动作: ask=询问, allow=允许, deny=拒绝; 项目(target=project)还支持 inherit=继承全局。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: CATEGORY_ENUM },
-        mode: { type: 'string', required: true, enum: ['ask', 'allow', 'deny', 'inherit'], description: '目标动作；inherit 仅适用于项目' },
-        reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：该分类被拒时回给 AI（为什么被拒、该怎么改）' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (CATS.indexOf(args.category) === -1) return { error: '未知分类: ' + args.category }
-        if (!setCategoryMode(rootOf(exec), args.target, args.category, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
-        await persist(exec)
-        return statusView(exec)
-      },
-    })
-
-    registerTool({
-      name: 'perm_set_fallback',
-      description: '设置「未匹配任何规则」时的兜底动作（默认 ask=询问）：ask=每个未匹配的调用都弹审批；allow=直接放行；deny=直接拒绝。directory/command/read/image/edit/undo/subagent/doomloop 之外的所有工具调用都归兜底策略。项目(target=project)还支持 inherit=继承全局。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        mode: { type: 'string', required: true, enum: ALL_MODES, description: '兜底动作；inherit 仅适用于项目' },
-        reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：被兜底拒绝时回给 AI（为什么被拒、该怎么改）' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (!setFallbackMode(rootOf(exec), args.target, args.mode, args.reason)) return { error: '非法的 target/mode 组合' }
-        await persist(exec)
-        return statusView(exec)
-      },
-    })
-
-    registerTool({
-      name: 'perm_set_editor_kernel',
-      description: '设置 str_replace_editor 的内核（默认 auto=自动判别）：auto=按当前实际注册的工具描述判别；builtin=DSH 内置（官方语义，insert_line 0 基、插入到该行之后）；shadow=dsh-better-edit 的覆盖实现（insert_line 1 基、插入到该行之前）。两者 insert 的 insert_line 语义相反，判别错误会让审批弹窗展示错误位置的改动。项目(target=project)还支持 inherit=继承全局。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        mode: { type: 'string', required: true, enum: EDITOR_KERNEL_VALUES, description: '内核判别方式；inherit 仅适用于项目' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (!setEditorKernel(rootOf(exec), args.target, args.mode)) return { error: '非法的 target/mode 组合' }
-        await persist(exec)
-        return statusView(exec)
-      },
-    })
-
-    registerTool({
-      name: 'perm_add_exception',
-      description: '给分类添加一条例外。directory/read/image/edit/undo 分类用 path(路径 glob，支持 * 与 ** 通配，如 G:/MCP/**、**/*.env)；command 分类用 match(命令名或子串，支持 * 通配任意剩余，如 Get-Item * / git status)。例外优先于分类默认动作；action: allow=命中即放行，ask=命中即弹审批，deny=命中即拒绝。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
-        match: { type: 'string', required: true, description: '路径 glob 或命令名/子串（* 匹配任意剩余）' },
-        action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny'], description: '命中例外后的动作' },
-        reason: { type: 'string', description: '拒绝原因，仅 deny 例外生效：拒绝时会回给 AI（为什么被拒、该怎么改）' },
-        note: { type: 'string', description: '备注，仅 ask 例外生效：命中时显示在审批弹窗上，方便日后回看当初为什么特意拦它。注意这是给人看的备注、不是保密字段，请勿写入敏感信息' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (EXC_CATS.indexOf(args.category) === -1) return { error: '该分类不支持例外' }
-        if (!args.match || !String(args.match)) return { error: 'match 不能为空' }
-        const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: args.action, reason: args.reason, note: args.note, path: args.category === 'command' ? undefined : args.match, match: args.category === 'command' ? args.match : undefined }, args.category)
-        if (!e) return { error: '非法的例外参数' }
-        // 与面板路由共用同一写入点：同方向不重复、新决定插到数组头部，避免被历史条目遮蔽。
-        const written = addProjectException(args.category, args.category === 'command' ? 'command' : 'path', args.match, args.action, rootOf(exec), { target: args.target, reason: args.reason, note: args.note })
-        if (!written) return { error: '例外未写入：分类/参数不支持' }
-        await persist(exec)
-        return { added: written, status: statusView(exec) }
-      },
-    })
-
-    registerTool({
-      name: 'perm_remove_exception',
-      description: '按 id 删除一条分类例外(id 见 perm_status 返回的 exceptions 或 perm_add_exception 返回)。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        category: { type: 'string', required: true, enum: EXC_CATEGORY_ENUM },
-        id: { type: 'string', required: true },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
-        const del = removeExceptionEntries(block, args.category, args.id)
-        if (!del.removed) return { removed: false, reason: del.reason, status: statusView(exec) }
-        await persist(exec)
-        return { removed: true, exception: del.exception, removedCount: del.count, remaining: del.remaining, status: statusView(exec) }
-      },
-    })
-
-    registerTool({
-      name: 'perm_set_quick',
-      description: '设置快捷工具默认动作(如 web_search/skill/grep/glob 等)。action=inherit 表示移除该项目覆盖(继承全局)。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        tool: { type: 'string', required: true, description: '工具名，支持通配如 cordis_*' },
-        action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny', 'inherit'], description: '动作；inherit 移除' },
-        reason: { type: 'string', description: '拒绝原因，仅 action=deny 生效：该工具被拒时回给 AI（为什么被拒、该怎么改）' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (!args.tool || !String(args.tool)) return { error: 'tool 不能为空' }
-        if (!setQuickAction(rootOf(exec), args.target, args.tool, args.action, args.reason)) return { error: '非法动作' }
-        await persist(exec)
-        return statusView(exec)
-      },
-    })
-
-    registerTool({
-      name: 'perm_add_rule',
-      description: '新增一条自定义规则(通用匹配)。匹配器至少提供一个：tool=按工具名匹配(支持 * 与 ? 通配，如 cordis_*)；path=匹配调用参数里任意路径字符串(glob)；args=匹配序列化参数里的子串(如 rm -rf)。action: allow=放行，ask=弹审批，deny=拒绝。项目规则优先于全局规则。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'], description: '规则放在全局还是当前项目' },
-        action: { type: 'string', required: true, enum: ['allow', 'ask', 'deny'], description: '命中后的动作' },
-        tool: { type: 'string', description: '工具名通配，如 cordis_*' },
-        path: { type: 'string', description: '路径 glob，匹配参数中的路径字符串' },
-        args: { type: 'string', description: '参数子串，匹配序列化后的参数' },
-        reason: { type: 'string', description: '命中时展示的原因' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        if (!args.tool && !args.path && !args.args) return { error: '至少提供 tool/path/args 之一' }
-        const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: args.action, tool: args.tool, path: args.path, args: args.args, reason: args.reason })
-        if (!rule) return { error: '非法的规则参数' }
-        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
-        if (!block.custom) block.custom = []
-        block.custom.push(rule)
-        await persist(exec)
-        return { added: rule, status: statusView(exec) }
-      },
-    })
-
-    registerTool({
-      name: 'perm_remove_rule',
-      description: '按 id 删除一条自定义规则(id 见 perm_status 或 perm_add_rule 的返回)。',
-      parameters: {
-        target: { type: 'string', required: true, enum: ['global', 'project'] },
-        id: { type: 'string', required: true, description: '要删除的规则 id' },
-      },
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(args, exec) {
-        await init(exec)
-        const block = args.target === 'project' ? ensureProject(rootOf(exec)) : config.global
-        const list = block.custom || []
-        const idx = list.findIndex((r) => r.id === args.id)
-        if (idx === -1) return { removed: false, reason: '未找到 id=' + args.id, status: statusView(exec) }
-        const removed = list.splice(idx, 1)[0]
-        await persist(exec)
-        return { removed: true, rule: removed, status: statusView(exec) }
-      },
-    })
-
-    registerTool({
-      name: 'perm_reload',
-      description: '从磁盘重新加载权限配置文件(手动编辑后调用)。',
-      parameters: {},
-      output: { schema: { type: 'json' }, render: renderer() },
-      async execute(_args, exec) { await load(exec); return statusView(exec) },
     })
 
     // 新会话默认权限修正已交由 dsh-permission-presets 0.1.2 原生处理：其在

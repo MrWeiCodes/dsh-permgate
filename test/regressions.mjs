@@ -30,7 +30,7 @@ try {
     'pathJoin', 'pathResolve', 'pathIsAbsolute',
     'fsExistsSync', 'fsReadFileSync', 'fsReaddirSync', 'fsUnlinkSync', 'fsLstatSync', 'fsRealpathSync',
     'osHomedir', 'process', 'console',
-    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, CATEGORY_ENUM, EXC_CATEGORY_ENUM, EDITOR_KERNELS, EDITOR_KERNEL_VALUES, DIFF_MAX_CHARS, readPreviewText, getFsEncodingService, FS_ENCODING_SERVICE };'
+    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, DIFF_MAX_CHARS, readPreviewText, getFsEncodingService, FS_ENCODING_SERVICE };'
   )(
     pathJoin, pathResolve, pathIsAbsolute,
     fsExistsSync, fsReadFileSync, fsReaddirSync, fsUnlinkSync, fsLstatSync, fsRealpathSync,
@@ -46,8 +46,10 @@ if (mod) {
   ok('overMaxChars 超限为真', mod.overMaxChars('a'.repeat(1048576), 'b') === true)
   ok('readFail 形状', mod.readFail(new Error('x')).zh === '读取失败: x' && mod.readFail('y').en === 'Read failed: y')
   ok('normLang 归一化', mod.normLang('en') === 'en' && mod.normLang('jp') === 'zh')
-  ok('CATEGORY_ENUM 与 CATS 一致', JSON.stringify(mod.CATEGORY_ENUM) === JSON.stringify(mod.CATS) && mod.CATS.indexOf('undo') !== -1)
-  ok('EXC_CATEGORY_ENUM 与 EXC_CATS 一致', JSON.stringify(mod.EXC_CATEGORY_ENUM) === JSON.stringify(mod.EXC_CATS))
+  // CATEGORY_ENUM / EXC_CATEGORY_ENUM 已随权限写工具移除（它们原本只是工具 schema 的 enum 来源，
+  // 且旧断言是恒真式：常量定义为 CATS.slice()，与自己比较必然相等）。这里直接守住两份清单本身。
+  ok('CATS 含全部八个分类且 undo 在内', mod.CATS.length === 8 && mod.CATS.indexOf('undo') !== -1 && mod.CATS.indexOf('doomloop') !== -1)
+  ok('EXC_CATS 是可挂例外的六个分类（不含 subagent/doomloop）', JSON.stringify(mod.EXC_CATS) === JSON.stringify(['directory', 'command', 'read', 'image', 'edit', 'undo']))
   ok('fileTooLarge 用参数而非闭包常量', mod.fileTooLarge({ size: 2000000 }, mod.DIFF_MAX_CHARS) === true && mod.fileTooLarge({ size: 10 }, mod.DIFF_MAX_CHARS) === false)
 }
 
@@ -110,7 +112,7 @@ ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id�
   ok('快照形状不认识时返回 undefined（不冒充有会话）',
     api2.pgCurrentSessionId({ phase: 'ready' }) === undefined && api2.pgCurrentSessionId(undefined) === undefined)
 }
-ok('normTarget 定义 + 五个设置路由统一使用（含 set-category / set-quick）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 5)
+ok('normTarget 定义 + 四个设置路由统一使用（含 set-category / set-quick）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 4)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
 // ─────────────────────────────────────────────────────────────
@@ -152,7 +154,54 @@ ok('无 osHomedir 恒真三元', !src.includes('osHomedir ? osHomedir()'))
 ok('内核兜底不做探测', src.includes("const kernel = entry.editorKernel || 'builtin'") && !src.includes('resolveEditorKernel(null)'))
 ok('detectEditorKernel 读 properties 层', src.includes('const props = params && params.properties && typeof params.properties') && !src.includes('params && params.insert_line && typeof params.insert_line.description'))
 ok('无未使用的 editTuple 绑定', !/for \(const i of g\.indices\) \{\r?\n\s+const r = editRanges\[i\]\r?\n\s+const raw = args\.edits\[i\]\r?\n\s+const e = editTuple\(raw\)/.test(src))
-ok('schema enum 用常量', src.includes("enum: ALL_MODES, description: '兜底动作") && src.includes("enum: EDITOR_KERNEL_VALUES, description: '内核判别方式"))
+// perm_set_fallback / perm_set_editor_kernel 的 schema enum 曾是非法值的真实闸门。
+// 工具移除后：兜底动作的拦截转由写入单点承担（路由调它，返回值 falsy 即回 { error }；
+// 注意 json() 未传 status，HTTP 层仍是 200，客户端按 error 字段判定失败）；
+// 编辑器内核则连人工指定一起删了（见下方第二条断言）。
+// 断言必须锚定 setter **函数体内**的守卫原文：只查全局子串会空转——MODES : ALL_MODES 在
+// setCategoryMode 里也有一份，删掉 setFallbackMode 的校验后它仍然存在（实测变异漏网）。
+ok('设置页路由对兜底动作做白名单校验', (function () {
+  const i = src.indexOf('function setFallbackMode(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  return src.includes("if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason)) return json(res, { error: '非法兜底参数")
+    && body.includes("const allowed = targetKey === 'global' ? MODES : ALL_MODES")
+    && body.includes('if (allowed.indexOf(mode) === -1) return false')
+})())
+// 编辑器内核：人工指定（配置项 editorKernel + 写入单点 + 路由）已彻底移除，
+// 判别恒为 detectEditorKernel 自动探测。
+// 名字黑名单只能拦「逐字恢复旧代码」：换个名字（如 kernelOverride + source:'manual'）
+// 重新引入等价能力即可全部绕过（实测漏网）。故下面按**行为形状**再钉一条：
+// resolveEditorKernel 函数体内不得出现任何配置读取——它一旦读配置，就说明人工指定又回来了。
+ok('编辑器内核已无人工指定通道（配置项/单点/路由均已移除）',
+  !src.includes('editorKernelSetting') && !src.includes('setEditorKernel')
+  && !src.includes('EDITOR_KERNELS') && !src.includes('EDITOR_KERNEL_VALUES')
+  && !src.includes("pathname === '/permgate/set-editor-kernel'")
+  && !src.includes('block.editorKernel = '))
+ok('内核判别函数不读配置（人工指定换名复活也会被拦住）', (function () {
+  const i = src.indexOf('function resolveEditorKernel(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  // 不得读全局/项目配置，也不得经 firstEffective/projectBlock 间接取值
+  return !/config\.|projectBlock\(|firstEffective\(/.test(body)
+})())
+ok('内核判别仍为自动探测（detectEditorKernel 是唯一来源）',
+  src.includes('function detectEditorKernel(exec) {')
+  && src.includes('const detected = detectEditorKernel(exec)')
+  && src.includes("if (detected) return { kernel: detected, source: 'detected' }")
+  && src.includes("return { kernel: 'builtin', source: 'fallback' }")
+  && !src.includes("source: 'config'"))
 ok('store 回退只取主键列', src.includes("const keys = db.prepare('SELECT path FROM ' + table).all()"))
 ok('无遗留 projectsOnlyFromConfig/mergeMigratedConfig', !src.includes('projectsOnlyFromConfig') && !src.includes('mergeMigratedConfig'))
 
@@ -896,7 +945,8 @@ ok('「整个目录」同时写目录闸与自身分类的 glob', src.includes("
 ok('缩略图有像素/边长上限（16MP / 4096），尺寸未知时一律不内联', src.includes('const IMAGE_MAX_PIXELS = 16 * 1000 * 1000') && src.includes('const IMAGE_MAX_DIM = 4096') && src.includes('const pixelOver = !!(sizeKnown && (') && src.includes('if (!sizeKnown) { out.sizeUnknown = true; return out }'))
 ok('拒绝候选不落 directory 例外（单点过滤，候选与旧形态共用）', src.includes('const writeException = (cat, kind, value, decision)') && src.includes("if (decision === 'deny' && cat === 'directory') return") && (src.match(/writeException\(/g) || []).length === 2 && !src.includes("w.cat === 'directory') continue"))
 ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => r\.match === value && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value, rootKey) })') && src.includes('const item = build({ match: value })'))
-ok('面板与工具写入统一走 addProjectException（不再尾部 push）', (src.match(/addProjectException\(a\.category|addProjectException\(args\.category/g) || []).length === 2 && !src.includes('block[a.category].exceptions.push(e)') && !src.includes('block[args.category].exceptions.push(e)'))
+// 原本计数为 2（面板路由 + perm_add_exception 工具）；工具移除后只剩面板路由这一处
+ok('例外写入统一走 addProjectException（不再尾部 push）', (src.match(/addProjectException\(a\.category|addProjectException\(args\.category/g) || []).length === 1 && !src.includes('block[a.category].exceptions.push(e)') && !src.includes('block[args.category].exceptions.push(e)'))
 ok('含通配符/.. 的原文不生成目录 glob 候选（守卫作用于原始值）', src.includes('const hasParentSeg =') && src.includes('const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)'))
 ok('预算内图片只读一次盘（嗅探与内联共用缓冲）', src.includes('whole = await fsService.readBytes(target, undefined, IMAGE_MAX_BYTES)') && src.includes('const bytes = whole || await fsService.readBytes'))
 ok('写入缺省作用域与删除侧一致（缺省全局，候选显式项目块）', src.includes("const target = o.target === 'project' ? 'project' : 'global'") && src.includes("addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })") && !src.includes('function addProjectRule'))
@@ -917,7 +967,8 @@ ok('read/image 详情复用预检单点且跳过体积闸', (src.match(/skipSize
 ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)') && src.includes('return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: \'directory\', kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat, root))') && src.includes('const hasGlobMeta = (p) =>'))
 ok('旧形态 rules 按 value 反查候选复用 writes', src.includes('const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))'))
 // 防回退：例外删除必须是单点且严格按 id 删除，并回传同路径剩余条目数供 UI 提示
-ok('例外删除严格按 id 并回传 remaining', src.includes('function removeExceptionEntries(block, catKey, id)') && (src.match(/removeExceptionEntries\(block, (a|args)\.category/g) || []).length === 2 && src.includes('const kept = c.exceptions.filter((r) => r.id !== id)') && src.includes('return { removed: true, count, remaining, exception: target }') && !src.includes('const kept = c.exceptions.filter((r) => !(r[key] === value'))
+// 原本计数为 2（面板路由 + perm_remove_exception 工具）；工具移除后只剩面板路由
+ok('例外删除严格按 id 并回传 remaining', src.includes('function removeExceptionEntries(block, catKey, id)') && (src.match(/removeExceptionEntries\(block, (a|args)\.category/g) || []).length === 1 && src.includes('const kept = c.exceptions.filter((r) => r.id !== id)') && src.includes('return { removed: true, count, remaining, exception: target }') && !src.includes('const kept = c.exceptions.filter((r) => !(r[key] === value'))
 ok('图片 base64 用视图避免整份字节拷贝', src.includes('Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)'))
 ok('两条候选主文案是纯路径、范围各走 hint（目录 / 文件）', src.includes("push(glob, glob, 'path',") && src.includes("push(fileVal, fileVal, 'path',") && src.includes("工作区外访问目录 + ") && src.includes("工作区外访问文件 + ") && !src.includes("'整个目录：'") && !src.includes("'仅此文件：'"))
 ok('dirGlob 盘根直接拼 /*（不再产生匹配不到的 G://*）', src.includes("if (/^[a-zA-Z]:$/.test(dir)) return dir + '/*'") && !src.includes("if (/^[a-zA-Z]:$/.test(dir)) dir += '/'") )
@@ -929,14 +980,29 @@ ok('choice 路径不再套用候选的 deny-directory 过滤', !src.includes("if
 group('11. 权限元操作纳入管控（issue #3：perm_* 曾无条件放行）')
 ok('decide 不再硬编码放行 perm_*', !src.includes("name.indexOf('perm_') === 0) {") && !src.includes('permgate management tool, always allowed'))
 {
-  // 少一个都会让「AI 自我提权」重新变成静默操作，故按清单整体校验
-  const ASK_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set_editor_kernel', 'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule', 'perm_remove_rule', 'perm_reload', 'cordis_run', 'cordis_stop', 'cordis_undefine']
+  // 9 个权限写工具已整体移除（理由见 QUICK_DEFAULTS 处注释：与设置页 UI 一一重复、
+  // 构成自我提权面、token 常驻、无使用证据）。这里反向守住「不许重新引入」：
+  // 一旦有人再加回写工具，必须同时把它们钉进 QUICK_DEFAULTS 的 ask 清单，
+  // 否则就是退回 issue #3 那条「AI 可静默改自己权限」的老路。
+  const REMOVED_WRITE_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set_editor_kernel', 'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule', 'perm_remove_rule', 'perm_reload']
+  const resurrected = REMOVED_WRITE_TOOLS.filter((t) => new RegExp("name: '" + t + "'").test(src))
+  ok('★ 9 个权限写工具已移除（未复活）', resurrected.length === 0, JSON.stringify(resurrected))
+  ok('★ 全仓只剩 perm_status 一个 perm_* 工具注册',
+    (src.match(/name: 'perm_\w+'/g) || []).length === 1 && src.includes("name: 'perm_status'"))
+  // 其余元操作（管插件）仍必须纳入管控
+  const ASK_TOOLS = ['cordis_run', 'cordis_stop', 'cordis_undefine']
   const missing = ASK_TOOLS.filter((t) => !new RegExp('\\b' + t + ": 'ask'").test(src))
-  ok('改权限/管插件的元操作全部纳入快捷预设且默认 ask', missing.length === 0, JSON.stringify(missing))
+  ok('管插件的元操作仍纳入快捷预设且默认 ask', missing.length === 0, JSON.stringify(missing))
   // perm_status 只读查询：明确放宽为 allow，防止被顺手改回 ask
   ok('perm_status 默认 allow（只读查询不弹窗）', src.includes("perm_status: 'allow'"))
+  // 写工具的快捷预设项与 i18n 标签都必须一并清掉，不留死键
+  const deadQuick = REMOVED_WRITE_TOOLS.filter((t) => new RegExp('\\b' + t + ": '").test(src))
+  ok('QUICK_DEFAULTS 无残留的写工具键', deadQuick.length === 0, JSON.stringify(deadQuick))
+  const deadI18n = REMOVED_WRITE_TOOLS.filter((t) => cli.includes("'quick." + t + "'"))
+  ok('客户端无残留的写工具用途标签（中英）', deadI18n.length === 0, JSON.stringify(deadI18n))
+  ok('perm_status 的用途标签保留（中英）',
+    cli.includes("'quick.perm_status': '查看权限状态'") && cli.includes("'quick.perm_status': 'view permission status'"))
 }
-ok('面板为新工具补了用途说明（中英）', cli.includes("'quick.perm_add_exception': '添加例外'") && cli.includes("'quick.cordis_run': '运行动态插件'") && cli.includes("'quick.perm_add_exception': 'add an exception'"))
 
 // ─────────────────────────────────────────────────────────────
 group('12. 审批弹窗候选文案与路径口径')
@@ -1043,8 +1109,29 @@ ok('例外添加行不再用全局单值状态（exAction / exReasonVal / exNote
 // 防回退：添加成功后只清本分类那一行——清全部会把别的分类填了一半的内容一并抹掉
 ok('添加例外后只清本分类的添加行', cli.includes('setExVals(Object.assign({}, exVals, { [c]: \'\' }));') && cli.includes('setExField(c, { reason: \'\', note: \'\' });'))
 ok('例外列表把 reason 与 note 分开显示（拒绝红 / 备注灰）', cli.includes("r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny") && cli.includes("r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)'"))
-ok('perm_add_exception 的 action 枚举含 ask（工具与文档同口径）', src.includes("action: { type: 'string', required: true, enum: ['ask', 'allow', 'deny'], description: '命中例外后的动作' }") && src.includes('ask=命中即弹审批') && !src.includes('例外优先于分类默认动作，仅 allow/deny'))
-ok('perm_add_exception 的 reason/note 参数说明各自讲清用途', src.includes('拒绝原因，仅 deny 例外生效：拒绝时会回给 AI') && src.includes('备注，仅 ask 例外生效：命中时显示在审批弹窗上') && src.includes('不是保密字段'))
+// 工具已移除，故改测「设置页路由 + 客户端文案」这条仍在的通道：
+// reason/note 的语义与文案口径必须继续成立（它们是面板的功能，不是工具的功能）。
+ok('例外 action 三态齐全（ask 是一等动作，面板与文档同口径）',
+  cli.includes("'panel.actionAsk'") && cli.includes("'panel.actionDeny'") && cli.includes("'panel.actionAllow'")
+  && !src.includes('例外优先于分类默认动作，仅 allow/deny'))
+// 原 perm_add_exception 工具级断言（reason/note 参数说明）已随工具删除，这里补上真正对应
+// 那块覆盖的守卫：宿主侧 normalizeException 的「reason 归 deny、note 归 ask」分流必须原样保留。
+// 注意不能只查面板 i18n 键——紧随其后的既有断言已在查同一批键，重复查等于没有新增覆盖。
+ok('例外的 reason/note 按动作各归其位（宿主侧分流原文）', (function () {
+  const i = src.indexOf('function normalizeException(r, key) {')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  return body.includes("if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }")
+    && body.includes("if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }")
+    // deny 不得存 note、ask 不得存 reason（串用会让「拒绝原因」出现在弹窗备注位上）
+    && !/action === 'deny'[\s\S]{0,60}e\.note/.test(body)
+    && !/action === 'ask'[\s\S]{0,60}e\.reason/.test(body)
+})())
 ok('面板文案保持两种用途分开（拒绝原因 vs 备注）', cli.includes("'panel.excReason': '拒绝原因'") && cli.includes("'panel.excNote': '备注'") && cli.includes("'panel.excReasonPh': '选填：会告知 AI 为什么被拒'") && cli.includes("'panel.excNotePh': '选填：命中时显示在弹窗上，勿写敏感信息'"))
 // 防回退：note 是给人看的备注、不是保密字段，注释/文案不得再承诺「AI 看不到」（配置会随 perm_status 下发）；
 // 「给自己看」同样在扫描范围内——它暗示了排他性，与「AI 读得到」的口径冲突，统一改成「方便日后回看」。
@@ -1061,10 +1148,14 @@ ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透�
 ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', src.includes('function fallbackSetting(root) {') && src.includes("if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }") && src.includes("return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }") && src.includes('return fallbackSetting(root).mode'))
 ok('兜底拒绝原因落盘并在切离 deny 时清除', src.includes("if (t) block.fallbackReason = t") && src.includes('else delete block.fallbackReason') && src.includes("if (mode !== 'deny') { delete block.fallbackReason; return true }") && src.includes("if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }"))
 ok('快捷工具改为 { action, reason? } 对象形态，老字符串由单一入口收敛', src.includes('function normalizeQuickEntry(v) {') && src.includes("const raw = typeof v === 'string' ? { action: v } : (v && typeof v === 'object' ? v : null)") && src.includes("if (raw.action === 'deny') { const t = normalizeText(raw.reason); if (t) out.reason = t }"))
-ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 4 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
+// 原本计数为 4（定义 + 弹窗候选 + 面板路由 + perm_set_quick 工具）；工具移除后为 3
+ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 3 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
 ok('quickAction 用取值函数取值，并保留防御性字符串回退（防非对象形态产出非法 action）', src.includes("const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)") && src.includes("const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)") && src.includes("return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]) }"))
 ok('三处 reason 都拼进回给 AI 的拒绝文案', src.includes("const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''") && src.includes("const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''") && src.includes("' 次相同调用' + exReason(d)"))
-ok('perm_set_category / set_fallback / set_quick 都收 reason 参数', src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：该分类被拒时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 mode=deny 生效：被兜底拒绝时回给 AI") && src.includes("reason: { type: 'string', description: '拒绝原因，仅 action=deny 生效：该工具被拒时回给 AI"))
+// 工具已移除；三处默认动作的 reason 仍由面板路由承载，改测面板的输入控件与回填
+ok('分类 / 兜底 / 快捷工具三处都有 reason 输入控件',
+  cli.includes("'panel.denyReason'") && cli.includes("'panel.denyReasonPh'")
+  && cli.includes("'panel.fallbackHint'") && cli.includes("reasonInput("))
 ok('status 下发三处的 reason（面板回填用）', src.includes('globalReason: normalizeText(config.global.fallbackReason) || null') && src.includes('projectReason: normalizeText(proj && proj.fallbackReason) || null'))
 ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/兜底/快捷工具新增行）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {') && (cli.match(/reasonInput\(/g) || []).length === 4)
 // 防回退：快捷工具行的原因输入框必须在动作下拉**之后**——该行工具名 span 有 minWidth 撑出固定
@@ -1159,8 +1250,8 @@ ok('invoke 把 saveError 与 error 同等对待（写盘失败不报「已保存
 })())
 // 防回退：WRITE_METHODS 必须与「面板实际调用的写盘端点」集合一致。
 // 少一个 -> 该端点的假成功漏网；多一个 -> 只读调用被误拦（两者都已实测复现过）。
-// 比对范围限定为**面板调用过的端点**：宿主还有面板已移除入口的写盘路由（如 set-editor-kernel），
-// 那些不该出现在面板清单里（另有断言钉住「client 无 set-editor-kernel 残留」）。
+// 比对范围限定为**面板调用过的端点**：宿主侧可能有面板未提供入口的写盘路由，
+// 那些不该出现在面板清单里（另有断言钉住「client 无此类残留」）。
 ok('WRITE_METHODS 与面板调用的写盘端点一致（不多不少）', (function () {
   const canon = (s) => s.replace(/^\/?permgate[\/:]/, '').replace(/^\/+/, '');
   // 宿主侧：真正调用 persist() 的路由
@@ -2154,8 +2245,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
   // 两类消费函数：① 收 root 值（纯函数，好测）；② 收 exec 后内部 rootOf(exec)（有会话上下文）
   const needsRoot = ['normAbsPath', 'pathKey', 'projectBlock', 'ensureProject', 'resolveCategory',
     'matchException', 'alreadyInProject', 'outsideMatrix', 'quickAction', 'fallbackSetting',
-    'fallbackMode', 'effectiveSandboxConfig', 'editorKernelSetting', 'commandFullyCovered',
-    'setCategoryMode', 'setQuickAction', 'setFallbackMode', 'setEditorKernel', 'setSandboxConfig',
+    'fallbackMode', 'effectiveSandboxConfig', 'commandFullyCovered',
+    'setCategoryMode', 'setQuickAction', 'setFallbackMode', 'setSandboxConfig',
     'resolveEditorKernel', 'projectsFromConfig', 'removeMigratedSource']
   const missingParam = needsRoot.filter((fn) => !new RegExp('function ' + fn + '\\([^)]*\\broot\\b').test(src))
   ok('所有根消费函数都接收显式 root 参数', missingParam.length === 0, JSON.stringify(missingParam))
@@ -2177,8 +2268,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
   const arity = {
     normAbsPath: 2, pathKey: 2, projectBlock: 1, ensureProject: 1, resolveCategory: 4,
     matchException: 4, alreadyInProject: 4, outsideMatrix: 3, quickAction: 2, fallbackSetting: 1,
-    fallbackMode: 1, effectiveSandboxConfig: 1, editorKernelSetting: 1, commandFullyCovered: 2,
-    setCategoryMode: 5, setQuickAction: 5, setFallbackMode: 4, setEditorKernel: 3, setSandboxConfig: 3,
+    fallbackMode: 1, effectiveSandboxConfig: 1, commandFullyCovered: 2,
+    setCategoryMode: 5, setQuickAction: 5, setFallbackMode: 4, setSandboxConfig: 3,
     resolveEditorKernel: 2, cleanupStaleProjects: 1, projectsFromConfig: 2, removeMigratedSource: 2,
     addProjectException: 6,
   }
@@ -2231,7 +2322,7 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     "const fallbackRoot = 'G:/FALLBACK'",
     "let config = { global: {}, projects: {} }",
     "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
-    "function freshProject() { const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit', editorKernel: 'inherit' }; for (const c of CATS) pb[c] = freshCategory(c, true); return pb }",
+    "function freshProject() { const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit' }; for (const c of CATS) pb[c] = freshCategory(c, true); return pb }",
     "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
     sliceFn('rootOf'), sliceFn('normAbsPath'), sliceFn('pathKey'),
     sliceFn('projectBlock'), sliceFn('ensureProject'), sliceFn('addProjectException'),
@@ -2359,7 +2450,9 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     src.includes('function addProjectException(cat, kind, value, decision, root, opts) {')
     && src.includes('const rootKey = root || fallbackRoot')
     && !src.includes('const root = o.root || fallbackRoot')
-    && (src.match(/addProjectException\(/g) || []).length === 6
+    // 原为 6（定义 + 候选两处 + 弹窗路由 + 面板路由 + perm_add_exception 工具）；
+    // 工具移除后为 5
+    && (src.match(/addProjectException\(/g) || []).length === 5
     && !/addProjectException\([^)]*\{[^}]*root:/.test(src))
 
   // 7) 清理失效工作区：必须区分「确认不存在」与「不可达」，且保护集降级时不删

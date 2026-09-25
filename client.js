@@ -1422,15 +1422,6 @@ window.__ModuleLoader__.load({
 				'quick.cordis_inspect_query': '执行只读检视',
 				'quick.cordis_inspect_self': '检视本会话插件',
 				'quick.perm_status': '查看权限状态',
-				'quick.perm_set_category': '改分类默认动作',
-				'quick.perm_set_fallback': '改兜底策略',
-				'quick.perm_set_editor_kernel': '改编辑器内核判别',
-				'quick.perm_add_exception': '添加例外',
-				'quick.perm_remove_exception': '删除例外',
-				'quick.perm_set_quick': '改快捷工具默认',
-				'quick.perm_add_rule': '添加自定义规则',
-				'quick.perm_remove_rule': '删除自定义规则',
-				'quick.perm_reload': '重载配置',
 				'quick.cordis_run': '运行动态插件',
 				'quick.cordis_stop': '停用动态插件',
 				'quick.cordis_undefine': '移除动态插件',
@@ -1616,15 +1607,6 @@ window.__ModuleLoader__.load({
 				'quick.cordis_inspect_query': 'run a read-only inspect query',
 				'quick.cordis_inspect_self': 'inspect session plugins',
 				'quick.perm_status': 'view permission status',
-				'quick.perm_set_category': 'set a category default',
-				'quick.perm_set_fallback': 'set the fallback policy',
-				'quick.perm_set_editor_kernel': 'set editor-kernel detection',
-				'quick.perm_add_exception': 'add an exception',
-				'quick.perm_remove_exception': 'remove an exception',
-				'quick.perm_set_quick': 'set a quick-tool default',
-				'quick.perm_add_rule': 'add a custom rule',
-				'quick.perm_remove_rule': 'remove a custom rule',
-				'quick.perm_reload': 'reload config',
 				'quick.cordis_run': 'run a dynamic plugin',
 				'quick.cordis_stop': 'stop a dynamic plugin',
 				'quick.cordis_undefine': 'remove a dynamic plugin',
@@ -2763,7 +2745,8 @@ window.__ModuleLoader__.load({
 			// 当前正在编辑（尚未保存）的拒绝原因格：{ kind: 'cat'|'quick'|'fb', tab, key }。
 			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
 			// 面板自身的 invoke 回调触发，还由 SSE 的 status/refresh 事件触发——宿主在 init()、
-			// AI 侧 perm_* 写入、配置重载、会话事件时都会 broadcast status。若不保留草稿，
+			// 配置重载、会话事件时都会 broadcast status（原先 AI 侧的 perm_* 写工具也是一路触发源，
+			// 那批工具已整体移除）。若不保留草稿，
 			// 用户「已输入但还没点保存」的文字会被后台推送静默清空。
 			const reasonFocus = React.useRef(null);
 
@@ -2851,7 +2834,8 @@ window.__ModuleLoader__.load({
 					return qr;
 				});
 				// 编辑态收敛：上面三条清理路径（endEdit / exitEditOf / 切 tab）都只在「用户主动操作」
-				// 时触发，而 AI 侧 perm_* 写入、配置重载、删行、换会话都是服务端驱动的，不经过它们——
+				// 时触发，而配置重载、删行、换会话都是服务端驱动的，不经过它们——（AI 侧 perm_* 写入
+				// 也曾是一路服务端驱动源，那批写工具已整体移除）
 				// 编辑态字符串会残留，格子重新出现时就成了「没点编辑却可输入」。故在整表重建后按
 				// **新的** mode 收敛一次：本格若不再渲染输入框（mode 不再是 deny，或键已不存在），
 				// 就一并丢弃编辑态与焦点标记。

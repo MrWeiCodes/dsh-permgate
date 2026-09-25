@@ -110,7 +110,9 @@ mkdirSync(join(dshHome, 'dsh-permgate'), { recursive: true })
 
 const host = createHost({ workspaceRoot: workspace, dshHome })
 group('0. 插件加载与宿主挂载')
-ok('apply 注册了 perm_* 工具', host.registered.size >= 8, 'registered=' + host.registered.size)
+// 9 个权限写工具已移除，现在只注册 perm_status 一个
+ok('apply 只注册 perm_status（其余 perm_* 写工具已移除）',
+  host.registered.size === 1 && host.registered.has('perm_status'), 'registered=' + host.registered.size + ' [' + [...host.registered.keys()].join(',') + ']')
 ok('apply 注册了 /permgate 路由', host.routes.length >= 1 && host.routes[0].path === '/permgate')
 ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-execute') === 'function')
 
@@ -275,9 +277,9 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
   ok('global 未被工作区文件采纳（fallbackMode 不是 allow）', !!(parsed && parsed.global && parsed.global.fallbackMode !== 'allow'), parsed && parsed.global && parsed.global.fallbackMode)
   ok('迁移成功后源文件被删除', !existsSync(residual))
 
-  const setCat = host2.registered.get('perm_set_category')
-  const saved = await setCat.execute({ target: 'global', category: 'edit', mode: 'deny' }, makeExec(ws2, 'perm_set_category', {}))
-  ok('perm_set_category 返回 status', !!(saved && saved.configPath))
+  // 权限写工具已整体移除，改用设置页路由（同一写入单点、同一持久化路径）
+  const saved = await callRoute(host2.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'edit', mode: 'deny' })
+  ok('set-category 返回 status', !!(saved && saved.data && saved.data.configPath))
   let parsed2 = null
   try { parsed2 = JSON.parse(readFileSync(homeCfg, 'utf8')) } catch (e) {}
   ok('保存后 home 配置写入 edit=deny', !!(parsed2 && parsed2.global && parsed2.global.edit && parsed2.global.edit.mode === 'deny'), JSON.stringify(parsed2 && parsed2.global && parsed2.global.edit))
@@ -288,12 +290,20 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
 // ─────────────────────────────────────────────────────────────
 group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删除键回退、status 契约')
 {
-  // 用干净 home 写一份「老配置代际」：quickTools 只有旧 5 键，其余预设键缺席
+  // 用干净 home 写一份「老配置代际」：quickTools 只有旧 5 键，其余预设键缺席；
+  // 并故意混入 1.5.x 时代落盘的、已移除的权限写工具键（含一条 allow，用于验证清理与 fail-open 防线）
   const ws3 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws3-'))
   const home3 = mkdtempSync(join(tmpdir(), 'pg-smoke-home3-'))
   mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(home3, 'dsh-permgate', 'config.json'), JSON.stringify({
-    global: { quickTools: { web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask' }, fallbackMode: 'ask' },
+    global: {
+      quickTools: {
+        web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
+        perm_add_exception: { action: 'allow' }, perm_set_category: { action: 'allow' }, perm_reload: { action: 'deny' },
+        my_custom_tool: { action: 'deny' },
+      },
+      fallbackMode: 'ask',
+    },
     projects: {},
   }, null, 2), 'utf8')
   const host3 = createHost({ workspaceRoot: ws3, dshHome: home3 })
@@ -314,9 +324,9 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   const r2 = await probe('mcp__not-a-preset')
   ok('group5: 非预设键仍走兜底、未被放行（mcp__*）', r2.nexted === false, JSON.stringify(r2.out))
 
-  const setQuick = host3.registered.get('perm_set_quick')
-  ok('group5: perm_set_quick 工具已注册', !!setQuick && typeof setQuick.execute === 'function')
-  await setQuick.execute({ target: 'global', tool: 'job_kill', action: 'deny' }, makeExec(ws3, 'perm_set_quick', {}))
+  // 权限写工具已移除，改用设置页路由写入
+  const sq = await callRoute(host3.routes, 'POST', '/permgate/set-quick', { target: 'global', tool: 'job_kill', action: 'deny' })
+  ok('group5: set-quick 路由写入成功', !!(sq && sq.data && sq.data.quickTools))
   const r3 = await probe('job_kill')
   ok('group5: 显式 deny 优先于预设默认值', r3.nexted === false, JSON.stringify(r3.out))
 
@@ -330,15 +340,29 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   const st = await callRoute(host3.routes, 'GET', '/permgate/status')
   const presetList = (st.data && st.data.quickPreset) || []
   const defaults = (st.data && st.data.quickDefaults) || {}
-  ok('group5: status 下发 quickPreset（35 项：22 常规 + 10 个 perm_* + cordis_run/stop/undefine）', presetList.length === 35, 'len=' + presetList.length)
+  // 35 → 26：9 个权限写工具已移除（22 常规 + perm_status + cordis_run/stop/undefine）
+  ok('group5: status 下发 quickPreset（26 项：22 常规 + perm_status + cordis_run/stop/undefine）', presetList.length === 26, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
-  // issue #3：perm_* 曾在 decide 里被无条件放行（AI 可自我提权且无弹窗）；纳入快捷预设后必须走 ask
-  const rp1 = await probe('perm_add_exception')
-  ok('group5: perm_add_exception 默认不被静默放行', rp1.nexted === false, JSON.stringify(rp1.out))
-  const rp2 = await probe('perm_set_category')
-  ok('group5: perm_set_category 默认不被静默放行', rp2.nexted === false, JSON.stringify(rp2.out))
+  // 9 个权限写工具已移除：它们既不该在预设清单里，也不再是可调用的工具
+  const permWrites = presetList.filter((t) => /^perm_/.test(t) && t !== 'perm_status')
+  ok('★ group5: 预设清单不含任何 perm_ 写工具', permWrites.length === 0, JSON.stringify(permWrites))
+  ok('★ group5: 预设清单保留 perm_status', presetList.indexOf('perm_status') !== -1)
+  // perm_status 是只读查询，默认放行（想看随时能看）
+  const rp1 = await probe('perm_status')
+  ok('group5: perm_status 默认放行（只读）', rp1.nexted === true, JSON.stringify(rp1.out))
   const rp3 = await probe('cordis_run')
   ok('group5: cordis_run 默认不被静默放行', rp3.nexted === false, JSON.stringify(rp3.out))
+
+  // 老配置残留的已移除写工具键：必须在加载时被丢弃（否则设置页出现无说明的孤儿行，
+  // 且残留的 allow 会在将来同名工具复活时绕过 QUICK_DEFAULTS 的 ask —— issue #3 老路）
+  const gq = (st.data && st.data.quickTools && st.data.quickTools.global) || {}
+  const leftovers = Object.keys(gq).filter((t) => /^perm_/.test(t) && t !== 'perm_status')
+  ok('★ group5: 残留的写工具快捷键已被清理（不下发到面板）', leftovers.length === 0, JSON.stringify(leftovers))
+  // 精确名单式清理：用户手填的自定义工具名必须保留（不能一刀切删未知键）
+  ok('★ group5: 用户自定义工具键未被误删', Object.prototype.hasOwnProperty.call(gq, 'my_custom_tool'), JSON.stringify(Object.keys(gq)))
+  // 即便残留 allow 曾写进配置，同名调用也不得被静默放行（工具已不存在 → 走兜底 ask）
+  const rpLegacy = await probe('perm_add_exception')
+  ok('★ group5: 残留 allow 不会让已移除工具被静默放行', rpLegacy.nexted === false, JSON.stringify(rpLegacy.out))
 
   try { rmSync(ws3, { recursive: true, force: true }); rmSync(home3, { recursive: true, force: true }) } catch (e) {}
 }
