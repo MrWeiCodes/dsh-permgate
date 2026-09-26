@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let React = require("react");
 
-		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
+		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-args-note { color: #bf8700; white-space: nowrap; margin-left: 6px; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
 
 		// ── 审批卡片：拖动柄 + 缩略按钮 + 缩小方块（计划 §3/§4）───────────────
 		// 标题栏整条是拖动柄（cursor:move 给出可拖暗示）；缩略按钮在柄内，需自身拦掉
@@ -298,6 +298,7 @@ window.__ModuleLoader__.load({
 			'permgate:set-sandbox': ['POST', '/permgate/set-sandbox'],
 			'permgate:set-categories': ['POST', '/permgate/set-categories'],
 			'permgate:set-category': ['POST', '/permgate/set-category'],
+			'permgate:set-command-sub': ['POST', '/permgate/set-command-sub'],
 			'permgate:set-quick': ['POST', '/permgate/set-quick'],
 			'permgate:add-exception': ['POST', '/permgate/add-exception'],
 			'permgate:remove-exception': ['POST', '/permgate/remove-exception'],
@@ -1441,9 +1442,22 @@ window.__ModuleLoader__.load({
 				'panel.delFailed': '删除失败',
 				'panel.needTool': '请输入工具名',
 				'panel.excCount': '例外（{n}）',
-				'panel.excCmdHint': '：匹配命令子串/glob，优先于分类默认',
+				// 例外匹配的对象是**单个命令段**（不是整条命令串）—— 提示文案必须说清这一点，
+				// 否则用户会以为写 `git status *` 就能放行 `git status && 任意命令`（旧实现确实如此）。
+				'panel.excCmdHint': '：匹配单个命令段（glob），优先于子设置与分类默认',
 				'panel.excPathHint': '：路径 glob，优先于分类默认',
 				'panel.excNone': '无例外',
+				'panel.subDestructive': '破坏性命令',
+				'panel.subDestructiveHint': '：段首命令命中内置名单时按此动作（更细的判定，优先于上方默认动作）',
+				'panel.subLabels': '命中名单',
+				'panel.subLabelsNote': '（内置，不可编辑）',
+				'panel.subSourceDefault': '默认值',
+				'panel.subSourceGlobal': '全局设置',
+				'panel.subSourceProject': '本项目设置',
+				'panel.subEffective': '当前生效',
+				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置是「{sub}」—— 判定链上子设置优先，破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把子设置也改成「{cat}」或「跟随全局」。',
+				'panel.excTooBroad': '匹配范围过宽',
+				'panel.excTooBroadHint': '这条例外匹配任意单个命令段，等于不再审查任何命令。建议改成具体命令（如 git status *）。',
 				'quick.web_search': '网页搜索',
 				'quick.skill': '加载技能',
 				'quick.grep': '内容检索',
@@ -1474,7 +1488,7 @@ window.__ModuleLoader__.load({
 				'panel.excCollapse': '折叠',
 				'panel.excListLink': '例外列表',
 				'panel.excUnit': '条',
-				'panel.excPh': '命令子串/glob',
+				'panel.excPh': '命令段 / glob',
 				'panel.excPathPh': '路径 glob',
 				'panel.excReason': '拒绝原因',
 				'panel.excReasonPh': '选填：会告知 AI 为什么被拒',
@@ -1628,9 +1642,20 @@ window.__ModuleLoader__.load({
 				'panel.delFailed': 'Delete failed',
 				'panel.needTool': 'Enter a tool name',
 				'panel.excCount': 'Exceptions ({n})',
-				'panel.excCmdHint': ': command substring/glob, overrides category default',
+				'panel.excCmdHint': ': matches a single command segment (glob); overrides sub-setting and category default',
 				'panel.excPathHint': ': path glob, overrides category default',
 				'panel.excNone': 'No exceptions',
+				'panel.subDestructive': 'Destructive commands',
+				'panel.subDestructiveHint': ': applies when the segment\'s leading command matches the built-in list (finer verdict, overrides the default action above)',
+				'panel.subLabels': 'Matched list',
+				'panel.subLabelsNote': '(built-in, read-only)',
+				'panel.subSourceDefault': 'default',
+				'panel.subSourceGlobal': 'global setting',
+				'panel.subSourceProject': 'project setting',
+				'panel.subEffective': 'Currently effective',
+				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
+				'panel.excTooBroad': 'Very broad',
+				'panel.excTooBroadHint': 'This exception matches any single command segment — effectively no command review at all. Prefer a concrete command such as git status *.',
 				'quick.web_search': 'web search',
 				'quick.skill': 'load skill',
 				'quick.grep': 'content search',
@@ -1661,7 +1686,7 @@ window.__ModuleLoader__.load({
 				'panel.excCollapse': 'Collapse',
 				'panel.excListLink': 'Exception list',
 				'panel.excUnit': 'items',
-				'panel.excPh': 'command substring/glob',
+				'panel.excPh': 'command segment / glob',
 				'panel.excPathPh': 'path glob',
 				'panel.excReason': 'Deny reason',
 				'panel.excReasonPh': 'optional: tells the AI why it was denied',
@@ -2141,6 +2166,11 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { className: 'pg-args-label' }, l.label + '：'),
 						l.path ? React.createElement('span', { className: 'pg-path-link', title: l.path, onClick: () => openSidebarFor(p, l.path) }, l.value)
 							: React.createElement('span', { className: 'pg-args-val' }, l.value),
+						// 段级标注（破坏性命令 / 无法解析 / 重定向到工作区外）：宿主在 argLine 的
+						// note 里下发。此前这个字段没有任何渲染方 —— 下发通道是断的，
+						// 用户看不到「这一行为什么被单独标出来」。与 reason 里的分段摘要互补：
+						// reason 是整条命令的概览，这里是**逐段**就地标注。
+						l.note ? React.createElement('span', { className: 'pg-args-note' }, '（' + l.note + '）') : null,
 					))
 					: React.createElement('span', null, p.args),
 			);
@@ -2743,6 +2773,12 @@ window.__ModuleLoader__.load({
 			const [quickReason, setQuickReason] = React.useState({});
 			// 分类默认值与兜底的拒绝原因输入框：{ [tab]: { [cat]: '' } } / { [tab]: '' }
 			const [catReasons, setCatReasons] = React.useState({ global: {}, project: {} });
+			// command 分类的子设置「破坏性命令」：{ global: 'ask'|'allow'|'deny'|'inherit', project: ... }。
+			// 与 cats 平行但独立：它跟着分类行走（选中的动作必须立即回显），而 reason 与
+			// 分类默认值同口径只读展示 —— 复用 reasonInput 那套「只读 + 编辑/保存」交互。
+			const [subDestructive, setSubDestructive] = React.useState({ global: null, project: null });
+			// 子设置的拒绝原因草稿：{ global: '', project: '' }（结构与 fbReason 同形）
+			const [subReasons, setSubReasons] = React.useState({ global: '', project: '' });
 			const [fbReason, setFbReason] = React.useState({ global: '', project: '' });
 			// 拒绝原因刚保存成功的那一格：{ key: 'kind:tab:key', seq }，显示短暂的对勾反馈。
 			const [reasonSaved, setReasonSaved] = React.useState(null);
@@ -2790,6 +2826,11 @@ window.__ModuleLoader__.load({
 			const [newToolReason, setNewToolReason] = React.useState('');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
+			// 一次性提示（非阻塞）：目前用于「大分类与破坏性子设置的严格度不一致」。
+			// 存纯字符串而非对象：原先带过 { key, text }，但 key 全仓无人读取
+			// （自动消失靠 effect 的对象身份，去重逻辑从未实现），属只写不读的死字段，故删掉。
+			// 与 msg（保存结果，蓝色）分开，提示用橙色以示「需要注意但不是错误」。
+			const [notice, setNotice] = React.useState(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 当前正在编辑（尚未保存）的拒绝原因格：{ kind: 'cat'|'quick'|'fb', tab, key }。
 			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
@@ -2805,10 +2846,18 @@ window.__ModuleLoader__.load({
 				return () => clearTimeout(id);
 			}, [confirm]);
 
+			// 提示自动消失：给足阅读时间（比删除确认长），换 tab 时也清掉 —— 提示说的是
+			// 「某一层的大分类与子设置不一致」，换层后它指向的对象已不在渲染中。
+			React.useEffect(() => {
+				if (notice === null) return undefined;
+				const id = setTimeout(() => setNotice(null), 8000);
+				return () => clearTimeout(id);
+			}, [notice]);
+
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
 			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点与编辑态（换层后它们指向的行已不在渲染中，
 			// 编辑态若残留，切回来时同一格会莫名其妙还处于可输入状态）。
-			React.useEffect(() => { setConfirm(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);
+			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -2828,7 +2877,32 @@ window.__ModuleLoader__.load({
 				// （即新数据里 mode 仍为 deny）：输入框被卸载时浏览器不保证派发 blur，焦点会残留；
 				// 若继续兜住旧值，该行再变回 deny 时会显示、并可能写回陈旧草稿。
 				// focusNow 在此快照：updater 由 React 在渲染阶段执行，届时 reasonFocus.current 可能已变。
+				// 注意它必须在**下面所有**用到草稿保护的 setState 之前声明（子设置那块也不例外）。
 				const focusNow = reasonFocus.current;
+				// 子设置「破坏性命令」：动作与 reason 都从 status.commandSub 取。
+				// global/project 是该层的**显式配置**（null = 用户没设过），缺席时用宿主下发的
+				// **该层推导默认值**（globalDefault/projectDefault）回填 —— 不能在客户端写死
+				// `|| 'ask'`：global command=deny 的用户会看到面板显示「询问」、甚至弹出
+				// 「破坏性命令会按询问处理」的提示，而实际裁决是拒绝（面板说谎）。
+				// 与 cats 同口径：不能拿 effective 回填，否则「未配置」会被显示成「已设为默认值」，
+				// 用户就分不清自己到底设过没有。
+				const subNext = {
+					global: (s.commandSub && s.commandSub.global && s.commandSub.global.action)
+						|| (s.commandSub && s.commandSub.globalDefault) || 'ask',
+					project: (s.commandSub && s.commandSub.project && s.commandSub.project.action)
+						|| (s.commandSub && s.commandSub.projectDefault) || 'inherit',
+				};
+				const subReasonNext = {
+					global: (s.commandSub && s.commandSub.global && s.commandSub.global.reason) || '',
+					project: (s.commandSub && s.commandSub.project && s.commandSub.project.reason) || '',
+				};
+				setSubDestructive(subNext);
+				setSubReasons((prev) => {
+					if (focusNow && focusNow.kind === 'sub' && prev && subNext[focusNow.tab] === 'deny') {
+						return Object.assign({}, subReasonNext, { [focusNow.tab]: prev[focusNow.tab] });
+					}
+					return subReasonNext;
+				});
 				setCatReasons((prev) => {
 					if (focusNow && focusNow.kind === 'cat' && prev && prev[focusNow.tab]
 						&& cs[focusNow.tab] && cs[focusNow.tab][focusNow.key] === 'deny') {
@@ -2899,6 +2973,7 @@ window.__ModuleLoader__.load({
 					const t = fk.slice(i + 1, j);
 					const key = fk.slice(j + 1);
 					if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');
+					if (kind === 'sub') return subNext[t] === 'deny';
 					if (kind === 'quick') {
 						const sub = t === 'global' ? 'g' : 'p';
 						return !!(qs[key] && qs[key][sub] === 'deny');
@@ -2932,7 +3007,7 @@ window.__ModuleLoader__.load({
 			// 注意：面板已移除编辑器内核入口（有一条断言钉住 client 不得出现该残留），故此处也不列它。
 			const WRITE_METHODS = [
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
-				'permgate:set-fallback', 'permgate:set-sandbox',
+				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
 				'permgate:add-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 			];
@@ -2964,12 +3039,17 @@ window.__ModuleLoader__.load({
 			};
 
 			// 把某一格的草稿还原成服务端当前值（取消编辑、以及编辑态被外部关闭时用）。
-			// 三处（分类 / 快捷工具 / 兜底）取值口径必须与各自 commit 的去重基准同源。
+			// 四处（分类 / 快捷工具 / 兜底 / 命令子设置）取值口径必须与各自 commit 的去重基准同源。
 			const revertReason = (kind, key) => {
 				if (kind === 'cat') {
 					const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
 					const cur = (block && block[key] && block[key].reason) || '';
 					setCatReasons((prev) => Object.assign({}, prev, { [tab]: Object.assign({}, prev[tab], { [key]: cur }) }));
+					return;
+				}
+				if (kind === 'sub') {
+					const cur = (status && status.commandSub && status.commandSub[tab] && status.commandSub[tab].reason) || '';
+					setSubReasons((prev) => Object.assign({}, prev, { [tab]: cur }));
 					return;
 				}
 				if (kind === 'quick') {
@@ -2998,8 +3078,25 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			// 该层子设置的**显式配置**动作（用户没设过则 undefined）。
+			// 与面板显示值（subDestructive，含推导默认值）区分：提示判据只能用显式值 ——
+			// 推导值永不比 mode 更松（destructiveDefaultOf 保证），拿它比较只会产生假警告。
+			const explicitSubOf = (t) => {
+				const e = status && status.commandSub && status.commandSub[t];
+				return (e && e.action) || undefined;
+			};
+
 			// 分类默认值的动作切换：只改 mode。拒绝原因由下方 commitCatReason 走单数端点
 			// （permgate:set-category）单独提交；宿主在 mode 切离 deny 时会清掉 reason。
+			//
+			// command 分类切换后，子设置可能与新 mode 不协调 —— 只**提示**，不改写：
+			//   · 判定链是 例外 → 子设置 → 大分类，子设置优先。所以大分类设为 deny 时，
+			//     子设置若是 ask/allow，破坏性命令仍按子设置走（用户会以为「一律拒绝」没生效）；
+			//     大分类设为 ask 时，子设置若是 allow，破坏性命令直接放行（比大分类更松）。
+			//   · 为什么不在宿主里联动改写：写入侧无法区分「子设置是默认值」与「用户显式设成了它」
+			//     —— 两者值完全相同。联动会静默覆盖用户的显式表态，还会造成「先设 A 后设 B」
+			//     与「先设 B 后设 A」结果不同（顺序依赖）。所以这里只把事实讲清楚，
+			//     要不要一并改由用户决定（面板上「当前生效」一行始终显示实际取值与来源）。
 			const changeCat = (c) => (e) => {
 				const mode = e.target.value;
 				setCats(Object.assign({}, cats, { [tab]: Object.assign({}, cats[tab], { [c]: mode }) }));
@@ -3007,6 +3104,59 @@ window.__ModuleLoader__.load({
 				// 莫名其妙又处于可输入状态（用户并没有点「编辑」）。
 				if (mode !== 'deny') exitEditOf('cat', c);
 				invoke('permgate:set-categories', { [tab]: { [c]: mode } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+				// 大分类刚变（mode 是新值）；子设置取**该层的显式配置**（未配置则传 undefined）。
+				// 不能传 subDestructive[tab] —— 它现在可能是宿主下发的**推导默认值**
+				// （见 applyStatus 的 globalDefault/projectDefault 回填），而推导值永不比 mode 更松
+				// （destructiveDefaultOf 保证），拿它去比较会产生**假警告**：
+				// 实测 global command 由 ask 改为 deny、用户从未设过子设置时，会弹出
+				// 「破坏性命令会按『询问』处理」—— 而读取侧按新 mode 推导出的实际动作是 deny。
+				if (c === 'command') warnSubMismatch(mode, explicitSubOf(tab));
+			};
+
+			// 大分类 mode 与子设置动作不协调时的提示（只提示，不改写 —— 理由见 changeCat）。
+			// 判据是「子设置比大分类**更松**」：MODE_RANK 越大越严（allow < ask < deny），
+			// 故更松即 MODE_RANK[sub] < MODE_RANK[catMode]。
+			//   · 大分类 deny + 子设置 ask/allow → 提示（用户会以为「一律拒绝」没生效）
+			//   · 大分类 ask  + 子设置 allow    → 提示（破坏性命令直接放行，比大分类更松）
+			// 更紧（子设置比大分类严）不提示 —— 那正是子设置的用途（D-6：大分类 allow 时
+			// 破坏性命令仍按子设置走），提示它只会造成噪音。
+			//
+			// sub 必须由调用方**显式传入**，不能从 subDestructive[tab] 读：
+			// 那是 React state，setSubDestructive 之后同一函数体内读到的仍是**本次渲染的旧值**，
+			// 于是判据拿旧值比较 —— 实测（cat=ask）子设置由 deny 改 allow（该提示的放松方向）
+			// 反而不提示，由 allow 改 deny（不该提示）反而误报且文案与实际动作矛盾。
+			// changeCat 一侧传的就是新值（mode），两侧口径现在一致。
+			const MODE_RANK = { allow: 0, ask: 1, deny: 2 };
+			const warnSubMismatch = (catMode, sub) => {
+				// inherit 表示「穿透到全局」，本层没有独立表态，无从比较 —— 不提示。
+				if (!sub || sub === 'inherit') return;
+				const rank = MODE_RANK[catMode];
+				if (rank === undefined || MODE_RANK[sub] === undefined) return;
+				if (MODE_RANK[sub] >= rank) return;
+				setNotice(T('panel.subMismatch').replace('{cat}', modeLabel(catMode)).replace('{sub}', modeLabel(sub)));
+			};
+
+			// 子设置动作切换：只改 action（reason 由 reasonInput 那套编辑态单独提交）。
+			// inherit 是项目层专属的「穿透全局」语义，宿主对 global+inherit 会拒绝 —— 故
+			// 下拉选项按 tab 取 ALL_MODES / MODES，与分类默认值的选择器同口径。
+			const changeSubDestructive = (e) => {
+				const action = e.target.value;
+				setSubDestructive(Object.assign({}, subDestructive, { [tab]: action }));
+				// 与 changeCat 同：切离 deny 时作废该格的编辑态（控件会被卸载）
+				if (action !== 'deny') exitEditOf('sub', 'command');
+				invoke('permgate:set-command-sub', { target: tab, action }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+				// 反向也要提示：用户刚把子设置放松到大分类之下（同一个不协调，两个方向都会出现）。
+				// 传 action（本次新值），不读 state —— 见 warnSubMismatch 的说明。
+				warnSubMismatch(cats[tab] ? cats[tab].command : undefined, action);
+			};
+
+			// 子设置拒绝原因的保存单点。空串必须原样下发（宿主把空串定义为显式清除、
+			// undefined 定义为保留原值），与 commitCatReason 完全同口径。
+			const commitSubReason = (focus) => {
+				const v = subReasons[tab];
+				const cur = (status && status.commandSub && status.commandSub[tab] && status.commandSub[tab].reason) || '';
+				if ((v || '') === cur) return;
+				invoke('permgate:set-command-sub', { target: tab, action: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 
 			// 拒绝原因保存单点：只在当前动作是 deny 时才写（其它动作下控件根本不显示）。
@@ -3116,6 +3266,46 @@ window.__ModuleLoader__.load({
 				options.map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
 			);
 
+			// command 分类的子设置行「破坏性命令」。
+			// 三个要点体现在界面上：
+			//   ① 它**独立于**上方「默认动作」—— 默认动作设为「允许」时它仍生效（更细优先于更粗），
+			//      所以它不随 mode 隐藏，提示文案也明说「优先于上方默认动作」；
+			//   ② 名单是内置的、只读的：给用户看见「到底哪些命令算破坏性」，但不给编辑入口
+			//      （判定内容可编辑会出现「名单被清空后用户以为还有保护」的假象）；
+			//   ③ 显示当前值来自哪一层（默认值 / 全局设置 / 本项目设置），与快捷工具面板同口径。
+			const commandSubRow = () => {
+			 const eff = (status && status.commandSub && status.commandSub.effective) || null;
+			 const labels = (status && status.commandSub && status.commandSub.labels) || [];
+			 const src = eff ? eff.source : 'default';
+			 const srcLabel = src === 'project' ? T('panel.subSourceProject') : (src === 'global' ? T('panel.subSourceGlobal') : T('panel.subSourceDefault'));
+			 return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
+				React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
+					React.createElement('span', { style: { fontSize: 12, fontWeight: 600 } },
+						T('panel.subDestructive'),
+						React.createElement('span', { style: { fontWeight: 400, color: 'rgba(128,128,128,0.85)' } }, T('panel.subDestructiveHint')),
+					),
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+						// 子设置的拒绝原因：与分类默认值同口径，只在 deny 时显示
+						reasonInput(
+							subReasons[tab],
+							(e) => setSubReasons(Object.assign({}, subReasons, { [tab]: e.target.value })),
+							commitSubReason,
+							subDestructive[tab] === 'deny',
+							{ kind: 'sub', tab: tab, key: 'command' },
+							() => revertReason('sub', 'command'),
+						),
+						sel(subDestructive[tab] || (tab === 'project' ? 'inherit' : 'ask'), changeSubDestructive, tab === 'project' ? ALL_MODES : MODES, busy),
+					),
+				),
+				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)' } },
+					T('panel.subLabels') + T('panel.subLabelsNote') + '：' + labels.join(' / '),
+				),
+				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } },
+					T('panel.subEffective') + '：' + modeLabel(eff ? eff.action : 'ask') + '（' + srcLabel + '）',
+				),
+			 );
+			};
+
 			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 
 			// 拒绝原因控件：四处（分类默认值 / 快捷工具 / 兜底 / 快捷工具新增行）共用一个渲染函数，
@@ -3221,6 +3411,11 @@ window.__ModuleLoader__.load({
 						),
 					),
 					EXC_CATS.indexOf(c) !== -1 ? React.createElement('div', { style: { marginTop: 2 } },
+						// command 分类的子设置「破坏性命令」：判定链是 例外 → 子设置 → 分类默认值，
+						// 子设置比大分类知道得更多，故它**独立于上方默认动作**生效 ——
+						// 默认动作设成「允许」时，破坏性命令仍按这里的动作走（这是修复一个
+						// 失效的原有意图，不是新增一层）。名单固定，只读展示（不可编辑）。
+						c === 'command' ? commandSubRow() : null,
 						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } },
 							T('panel.excCount').replace('{n}', String(excList.length)) + (c === 'command' ? T('panel.excCmdHint') : T('panel.excPathHint')),
 						),
@@ -3239,6 +3434,26 @@ window.__ModuleLoader__.load({
 									// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
 									r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny, marginLeft: 6 } }, '「' + r.reason + '」') : null,
 									r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', marginLeft: 6 } }, '(' + r.note + ')') : null,
+									// 「匹配任意单段」的判据：命令例外里这几乎等于「不再审查任何命令」。
+									// 不拦（那是用户的权利），但必须给出黄色提示，否则它看起来和普通例外没区别。
+									// 只对命令分类提示：路径侧的 `*` 在 glob 语义下范围受限（不跨分隔符），不属同一问题。
+									//
+									// 判据必须与**匹配器同构**，不能写 `=== '*'`：命令侧的 globMatch 里
+									// `*` 与 `?` 之外没有特殊含义，故 `**`、`***` 与裸 `*` 完全等价
+									// （都匹配任意段），字面量比较会让它们漏报。
+									// `**` 尤其容易被踩：本仓库路径侧注释与 placeholder 都把 `**` 当惯用写法
+									// （「`**` 会匹配整个子树」），用户照搬进命令例外极自然 —— 面板却不给警告。
+									//
+									// 同构判据：模式**只由 `*` 与空格组成**时匹配任意段。
+									//   · 纯 `*` 序列（`*` / `**` / `***`）→ 匹配任意段 ✓
+									//   · `* *` 也匹配任意段（实测：对含空格的段两个 `*` 各吞一半；
+									//     对无空格段由「尾随 ` *`」分支覆盖）→ 同样提示
+									//   · 含 `?` 的不算：`?` 要求恰好一个字符，`?*` / `??` 并不匹配任意段
+									//     （写成 `/^[*?]+$/` 会把它们误报，实测过）
+									//   · 含其他字符的不算（`a*` / `git *` 都限定了前缀）
+									c === 'command' && /^[*\s]+$/.test(String(r.match || '')) && String(r.match || '').indexOf('*') !== -1
+										? React.createElement('span', { style: { fontSize: 11, color: '#bf8700', marginLeft: 6, whiteSpace: 'nowrap' }, title: T('panel.excTooBroadHint') }, '⚠ ' + T('panel.excTooBroad'))
+										: null,
 									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
 										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
 										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
@@ -3456,6 +3671,7 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, d.reason || ''),
 					)) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noDecisions')),
 				),
+				notice ? React.createElement('div', { style: { fontSize: 12, color: '#bf8700', background: 'rgba(191,135,0,0.08)', border: '1px solid rgba(191,135,0,0.35)', borderRadius: 6, padding: '6px 8px', marginBottom: 8, lineHeight: 1.5 } }, '⚠ ' + notice) : null,
 				msg ? React.createElement('div', { style: { fontSize: 12, color: '#1e88e5', marginBottom: 8 } }, msg) : null,
 			);
 		}

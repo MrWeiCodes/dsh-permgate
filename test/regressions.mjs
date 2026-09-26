@@ -3,7 +3,7 @@
 // 用法：node test/regressions.mjs
 // 约定：只做静态断言 + 纯函数复算 + 模块级冒烟，不依赖 DSH 运行时，不发起网络请求。
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
@@ -24,17 +24,23 @@ group('1. 模块级冒烟：头部（export default 之前的全部定义）在�
 const headEnd = src.indexOf('export default {')
 ok('能定位 export default', headEnd > 0)
 const head = src.slice(0, headEnd).replace(/^import .*$/gm, '')
+// 头部现在引用了 shell-parse.js 的导出（命令判定已迁到那里）：import 行被剥掉后，
+// 这些标识符必须作为参数注入，否则「模块级头部求值」这条冒烟会因 ReferenceError 失败 ——
+// 而那正是它存在的意义（捕获「引用了作用域里没有的东西」），所以这里不能把断言放宽。
+const sp = await import(pathToFileURL(pathJoin(ROOT, 'shell-parse.js')).href)
 let mod = null
 try {
   mod = new Function(
     'pathJoin', 'pathResolve', 'pathIsAbsolute',
     'fsExistsSync', 'fsReadFileSync', 'fsReaddirSync', 'fsUnlinkSync', 'fsLstatSync', 'fsRealpathSync',
     'osHomedir', 'process', 'console',
-    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, DIFF_MAX_CHARS, readPreviewText, getFsEncodingService, FS_ENCODING_SERVICE };'
+    'assessCommand', 'matchCommand', 'codeLabel', 'decomposeCommand', 'segmentLabel', 'SHELL_OF_TOOL', 'DESTRUCTIVE_LABELS',
+    head + '\n; return { overMaxChars, sreCommand, isFileWrite, isFileRead, isFileImage, sniffImage, IMAGE_MIME, isUndo, isPreviewableFileTool, normTarget, normPathKey, fileTooLarge, readFail, bi, L, normLang, CATS, EXC_CATS, DIFF_MAX_CHARS, readPreviewText, getFsEncodingService, FS_ENCODING_SERVICE, COMMAND_TOOLS, SHELL_OF_TOOL };'
   )(
     pathJoin, pathResolve, pathIsAbsolute,
     fsExistsSync, fsReadFileSync, fsReaddirSync, fsUnlinkSync, fsLstatSync, fsRealpathSync,
-    osHomedir, process, console
+    osHomedir, process, console,
+    sp.assessCommand, sp.matchCommand, sp.codeLabel, sp.decomposeCommand, sp.segmentLabel, sp.SHELL_OF_TOOL, sp.DESTRUCTIVE_LABELS
   )
   ok('模块级头部求值成功（无 ReferenceError）', true)
 } catch (e) {
@@ -51,6 +57,9 @@ if (mod) {
   ok('CATS 含全部八个分类且 undo 在内', mod.CATS.length === 8 && mod.CATS.indexOf('undo') !== -1 && mod.CATS.indexOf('doomloop') !== -1)
   ok('EXC_CATS 是可挂例外的六个分类（不含 subagent/doomloop）', JSON.stringify(mod.EXC_CATS) === JSON.stringify(['directory', 'command', 'read', 'image', 'edit', 'undo']))
   ok('fileTooLarge 用参数而非闭包常量', mod.fileTooLarge({ size: 2000000 }, mod.DIFF_MAX_CHARS) === true && mod.fileTooLarge({ size: 10 }, mod.DIFF_MAX_CHARS) === false)
+  // COMMAND_TOOLS 由 SHELL_OF_TOOL 派生（单一来源）：两份定义漂移时新增命令工具会漏判
+  ok('★ COMMAND_TOOLS 由 SHELL_OF_TOOL 派生（单一来源）',
+    JSON.stringify(Object.keys(mod.COMMAND_TOOLS).sort()) === JSON.stringify(Object.keys(mod.SHELL_OF_TOOL).sort()))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -112,7 +121,7 @@ ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id�
   ok('快照形状不认识时返回 undefined（不冒充有会话）',
     api2.pgCurrentSessionId({ phase: 'ready' }) === undefined && api2.pgCurrentSessionId(undefined) === undefined)
 }
-ok('normTarget 定义 + 四个设置路由统一使用（含 set-category / set-quick）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 4)
+ok('normTarget 定义 + 五个设置路由统一使用（含 set-category / set-quick / set-command-sub）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 5)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
 // ─────────────────────────────────────────────────────────────
@@ -229,6 +238,9 @@ group('6b. lint 工具链：配置声称的覆盖范围必须真的被跑')
   // 配置的 files 必须仍覆盖 test/，否则上面的 `eslint .` 也只是跑了个寂寞
   const cfg = readFileSync(pathJoin(ROOT, 'eslint.config.mjs'), 'utf8')
   ok('配置的 files 覆盖 test/**/*.mjs', /files:\s*\[[^\]]*test\/\*\*\/\*\.mjs/.test(cfg))
+  // 新增的 shell-parse.js 也必须在 files 里：漏了它等于这个文件从未被 lint
+  // （而它是本次改动里唯一新增的、含大量纯逻辑的文件，最需要 no-undef 这类检查）
+  ok('★ 配置的 files 覆盖 shell-parse.js', /files:\s*\[[^\]]*'shell-parse\.js'/.test(cfg))
   // smoke.mjs 用 setImmediate 构造 mock 请求；缺声明会报 no-undef（实测确有此缺口）
   ok('★ globals 声明 setImmediate（smoke.mjs 真的在用，缺则 no-undef）',
     /setImmediate:\s*'readonly'/.test(cfg)
@@ -254,7 +266,8 @@ ok('quick 存在性判断不用原型链写法', !cli.includes("pq[t] && pq[t] !
 ok('删除按钮只给「自加且本层有键」的行', cli.includes('(!isPreset && hasKey)'))
 ok('删除不做本地乐观删除', !cli.includes('delete next[tool]'))
 ok('确认态 key 含层级', cli.includes("'quick:' + tab + ':' + t"))
-ok('切 tab 清空确认态（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);'))
+// notice 也一并清掉：提示说的是「某一层的大分类与子设置不一致」，换层后它指向的对象已不在渲染中
+ok('切 tab 清空确认态与提示（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);'))
 ok('兜底文案不再以 todo/cordis 举例', !cli.includes('如 MCP、todo、cordis') && !cli.includes('(e.g. MCP, todo, cordis)'))
 ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'"))
 {
@@ -1210,7 +1223,8 @@ group('14. 拒绝原因（reason）扩展到「默认动作」层级：分类 / 
 // 防回退：这三处曾经完全没有 reason 字段，只有例外能写。
 ok('分类默认值可带拒绝原因，且只在 deny 时保留', src.includes("if (cat.mode === 'deny') { const t = normalizeText(c.reason); if (t) cat.reason = t }") && src.includes("if (reason === undefined) return true") && src.includes('else delete block[cat].reason'))
 // 防回退：写入单点曾把「未提供 reason」当成「清除 reason」，一次无关写入就会静默删掉用户写好的原因
-ok('未提供 reason 时保留原值（不再把 undefined 当成清除）', (src.match(/if \(reason === undefined\) return true/g) || []).length === 2 && src.includes("const t = reason === undefined ? prevReason : normalizeText(reason)"))
+// 三处：setCategoryMode / setFallbackMode / setCommandSub（子设置与分类同口径）
+ok('未提供 reason 时保留原值（不再把 undefined 当成清除）', (src.match(/if \(reason === undefined\) return true/g) || []).length === 3 && src.includes("const t = reason === undefined ? prevReason : normalizeText(reason)"))
 ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透全局）', src.includes("if (pv && pv !== 'inherit') return { action: pv, ruleId: null, reason: normalizeText(pCat.reason) }") && src.includes("return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }"))
 ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', src.includes('function fallbackSetting(root) {') && src.includes("if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }") && src.includes("return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }") && src.includes('return fallbackSetting(root).mode'))
 ok('兜底拒绝原因落盘并在切离 deny 时清除', src.includes("if (t) block.fallbackReason = t") && src.includes('else delete block.fallbackReason') && src.includes("if (mode !== 'deny') { delete block.fallbackReason; return true }") && src.includes("if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }"))
@@ -1224,7 +1238,7 @@ ok('分类 / 兜底 / 快捷工具三处都有 reason 输入控件',
   cli.includes("'panel.denyReason'") && cli.includes("'panel.denyReasonPh'")
   && cli.includes("'panel.fallbackHint'") && cli.includes("reasonInput("))
 ok('status 下发三处的 reason（面板回填用）', src.includes('globalReason: normalizeText(config.global.fallbackReason) || null') && src.includes('projectReason: normalizeText(proj && proj.fallbackReason) || null'))
-ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/兜底/快捷工具新增行）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {') && (cli.match(/reasonInput\(/g) || []).length === 4)
+ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/兜底/命令子设置/快捷工具新增行）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {') && (cli.match(/reasonInput\(/g) || []).length === 5)
 // 防回退：快捷工具行的原因输入框必须在动作下拉**之后**——该行工具名 span 有 minWidth 撑出固定
 // 列宽，输入框插在它前面会把下拉右推（窄面板下换行），只有选「拒绝」的行会漂移。
 ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r) =>'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('sel(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
@@ -1264,10 +1278,11 @@ ok('面板全局列与服务端同径跳过 inherit', cli.includes("hasOwnKey(gq
 ok('面板清空拒绝原因时透传空串（不折叠成 undefined）', cli.includes('const v = catReasons[tab] ? catReasons[tab][c] : undefined') && cli.includes('const v = fbReason[tab]') && cli.includes('const v = quickReason[tool] ? quickReason[tool][key] : undefined') && cli.includes("mode: 'deny', reason: v }") && cli.includes("action: 'deny', reason: v }") && !cli.includes('catReasons[tab][c] || undefined') && !cli.includes('fbReason[tab] || undefined') && !cli.includes('quickReason[tool][key] || undefined'))
 // 防回退：只固定中间变量声明是不够的——把下发字段改成 `reason: v || undefined` 时，
 // 上面的 `const v = ...` 仍在，断言会空转。故必须同时校验真正下发的三个字段。
-ok('三处下发字段确实原样透传 v（不是只声明了 v）', (cli.match(/reason: v \}/g) || []).length === 3)
+// 四处：分类默认值 / 快捷工具 / 兜底 / 命令子设置
+ok('四处下发字段确实原样透传 v（不是只声明了 v）', (cli.match(/reason: v \}/g) || []).length === 4)
 // 防回退：对勾曾在 invoke 之前无条件点亮，写盘失败（r.error / catch 只 setMsg）时界面
 // 仍显示「✓ 已保存」，与错误信息并存。必须由成功回调点亮。
-ok('「已保存」对勾只在写盘成功回调里点亮', (cli.match(/\(\) => markReasonSaved\(focus\)/g) || []).length === 3 && !cli.includes('setReasonSaved(reasonKeyOf(focus));'))
+ok('「已保存」对勾只在写盘成功回调里点亮', (cli.match(/\(\) => markReasonSaved\(focus\)/g) || []).length === 4 && !cli.includes('setReasonSaved(reasonKeyOf(focus));'))
 // 防回退：同一格连续保存两次时，若 reasonSaved 只存稳定字符串键，第二次 setState 会 bail out，
 // 旧定时器不重置、对勾按第一次的时间点提前消失。带 seq 才能每次产生新身份。
 ok('对勾状态带 seq，避免同格二次保存被 React bail out', cli.includes('const reasonSavedSeq = React.useRef(0)') && cli.includes('setReasonSaved({ key: reasonKeyOf(f), seq: reasonSavedSeq.current })') && cli.includes('reasonSaved.key === fk'))
@@ -1285,7 +1300,7 @@ ok('退出编辑态按格进行并同步清焦点（exitEditOf）', cli.includes
 ok('切到另一格编辑前先还原前一格草稿', cli.includes('const beginEdit = () => {') && cli.includes('if (prevF && reasonKeyOf(prevF) !== fk) revertReason(prevF.kind, prevF.key);'))
 // 防回退：三处「取消」与 exitEditOf 共用同一份还原逻辑，取值口径须与服务端同源
 // （1 处定义 + 4 处调用：三处取消 + exitEditOf 内部）
-ok('取消/退出编辑共用单一还原入口（revertReason）', cli.includes('const revertReason = (kind, key) => {') && (cli.match(/revertReason\(/g) || []).length === 5 && !cli.includes('setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: (block'))
+ok('取消/退出编辑共用单一还原入口（revertReason）', cli.includes('const revertReason = (kind, key) => {') && (cli.match(/revertReason\(/g) || []).length === 6 && !cli.includes('setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: (block'))
 // 防回退：只数调用次数是不够的——quick 分支的三要素（tab→global/project 表选择、legacy 对象守卫、
 // 写回 setQuickReason 的 sub 桶）必须逐项固定。同样必须限定在 revertReason 函数体内：
 // 这三要素里的 map 表达式在 commitQuickReason 中重复出现，全文匹配会空转（实测漏网）。
@@ -1420,8 +1435,9 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
     'const kind = fk.slice(0, i);',
     'const t = fk.slice(i + 1, j);',
     'const key = fk.slice(j + 1);',
-    // 三处判据都必须以 deny 为准（写反成 ask / 恒真 / 恒假都会失败）
+    // 四处判据都必须以 deny 为准（写反成 ask / 恒真 / 恒假都会失败）
     "if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');",
+    "if (kind === 'sub') return subNext[t] === 'deny';",
     "if (kind === 'quick') { const sub = t === 'global' ? 'g' : 'p';",
     "return !!(qs[key] && qs[key][sub] === 'deny'); }",
     "return fbShow[t] === 'deny'; };",
@@ -1436,15 +1452,298 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
 })()
 // 防回退：回车与「保存」按钮会各触发一次提交，必须按「与已落盘值相同就跳过」去重，
 // 否则每次点开又保存都写一次盘。
-ok('回车/保存按钮双触发按值去重（同值不重复写盘）', (cli.match(/if \(\(v \|\| ''\) === (cur|\(prev \|\| ''\))\) return;/g) || []).length === 3)
+ok('回车/保存按钮双触发按值去重（同值不重复写盘）', (cli.match(/if \(\(v \|\| ''\) === (cur|\(prev \|\| ''\))\) return;/g) || []).length === 4)
 ok('面板读快捷工具值时兼容对象/字符串两种形态', cli.includes('function quickMode(v) { return v && typeof v === \'object\' ? v.action : v; }') && cli.includes('function quickReasonOf(v) { return v && typeof v === \'object\' ? v.reason : undefined; }'))
 // 防回退：ask 例外不能算「已表态」，否则弹窗里再不给「允许此项」候选，用户只能去面板手工改
 ok('alreadyInProject 只认方向明确的例外（ask 不算已表态）', src.includes("const decided = (r) => r.action !== 'ask'") && (src.match(/exceptions\.some\(\(r\) => decided\(r\) && /g) || []).length === 2)
-// 防回退：commandFullyCovered 只认 allow（ask 例外不得触发「命令组成均已命中例外」静默放行）
-ok('命令全覆盖判定只认 allow 例外（ask 例外不静默放行）', src.includes("if (r.action === 'allow' && matchCommand(r.match, value)) { hit = true; break }"))
+// 防回退：命令例外匹配已迁到 shell-parse.js，且判定按**段级**进行。
+// 旧实现（commandFullyCovered 只认 allow + 整串匹配）已被删除 —— 那条断言随实现一起作废，
+// 换成对「段级判定是唯一路径」的结构断言（见 §6.3 单一来源断言）。
+ok('★ 命令判定委托给 shell-parse.js 的 assessCommand（不再有第二份实现）',
+  src.includes("import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'")
+  && src.includes('const a = assessCommand(cmd, shell, {')
+  // 按「定义」判而不是按「出现过」判：注释里会提到这些旧名字（记录为什么删掉它们），
+  // 用 includes 会把注释也算成回潮（实测踩过）。
+  && !/function\s+commandFullyCovered\s*\(/.test(src)
+  && !/function\s+commandTokens\s*\(/.test(src)
+  && !/function\s+splitCommandSegments\s*\(/.test(src)
+  && !/const\s+DANGEROUS_CMD_RE\s*=/.test(src)
+  && !/const\s+PS_KEYWORDS\s*=/.test(src)
+  && !/const\s+ROUTER_CMDS\s*=/.test(src)
+  && !/const\s+ROUTER_OPT_VALUE\s*=/.test(src))
+ok('★ 例外匹配作用于单个命令段（不是整条命令串）', src.includes('const matchSegmentException = (segText, label) => {') && src.includes('const targets = (label && label !== segText) ? [segText, label] : [segText]'))
+// ★ 层级顺序先于匹配对象：对「项目层 → 全局层」的每一层都完整试两个对象。
+// 反例：写回「先按段原文走完整层序、再按 label 走一遍」，会让全局层命中段原文压过项目层命中 label
+// （实测全局 env *=allow + 项目 git status *=deny 时，env FOO=1 git status 被全局 allow 遮蔽）。
+ok('★ 例外的层级顺序先于匹配对象（项目层不被全局层遮蔽）',
+  /const lists = \[\][\s\S]{0,400}?if \(pCat && Array\.isArray\(pCat\.exceptions\)\) lists\.push\(pCat\.exceptions\)[\s\S]{0,200}?if \(Array\.isArray\(gCat\.exceptions\)\) lists\.push\(gCat\.exceptions\)/.test(src)
+  && /for \(const list of lists\) \{[\s\S]{0,300}?for \(const target of targets\)/.test(src))
 // 防回退：全局快捷工具曾不跳过 inherit —— decide() 只处理 ask/deny，inherit 落到 pre-execute
 // 的「两者都不匹配」分支直接 next()，等于静默放行（项目分支一直有该守卫，两侧须同口径）
 ok('全局快捷工具同样跳过 inherit（与项目分支同口径，不静默放行）', src.includes("if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name))") && (src.match(/!== 'inherit' && matchGlob\(k, name\)/g) || []).length === 2)
+
+// ─────────────────────────────────────────────────────────────
+group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）')
+{
+  const sp = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+  // ★ 全仓只有一份命令分段实现：不得再出现第二处 split(/[;|]/)
+  // （旧实现有三份：splitCommandSegments / whole.split(/[|;]/) / describeIntent 的 split(/[;|]/)）
+  ok('★ 全仓只有一份命令分段实现（shell-parse.js 的 decomposeCommand）',
+    (src.match(/\.split\(\s*\/\[\|;\]\/\s*\)/g) || []).length === 0
+    && (src.match(/\.split\(\s*\/\[;\|\]\/\s*\)/g) || []).length === 0
+    && (cli.match(/\.split\(\s*\/\[\|;\]\/\s*\)/g) || []).length === 0
+    && sp.includes('export function decomposeCommand(source, shell) {'))
+  // ★ 旧实现已删除且未复活（按定义判，不按出现判 —— 注释里会提到它们）
+  ok('★ commandTokens / cleanToken / commandFullyCovered / DANGEROUS_CMD_RE 已删除且未复活',
+    !/function\s+commandTokens\s*\(/.test(src) && !/function\s+cleanToken\s*\(/.test(src)
+    && !/function\s+commandFullyCovered\s*\(/.test(src) && !/DANGEROUS_CMD_RE\s*=/.test(src))
+  // ★ describeIntent 走 decomposeCommand 且**方言按工具取**（不再是第三份 split，也不再硬编码 'bash'）
+  // 只断言「调了 decomposeCommand」是不够的：判定侧按 SHELL_OF_TOOL[exec.name] 取方言，
+  // 摘要侧硬编码 'bash' 时两者对同一条 pwsh 命令会看到不同文本（`\` 被当转义符吃掉）。
+  ok('★ describeIntent 与判定同源（同一份 decomposeCommand + 同一方言）',
+    /function describeIntent\(exec, d\) \{[\s\S]{0,900}?decomposeCommand\(v, SHELL_OF_TOOL\[exec\.name\] \|\| 'bash'\)/.test(src)
+    && /function describeIntent\(exec, d\) \{[\s\S]{0,900}?d\.segments/.test(src))
+  // ★ buildCandidates 走 segmentLabel 且方言与判定同源（entry.tool 派生，不再硬编码 'bash'）
+  ok('★ buildCandidates 与判定同源（segmentLabel + 按 entry.tool 取方言）',
+    /function buildCandidates\(entry\) \{[\s\S]{0,1600}?segmentLabel\(seg\.words\)/.test(src)
+    && /function buildCandidates\(entry\) \{[\s\S]{0,1600}?decomposeCommand\(String\(entry\.value\), shell\)/.test(src)
+    && /function buildCandidates\(entry\) \{[\s\S]{0,1600}?SHELL_OF_TOOL\[entry\.tool\] \|\| 'bash'/.test(src))
+  // ★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）
+  ok('★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）',
+    sp.includes('return lh === lp || lh.startsWith(lp + \' \')')
+    && !/indexOf\(p\.toLowerCase\(\)\) !== -1/.test(sp)
+    && !/indexOf\(p\.toLowerCase\(\)\) !== -1/.test(src))
+  // ★ destructive 子设置的判定在 command 分类默认值之前（更细优先，D-6）
+  ok('★ destructive 子设置先于 command 分类默认值（更细优先，D-6）', (function () {
+    const i = sp.indexOf('if (unparsable) {')
+    const j = sp.indexOf('} else if (destructive) {')
+    const k = sp.indexOf('// ③ command 分类默认值')
+    return i > 0 && j > i && k > j
+  })())
+  // ★ 不得存在 unparsable 子设置（D-4：它只是 code 标注，不是动作来源）
+  ok('★ 不存在 unparsable 子设置（D-4：它只是 code 标注，不是动作来源）',
+    !/unparsable\s*:\s*\{\s*action/.test(src) && !/subSetting\('unparsable'/.test(src)
+    && !/normalizeSubSetting\([^)]*unparsable/.test(src))
+  // ★ 子设置名单固定：只认 action 与 reason 两个键（labels 字段不存在）
+  // 缺键/非法值返回 null（推导交给读取侧，不物化 —— 见 normalizeCategory 的注释）
+  ok('★ 子设置名单固定：normalizeSubSetting 只产出 action 与 reason（D-12）',
+    /function normalizeSubSetting\(raw, inheritDefault\) \{[\s\S]{0,600}?if \(\(inheritDefault \? ALL_MODES : MODES\)\.indexOf\(r\.action\) === -1\) return null[\s\S]{0,300}?if \(out\.action === 'deny'\) \{ const t = normalizeText\(r\.reason\); if \(t\) out\.reason = t \}[\s\S]{0,80}?return out/.test(src)
+    && !/\.labels\b/.test(src.replace(/labels: \[\.\.\.DESTRUCTIVE_LABELS\]/g, '')))
+  // ★ 子设置读取单点：assessCommand 的钩子与 statusView 都走 commandSubSetting
+  // （3 处 = 定义 1 + 调用 2；多出第 3 个调用点就意味着出现了第二条读取链）
+  ok('★ 子设置读取单点（assessCommand 钩子与 statusView 同源）',
+    (src.match(/commandSubSetting\(root\)/g) || []).length === 3
+    && src.includes('destructive: () => commandSubSetting(root),')
+    && src.includes('effective: commandSubSetting(root),'))
+  // ★ 读不懂的段只跳过**授权方向**的例外面（allow）—— fail-closed 底线。
+  // 同时要求：deny 与 ask 例外、破坏性子设置都照常生效。
+  //   · deny 保留：否则 opaque 构造成了「绕开用户显式拒绝」的手段；
+  //   · ask 保留：它**不是授权而是「要求确认」**，跳过它等于把「每次问我」降级为「静默放行」
+  //     （实测过：例外 rm=ask 时 `rm -rf /data` 是 ask，`rm -rf /data $(true)` 曾是 allow）。
+  // 反例：把判据写回 `ex.action === 'deny'`，本条的 ask 部分即失败。
+  ok('★ 读不懂的段只跳过 allow 例外（deny 与 ask 例外、子设置均照常生效）',
+    /if \(ex && ex\.action !== 'allow'\)/.test(sp)
+    && /if \(unparsable\) \{[\s\S]{0,3400}?\} else if \(destructive\) \{/.test(sp)
+    && /if \(unparsable\) \{[\s\S]{0,3600}?\} else \{[\s\S]{0,300}?resolveException/.test(sp))
+  // ★ 例外匹配是**单一实现**（opaque 段与可读段共用 resolveException），
+  // 且必须试**并集提取出的名字**（labels，来自 rawCommandNames）、**deny/ask 优先于 allow**。
+  //
+  // 为什么强调「单一实现」：曾经两段各写一份，于是 opaque 分支试了并集名字、可读分支没试 ——
+  // 实测（例外 `rm *`=deny + 子设置 allow）`rm -rf /x` 是 deny，而
+  // `find . -exec rm -rf {} +` / `find . -delete` 是 **allow**：
+  // 主 label 是 `find`，`rm` 在额外 label 里，可读分支从不试它 —— 用户的「rm 一律拒绝」被绕过。
+  // 两段共用一份实现才能保证「子设置能拦的，用户的 deny 例外也拦得住」。
+  //
+  // 反例：删掉 labels 循环、让 allow 命中即返回、或把两段改回各写一份，本条即失败。
+  ok('★ 例外匹配单一实现：试并集名字，且 deny/ask 优先于 allow',
+    sp.includes('const resolveException = (segText, allLabels) => {')
+    // 两段都必须调它（各一次 = 恰好 2 处调用，多一处就意味着又出现了第二份实现）
+    && (sp.match(/resolveException\(seg\.text, labels\)/g) || []).length === 2
+    && /if \(r\.action === 'deny'\) return r/.test(sp)
+    && /if \(r\.action === 'ask' && !ask\) ask = r/.test(sp)
+    && /return ask \|\| allow/.test(sp))
+  // ★ 命令替换必须**摘出内容**（而非只换定界符）：双引号内的命令替换会被双引号剥离吃掉。
+  // 实测 `echo "$(rm -rf /x)"` 与 `echo "\`rm -rf /x\`"` 曾提取不到 rm。
+  // 且必须**递归**展开：嵌套的命令替换（`$(echo \`rm -rf /x\`)`）内层也要可见。
+  ok('★ 命令替换内容摘出后递归展开再拼回（双引号内与嵌套均不漏）',
+    /replaceCommandSubstitution\(noSingle, extracted\)/.test(sp)
+    && /expandSubstitution\(item, 8\)/.test(sp)
+    && /expanded\.join\(' ; '\)/.test(sp)
+    && sp.includes('function replaceCommandSubstitution(text, extracted) {')
+    && sp.includes('function expandSubstitution(text, depth) {'))
+  // ★ 整行 ok:false 时 deny 例外仍要生效（合法 heredoc 曾绕过显式拒绝）
+  ok('★ 整行读不懂时仍查 deny 例外（不绕过用户显式拒绝）',
+    /if \(!d\.ok\) \{[\s\S]{0,1200}?rawCommandNames\(/.test(sp)
+    && /ex && ex\.action === 'deny'/.test(sp)
+    && sp.includes('export function rawCommandNames(text) {'))
+  // ★ 破坏性名单含 POSIX 侧（修好 D4 的主要漏报），且不列入高频日常命令
+  ok('★ 破坏性名单含 POSIX 侧（rm/dd/chmod/chown/kill）',
+    ['rm', 'dd', 'chmod', 'chown', 'kill', 'truncate', 'shred'].every((l) => sp.includes("'" + l + "'")))
+  ok('★ 破坏性名单不含高频日常命令（mv/cp/tee/git push/npm publish）',
+    !sp.includes("'mv'") && !sp.includes("'cp'") && !sp.includes("'tee'")
+    && !sp.includes("'git push'") && !sp.includes("'npm publish'"))
+  // ★★ wrapper 带值选项表必须兜底，否则 `command -v rm` 这类会让判定链抛异常 → fail-open。
+  // 判据：不得直接对表取下标（WRAPPERS 里有几个成员根本没有条目）。
+  // 按**去注释后**的代码判：注释里会引用旧写法说明为什么要改（用裸 includes 会误报，实测踩过）。
+  ok('★★ wrapper 带值选项表访问有兜底（无条目不得抛异常 → 否则 pre-execute fail-open）',
+    (function () {
+      const code = sp.replace(/\/\/[^\n]*/g, '')
+      return !/WRAPPER_VALUE_FLAGS\[name\]\[/.test(code)
+        && /const valueFlags = WRAPPER_VALUE_FLAGS\[name\] \|\| \{\}/.test(code)
+    })())
+  // ★★ `command -v/-V` 是查询、不是执行：不得把被查询的名字当命令判（实测误报）
+  ok('★★ command -v/-V 判为查询而非执行（不误判被查询的名字）',
+    /if \(name === 'command' && \(token === '-v' \|\| token === '-V'\)\) return \{ words: current, opaque: true \}/.test(sp))
+  // ★★ opaque 段必须用原文并集提取命令名（否则 opaque 里藏的命令逃过破坏性判定）
+  ok('★★ opaque 段用 rawCommandNames 并集提取（提不出词元 / 命令藏在构造里 两种都堵）',
+    /if \(seg\.opaque\) \{[\s\S]{0,300}?const extra = rawCommandNames\(seg\.text\)/.test(sp))
+  // ★★ segmentLabel 的关键字跳过必须循环（`case x in a) rm …` / `then nohup rm …`）
+  ok('★★ segmentLabel 关键字跳过是循环（关键字后可能又是关键字或 wrapper）',
+    /for \(let guard = 0; guard < 8; guard \+= 1\) \{[\s\S]{0,200}?if \(!STATEMENT_KEYWORDS\[head\]\) break/.test(sp))
+  // ★ 自定义规则：首条命中即返回（数组顺序 = 优先级，与例外同口径）
+  // 曾经短暂改成「最严命中」，实测会毁掉「具体规则覆盖宽泛规则」这个最自然的写法：
+  //   [0] allow tool=pwsh args="git status"  /  [1] deny tool=pwsh
+  // 用户意图是「pwsh 一律拒绝，但 git status 例外」，最严命中下 git status 也变 deny —— 意图无法表达。
+  // 参考工程的「顺序无关」是为文本规则行（顺序不可见、可能由 LLM 生成）设计的，前提在 permgate 不成立。
+  ok('★ 自定义规则首条命中即返回（数组顺序 = 优先级，规则顺序完全归用户）',
+    /for \(const rule of rules\) \{\s*if \(ruleMatches\(rule, name, args\)\) \{\s*return \{ action: rule\.action/.test(src)
+    && !src.includes('RULE_SEVERITY'))
+  // ★ 规则插入位置：**尾部**（后加的排最后），顺序完全归用户 —— 用户定。
+  // 曾短暂改为 unshift（新规则插到头部），已回退：那会让用户看到自己没动过的顺序变了。
+  // 优先级由用户之后手动调节（面板拖动排序是独立议题）。
+  // 判据按「add-rule 路由那一处」取，不按全仓计数 —— 弹窗「记住此决定」那处 HEAD 起就是 unshift。
+  ok('★ add-rule 插到数组尾部（顺序只由用户改，不自动重排）', (function () {
+    const i = src.indexOf("pathname === '/permgate/add-rule'")
+    if (i < 0) return false
+    const body = src.slice(i, i + 1200)
+    return body.includes('block.custom.push(rule)') && !body.includes('block.custom.unshift(rule)')
+  })())
+  // 弹窗「记住此决定」那两处是 HEAD 就有的 unshift（与面板 add-rule 的 push 并存）：
+  // 它们不在本次改动范围内，此断言只为记录「这两处没被顺手改掉」。
+  ok('弹窗记住规则的两处写入保持 HEAD 原状（unshift，不在本次改动范围）',
+    (src.match(/block\.custom\.unshift\(/g) || []).length === 2)
+  // ★ 段级信息随判定下发（弹窗分段渲染与决策日志依赖它）
+  ok('★ 段级信息随判定下发（segments + code）',
+    src.includes('segments: a.segments,') && src.includes('code: a.code,')
+    && src.includes('argLines: humanArgsPreview(exec.name, exec.arguments, exec, d),'))
+  // ★ 设置页有子设置控件，且名单只读展示（D-12）
+  ok('★ 设置页有「破坏性命令」子设置控件（仅 command 分类渲染）',
+    cli.includes("c === 'command' ? commandSubRow() : null")
+    && cli.includes("invoke('permgate:set-command-sub'")
+    && cli.includes("'permgate:set-command-sub': ['POST', '/permgate/set-command-sub']"))
+  ok('★ 设置页名单只读展示（不可编辑，D-12）',
+    cli.includes("T('panel.subLabels') + T('panel.subLabelsNote')")
+    && !cli.includes("permgate:set-command-labels"))
+  // ★ 「匹配任意段」的警告判据必须与匹配器同构：字面量 `=== '*'` 会漏报 `**`/`***`/`* *`
+  //（命令侧 globMatch 里 `*` 之间无特殊含义；`**` 是本仓库路径侧的惯用写法，用户极易照搬）。
+  // 反例：把判据写回 `String(r.match || '').trim() === '*'`，本条即失败。
+  ok('★ 「匹配范围过宽」判据与匹配器同构（覆盖 ** 与 * *，且不误报 ?* ）', (function () {
+    if (!/c === 'command' && \/\^\[\*\\s\]\+\$\/\.test\(String\(r\.match \|\| ''\)\)/.test(cli)) return false
+    if (cli.includes("String(r.match || '').trim() === '*'")) return false
+    // 真值表复算：与 matchCommand 的语义对齐（只由 * 与空白组成 → 匹配任意段）
+    const guard = (m) => /^[*\s]+$/.test(String(m || '')) && String(m || '').indexOf('*') !== -1
+    const expect = [['*', true], ['**', true], ['***', true], ['* *', true], ['?*', false], ['*?', false], ['?', false], ['a*', false], ['git *', false], ['', false]]
+    return expect.every(([m, want]) => guard(m) === want)
+  })())
+  // ★ 子设置的「用户显式值」与「推导默认值」在落盘时必须可区分
+  // normalizeCategory 只保留用户显式写的值（缺键留空），推导交给读取侧 commandSubSetting。
+  // 反例：写回 `cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, destructiveDefaultOf(...))`
+  // —— 推导值会被 persist 固化成显式键，导致「面板设项目 deny 被穿透到全局 ask」与
+  // 「放松大分类后子设置粘住 deny」两处实测缺陷。
+  ok('★ normalizeCategory 只保留用户显式写的子设置（推导交给读取侧，不物化）',
+    src.includes("const sub = normalizeSubSetting(c.destructive, inheritDefault)")
+    && src.includes('if (sub) cat.destructive = sub')
+    && !src.includes('cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, destructiveDefaultOf'))
+  // ★ 读取侧按本层 mode 推导默认值（commandSubSetting 的 ③ 分支）
+  ok('★ commandSubSetting 在两层都无显式值时按本层 mode 推导（含项目层 deny）',
+    /function commandSubSetting\(root\) \{[\s\S]{0,1600}?const derived = destructiveDefaultOf\(mode, false\)[\s\S]{0,200}?return \{ action: derived/.test(src)
+    && /const pMode = proj && proj\.command && proj\.command\.mode/.test(src))
+  // ★ 建块时不得为 command 物化 destructive（freshCategory(cat,true) 给的是 inherit，
+  // 落盘后会变成「本层有表态」而穿透到全局 —— 这正是面板设项目 deny 被旁路的根因）
+  ok('★ setCategoryMode 建块时不为 command 物化 destructive',
+    /if \(!block\[cat\]\) \{[\s\S]{0,500}?if \(cat === 'command'\) delete block\[cat\]\.destructive/.test(src))
+  // ★ 子设置默认值不得比本层分类 mode 更宽松（否则用户显式收紧的 deny 被默认值悄悄放开）
+  // 反例：把 destructiveDefaultOf 写回恒 'ask'，下面这条即失败。
+  ok('★ 子设置默认值随本层 mode 收紧（mode=deny 时子设置默认 deny，allow/ask 时仍 ask）',
+    /function destructiveDefaultOf\(mode, inheritDefault\) \{[\s\S]{0,200}?if \(mode === 'deny'\) return 'deny'[\s\S]{0,120}?return inheritDefault \? 'inherit' : 'ask'/.test(src))
+  // ★ 写入侧**不得**联动改写子设置：值上无法区分「默认 ask」与「用户显式设的 ask」，
+  // 联动会静默覆盖用户表态，且造成「先设 A 后设 B」与「先设 B 后设 A」结果不同（顺序依赖）。
+  // 反例：在 setCategoryMode 里加回 `block[cat].destructive = { action: 'deny' }`，本条即失败。
+  ok('★ setCategoryMode 不联动改写 destructive 子设置（避免顺序依赖与覆盖用户表态）', (function () {
+    const i = src.indexOf('function setCategoryMode(')
+    if (i < 0) return false
+    const body = src.slice(i, i + 1600)
+    return !/destructive\s*=\s*\{\s*action/.test(body) && /这里\*\*刻意不联动\*\*/.test(body)
+  })())
+  // ★ 全局层不接受 inherit（inherit 是项目层专属的「穿透」语义，与 setCategoryMode 同口径）
+  ok('★ 子设置写入：全局层不接受 inherit（与 setCategoryMode 同口径）',
+    /function setCommandSub\(root, targetKey, action, reason\) \{[\s\S]{0,200}?const allowed = targetKey === 'global' \? MODES : ALL_MODES/.test(src))
+  // ★ 大分类与子设置严格度不一致时**提示但不改写**（用户确认的方案）
+  // 判据：子设置比大分类更松（MODE_RANK 越大越严，故更松 = 子设置排名更小）才提示；
+  // 更紧是子设置的正常用途（D-6），提示它只会造成噪音。
+  // 反例：把比较写成 `<=`（方向反了，会在子设置更严时提示、更松时不提示），本条即失败。
+  ok('★ 大分类与子设置不一致时提示（严格度比较，allow < ask < deny）',
+    cli.includes('const MODE_RANK = { allow: 0, ask: 1, deny: 2 };')
+    && /const warnSubMismatch = \(catMode, sub\) => \{[\s\S]{0,700}?if \(MODE_RANK\[sub\] >= rank\) return;/.test(cli))
+  ok('★ 提示在「改大分类」与「改子设置」两个方向都会触发（否则用户看不到）',
+    /if \(c === 'command'\) warnSubMismatch\(mode, explicitSubOf\(tab\)\);/.test(cli)
+    && /warnSubMismatch\(cats\[tab\] \? cats\[tab\]\.command : undefined, action\);/.test(cli))
+  // ★ 提示判据只能用**显式值**，不能用面板显示值（含宿主下发的推导默认值）。
+  // 推导值永不比 mode 更松（destructiveDefaultOf 保证），拿它比较会产生**假警告**：
+  // 实测 global command 由 ask 改为 deny、用户从未设过子设置时，会弹出
+  // 「破坏性命令会按『询问』处理」—— 而实际读取侧按新 mode 推导出的是 deny。
+  // 反例：把 changeCat 那侧改回 `subDestructive[tab]`，本条即失败。
+  ok('★ 提示判据用显式值（不用含推导默认值的面板显示值，避免假警告）',
+    /const explicitSubOf = \(t\) => \{[\s\S]{0,200}?return \(e && e\.action\) \|\| undefined;/.test(cli)
+    && /warnSubMismatch\(mode, explicitSubOf\(tab\)\)/.test(cli)
+    && !/warnSubMismatch\(mode, subDestructive\[tab\]\)/.test(cli))
+  ok('★ inherit 不参与比较（本层无独立表态，穿透到全局，无从判定松紧）',
+    /const warnSubMismatch = \(catMode, sub\) => \{[\s\S]{0,400}?if \(!sub \|\| sub === 'inherit'\) return;/.test(cli))
+  // ★ sub 必须由调用方显式传入，不得从 subDestructive[tab] 读（React state 异步更新，
+  // 同一函数体内读到的是旧值 —— 实测曾导致「放松时不提示、收紧时误报」）。
+  // 反例：把 warnSubMismatch 里改回 `const sub = subDestructive[tab];`，本条即失败。
+  ok('★ 子设置新值由调用方显式传入（不读异步 state，避免判错方向）',
+    /const warnSubMismatch = \(catMode, sub\) => \{/.test(cli)
+    && !/const warnSubMismatch = \(catMode\) => \{[\s\S]{0,200}?subDestructive\[tab\]/.test(cli)
+    && /warnSubMismatch\(cats\[tab\] \? cats\[tab\]\.command : undefined, action\);/.test(cli))
+  ok('★ 提示只提示不改写：changeCat 内不得出现 set-command-sub 调用',
+    (function () {
+      const i = cli.indexOf('const changeCat = (c) => (e) => {')
+      if (i < 0) return false
+      const body = cli.slice(i, i + 1400)
+      return !body.includes('permgate:set-command-sub')
+    })())
+  ok('★ 提示文案中英文齐备（含 {cat} / {sub} 占位符）',
+    cli.includes("'panel.subMismatch'") && cli.includes("T('panel.subMismatch').replace('{cat}', modeLabel(catMode)).replace('{sub}', modeLabel(sub))")
+    && (cli.match(/'panel\.subMismatch':/g) || []).length === 2)
+  // ★ 省略提示必须在硬截断**之后**拼（否则它位于串尾、最先被吃掉）。
+  // 反例：把 `more` 改回先 push 进 parts 再整串截断，本条即失败。
+  ok('★ 分段摘要的「另有 N 段」提示不被 300 字符硬截断吞掉',
+    /const more = rest > 0 \?/.test(src)
+    && /const budget = Math\.max\(40, SEG_SUMMARY_MAX_CHARS - more\.length\)/.test(src)
+    && /return \(lang === 'en' \? ' — segments: ' : ' —— 分段：'\) \+ joined \+ more/.test(src))
+  // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
+  // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次
+  // （写成 `<=` 时，大分类 deny + 子设置 ask 不提示，反而在子设置更严时提示）。
+  ok('★ 提示判据真值表复算：仅当子设置比大分类更松时提示', (function () {
+    const m = /const MODE_RANK = \{ allow: 0, ask: 1, deny: 2 \};/.exec(cli)
+    if (!m) return false
+    const RANK = { allow: 0, ask: 1, deny: 2 }
+    // 复算函数：与 warnSubMismatch 的判据同构（inherit / 未知值不提示）
+    const warns = (catMode, sub) => {
+      if (!sub || sub === 'inherit') return false
+      const rank = RANK[catMode]
+      if (rank === undefined || RANK[sub] === undefined) return false
+      return RANK[sub] < rank
+    }
+    const expected = [
+      ['deny', 'ask', true], ['deny', 'allow', true], ['deny', 'deny', false], ['deny', 'inherit', false],
+      ['ask', 'allow', true], ['ask', 'ask', false], ['ask', 'deny', false], ['ask', 'inherit', false],
+      ['allow', 'ask', false], ['allow', 'allow', false], ['allow', 'deny', false], ['allow', 'inherit', false],
+    ]
+    return expected.every(([cat, sub, want]) => warns(cat, sub) === want)
+  })())
+}
 
 // ─────────────────────────────────────────────────────────────
 group('15. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入文件类分类闸')
@@ -2312,8 +2611,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
   // 两类消费函数：① 收 root 值（纯函数，好测）；② 收 exec 后内部 rootOf(exec)（有会话上下文）
   const needsRoot = ['normAbsPath', 'pathKey', 'projectBlock', 'ensureProject', 'resolveCategory',
     'matchException', 'alreadyInProject', 'outsideMatrix', 'quickAction', 'fallbackSetting',
-    'fallbackMode', 'effectiveSandboxConfig', 'commandFullyCovered',
-    'setCategoryMode', 'setQuickAction', 'setFallbackMode', 'setSandboxConfig',
+    'fallbackMode', 'effectiveSandboxConfig', 'commandSubSetting',
+    'setCategoryMode', 'setQuickAction', 'setFallbackMode', 'setSandboxConfig', 'setCommandSub',
     'resolveEditorKernel', 'projectsFromConfig', 'removeMigratedSource']
   const missingParam = needsRoot.filter((fn) => !new RegExp('function ' + fn + '\\([^)]*\\broot\\b').test(src))
   ok('所有根消费函数都接收显式 root 参数', missingParam.length === 0, JSON.stringify(missingParam))
@@ -2335,8 +2634,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
   const arity = {
     normAbsPath: 2, pathKey: 2, projectBlock: 1, ensureProject: 1, resolveCategory: 4,
     matchException: 4, alreadyInProject: 4, outsideMatrix: 3, quickAction: 2, fallbackSetting: 1,
-    fallbackMode: 1, effectiveSandboxConfig: 1, commandFullyCovered: 2,
-    setCategoryMode: 5, setQuickAction: 5, setFallbackMode: 4, setSandboxConfig: 3,
+    fallbackMode: 1, effectiveSandboxConfig: 1, commandSubSetting: 1,
+    setCategoryMode: 5, setQuickAction: 5, setFallbackMode: 4, setSandboxConfig: 3, setCommandSub: 4,
     resolveEditorKernel: 2, cleanupStaleProjects: 1, projectsFromConfig: 2, removeMigratedSource: 2,
     addProjectException: 6,
   }
@@ -2472,8 +2771,10 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
       }
     }
     const bad = calls.filter((c) => c.arg !== 'root' && c.arg !== 'rootOf(exec)')
+    // 7 处：decide() 的 read/image/edit/undo 各 1（工作区外判定），commandDecision 的
+    // 重定向目标判定 1（D-8 只标注不设闸，但同样必须用会话派生的根），needsUpgrade 等 2 处。
     ok('isOutside 的每个调用点都传会话派生的根（不得用固定兜底根）',
-      calls.length === 6 && bad.length === 0,
+      calls.length === 7 && bad.length === 0,
       JSON.stringify(bad.length ? bad : calls.length))
   }
 
@@ -3381,7 +3682,7 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   }
 }
 // ─────────────────────────────────────────────────────────────
-// 27. 审批弹窗改造：拖动 / 缩小方块 / 超时机制（.plan/approval-dialog-plan.md）
+// 27. 审批弹窗改造：拖动 / 缩小方块 / 超时机制
 {
   console.log('\n— 27. 审批弹窗改造：拖动 / 缩小方块 / 超时机制')
 

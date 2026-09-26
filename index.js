@@ -3,6 +3,7 @@
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
@@ -90,9 +91,9 @@ const RETIRE_QUICK_DEFAULTS_MIGRATION = 'retire-quick-defaults-cordis_define'
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
 const REPEAT_STREAK = 4
-const PS_KEYWORDS = { foreach: 1, if: 1, else: 1, elseif: 1, for: 1, while: 1, do: 1, until: 1, switch: 1, return: 1, function: 1, filter: 1, param: 1, begin: 1, process: 1, end: 1, try: 1, catch: 1, finally: 1, throw: 1, break: 1, continue: 1, trap: 1, in: 1, not: 1, and: 1, or: 1, class: 1, enum: 1, using: 1, exit: 1, dynamicparam: 1, data: 1 }
-// 子命令路由器命令族：候选细化到「git status *」这一粒度，而不是一放全放「git *」
-const ROUTER_CMDS = { git: 1, npm: 1, pnpm: 1, yarn: 1, docker: 1, kubectl: 1, dotnet: 1, cargo: 1, go: 1, gh: 1, pip: 1, uv: 1, conda: 1 }
+// PS_KEYWORDS / ROUTER_CMDS / ROUTER_OPT_VALUE 已随命令判定一起迁到 shell-parse.js：
+// 「哪些是 PowerShell 关键字」「哪些命令是子命令路由器」属于解析器的词汇表，
+// 留一份在宿主里就会与解析器实际用的那份漂移（候选生成与判定各按一张表走）。
 
 const FILE_READ_TOOLS = { read: 1 }
 // 图片读取单列一类：判定链与 read 完全同构（工作区外先过「目录访问」闸，再过本分类 + 路径例外），
@@ -100,7 +101,10 @@ const FILE_READ_TOOLS = { read: 1 }
 // 老配置升级后读图会先询问（v1 的 locked 配置保持 deny），是否放宽由用户自己决定。
 const FILE_IMAGE_TOOLS = { read_image: 1 }
 const FILE_WRITE_TOOLS = { write: 1, edit: 1 }
-const COMMAND_TOOLS = { pwsh: 1, bash: 1 }
+// 命令工具 → shell 方言：由 shell-parse.js 的 SHELL_OF_TOOL 派生（单一来源），
+// 避免「哪些工具是命令工具」与「它属于哪个 shell」两份定义在新增工具时漂移。
+const COMMAND_TOOLS = {}
+for (const k of Object.keys(SHELL_OF_TOOL)) COMMAND_TOOLS[k] = 1
 const SUBAGENT_TOOLS = { subagent: 1, subagent_fork: 1, workflow: 1, ralph: 1 }
 
 // str_replace_editor 的写命令（view 只读）。
@@ -760,7 +764,30 @@ export default {
       // 把 undo 显式设为 ask 即可恢复逐次确认。
       const cat = { mode: inheritDefault ? 'inherit' : (key === 'directory' || key === 'command' || key === 'edit' || key === 'image' || key === 'doomloop' ? 'ask' : 'allow') }
       if (EXC_CATS.indexOf(key) !== -1) cat.exceptions = []
+      // command 分类的子设置「破坏性命令」：判定链是 例外 → 子设置 → 分类默认值，
+      // 子设置比大分类「知道得更多」（它认识 rm/dd/chmod 这些具体命令名），
+      // 故更细的判定优先于更粗的判定 —— 大分类设为 allow 时破坏性命令仍按子设置走。
+      // 默认 ask 是**修复一个失效的原有意图**（旧 DANGEROUS_CMD_RE 只在快速通道上生效，
+      // 够不到大分类 allow 这条路径），不是新增一层；用户可显式设为 allow 回到原行为。
+      //
+      // **这里不种 destructive 默认值**：freshCategory 的产物会经 ensureProject/freshProject
+      // 落盘，种下的值就成了一条「用户表态」。项目层种的是 inherit，读取侧看到「本层有表态」
+      // 便穿透全局 —— 用户在面板把「本项目命令」设为拒绝时，破坏性命令反而按全局 ask 弹窗
+      // （实测过：面板写 → rm 待批；同意图手写配置 → deny）。默认值统一由读取侧
+      // commandSubSetting 按本层 mode 推导，落盘只承载用户显式写下的值。
       return cat
+    }
+
+    // 子设置默认值不得**比它所在层的分类 mode 更宽松** —— 否则用户显式收紧大分类时，
+    // 子设置会用默认值把收紧悄悄放开。实测过的三种存量严格配置（全局 command=deny、
+    // 项目层 command=deny、老格式 {mode:'locked'} 经 migrateOld 映射出的全 deny）：
+    // 默认 ask 会让 rm/dd/chmod/sudo/taskkill/Remove-Item 这些名单命令由 deny 变 ask
+    // （弹窗待批，一次误点即放行），且该分类配的 deny reason 也不再下发。
+    // 反向必须保持不动：大分类 allow 时子设置默认仍是 ask（D-6 的核心修复，
+    // 若跟着 mode 变成 allow 就等于把破坏性命令静默放行，正是本次要修的那个洞）。
+    function destructiveDefaultOf(mode, inheritDefault) {
+      if (mode === 'deny') return 'deny'
+      return inheritDefault ? 'inherit' : 'ask'
     }
 
     // 文本类字段（拒绝原因 / 备注）的统一口径：trim + 截断 200，空串视为未填。
@@ -787,6 +814,21 @@ export default {
       return e
     }
 
+    // command 分类子设置「破坏性命令」的归一化：动作值走 MODES/ALL_MODES（与 mode 同口径），
+    // reason 只在 deny 时保留（allow 不弹窗、ask 有自己的备注，存了也读不到）。
+    // 名单固定，不开放用户增删 —— 故**只认 action 与 reason 两个键**，其余一律丢弃，
+    // 老配置里手写的 labels/未知键不会被悄悄带进内存（否则「名单固定」只是界面上的约定）。
+    //
+    // 缺键或值非法时返回 **null**（不是补一个默认动作）：推导交给读取侧
+    // （commandSubSetting），落盘只承载用户显式表态 —— 理由见 normalizeCategory 的注释。
+    function normalizeSubSetting(raw, inheritDefault) {
+      const r = raw && typeof raw === 'object' ? raw : {}
+      if ((inheritDefault ? ALL_MODES : MODES).indexOf(r.action) === -1) return null
+      const out = { action: r.action }
+      if (out.action === 'deny') { const t = normalizeText(r.reason); if (t) out.reason = t }
+      return out
+    }
+
     function normalizeCategory(raw, key, inheritDefault) {
       const def = freshCategory(key, inheritDefault)
       const c = raw && typeof raw === 'object' ? raw : {}
@@ -796,6 +838,22 @@ export default {
       if (cat.mode === 'deny') { const t = normalizeText(c.reason); if (t) cat.reason = t }
       if (EXC_CATS.indexOf(key) !== -1) {
         cat.exceptions = Array.isArray(c.exceptions) ? c.exceptions.map((r) => normalizeException(r, key)).filter(Boolean) : []
+      }
+      // 子设置：**只保留用户显式写下的值**，缺键/非法值一律留空（不落 action）。
+      //
+      // 为什么不在这里补推导值（曾经的写法是 `normalizeSubSetting(c.destructive, …, destructiveDefaultOf(mode))`）：
+      // normalizeCategory 的结果会被 persist 整体序列化落盘，于是**推导值会变成显式键**，
+      // 而显式键在下次加载时会被当成「用户表过态」原样保留。两个后果都已实测复现：
+      //   ① 面板把项目层 command 设为 deny 时，setCategoryMode 用 freshCategory 建块拿到
+      //      `destructive: inherit` 并落盘 → 读取侧穿透到全局 ask → 用户的拒绝被旁路，
+      //      而同意图手写配置文件（无该键）却能正确推导出 deny —— 同一意图两种结果；
+      //   ② 存量 deny 配置加载后推导出 deny，任意一次**无关写盘**把它固化；此后用户把
+      //      command 放松为 allow，子设置仍是 deny —— 放松不生效且重启后粘住。
+      // 现在推导完全交给读取侧（commandSubSetting 的 fallback），落盘只承载用户表态，
+      // 幂等性恢复：destructive 的取值不再取决于「中间有没有发生过一次写盘」。
+      if (key === 'command') {
+        const sub = normalizeSubSetting(c.destructive, inheritDefault)
+        if (sub) cat.destructive = sub
       }
       return cat
     }
@@ -893,6 +951,12 @@ export default {
       // image 是本版新增的从严分类，不套用老模式映射：off/permissive 老配置按新默认 ask
       // （升级后读图先询问，由用户决定是否放宽），locked 仍保持 deny，避免比旧行为更松。
       for (const c of CATS) cfg.global[c].mode = c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask') : (map[oldMode] || 'allow')
+      // 注意：这里**不**为 command 物化 destructive 子设置。
+      // 曾经写过 `cfg.global.command.destructive = { action: destructiveDefaultOf(mode, false) }`，
+      // 那是为了解决「老 locked 配置升级后 mode=deny 但子设置默认 ask」—— 但同一个问题现在由
+      // 读取侧（commandSubSetting 按本层 mode 推导）统一解决，而物化会带来新问题：
+      // 推导值一旦落盘就成了「用户表态」，此后用户把 command 放松为 allow 时，
+      // 子设置仍保留 deny —— 放松不生效且重启后粘住（实测复现过）。
       cfg.global.fallbackMode = map[oldMode]
       cfg.global.doomloop.mode = oldMode === 'off' ? 'allow' : 'ask'
       if (oldMode === 'locked') {
@@ -911,6 +975,7 @@ export default {
           if (c === 'image') { if (pm === 'locked') pb[c].mode = 'deny'; continue }
           pb[c].mode = pm === 'off' ? 'allow' : (map[pm] || 'allow')
         }
+        // 与全局层同理：项目层也**不**物化子设置（推导由读取侧按本层 mode 负责）
         pb.doomloop.mode = pm === 'off' ? 'allow' : 'ask'
         // 仅显式配置过旧模式的项目保留旧行为（off→allow）；未显式配置（缺省 off）用 inherit 跟随全局，
         // 否则之后全局收紧兜底时这些老项目仍按 allow 静默放行
@@ -1351,29 +1416,10 @@ export default {
       try { return globToRegExp(glob).test(norm(value)) } catch (e) { return false }
     }
 
-    function matchCommand(pat, hay) {
-      const p = String(pat || '')
-      const h = String(hay || '')
-      // 空 pattern 不匹配任何命令（否则 indexOf('') === 0 恒真，等于放行所有命令）
-      if (!p) return false
-      if (p.indexOf('*') === -1 && p.indexOf('?') === -1) return h.toLowerCase().indexOf(p.toLowerCase()) !== -1
-      let body = p
-      let tail = '.*'
-      // 「cmd *」尾随通配：也匹配无参数的原命令（git status * 同时覆盖 git status）
-      if (p.endsWith(' *')) {
-        body = p.slice(0, -2)
-        tail = '( .*)?'
-      }
-      let re = ''
-      for (const c of body) {
-        if (c === '*') re += '.*'
-        else if (c === '?') re += '.'
-        else if ('\\^$.[]{}()|+-'.indexOf(c) !== -1) re += '\\' + c
-        else re += c
-      }
-      re += tail
-      try { return new RegExp('^' + re + '$', 'i').test(h) } catch (e) { return false }
-    }
+    // 命令例外匹配（matchCommand）的实现已迁到 shell-parse.js：它是纯函数，且
+    // 「词边界精确」与「通配符锚定」两条语义必须与段级判定用的是同一份代码 ——
+    // 两处各写一份时，测试通过的那份与运行时用的那份会分家（旧实现正是如此：
+    // 子串匹配 + 通配符 `.*` 吞操作符，两处缺陷叠在一起才造成静默放行）。
 
     function collectStrings(v, acc) {
       if (typeof v === 'string') acc.push(v)
@@ -1430,8 +1476,28 @@ export default {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
       const block = targetKey === 'global' ? config.global : ensureProject(root)
-      if (!block[cat]) block[cat] = freshCategory(cat, targetKey !== 'global')
+      if (!block[cat]) {
+        block[cat] = freshCategory(cat, targetKey !== 'global')
+        // command 的子设置**不随建块物化**：freshCategory(cat, true) 给项目层的是
+        // `destructive: {action:'inherit'}`，一旦落盘就成了显式键 —— 读取侧看到「本层有表态」
+        // 便穿透到全局，于是用户在面板上把「本项目命令」设为拒绝时，破坏性命令却按全局 ask
+        // 走弹窗（实测：面板写 → rm 待批；同意图手写配置 → deny，两种结果）。
+        // 删掉它，让读取侧（commandSubSetting）按本层 mode 推导 —— 那才是正确的默认来源。
+        if (cat === 'command') delete block[cat].destructive
+      }
       block[cat].mode = mode
+      // 这里**刻意不联动** command 的 destructive 子设置。曾经加过「收紧到 deny 时把子设置
+      // 也改成 deny」，但写入侧无法区分「子设置是默认值」与「用户显式设成了 ask」——
+      // 两者在值上完全相同，于是那次同步会**静默覆盖用户的显式表态**
+      // （实测：用户先把子设置设为「询问」，再把大分类设为「拒绝」，子设置被改写成「拒绝」）。
+      // 顺序不同结果不同 = 用户无法预期，比「大分类 deny 时破坏性命令仍弹窗」更糟。
+      //
+      // 现在的语义是纯读取侧决定的，无顺序依赖：
+      //   · 用户显式设过子设置 → 一律尊重（判定链上子设置优先于大分类）；
+      //   · 老配置（连 destructive 键都没有）→ 由 normalizeCategory 按本层 mode 补默认值
+      //     （mode=deny 时补 deny，见 destructiveDefaultOf），升级不会把显式拒绝放松。
+      // 面板上「当前生效」一行会把实际取值与来源显示出来，用户能看到大分类 deny 下
+      // 破坏性命令仍按子设置走，需要一并收紧就去改子设置。
       if (mode !== 'deny') { delete block[cat].reason; return true }
       if (reason === undefined) return true
       const t = normalizeText(reason)
@@ -1592,6 +1658,56 @@ export default {
       // 项目未显式配置（缺失或 inherit）才穿透全局：此处 pv 已确定不生效，
       // 故直接取全局值，不再经 firstEffective 传一个恒不命中的 projVal（与 fallbackSetting 同形）。
       return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }
+    }
+
+    // command 分类的子设置读取：与 resolveCategory 同口径（项目显式 → 全局 → 默认），
+    // 项目层 inherit 穿透全局。单一读取点：assessCommand 的 destructive 钩子与 statusView
+    // 的下发都走它，避免「面板显示一个值、实际裁决按另一个值」的双份真相。
+    //
+    // **推导在这里做，不在 normalizeCategory 里做**：那边补的值会被 persist 落盘成显式键，
+    // 于是「推导值」与「用户表态」在磁盘上不可区分（详见 normalizeCategory 的注释与两处实测）。
+    // 现在的优先级：
+    //   ① 项目层显式非 inherit → 用它
+    //   ② 全局层显式非 inherit → 用它
+    //   ③ 都没显式值 → 按**本层实际生效的 command mode** 推导（destructiveDefaultOf）：
+    //      本层 mode=deny 时给 deny（用户显式收紧大分类，不该被子设置默认值放开 ——
+    //      面板设「本项目命令=拒绝」走的就是这条路径，它用 freshCategory 建块，拿到的是
+    //      inherit 而非 deny，修复前会穿透到全局 ask 把用户的拒绝旁路）；
+    //      mode=allow/ask 时给 ask（D-6：破坏性命令不被大分类 allow 静默放行）。
+    function commandSubSetting(root) {
+      const proj = projectBlock(root)
+      const pSub = proj && proj.command && proj.command.destructive
+      const pv = pSub && pSub.action
+      if (pv && pv !== 'inherit') return { action: pv, reason: normalizeText(pSub.reason), source: 'project' }
+      const gSub = config.global.command && config.global.command.destructive
+      const gv = gSub && gSub.action
+      if (gv && gv !== 'inherit') return { action: gv, reason: normalizeText(gSub.reason), source: 'global' }
+      // ③ 推导：取本层（项目优先，否则全局）的 command mode 决定默认动作
+      const pMode = proj && proj.command && proj.command.mode
+      const useProject = pMode && pMode !== 'inherit'
+      const mode = useProject ? pMode : (config.global.command && config.global.command.mode)
+      const derived = destructiveDefaultOf(mode, false)
+      // derived 只可能是 deny / ask（inheritDefault=false），都是能直接用的动作
+      return { action: derived, reason: undefined, source: useProject ? 'project-default' : 'default' }
+    }
+
+    // 子设置写入单点（设置页路由专用）。reason 语义与 setCategoryMode 完全一致：
+    // 未提供（undefined）保留原值；空串/纯空白显式清除；有内容覆盖。
+    // 全局层不接受 inherit（与 setCategoryMode 同口径：inherit 是项目层专属的「穿透」语义）。
+    function setCommandSub(root, targetKey, action, reason) {
+      const allowed = targetKey === 'global' ? MODES : ALL_MODES
+      if (allowed.indexOf(action) === -1) return false
+      const block = targetKey === 'global' ? config.global : ensureProject(root)
+      if (!block.command) block.command = freshCategory('command', targetKey !== 'global')
+      if (action === 'inherit') { block.command.destructive = { action: 'inherit' }; return true }
+      if (!block.command.destructive) block.command.destructive = {}
+      block.command.destructive.action = action
+      if (action !== 'deny') { delete block.command.destructive.reason; return true }
+      if (reason === undefined) return true
+      const t = normalizeText(reason)
+      if (t) block.command.destructive.reason = t
+      else delete block.command.destructive.reason
+      return true
     }
 
     function pathArg(args) {
@@ -2973,7 +3089,18 @@ export default {
       const t = exec.name
       const v = d.value !== undefined && d.value !== null ? String(d.value) : ''
       if (d.kind === 'command' && v) {
-        const first = String(v).split(/[;|]/)[0].trim()
+        // 取第一段作为意图摘要：与判定同源（同一份 decomposeCommand + 同一方言）。
+        // 不再自己 split(/[;|]/) —— 那是本文件里的第三份分段实现，口径与判定侧不一致时
+        // 会给出与实际判定无关的摘要。
+        // 方言必须按工具取（曾经硬编码 'bash'）：pwsh 工具用 bash 词法器分解时，
+        // `\` 会被当转义符吃掉、尾部反斜杠直接判失败，摘要与判定看到的不是同一条命令。
+        // 判定结果里已带 segments（commandDecision 下发的），有就直接复用，省掉第二次分解。
+        let first = v
+        if (d.segments && d.segments.length) first = d.segments[0].text
+        else {
+          const dec = decomposeCommand(v, SHELL_OF_TOOL[exec.name] || 'bash')
+          if (dec.ok && dec.segments.length) first = dec.segments[0].text
+        }
         const f = first.length > 80 ? first.slice(0, 80) + '…' : first
         return bi('执行命令 ' + f, 'Run command ' + f)
       }
@@ -2997,7 +3124,10 @@ export default {
       return idx >= 0 ? s.slice(idx + 1) : s
     }
 
-    function humanArgsPreview(name, args, exec) {
+    // d：本次判定结果（可选）。命令工具会带 segments，用于**按段展示**命令 ——
+    // 审批人要能看清这条命令由几段组成、每段是什么：旧实现把整条命令塞成一行，
+    // `git status && rm -rf ~/.dsh` 在弹窗里只是一条长字符串，而真正需要人看的恰恰是第二段。
+    function humanArgsPreview(name, args, exec, d) {
       const lang = uiLang
       const lines = []
       const push = (label, value, extra) => {
@@ -3044,7 +3174,18 @@ export default {
               : (typeof args.new_str === 'string' ? args.new_str : (typeof args.file_text === 'string' ? args.file_text : '')))
           if (content) push(t('内容', 'Content'), content.length > 140 ? content.slice(0, 140) + '…（共 ' + content.length + ' 字符）' : content)
         } else if (COMMAND_TOOLS[name]) {
-          push(t('命令', 'Command'), args.command || '')
+          const segs = (d && Array.isArray(d.segments)) ? d.segments : null
+          if (segs && segs.length > 1) {
+            for (let i = 0; i < segs.length; i++) {
+              const s = segs[i]
+              const tag = codeLabel(s.code)
+              // 段号 + 引出该段的操作符：`段 2 &&` 一眼看出这是 `&&` 后面的那一段
+              const label = t('段', 'Seg') + ' ' + (i + 1) + (i === 0 ? '' : ' ' + s.op)
+              push(label, s.text, tag ? { note: L(tag, lang) } : undefined)
+            }
+          } else {
+            push(t('命令', 'Command'), args.command || '')
+          }
           if (typeof args.description === 'string' && args.description) push(t('说明', 'Description'), args.description)
         } else if (name === 'web_search' || name === 'web_fetch') {
           if (typeof args.query === 'string') push(t('查询', 'Query'), args.query)
@@ -3115,14 +3256,21 @@ export default {
       // recentDecisions 下发给 AI。note 若拼进 reason，就等于搭着这条链路一起被 AI 读到——
       // 而备注的设计用途只有「弹窗上给人看」这一处，没有理由进入审计与工具出口。
       // 无自定义文字时回退「（例外 id）」标注，方便去设置页定位是哪一条。
+      // 例外 id 的字段名有两处来源：resolveCategory 的返回值用 ruleId，而 shell-parse 的
+      // assessCommand 返回值用 matched（命令分支直接把 a 传进来）。两处都认，
+      // 否则命令分支命中 ask 例外时这一支恒不成立（ask 的 reason 已被 shell-parse 清空），
+      // 文案里再也不出现「（例外 e1）」—— 相对 HEAD 是一次静默退化。
+      const exIdOf = (d) => (d && (d.ruleId || d.matched)) || null
       const exReason = (d) => {
         if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'
-        if (d && d.ruleId) return '（例外 ' + d.ruleId + '）'
+        const id = exIdOf(d)
+        if (id) return '（例外 ' + id + '）'
         return ''
       }
       const exReasonEn = (d) => {
         if (d && d.action === 'deny' && d.reason) return ' (' + d.reason + ')'
-        if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
+        const id = exIdOf(d)
+        if (id) return ' (exception ' + id + ')'
         return ''
       }
       // ask 例外的备注：与 reason 分开下发，仅供弹窗展示（理由见上方 note 说明）。
@@ -3149,6 +3297,25 @@ export default {
       const rules = []
       if (proj && Array.isArray(proj.custom)) { for (const r of proj.custom) rules.push(r) }
       if (Array.isArray(config.global.custom)) { for (const r of config.global.custom) rules.push(r) }
+      // 自定义规则：**首条命中即返回** —— 数组顺序就是优先级。
+      //
+      // 为什么不是「最严命中」：那会让「更具体的规则覆盖更宽泛的规则」这个最自然的写法失效。
+      // 实测（曾经改成最严命中时的行为）：
+      //   [0] allow tool=pwsh args="git status"   ← 想放行的具体用法
+      //   [1] deny  tool=pwsh                     ← 想拒绝的宽泛规则
+      // 用户意图是「pwsh 一律拒绝，但 git status 例外」，最严命中下 git status 也变成 deny —— 意图无法表达。
+      // 「顺序即优先级」是**能力**：用户既能写「宽泛兜底 + 具体例外」，也能写「具体拒绝 + 宽泛放行」，
+      // 取决于他要哪一种。参考工程的「顺序无关」是为**文本规则行**（顺序不可见、可能由 LLM 生成）设计的，
+      // permgate 的规则是面板上的结构化列表、顺序可见且由用户手动添加，前提不成立。
+      //
+      // 与例外的差别（有意保留，不是不一致）：
+      //   例外 —— 写入侧把新条目 unshift 到头部（「最新决定先生效」，弹窗一键记住就立刻生效）；
+      //   规则 —— 写入侧 push 到尾部，**顺序完全归用户，不自动重排**。
+      // 差别的原因是交互：例外主要由弹窗候选「一键记住」写入（用户期待立即生效），
+      // 规则由面板表单逐条添加（用户期待顺序不变）。两者共用「首条命中」这一读侧语义。
+      // 代价（有意接受）：新规则若被前面命中的规则遮蔽就不生效，直到用户手动把它调到前面。
+      // 面板拖动排序是**独立议题**（尚未实现）：顺序即优先级，但用户目前只能靠「后加的排最后」
+      // 间接控制，无法直接调整既有条目的先后 —— 需要时再补 UI。
       for (const rule of rules) {
         if (ruleMatches(rule, name, args)) {
           return { action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' }
@@ -3216,15 +3383,7 @@ export default {
         return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
       }
       if (COMMAND_TOOLS[name]) {
-        const cmd = commandArg(args)
-        // 命令的所有可识别命令 token 均已命中 allow 例外 → 视为已覆盖，直接放行（不再弹窗）
-        if (commandFullyCovered(cmd, root)) {
-          return { action: 'allow', reason: bi('命令组成均已命中例外，放行', 'All command tokens covered by exceptions, allowed'), cat: null, value: null, kind: null }
-        }
-        const d = resolveCategory('command', cmd, 'command', root)
-        const exZh = exReason(d)
-        const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('执行命令' + exZh, 'Run command' + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'command', value: cmd, kind: 'command' }
+        return commandDecision(exec, root, exReason, exReasonEn, exNote)
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
@@ -3249,7 +3408,11 @@ export default {
     }
 
     function recordDecision(d, exec) {
-      decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, reason: d.reason || '' })
+      // code 一并留痕：它是「为什么问这一次」的机器可读答案（destructive / unparsable /
+      // write-outside / segment-* ），与 reason 那种人读长文本互补。
+      // 此前 commandDecision 已经把 code 放进返回值，但这里没写 —— 注释声称「决策日志记 code」
+      // 而日志里没有这个字段，属于写了没人读的死数据。
+      decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, code: d.code || null, reason: d.reason || '' })
       if (decisions.length > MAX_DECISIONS) decisions.splice(0, decisions.length - MAX_DECISIONS)
     }
 
@@ -3287,116 +3450,127 @@ export default {
       return false
     }
 
-    // 路由器命令的「带值选项」：跳过选项本身后还要跳过它的值（git -c key=val / npm --prefix ./x）
-    const ROUTER_OPT_VALUE = { '-c': 1, '-C': 1, '--config': 1, '--config-env': 1, '--git-dir': 1, '--work-tree': 1, '--namespace': 1, '--exec-path': 1, '-H': 1, '--prefix': 1, '--cwd': 1, '--project': 1, '--registry': 1 }
-
-    function commandTokens(seg) {
-      const toks = String(seg).trim().split(/\s+/)
-      if (!toks.length) return []
-      let idx = 0
-      if (toks[0].indexOf('$') === 0) {
-        if (toks[1] === '=') idx = 2
-        else return []
-      }
-      const cleanToken = (t) => {
-        t = String(t).replace(/[;|]$/, '')
-        t = t.replace(/^[.\/\\]/, '').trim()
-        if (!t) return ''
-        if (t.indexOf('$') !== -1 || t.indexOf('@') !== -1) return ''
-        if (t.indexOf(':') !== -1 || t.indexOf('\\') !== -1 || t.indexOf('/') !== -1) return ''
-        if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(t)) return ''
-        if (/[()[\]{}'"]/.test(t)) return ''
-        return t
-      }
-      const first = cleanToken(toks[idx])
-      if (!first) return []
-      if (PS_KEYWORDS[first.toLowerCase()]) {
-        // 关键字开头（foreach/if…）：继续向后找真正的命令 token
-        for (let j = idx + 1; j < toks.length; j++) {
-          const t = cleanToken(toks[j])
-          if (!t) continue
-          if (PS_KEYWORDS[t.toLowerCase()]) continue
-          return [t]
-        }
-        return []
-      }
-      if (!ROUTER_CMDS[first.toLowerCase()]) return [first]
-      // 路由器命令：跳过选项（含带值选项的值），取第一个非选项 token 作子命令
-      // 子命令位不做 PS 关键字过滤（git switch 是真子命令；子命令属于路由器自己的词汇表）
-      let sub = ''
-      for (let j = idx + 1; j < toks.length; j++) {
-        const raw = String(toks[j]).replace(/[;|]$/, '')
-        if (raw.indexOf('-') === 0) {
-          if (ROUTER_OPT_VALUE[raw]) j++
-          continue
-        }
-        const t = cleanToken(raw)
-        if (!t) continue
-        sub = t
-        break
-      }
-      return sub ? [first, sub] : [first]
-    }
-
-    // 命令的所有可识别命令 token（如 Get-ChildItem / git status）是否均已命中 allow 例外。
-    // 两道安全闸：① 破坏性命令（杀进程/删文件/改系统）一律不走「全命中」快速通道，
-    // ② 任一命令段识别不出命令 token（变量赋值/表达式/字符串拼接等）也不视为已覆盖。
-    // 两者命中时仍需弹窗走正常判定（用户显式配置的 allow 例外仍会命中，这里只挡「碰巧覆盖」）。
-    const DANGEROUS_CMD_RE = /\b(?:Stop-Process|Stop-Service|Stop-Computer|Stop-Job|Restart-Computer|Restart-Service|Remove-Item|Remove-ItemProperty|Remove-Service|Remove-PSDrive|Remove-Variable|Remove-Alias|Remove-Event|Remove-Job|Start-Process|Start-Service|Start-Computer|Start-Job|taskkill|shutdown|format|diskpart|rmdir|erase|Clear-Content|Clear-Item|Set-ExecutionPolicy|icacls|takeown|attrib|reg\s+delete|wmic\s+process)\b/i
-    function commandFullyCovered(cmd, root) {
-      try {
-        const whole = String(cmd || '')
-        // 破坏性命令：即便命令 token 命中 allow 例外，也不允许静默放行
-        if (DANGEROUS_CMD_RE.test(whole)) return false
-        const parts = whole.split(/[|;]/)
-        const results = []
-        for (const seg of parts) {
-          const toks = commandTokens(seg)
-          // 识别不出命令 token 的段：解析器看不懂，不能当作「已覆盖」
-          if (!toks.length) return false
-          let label = toks[0]
-          if (toks.length >= 2 && ROUTER_CMDS[toks[0].toLowerCase()]) label = toks[0] + ' ' + toks[1]
-          const value = label + ' *'
-          const proj = projectBlock(root)
-          const lists = []
-          if (proj && proj.command && Array.isArray(proj.command.exceptions)) lists.push(proj.command.exceptions)
-          if (config.global.command && Array.isArray(config.global.command.exceptions)) lists.push(config.global.command.exceptions)
-          let hit = false
-          for (const list of lists) {
-            for (const r of list) {
-              if (r.action === 'allow' && matchCommand(r.match, value)) { hit = true; break }
+    // ── 命令判定：段级例外（本计划的核心修复）────────────────────────────────
+    // 旧实现在这里有三份独立实现（commandTokens / commandFullyCovered / splitCommandSegments）
+    // 且例外匹配作用于**整条命令串**，于是 `git status *` 编译出的 `^git status( .*)?$` 里的 `.*`
+    // 吞掉了 `;` `|` `&&` 之后的一切 —— 实测 11 条命令被静默执行（含 `rm -rf ~/.dsh`）。
+    // 现在判定统一委托给 shell-parse.js 的 assessCommand：分解成段 → 逐段判定 → fail-closed 合并。
+    // 本函数只负责「把宿主状态注入成钩子」与「把段级结果翻成 decide() 的返回形状」。
+    //
+    // 判定链（逐段，见 shell-parse.js 的 assessCommand）：
+    //   ① 用户例外（段级匹配）  → ② destructive 子设置（更细，优先于大分类）→ ③ command 分类默认值
+    //   读不懂的段跳过 ①②，直接落 ③ —— 读不懂的内容不可被授权。
+    function commandDecision(exec, root, exReason, exReasonEn, exNote) {
+      const cmd = commandArg(exec.arguments)
+      const shell = SHELL_OF_TOOL[exec.name] || 'bash'
+      // 例外匹配：作用对象是**单个命令段**（seg.text），不是整条命令串。
+      //
+      // 匹配对象有两个：① 段原文（用户手写的例外，如 `git status *` 匹配 `git status -s`）；
+      // ② 归一化 label（弹窗候选写下的例外，如候选值 `git status *` 要能命中段原文
+      //    `env FOO=1 git status`、`/usr/bin/git status`、`git -c a=b status`）。
+      // 只试 ① 会让「允许此项」写下的例外永不命中（候选值是 label 派生的，段原文带 wrapper/路径前缀），
+      // 用户点了按钮却还在反复弹窗，且 alreadyInProject 判重让该候选下次不再出现 —— 变成死结。
+      // 只试 ② 则用户手写的更具体模式（含参数）会失效。
+      //
+      // **层级顺序必须先于匹配对象**：对「项目层 → 全局层」的每一层，都完整试两个对象。
+      // 曾经写成「先按段原文走完整层序，未命中再按 label 走一遍」，那会产生第三种优先级 ——
+      // 全局层命中段原文 会压过 项目层命中 label：实测全局 `env *`=allow + 项目 `git status *`=deny 时
+      // `env FOO=1 git status` 命中全局 allow（项目级拒绝被静默遮蔽），
+      // 而把全局那条换成 `echo *`（不匹配段原文）后同一条命令正确命中项目 deny。
+      // 现在项目层只要在任一对象上命中就先返回，与 resolveCategory 既有的层级语义一致。
+      const matchSegmentException = (segText, label) => {
+        const proj = projectBlock(root)
+        const pCat = proj ? proj.command : undefined
+        const gCat = config.global.command || freshCategory('command', false)
+        const targets = (label && label !== segText) ? [segText, label] : [segText]
+        const lists = []
+        if (pCat && Array.isArray(pCat.exceptions)) lists.push(pCat.exceptions)
+        if (Array.isArray(gCat.exceptions)) lists.push(gCat.exceptions)
+        for (const list of lists) {
+          for (const r of list) {
+            for (const target of targets) {
+              if (!matchCommand(r.match, target)) continue
+              return {
+                action: r.action,
+                ruleId: r.id,
+                reason: (r.action === 'deny' && r.reason) ? r.reason : undefined,
+                note: (r.action === 'ask' && r.note) ? r.note : undefined,
+              }
             }
-            if (hit) break
           }
-          results.push(hit)
         }
-        return results.length > 0 && results.every(Boolean)
-      } catch (e) { return false }
+        return null
+      }
+      const a = assessCommand(cmd, shell, {
+        home: homeFromEnv(),
+        matchException: matchSegmentException,
+        destructive: () => commandSubSetting(root),
+        category: () => resolveCategory('command', null, null, root),
+        isOutsideWorkspace: (p) => isOutside(p, root),
+      })
+      // inherit：两层都没给出动作 → 落兜底策略（与分类 mode 的 inherit 同口径）。
+      // 不在这里直接问 fallbackSetting 是为了让「为什么走到兜底」这件事由 decide() 统一处理。
+      //
+      // 可达性说明（不要误以为这条分支在日常生效）：当前宿主下它**恒不成立** ——
+      //   · commandSubSetting 显式不返回 inherit（两层都未配置时回落内置默认 ask）；
+      //   · resolveCategory 对 command 分类只会返回具体 mode（项目层 inherit 已在读取时穿透全局，
+      //     全局层经 MODES 校验，永远落不出 inherit）。
+      // 保留它是因为 assessCommand 的契约允许返回 inherit，且宿主的默认值策略不该由解析器假定；
+      // 但**任何依赖它生效的改动都是无效的**（例如指望「用户配的兜底 allow 能放行命令」）。
+      // test/shell-parse.mjs 的 F26 用自造钩子触发这条路径，那是模块契约测试，不代表宿主可达。
+      if (a.action === 'inherit') {
+        const fb = fallbackSetting(root)
+        const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
+        const frEn = fb.mode === 'deny' && fb.reason ? ' (' + fb.reason + ')' : ''
+        return { action: fb.mode, reason: bi('执行命令：未配置判定，按兜底策略处理：' + fb.mode + fr, 'Run command: no verdict configured; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'command', value: cmd, kind: 'command', segments: a.segments }
+      }
+      const exZh = exReason(a)
+      const exEn = exReasonEn(a)
+      // 段级信息随判定一起下发：弹窗按段渲染、决策日志记 code（「为什么问这一次」可追溯）。
+      // 段数组只含判定所需的最小字段，不含命令全文以外的任何内容。
+      return {
+        action: a.action,
+        reason: bi('执行命令' + describeSegments(a, 'zh') + exZh, 'Run command' + describeSegments(a, 'en') + exEn),
+        note: exNote(a),
+        ruleId: a.matched,
+        cat: 'command',
+        value: cmd,
+        kind: 'command',
+        segments: a.segments,
+        code: a.code,
+      }
     }
 
-    // 引号感知的命令分段：只把引号外的 | 与 ; 当分段符。
-    // 正则/字符串里常含 |（如匹配盘符的正则），按管道切开会产生 C:\ 这类假命令。
-    function splitCommandSegments(s) {
-      const out = []
-      let cur = ''
-      let quote = null
-      for (let i = 0; i < s.length; i++) {
-        const ch = s[i]
-        if (quote !== null) {
-          cur += ch
-          if (ch === quote) {
-            if (quote === "'" && s[i + 1] === "'") { cur += s[++i]; continue }
-            if (quote === '"' && s[i - 1] === '`') continue
-            quote = null
-          }
-          continue
-        }
-        if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue }
-        if (ch === '|' || ch === ';') { out.push(cur); cur = ''; continue }
-        cur += ch
+    // 段级判定摘要（弹窗与拒绝文案共用）：把「哪一段为什么被拦」讲清楚。
+    // 只列**非 allow** 的段 —— 全部列出会把日常的多段命令刷成一屏。
+    //
+    // 总量必须设上限：reason 会被 recordDecision 写进 decisions 环形缓冲（MAX_DECISIONS 条），
+    // 再经 statusView 的 recentDecisions 下发给 AI。段数随命令行数线性增长，
+    // 不截断时一条 2000 行的脚本会让单条 reason 达到 ~160 KB（中英各一份）、
+    // 环形缓冲膨胀到 MB 级 —— 而这段文字的实际用途只是「让审批人一眼看出是哪一段被拦」。
+    const SEG_SUMMARY_MAX_PARTS = 5
+    const SEG_SUMMARY_MAX_CHARS = 300
+    function describeSegments(a, lang) {
+      const segs = (a.segments || []).filter((s) => s.action !== 'allow')
+      if (!segs.length) return ''
+      const parts = []
+      for (const s of segs.slice(0, SEG_SUMMARY_MAX_PARTS)) {
+        const tag = codeLabel(s.code)
+        const t = s.text.length > 80 ? s.text.slice(0, 80) + '…' : s.text
+        parts.push(t + (tag ? '（' + L(tag, lang) + '）' : ''))
       }
-      out.push(cur)
-      return out
+      // 省略提示必须给出**还有几段**：只写「…」会让审批人以为已经看全了。
+      // 注意它必须在**硬截断之后**再拼：曾经先 push 提示、再对整串按 300 字符截断，
+      // 而提示位于串尾、最先被吃掉 —— 实测 8 段各 75 字符时中英两版都不含提示，
+      // 恰好违背了「不能让审批人以为已经看全」的初衷。
+      const rest = segs.length - parts.length
+      const more = rest > 0 ? (lang === 'en' ? ' … +' + rest + ' more' : ' …另有 ' + rest + ' 段') : ''
+      // 分段展示：`git status && rm -rf x` 被拦时，用户要能一眼看出是哪一段
+      let joined = parts.join(lang === 'en' ? ' ; ' : ' ；')
+      // 给省略提示预留长度，保证截断后它仍完整可见
+      const budget = Math.max(40, SEG_SUMMARY_MAX_CHARS - more.length)
+      if (joined.length > budget) joined = joined.slice(0, budget) + '…'
+      return (lang === 'en' ? ' — segments: ' : ' —— 分段：') + joined + more
     }
 
     function buildCandidates(entry) {
@@ -3410,18 +3584,34 @@ export default {
       const push = (label, value, kind, writes, hint) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind, writes: Array.isArray(writes) ? writes : [{ cat: entry.cat, kind, value }], ...(hint ? { hint } : {}) })
       const t = (zh, en) => (uiLang === 'en' ? en : zh)
       if (entry.kind === 'command' && entry.value) {
-        const parts = splitCommandSegments(String(entry.value))
+        // 候选与判定同源：同一份 decomposeCommand + segmentLabel（见 §3.7「单一来源」），
+        // 且**方言也同源** —— 判定侧按 SHELL_OF_TOOL[exec.name] 取方言，这里曾经硬编码 'bash'，
+        // 于是 pwsh 工具下两侧对同一条命令的分段结果不同（bash 词法器把 `\` 当转义符）：
+        //   `.\scripts\build.ps1 -Clean` 候选 label 成了 `.scriptsbuild`（写下的例外永不命中）；
+        //   `Remove-Item -Recurse -Force C:\Temp\` 在 bash 下直接 ok:false（一个候选都不产出）。
+        const shell = SHELL_OF_TOOL[entry.tool] || 'bash'
+        const d = decomposeCommand(String(entry.value), shell)
         const seen = {}
-        for (const seg of parts) {
-          const toks = commandTokens(seg)
-          if (!toks.length) continue
-          let label = toks[0]
-          if (toks.length >= 2 && ROUTER_CMDS[toks[0].toLowerCase()]) label = toks[0] + ' ' + toks[1]
-          if (seen[label]) continue
-          seen[label] = true
-          const val = label + ' *'
-          if (alreadyInProject(val, 'command', null, root)) continue
-          push(label, val, 'command')
+        if (d.ok) {
+          for (const seg of d.segments) {
+            const label = segmentLabel(seg.words)
+            // 读不懂的段不生成候选：给一个「允许 $(任意代码) *」的按钮等于给用户一把
+            // 看起来能解决问题、实际把授权面开得极大的钥匙（判定侧也不会采纳它）。
+            //
+            // 判据必须与判定侧**同源**：assessCommand 里是
+            //   `!!seg.opaque || !label || nestedInlineProgram(label, seg.words)`
+            // 曾经这里只看前两项，于是 `node -e "..."` / `bash -lc "..."` 这类
+            // 「段首可读但带内联程序」的段会产出候选 `node *`：用户点了写入成功，
+            // 判定侧仍不采纳（读不懂的内容不可被授权），命令继续弹窗 ——
+            // 而 alreadyInProject 判重已把它当「已表态」，**下次弹窗候选变成空**，
+            // 用户既没放行成功、也再没有按钮可点，形成死结。
+            if (!label || seg.opaque || nestedInlineProgram(label, seg.words)) continue
+            if (seen[label]) continue
+            seen[label] = true
+            const val = label + ' *'
+            if (alreadyInProject(val, 'command', null, root)) continue
+            push(label, val, 'command')
+          }
         }
       } else if (entry.kind === 'path' && entry.value) {
         // 例外按 glob 匹配：文件路径若含 * 或 ?，写成的例外会比「仅此路径」宽得多
@@ -3526,7 +3716,7 @@ export default {
           intent: taskText || describeIntent(exec, d),
           ts: Date.now(),
           candidates: [],
-          argLines: humanArgsPreview(exec.name, exec.arguments, exec),
+          argLines: humanArgsPreview(exec.name, exec.arguments, exec, d),
           // 超时相关：deadline 是**绝对时间戳**，客户端据此本地倒数（不用服务端每秒推送）；
           // 服务端 setTimeout 才是超时的权威作者，浏览器只负责显示。
           // 这样即使后台标签被节流，超时也照常按时发生，且客户端不会累计漂移。
@@ -4137,6 +4327,24 @@ export default {
         stats,
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
         cats: CATS,
+        // command 分类的子设置「破坏性命令」：下发当前生效值与来源（global / project / default），
+        // 与 quickTools/quickDefaults 同口径 —— 面板显示的就是裁决实际用的那个值。
+        // labels 一并下发供设置页**只读展示**（名单固定，不开放用户增删，D-12）。
+        //
+        // global/project 是该层的**显式配置**（null = 用户没设过），而 defaultAction 是该层的
+        // **推导默认值**（按本层 command mode 算，见 destructiveDefaultOf）—— 两者必须分开下发：
+        // 客户端要「未配置时显示推导值」，但推导逻辑在宿主（读取侧单一来源），不能在客户端
+        // 再写一份（写死 `|| 'ask'` 时，global command=deny 的用户会看到面板显示「询问」、
+        // 甚至弹出「破坏性命令会按询问处理」的提示，而实际裁决是拒绝 —— 面板说谎）。
+        commandSub: {
+          key: 'destructive',
+          effective: commandSubSetting(root),
+          global: (config.global.command && config.global.command.destructive) || null,
+          project: (proj && proj.command && proj.command.destructive) || null,
+          globalDefault: destructiveDefaultOf(config.global.command && config.global.command.mode, false),
+          projectDefault: destructiveDefaultOf(proj && proj.command && proj.command.mode, true),
+          labels: [...DESTRUCTIVE_LABELS].sort(),
+        },
         editorKernel: resolveEditorKernel(exec, root),
         fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
         excCats: EXC_CATS,
@@ -4520,6 +4728,14 @@ export default {
           await persist(exec)
           return json(res, statusView(exec))
         }
+        if (pathname === '/permgate/set-command-sub' && method === 'POST') {
+          await init(exec)
+          // target 与其它设置路由同口径归一（缺失/非法一律 global），理由见 set-category 处注释
+          const target = normTarget(a)
+          if (!setCommandSub(rootOf(exec), target, a.action, a.reason)) return json(res, { error: '非法的 target/action 组合' })
+          await persist(exec)
+          return json(res, statusView(exec))
+        }
         if (pathname === '/permgate/set-quick' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
@@ -4556,6 +4772,13 @@ export default {
           if (!rule) return json(res, { error: '非法的规则参数' })
           const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           if (!block.custom) block.custom = []
+          // 新规则**插到数组尾部**（后加的排最后）—— 用户定：保持这个顺序，优先级由用户之后
+          // 手动调节（面板拖动排序是**独立议题**，尚未实现，见 decide() 规则循环处的说明）。
+          //
+          // 已知后果（有意接受）：decide() 首条命中即返回，所以新规则若被前面任何一条命中遮蔽，
+          // 就不会生效 —— 直到用户把它调到前面。面板上两条规则看起来一样，这一点不直观，
+          // 但「自动插到头部」会让用户失去对顺序的控制权（他会看到自己没动过的顺序变了），
+          // 两害相权取其轻：**顺序只由用户改**。
           block.custom.push(rule)
           await persist(exec)
           return json(res, { added: rule, status: statusView(exec) })

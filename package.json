@@ -35,12 +35,14 @@
   },
   "files": [
     "index.js",
+    "shell-parse.js",
     "client.js",
     "cordis.patch.yml"
   ],
   "scripts": {
-    "test": "node test/regressions.mjs && node test/smoke.mjs",
+    "test": "node test/regressions.mjs && node test/shell-parse.mjs && node test/smoke.mjs",
     "test:unit": "node test/regressions.mjs",
+    "test:parse": "node test/shell-parse.mjs",
     "test:smoke": "node test/smoke.mjs",
     "lint": "eslint ."
   },

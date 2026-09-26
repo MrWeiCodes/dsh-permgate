@@ -12,7 +12,7 @@
 // 等于配置声称覆盖、实际没跑）。
 export default [
   {
-    files: ['index.js', 'client.js', 'test/**/*.mjs'],
+    files: ['index.js', 'shell-parse.js', 'client.js', 'test/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

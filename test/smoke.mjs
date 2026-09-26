@@ -1762,6 +1762,424 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）')
+{
+  // 背景（实测漏洞）：旧实现用**整条命令串**匹配例外，`git status *` 编译出的
+  // `^git status( .*)?$` 里的 `.*` 吞掉了 `;` `|` `&&` 之后的一切 —— 11 条命令被静默执行。
+  // 本组走**真实 tools/pre-execute 链路**复现那 11 条，断言它们不再整条静默放行。
+  // 断言口径是「不返回 next()」（即不无条件放行），而不是钉死 ask/deny ——
+  // 具体落点由配置决定，测试不该把某个默认值固化成语义。
+  const ws = mkdtempSync(join(tmpdir(), 'pg-seg-ws-'))
+  const home = mkdtempSync(join(tmpdir(), 'pg-seg-home-'))
+  mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+  const EXC = ['git status *', 'git log *', 'git diff *', 'Get-ChildItem *', 'Get-Content *',
+    'Copy-Item *', 'cd *', 'node --check *', 'docker ps *', 'grep *']
+  writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: {
+      sandboxMode: 'danger-full-access', fallbackMode: 'ask',
+      command: { mode: 'ask', destructive: { action: 'ask' }, exceptions: EXC.map((m, i) => ({ id: 'e' + i, action: 'allow', match: m })) },
+    },
+    projects: {},
+  }, null, 2), 'utf8')
+  const h = createHost({ workspaceRoot: ws, dshHome: home })
+  const pre = h.hooks.get('tools/pre-execute')
+  // 探测：nexted 为真 = 被静默放行；否则说明走了审批/拒绝
+  const probe = async (cmd) => {
+    let nexted = false
+    const p = pre(makeExec(ws, 'bash', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
+    p.catch(() => {})
+    const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    return { nexted, verdict: out && out.kind }
+  }
+
+  // A 组：操作符穿透（修复前 11/11 静默放行）
+  const A = [
+    'git status && rm -rf ~/.dsh', 'git status ; rm -rf ~/.dsh', 'git status | rm -rf ~/.dsh',
+    'git status `rm -rf ~/.dsh`', 'git status $(rm -rf ~/.dsh)', 'git status & rm -rf ~/.dsh',
+    'git status\nrm -rf ~/.dsh', 'git status\n&& rm -rf ~/.dsh',
+    'cd /tmp && rm -rf ~/.dsh', 'Get-Content a && rm -rf ~/.dsh', 'Copy-Item a b && rm -rf ~/.dsh',
+  ]
+  const leaked = []
+  for (const c of A) { const r = await probe(c); if (r.nexted) leaked.push(c) }
+  ok('★ group20: A 组 11 条操作符穿透命令均不再静默放行', leaked.length === 0, JSON.stringify(leaked))
+
+  // C 组：命令替换 / 嵌套解释器
+  const C = ['git status $(rm -rf ~/.dsh)', 'git status `rm -rf ~/.dsh`', 'sh -c "rm -rf ~/.dsh"',
+    'pwsh -Command "Remove-Item ~/.dsh -Recurse"', 'node -e "require(\'fs\').rmSync(\'x\')"']
+  const leakedC = []
+  for (const c of C) { const r = await probe(c); if (r.nexted) leakedC.push(c) }
+  ok('★ group20: C 组命令替换/嵌套均不静默放行', leakedC.length === 0, JSON.stringify(leakedC))
+
+  // I 组：部分覆盖（一段有例外、另一段没有）
+  const I = ['git status && npm publish', 'cd /tmp && rm -rf ~/.dsh', 'echo x && git push --force']
+  const leakedI = []
+  for (const c of I) { const r = await probe(c); if (r.nexted) leakedI.push(c) }
+  ok('★ group20: I 组部分覆盖均不整条放行', leakedI.length === 0, JSON.stringify(leakedI))
+
+  // 反向：不得过度收紧（单段命中例外仍免审 —— G/H 组的运行时对照）
+  const KEEP = ['git status', 'git status --short', 'git log --format=oneline',
+    'git log --pretty=format:%h', 'docker ps --format json', 'Get-ChildItem -Recurse', 'node --check x.js']
+  const blocked = []
+  for (const c of KEEP) { const r = await probe(c); if (!r.nexted) blocked.push(c) }
+  ok('★ group20: 命中例外的单段命令仍免审（未过度收紧；含 D3 的 format 误报回归）',
+    blocked.length === 0, JSON.stringify(blocked))
+
+  // ★ D-6 核心回归：command 大分类 = allow 时，破坏性命令仍不返回 next()
+  // （现有实现在此场景下会放行 —— 这正是 §1.2b 的缺陷）
+  await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'command', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  const DESTRUCTIVE = ['Remove-Item -Recurse -Force C:\\x', 'taskkill /f /im x.exe',
+    'icacls C:\\x /grant everyone:F', 'rm -rf ~/.dsh']
+  const leakedD = []
+  for (const c of DESTRUCTIVE) { const r = await probe(c); if (r.nexted) leakedD.push(c) }
+  ok('★★ group20: command=allow 时破坏性命令仍不静默放行（D-6 核心修复，§1.2b）',
+    leakedD.length === 0, JSON.stringify(leakedD))
+  // 对照：同一配置下普通命令确实放行（证明大分类仍生效，不是整类被锁死）
+  const rPlain = await probe('some-unknown-tool --flag')
+  ok('group20: 同一配置下普通命令仍按大分类 allow 放行（大分类仍生效）', rPlain.nexted === true, JSON.stringify(rPlain))
+
+  // ★ 子设置可配置性：destructive=allow 时破坏性命令回到放行（用户知情放开）
+  await callRoute(h.routes, 'POST', '/permgate/set-command-sub', { target: 'project', action: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  const rAllow = await probe('rm -rf ~/.dsh')
+  ok('★ group20: destructive=allow 时破坏性命令放行（子设置可配置，用户知情放开）', rAllow.nexted === true, JSON.stringify(rAllow))
+  // ★ destructive=deny 时直接拒绝，且理由取自子设置 reason
+  await callRoute(h.routes, 'POST', '/permgate/set-command-sub', { target: 'project', action: 'deny', reason: '不许删', lang: 'zh', sessionId: 'sess-1' })
+  let denyOut = null
+  const pDeny = pre(makeExec(ws, 'bash', { command: 'rm -rf ~/.dsh' }), async () => ({ kind: 'allow' }))
+  pDeny.catch(() => {})
+  denyOut = await Promise.race([pDeny, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  ok('★ group20: destructive=deny 时直接拒绝', !!denyOut && denyOut.kind === 'deny', JSON.stringify(denyOut))
+  ok('★ group20: 拒绝理由取自子设置 reason', !!denyOut && String(denyOut.reason || '').indexOf('不许删') !== -1, JSON.stringify(denyOut && denyOut.reason))
+
+  // ★ 分组/花括号包住的破坏性命令（走真实链路）：段内 opaque 不得关掉子设置。
+  // 根因：分组被整块当 opaque 文本吞掉 → 段 words 为空 → label 为空 → 破坏性判定恒 false。
+  // 这是「段内 opaque 不得关掉子设置」那条修复的遗漏分支（只覆盖了「词元提取得出」的形态）。
+  const GROUPED = ['(rm -rf ~/.dsh)', '( rm -rf ~/.dsh )', '{ rm -rf ~/.dsh; }',
+    '(cd /tmp; rm -rf ~/.dsh)', 'echo a; (rm -rf ~/.dsh)', 'if true; then (rm -rf ~/.dsh); fi',
+    '(sudo rm -rf /x)', '(chmod 777 /etc/passwd)']
+  const leakedG = []
+  for (const c of GROUPED) { const r = await probe(c); if (r.nexted) leakedG.push(c) }
+  ok('★★ group20: 分组/花括号包住的破坏性命令不被静默放行（段内 opaque 不得关掉子设置）',
+    leakedG.length === 0, JSON.stringify(leakedG))
+
+  // ★ 用户例外优先于子设置（D-5）
+  await callRoute(h.routes, 'POST', '/permgate/add-exception', { target: 'project', category: 'command', action: 'allow', match: 'rm -rf /tmp/*', lang: 'zh', sessionId: 'sess-1' })
+  const rExFirst = await probe('rm -rf /tmp/x')
+  ok('★ group20: 用户例外优先于 destructive 子设置（D-5）', rExFirst.nexted === true, JSON.stringify(rExFirst))
+
+  // ★ status 下发子设置（面板据它渲染；来源与名单一并下发）
+  const st = await callRoute(h.routes, 'GET', '/permgate/status')
+  const cs = st.data && st.data.commandSub
+  ok('★ group20: status 下发 commandSub（当前值 + 来源 + 只读名单）',
+    !!(cs && cs.key === 'destructive' && cs.effective && Array.isArray(cs.labels) && cs.labels.length > 10),
+    JSON.stringify(cs && { key: cs.key, eff: cs.effective, n: (cs.labels || []).length }))
+  ok('★ group20: commandSub.effective.source 反映实际来源（本项目设置）',
+    !!(cs && cs.effective && cs.effective.source === 'project'), JSON.stringify(cs && cs.effective))
+  ok('★ group20: 名单只读下发且不含 mv/cp（刻意不列入的高频命令）',
+    !!(cs && cs.labels.indexOf('mv') === -1 && cs.labels.indexOf('cp') === -1 && cs.labels.indexOf('rm') !== -1),
+    JSON.stringify(cs && cs.labels.filter((l) => l === 'mv' || l === 'cp' || l === 'rm')))
+
+  // ★ 老配置（无 destructive 键）加载后补默认值 ask
+  const ws2 = mkdtempSync(join(tmpdir(), 'pg-seg2-ws-'))
+  const home2 = mkdtempSync(join(tmpdir(), 'pg-seg2-home-'))
+  mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
+  writeFileSync(join(home2, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: { fallbackMode: 'ask', command: { mode: 'ask', exceptions: [] } }, projects: {},
+  }, null, 2), 'utf8')
+  const h2 = createHost({ workspaceRoot: ws2, dshHome: home2 })
+  const st2 = await callRoute(h2.routes, 'GET', '/permgate/status')
+  const cs2 = st2.data && st2.data.commandSub
+  // source 为 'global' 而不是 'default' 是**正确的**：normalizeCategory 会把默认值补进
+  // 全局块并落盘（与 mode 的默认值完全同口径 —— 每个分类的 mode 也是这样补进去的）。
+  // 故 'default' 只在「全局块里连 command 都没有」时才出现，正常加载后恒为具体层。
+  // 关键断言是「动作是 ask」——即老配置升级后破坏性命令确实被拦（下面那条运行时用例）。
+  ok('★ group20: 老配置（无 destructive 键）→ 迁移补默认值 ask',
+    !!(cs2 && cs2.effective && cs2.effective.action === 'ask'),
+    JSON.stringify(cs2 && cs2.effective))
+  // 老配置下破坏性命令同样不被静默放行
+  let nexted2 = false
+  const pre2 = h2.hooks.get('tools/pre-execute')
+  const p2 = pre2(makeExec(ws2, 'bash', { command: 'rm -rf x' }), async () => { nexted2 = true; return { kind: 'allow' } })
+  p2.catch(() => {})
+  await Promise.race([p2, new Promise((r) => setTimeout(r, 300))])
+  ok('★ group20: 老配置下破坏性命令也不静默放行', nexted2 === false)
+
+  // ★★ group20b：显式收紧的 command=deny 不得被子设置默认值放松
+  // 背景：子设置优先于大分类（D-6，收紧方向的核心修复），但同一条规则在**放松方向**也生效时，
+  // 默认 ask 会把用户显式设的 deny 降级为弹窗（一次误点即放行），该分类配的 deny reason 也不再下发。
+  // 反例：destructiveDefaultOf 写回恒 'ask'，本组即失败。
+  const ws3 = mkdtempSync(join(tmpdir(), 'pg-seg3-ws-'))
+  const home3 = mkdtempSync(join(tmpdir(), 'pg-seg3-home-'))
+  mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
+  writeFileSync(join(home3, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: { fallbackMode: 'ask', command: { mode: 'deny', reason: '命令一律拒绝' } }, projects: {},
+  }, null, 2), 'utf8')
+  const h3 = createHost({ workspaceRoot: ws3, dshHome: home3 })
+  const st3 = await callRoute(h3.routes, 'GET', '/permgate/status')
+  const cs3 = st3.data && st3.data.commandSub
+  ok('★★ group20b: 全局 command=deny + 无 destructive 键 → 子设置迁移为 deny（不放松）',
+    !!(cs3 && cs3.effective && cs3.effective.action === 'deny'), JSON.stringify(cs3 && cs3.effective))
+  // 运行时：破坏性命令必须直接 deny（而不是弹窗）
+  let denyOut3 = null
+  const pre3 = h3.hooks.get('tools/pre-execute')
+  const p3 = pre3(makeExec(ws3, 'bash', { command: 'rm -rf x' }), async () => ({ kind: 'allow' }))
+  p3.catch(() => {})
+  denyOut3 = await Promise.race([p3, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  ok('★★ group20b: command=deny 时破坏性命令直接拒绝（不得降级为弹窗）',
+    !!denyOut3 && denyOut3.kind === 'deny', JSON.stringify(denyOut3))
+
+  // ★★ group20c：opaque 构造不得关掉破坏性子设置，也不得绕开显式 deny 例外
+  // 反例：shell-parse 的 destructive 判定写回 `!unparsable && …`，本组即失败。
+  // 注意这里**只收「段首就是破坏性命令」的形态**：`bash -lc "..."` 这类段首是解释器的
+  // 嵌套调用按 D-4 落大分类默认值（大分类 allow 即放行）—— 那是计划里明确接受的取舍
+  // （§10.5 登记为「参考工程是 deny，本计划是 ask」），不在本组的断言范围。
+  const opaqueCases = ['rm -rf ~/.dsh $(true)', 'rm -rf ~/.dsh `true`', 'if true; then rm -rf ~/.dsh; fi',
+    'find . -exec rm -rf {} +', 'Remove-Item -Recurse -Force $(Get-Location)']
+  await callRoute(h3.routes, 'POST', '/permgate/set-command-sub', { target: 'global', action: 'ask', lang: 'zh', sessionId: 'sess-1' })
+  await callRoute(h3.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'command', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  const leakedOpaque = []
+  for (const c of opaqueCases) {
+    let nexted3 = false
+    const p = pre3(makeExec(ws3, 'bash', { command: c }), async () => { nexted3 = true; return { kind: 'allow' } })
+    p.catch(() => {})
+    await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    if (nexted3) leakedOpaque.push(c)
+  }
+  ok('★★ group20c: 大分类 allow 时 opaque 构造/控制关键字/find -exec 均不得静默放行破坏性命令',
+    leakedOpaque.length === 0, JSON.stringify(leakedOpaque))
+
+  // ★★ group20d：设置顺序不得影响结果（无顺序依赖）
+  // 背景：曾让 setCategoryMode 在「大分类收紧到 deny」时联动把子设置也改成 deny。
+  // 但写入侧无法区分「子设置是默认 ask」与「用户显式设成了 ask」—— 两者值相同，
+  // 于是那次同步会**静默覆盖用户的显式表态**，且造成「先设 A 后设 B」与「先设 B 后设 A」
+  // 结果不同。本组用两条**相反顺序**的操作序列断言最终状态一致，并断言用户表态被保留。
+  const orderCases = [
+    ['先设子设置=ask，再设大分类=deny', async (routes) => {
+      await callRoute(routes, 'POST', '/permgate/set-command-sub', { target: 'global', action: 'ask', lang: 'zh', sessionId: 'sess-1' })
+      await callRoute(routes, 'POST', '/permgate/set-category', { target: 'global', category: 'command', mode: 'deny', lang: 'zh', sessionId: 'sess-1' })
+    }],
+    ['先设大分类=deny，再设子设置=ask', async (routes) => {
+      await callRoute(routes, 'POST', '/permgate/set-category', { target: 'global', category: 'command', mode: 'deny', lang: 'zh', sessionId: 'sess-1' })
+      await callRoute(routes, 'POST', '/permgate/set-command-sub', { target: 'global', action: 'ask', lang: 'zh', sessionId: 'sess-1' })
+    }],
+  ]
+  const orderResults = []
+  for (const [label, runSteps] of orderCases) {
+    const wsO = mkdtempSync(join(tmpdir(), 'pg-order-ws-'))
+    const homeO = mkdtempSync(join(tmpdir(), 'pg-order-home-'))
+    mkdirSync(join(homeO, 'dsh-permgate'), { recursive: true })
+    const hO = createHost({ workspaceRoot: wsO, dshHome: homeO })
+    await runSteps(hO.routes)
+    const stO = await callRoute(hO.routes, 'GET', '/permgate/status')
+    const subO = stO.data && stO.data.commandSub
+    const preO = hO.hooks.get('tools/pre-execute')
+    const probeO = async (cmd) => {
+      let nexted = false
+      const p = preO(makeExec(wsO, 'bash', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
+      p.catch(() => {})
+      const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      return nexted ? 'allow' : ((out && out.kind) || 'timeout')
+    }
+    const subAction = subO && subO.global && subO.global.action
+    const destructive = await probeO('rm -rf x')
+    const plain = await probeO('git status')
+    orderResults.push({ label, subAction, destructive, plain })
+    // 用户显式设的 ask 必须被保留（不得被子设置默认值/联动改写覆盖）
+    ok('★★ group20d: ' + label + ' → 用户显式设的子设置保留为 ask',
+      subAction === 'ask', JSON.stringify(subO))
+    // 判定链：子设置优先于大分类 → 破坏性命令弹窗；普通命令落大分类 deny
+    ok('★★ group20d: ' + label + ' → 破坏性命令按子设置走（ask，不落大分类 deny）',
+      destructive === 'timeout', 'got=' + destructive)
+    ok('★★ group20d: ' + label + ' → 普通命令落大分类（deny）',
+      plain === 'deny', 'got=' + plain)
+    try { rmSync(wsO, { recursive: true, force: true }); rmSync(homeO, { recursive: true, force: true }) } catch (e) {}
+  }
+  ok('★★ group20d: 两种设置顺序结果完全一致（无顺序依赖）',
+    orderResults.length === 2 && JSON.stringify(orderResults[0].subAction) === JSON.stringify(orderResults[1].subAction)
+    && orderResults[0].destructive === orderResults[1].destructive && orderResults[0].plain === orderResults[1].plain,
+    JSON.stringify(orderResults))
+
+  // ★★ group20e：老格式 migrateOld 路径的子设置必须跟着 mode 收紧
+  // 背景：migrateOld 走 freshConfig()（子设置固定 ask），随后才把 mode 改成 deny；
+  // 不重新推导的后果是老 `locked` 预设（最严格的配置）升级后
+  // mode=deny 但子设置仍是 ask —— 破坏性命令由「拒绝」降级为「弹窗待批」。
+  // 反例：删掉 migrateOld 里的 `cfg.global.command.destructive = ...`，本组即失败。
+  for (const [label, oldMode, wantSub, wantVerdict] of [
+    ['group20e: locked → 子设置 deny', 'locked', 'deny', 'deny'],
+    ['group20e: permissive → 子设置 ask', 'permissive', 'ask', 'timeout'],
+    ['group20e: off → 子设置 ask', 'off', 'ask', 'timeout'],
+  ]) {
+    const wsM = mkdtempSync(join(tmpdir(), 'pg-old-ws-'))
+    const homeM = mkdtempSync(join(tmpdir(), 'pg-old-home-'))
+    mkdirSync(join(homeM, 'dsh-permgate'), { recursive: true })
+    // 老格式：只有 global.mode，没有分类键（触发 migrateOld）
+    writeFileSync(join(homeM, 'dsh-permgate', 'config.json'), JSON.stringify({ global: { mode: oldMode } }, null, 2), 'utf8')
+    const hM = createHost({ workspaceRoot: wsM, dshHome: homeM })
+    const stM = await callRoute(hM.routes, 'GET', '/permgate/status')
+    const csM = stM.data && stM.data.commandSub
+    ok('★★ ' + label,
+      !!(csM && csM.effective && csM.effective.action === wantSub), JSON.stringify(csM && csM.effective))
+    // 运行时：破坏性命令的落点必须与子设置一致（locked 下必须是 deny，不能只是弹窗）
+    let nextedM = false
+    const pM = hM.hooks.get('tools/pre-execute')(makeExec(wsM, 'bash', { command: 'rm -rf x' }), async () => { nextedM = true; return { kind: 'allow' } })
+    pM.catch(() => {})
+    const outM = await Promise.race([pM, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    const gotM = nextedM ? 'allow' : ((outM && outM.kind) || 'timeout')
+    ok('★★ group20e: ' + oldMode + ' 老配置下破坏性命令落点 = ' + wantVerdict + '（不是弹窗）',
+      gotM === wantVerdict, 'got=' + gotM)
+    try { rmSync(wsM, { recursive: true, force: true }); rmSync(homeM, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ★★ group20f：间接执行的破坏性命令必须被用户的 deny 例外拦住（例外视野与子设置对称）。
+  // 背景：破坏性子设置看的是 labels **并集**（能看到 `find -exec rm` 里的 rm），
+  // 而例外匹配一度只看「段原文 + 主 label」（`find . -exec rm …` 的主 label 是 `find`）——
+  // 于是「子设置能拦、用户的 deny 例外却拦不住」。实测（子设置 allow + 例外 `rm *`=deny）：
+  //   `rm -rf /x`                → deny（例外命中）
+  //   `find . -exec rm -rf {} +` → **allow** ← 用户显式写的「rm 一律拒绝」被绕过
+  // 修法：例外匹配抽成单一实现 resolveException，opaque 段与可读段共用、都试全部 label。
+  // 用**独立 host**：本组需要一条 `rm *`=deny 例外，它会按「顺序即优先级」压过 group20 里
+  // 已有的 allow 例外，污染后续断言（实测踩过）。
+  const wsF = mkdtempSync(join(tmpdir(), 'pg-segF-ws-'))
+  const homeF = mkdtempSync(join(tmpdir(), 'pg-segF-home-'))
+  mkdirSync(join(homeF, 'dsh-permgate'), { recursive: true })
+  writeFileSync(join(homeF, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: {
+      fallbackMode: 'ask',
+      command: {
+        mode: 'allow', destructive: { action: 'allow' },
+        exceptions: [{ id: 'e1', action: 'deny', match: 'rm *' }],
+      },
+    },
+    projects: {},
+  }, null, 2), 'utf8')
+  const hF = createHost({ workspaceRoot: wsF, dshHome: homeF })
+  const preF = hF.hooks.get('tools/pre-execute')
+  const probeF = async (c) => {
+    let nexted = false
+    const p = preF(makeExec(wsF, 'bash', { command: c }), async () => { nexted = true; return { kind: 'allow' } })
+    p.catch(() => {})
+    const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    return { nexted, verdict: out && out.kind }
+  }
+  const leakedInd = []
+  for (const c of ['find . -exec rm -rf {} +', 'find . -delete', 'time find . -delete',
+    'find . -exec rm -rf {} \\;', 'echo $(rm -rf /x)', 'echo "`rm -rf /x`"']) {
+    const r = await probeF(c)
+    if (!(r.verdict === 'deny')) leakedInd.push(c + ' → ' + r.verdict)
+  }
+  ok('★★ group20f: 间接执行的破坏性命令被 deny 例外拦住（find -exec / find -delete / 命令替换）',
+    leakedInd.length === 0, JSON.stringify(leakedInd))
+  // 反向：额外 label 不得让无关例外命中（不得引入误报）
+  const fpInd = []
+  for (const c of ['find . -name "*.log"', 'find . -exec echo {} +', 'echo $(date)', 'find . -type f']) {
+    const r = await probeF(c)
+    if (r.nexted !== true) fpInd.push(c + ' → ' + r.verdict)
+  }
+  ok('group20f: 无关命令不被 rm 例外误伤（额外 label 不引入误报）', fpInd.length === 0, JSON.stringify(fpInd))
+  try { rmSync(wsF, { recursive: true, force: true }); rmSync(homeF, { recursive: true, force: true }) } catch (e) {}
+
+  try {
+    rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
+    rmSync(ws2, { recursive: true, force: true }); rmSync(home2, { recursive: true, force: true })
+    rmSync(ws3, { recursive: true, force: true }); rmSync(home3, { recursive: true, force: true })
+  } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
+group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）')
+{
+  // 背景：曾把规则改成「最严命中」，实测毁掉「具体规则覆盖宽泛规则」这个最自然的写法。
+  // 本组把两种意图都钉住：顺序即优先级是**能力**，不是缺陷。
+  const ws = mkdtempSync(join(tmpdir(), 'pg-rule-ws-'))
+  const home = mkdtempSync(join(tmpdir(), 'pg-rule-home-'))
+  mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+  const h = createHost({ workspaceRoot: ws, dshHome: home })
+  const pre = h.hooks.get('tools/pre-execute')
+  const probe = async (name, args) => {
+    let nexted = false
+    const p = pre(makeExec(ws, name, args || {}), async () => { nexted = true; return { kind: 'allow' } })
+    p.catch(() => {})
+    const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    return { nexted, verdict: out && out.kind }
+  }
+  const setRules = (rules) => {
+    writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+      global: { fallbackMode: 'ask', custom: rules }, projects: {},
+    }, null, 2), 'utf8')
+    return createHost({ workspaceRoot: ws, dshHome: home })
+  }
+
+  // 意图一：「宽泛兜底 + 具体例外」——具体 allow 排在宽泛 deny 之前，必须生效
+  let h1 = setRules([
+    { id: 'r1', action: 'allow', tool: 'pwsh', args: 'git status' },
+    { id: 'r2', action: 'deny', tool: 'pwsh' },
+  ])
+  let pre1 = h1.hooks.get('tools/pre-execute')
+  let nexted = false
+  const p1 = pre1(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted = true; return { kind: 'allow' } })
+  p1.catch(() => {})
+  await Promise.race([p1, new Promise((r) => setTimeout(r, 300))])
+  ok('★ group21: 具体 allow 排在宽泛 deny 之前 → 该具体用法放行（顺序即优先级）', nexted === true)
+  let v1 = null
+  const p1b = pre1(makeExec(ws, 'pwsh', { command: 'rm -rf /' }), async () => ({ kind: 'allow' }))
+  p1b.catch(() => {})
+  v1 = await Promise.race([p1b, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  ok('★ group21: 同一配置下其它 pwsh 命令仍被宽泛 deny 拦住', !!v1 && v1.kind === 'deny', JSON.stringify(v1))
+
+  // 意图二：「具体拒绝 + 宽泛放行」——反过来写也要能表达
+  const h2 = setRules([
+    { id: 'r1', action: 'deny', tool: 'pwsh', args: 'rm -rf' },
+    { id: 'r2', action: 'allow', tool: 'pwsh' },
+  ])
+  const pre2 = h2.hooks.get('tools/pre-execute')
+  let v2 = null
+  const p2 = pre2(makeExec(ws, 'pwsh', { command: 'rm -rf /' }), async () => ({ kind: 'allow' }))
+  p2.catch(() => {})
+  v2 = await Promise.race([p2, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  ok('★ group21: 具体 deny 排在宽泛 allow 之前 → 该具体用法被拒（反方向同样可表达）',
+    !!v2 && v2.kind === 'deny', JSON.stringify(v2))
+  let nexted2 = false
+  const p2b = pre2(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted2 = true; return { kind: 'allow' } })
+  p2b.catch(() => {})
+  await Promise.race([p2b, new Promise((r) => setTimeout(r, 300))])
+  ok('★ group21: 同一配置下其它 pwsh 命令按宽泛 allow 放行', nexted2 === true)
+
+  // ★ add-rule 插到**尾部**（后加的排最后）：顺序完全归用户，不自动重排 —— 用户定。
+  // 已知后果（有意接受）：新规则若被前面命中的规则遮蔽就不生效，直到用户手动把它调到前面。
+  const h3 = setRules([{ id: 'rOld', action: 'deny', tool: 'pwsh' }])
+  const addRes = await callRoute(h3.routes, 'POST', '/permgate/add-rule', { target: 'global', action: 'allow', tool: 'pwsh', args: 'git status', lang: 'zh' })
+  ok('group21: add-rule 写入成功', !!(addRes.data && addRes.data.added), JSON.stringify(addRes.data && (addRes.data.error || addRes.data.added)))
+  const st3 = await callRoute(h3.routes, 'GET', '/permgate/status')
+  const list3 = (st3.data && st3.data.custom && st3.data.custom.global) || []
+  ok('★ group21: 新规则排在数组尾部（顺序只由用户改，不自动重排）',
+    list3.length === 2 && list3[1].id === (addRes.data.added && addRes.data.added.id) && list3[0].id === 'rOld',
+    JSON.stringify(list3.map((r) => r.id)))
+  // 端到端确认这个已知后果确实如此（不是 bug，是有意接受的取舍）：
+  // 新加的 allow 排在老 deny 之后 → 被遮蔽，暂不生效；用户把它调到前面即可生效。
+  const pre3 = h3.hooks.get('tools/pre-execute')
+  let nexted3 = false
+  const p3 = pre3(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted3 = true; return { kind: 'allow' } })
+  p3.catch(() => {})
+  const v3 = await Promise.race([p3, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  ok('★ group21: 新规则排在老规则之后时被遮蔽（已知后果，由用户手动调节顺序解决）',
+    nexted3 === false && !!v3 && v3.kind === 'deny', JSON.stringify({ nexted: nexted3, v: v3 && v3.kind }))
+  // 对照：把新规则手动调到前面（模拟用户拖动排序后的配置）→ 立即生效
+  const h4 = setRules([
+    { id: 'rNew', action: 'allow', tool: 'pwsh', args: 'git status' },
+    { id: 'rOld', action: 'deny', tool: 'pwsh' },
+  ])
+  const pre4 = h4.hooks.get('tools/pre-execute')
+  let nexted4 = false
+  const p4 = pre4(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted4 = true; return { kind: 'allow' } })
+  p4.catch(() => {})
+  await Promise.race([p4, new Promise((r) => setTimeout(r, 300))])
+  ok('★★ group21: 用户手动把规则调到前面后立即生效（顺序 = 优先级）', nexted4 === true)
+
+  try {
+    rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
+  } catch (e) {}
+}
+
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)
