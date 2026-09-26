@@ -48,9 +48,8 @@ const QUICK_DEFAULTS = {
   //      （而 deferLoading 需要额外的激活通道才可用，平台注释明确「延迟基线工具只能在
   //      首次被 addition 之后才可见」，不是低成本方案）；
   //   ④ 无使用证据 —— 中英文 README 均未提及，实测决策记录零调用。
-  // 保留 perm_status：只读、不改配置（下发内容含例外 reason/note 与绝对路径，属既有设计，
-  // 且代码注释与面板文案均已声明 note 不是保密字段），提供 UI 给不了的对话价值（AI 能回答
-  // 「为什么这次被拦」「现在是什么配置」）。
+  // 保留 perm_status：只读、不改配置（下发内容含例外 reason/note 与绝对路径，属既有设计），
+  // 提供 UI 给不了的对话价值（AI 能回答「为什么这次被拦」「现在是什么配置」）。
   perm_status: 'allow',
   // cordis_run 在宿主进程里执行代码、stop/undefine 管理（可移除）动态插件 —— 同属元操作，一律先问
   cordis_run: 'ask', cordis_stop: 'ask', cordis_undefine: 'ask',
@@ -780,8 +779,7 @@ export default {
       //   reason —— deny 专属，拒绝时随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
       //   note   —— ask 专属，命中时显示在审批弹窗上（「当初为什么特意拦它」），方便日后回看。
       // allow 两者都不存：放行的调用不再弹窗，reason 也用不上。
-      // 注意：note 是给人看的备注，不是保密字段——它会随配置一起被 perm_status 等读取权限的调用读到，
-      // 故 UI/文档只说「备注」，不承诺「AI 看不到」，也提示用户不要写入敏感信息。
+      // note 就只是一句备注。它会不会被 AI 读到、算不算隐私问题——明确不管，不作为议题。
       if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }
       if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }
       if (key === 'command') e.match = value
@@ -3107,24 +3105,29 @@ export default {
       // 从 exec 派生而非读全局变量：否则并发会话会互相改写，导致 isOutside 用错根
       // 把工作区外路径判成区内、直接跳过目录闸（fail-open）。
       const root = rootOf(exec)
-      // 自定义文字分两种，用途不同、不可互换：
+      // 自定义文字分两种，用途不同、不可互换，且**在数据层彻底分离**：
       //   reason —— 拒绝理由，会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
       //             例外的 reason、分类默认值的 reason、兜底/快捷工具拒绝时的 reason 都走它。
-      //   note   —— 给人看的备注，出现在审批弹窗文案与决策记录里（「当初为什么特意拦它」）。
-      //             它只是「给人看」，不是保密字段：决策记录会随 perm_status 下发，故不承诺 AI 看不到。
+      //   note   —— ask 例外的备注（「当初为什么特意拦它」），只给人看：经 decide() 的 note
+      //             字段 → askUser 的 entry.note → /permgate/pending → 弹窗独立展示位
+      //             （client.js 的 p.note），**不拼进 reason 字符串**。
+      // 为什么必须分开：reason 会被 recordDecision 写入决策记录，再随 perm_status 的
+      // recentDecisions 下发给 AI。note 若拼进 reason，就等于搭着这条链路一起被 AI 读到——
+      // 而备注的设计用途只有「弹窗上给人看」这一处，没有理由进入审计与工具出口。
       // 无自定义文字时回退「（例外 id）」标注，方便去设置页定位是哪一条。
       const exReason = (d) => {
         if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'
-        if (d && d.action === 'ask' && d.note) return '（' + d.note + '）'
         if (d && d.ruleId) return '（例外 ' + d.ruleId + '）'
         return ''
       }
       const exReasonEn = (d) => {
         if (d && d.action === 'deny' && d.reason) return ' (' + d.reason + ')'
-        if (d && d.action === 'ask' && d.note) return ' (' + d.note + ')'
         if (d && d.ruleId) return ' (exception ' + d.ruleId + ')'
         return ''
       }
+      // ask 例外的备注：与 reason 分开下发，仅供弹窗展示（理由见上方 note 说明）。
+      // 非 ask、或未填备注时为 null —— 不产出空串，免得消费侧还要额外判空。
+      const exNote = (d) => (d && d.action === 'ask' && d.note ? d.note : null)
       // 注意：perm_* 曾在此被无条件放行，等于给 AI 留了一条「自我提权且无弹窗」的后门
       // （当时 perm_set_category / perm_set_fallback / perm_add_exception … 改动即生效）。
       // 后来改为不再特判、统一走下面的正常判定链（自定义规则 → 分类 → 快捷工具 → 兜底），
@@ -3139,7 +3142,7 @@ export default {
         const d = resolveCategory('doomloop', null, null, root)
         if (d.action !== 'allow') {
           // 分类默认值的拒绝原因同样带上（doomloop 无例外，d.reason 只可能来自分类默认值）
-          return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls' + exReasonEn(d)), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
+          return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
         }
       }
       const proj = projectBlock(root)
@@ -3158,13 +3161,13 @@ export default {
           // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
           const m = outsideMatrix('read', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('read', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
+        return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
       }
       // 读图与读文件同一条判定链（工作区外先过「目录访问」闸，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
@@ -3175,13 +3178,13 @@ export default {
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
           const m = outsideMatrix('image', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('image', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' }
+        return { action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' }
       }
       if (isFileWrite(name, args)) {
         const fp = pathArg(args)
@@ -3189,13 +3192,13 @@ export default {
           // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
           const m = outsideMatrix('edit', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('edit', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
+        return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过「目录访问」闸（directory + undo 合并矩阵）。
@@ -3204,13 +3207,13 @@ export default {
         if (fp && isOutside(fp, root)) {
           const m = outsideMatrix('undo', fp, root)
           if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
           return { action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
         }
         const d = resolveCategory('undo', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
+        return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
       }
       if (COMMAND_TOOLS[name]) {
         const cmd = commandArg(args)
@@ -3221,11 +3224,11 @@ export default {
         const d = resolveCategory('command', cmd, 'command', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('执行命令' + exZh, 'Run command' + exEn), ruleId: d.ruleId, cat: 'command', value: cmd, kind: 'command' }
+        return { action: d.action, reason: bi('执行命令' + exZh, 'Run command' + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'command', value: cmd, kind: 'command' }
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
-        return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
+        return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
       }
       const q = quickAction(name, root)
       if (q) {
@@ -3480,6 +3483,8 @@ export default {
     //   opts.timeoutMs  超时时长（毫秒）。0 / 未传 = 永不超时（默认，现有行为）。
     //   opts.onTimeout  超时后的动作，只能是 'allow' | 'deny'。
     //   opts.note       附加说明（异常原因等），随弹窗下发，供人判断「为什么走到这一步」。
+    //                   注意：d.note（命中的 ask 例外备注）优先于它，二者都只进 entry.note，
+    //                   绝不拼进 reason（reason 会被记入决策记录并随 perm_status 回给 AI）。
     // 机制本身是通用的（不写死为 auto 专用），但**当前仓库内没有任何调用方传入 opts**
     // （唯一调用点是本文件 tools/pre-execute 的 askUser(exec, d)）：auto 的异常回落路径
     // 目前只存在于 .plan/auto-approval-plan.md（尚未实现）。所以超时是给 auto 预留的能力，
@@ -3530,11 +3535,15 @@ export default {
           // 日后改动时无法判断它是否还有人依赖。
           deadline: timeoutMs ? Date.now() + timeoutMs : null,
           onTimeout: timeoutMs ? onTimeout : null,
-          // note 与同文件的 reason/例外 note 同口径（normalizeText：trim + 截断 200 +
-          // 非字符串丢弃）。早先这里是裸 String(o.note)，是全文件唯一无上界的弹窗文本通道：
-          // 该字段会经 /permgate/pending 原样下发并渲染进卡片（卡片只有 max-height:82vh），
+          // note 有两个来源，都是「为什么走到这一步」的说明，优先取本次判定命中的 ask 例外备注
+          // （d.note，最具体：就是当初特意拦它的那句话），无则回退 opts.note（auto 异常回落预留）。
+          // 二者都不拼进 reason —— reason 会被 recordDecision 写入决策记录并随 perm_status 下发给
+          // AI，而备注只该在弹窗上给人看（详见 decide() 中 exNote 的说明）。
+          // 统一走 normalizeText（trim + 截断 200 + 非字符串丢弃），与 reason/例外 note 同口径。
+          // 早先这里是裸 String(o.note)，是全文件唯一无上界的弹窗文本通道：该字段会经
+          // /permgate/pending 原样下发并渲染进卡片（卡片只有 max-height:82vh），
           // 超长文本会把「允许/拒绝」按钮挤出可视区。
-          note: normalizeText(o.note) || null,
+          note: normalizeText(d.note) || normalizeText(o.note) || null,
           // 审批发起时的项目根：审批可能挂起很久、期间用户会切会话，故必须把发起时的
           // 根快照下来 —— 打相对路径/对比/打开侧栏/落盘例外都用它，不能用「当前会话」的根。
           projRoot: rootOf(exec),
@@ -4646,12 +4655,53 @@ export default {
       onDispose(ctx.tools.register(defineTool(definition)))
     }
 
+    // 工具返回的视图：去掉例外的 note。
+    // note 是 ask 例外上的一句说明（「当初为什么特意拦它」），只在弹窗与设置页展示，工具侧不需要。
+    //
+    // 说明：note 只是一句备注，这里去掉它只是分工——工具侧不需要展示备注，面板侧照旧。
+    // 它会不会被 AI 读到、算不算隐私问题——明确不管，直接忽略，不作为议题。
+    //
+    // 另外返回副本：categories.* 是 config 的引用，就地删会改坏运行中的配置。
+    function toolView(view) {
+      try {
+        if (!view || typeof view !== 'object') return view
+        const cats = view.categories
+        if (!cats || typeof cats !== 'object') return view
+        const cleanBlock = (block) => {
+          if (!block || typeof block !== 'object') return block
+          const out = Object.assign({}, block)
+          for (const key of Object.keys(out)) {
+            const cat = out[key]
+            if (!cat || typeof cat !== 'object') continue
+            if (!Array.isArray(cat.exceptions)) continue
+            if (!cat.exceptions.some((r) => r && typeof r === 'object' && 'note' in r)) continue
+            out[key] = Object.assign({}, cat, {
+              exceptions: cat.exceptions.map((r) => {
+                if (!r || typeof r !== 'object' || !('note' in r)) return r
+                const e = Object.assign({}, r)
+                delete e.note
+                return e
+              }),
+            })
+          }
+          return out
+        }
+        return Object.assign({}, view, { categories: { global: cleanBlock(cats.global), project: cleanBlock(cats.project) } })
+      } catch (e) {
+        // 清洗失败不能让 perm_status 整个报错：退回原视图保证工具仍可用。
+        // 但必须留痕 —— 静默退回会让「工具侧不显示备注」这条分工在无感知的情况下失效，
+        // 与 tools/pre-execute 等处 catch 必打日志的口径保持一致。
+        console.error('[permgate] toolView failed:', e)
+        return view
+      }
+    }
+
     registerTool({
       name: 'perm_status',
       description: '查看权限网关(permgate)当前生效的分类默认(目录/命令/读取/读取图片/编辑/撤销操作/子代理/重复操作)、例外、快捷工具、自定义规则、最近决策与配置路径。',
       parameters: {},
       output: { schema: { type: 'json' }, render: renderer() },
-      async execute(_args, exec) { await init(exec); return statusView(exec) },
+      async execute(_args, exec) { await init(exec); return toolView(statusView(exec)) },
     })
 
     // 新会话默认权限修正已交由 dsh-permission-presets 0.1.2 原生处理：其在

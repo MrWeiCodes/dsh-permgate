@@ -2008,7 +2008,9 @@ window.__ModuleLoader__.load({
 					}, T('app.timeoutStop')),
 					stopFailed ? React.createElement('span', { className: 'pg-count-err' }, T('app.timeoutStopFailed')) : null,
 				) : null,
-				// 异常原因（auto 专用）：让人知道「为什么模型没用上」
+				// note 展示位，两个来源共用：① 命中的 ask 例外备注（「当初为什么特意拦它」）；
+				// ② auto 异常回落的附加说明。二者都经 entry.note 独立下发，**不拼进 reason** ——
+				// reason 会被记入决策记录并随 perm_status 回给 AI，备注只该在这里给人看。
 				p.note ? React.createElement('div', { className: 'pg-note' }, p.note) : null,
 				props.children,
 			);

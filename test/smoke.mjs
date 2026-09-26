@@ -992,7 +992,10 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   const listA = await callRoute(hA.routes, 'GET', '/permgate/pending')
   const itemA = (Array.isArray(listA.data) ? listA.data : []).filter((x) => x.tool === 'read').pop()
   ok('group15: ask 例外命中 → 仍进审批（分类默认 allow 也拦得住）', !!itemA, JSON.stringify(listA.data))
-  ok('group15: 弹窗文案带出该例外的备注', !!itemA && String(itemA.reason).indexOf('这个目录的文本需人工确认') !== -1, String(itemA && itemA.reason))
+  // note 走独立字段下发（不拼进 reason）：reason 会被 recordDecision 写入决策记录、
+  // 再随 perm_status 的 recentDecisions 回给 AI，而备注只该在弹窗上给人看。
+  ok('group15: 弹窗带出该例外的备注（独立 note 字段）', !!itemA && String(itemA.note || '').indexOf('这个目录的文本需人工确认') !== -1, JSON.stringify(itemA && { reason: itemA.reason, note: itemA.note }))
+  ok('group15: 该备注不拼进 reason（否则会随决策记录下发给 AI）', !!itemA && String(itemA.reason).indexOf('这个目录的文本需人工确认') === -1, String(itemA && itemA.reason))
   if (itemA) await callRoute(hA.routes, 'POST', '/permgate/decide', { id: itemA.id, action: 'deny', lang: 'zh' })
   await Promise.race([pA, new Promise((r) => setTimeout(r, 200))])
 
@@ -1058,10 +1061,14 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   // cat 不下发给客户端，但 reason 前缀与 ruleId 同源于 cat：前缀是「读取图片权限」即证明
   // 例外触发时 cat 跟随例外所在闸（image），而不是回落成目录闸
   ok('group15: 工作区外 ask 例外 → 进审批且文案前缀跟随例外所在闸', !!itemA4 && String(itemA4.reason).indexOf('读取图片权限：') === 0, JSON.stringify(itemA4 && { reason: itemA4.reason }))
-  ok('group15: 工作区外 ask 例外的文案带自己的备注', !!itemA4 && String(itemA4.reason).indexOf('外部图片需确认') !== -1, String(itemA4 && itemA4.reason))
+  ok('group15: 工作区外 ask 例外的备注走独立字段（不拼进 reason）', !!itemA4 && String(itemA4.note || '').indexOf('外部图片需确认') !== -1 && String(itemA4.reason).indexOf('外部图片需确认') === -1, JSON.stringify(itemA4 && { reason: itemA4.reason, note: itemA4.note }))
   const stA4 = await callRoute(hA2.routes, 'GET', '/permgate/status')
   const decA4 = ((stA4.data && stA4.data.recentDecisions) || []).filter((d) => d.tool === 'read_image').pop()
   ok('group15: 工作区外 ask 例外的 ruleId 与文案同源', !!decA4 && decA4.ruleId === idA2, JSON.stringify({ got: decA4 && decA4.ruleId, want: idA2 }))
+  // 本次改动的核心目标：备注不再随决策记录流到 AI。recentDecisions 会被 perm_status 下发给 AI，
+  // 故这里必须确认 note 文本**不在**其中（reason 是决策记录里唯一的自由文本位）。
+  ok('★ group15: ask 例外的备注不随决策记录（recentDecisions）下发给 AI',
+    !!decA4 && String(decA4.reason).indexOf('外部图片需确认') === -1, JSON.stringify(decA4 && { reason: decA4.reason }))
   if (itemA4) await callRoute(hA2.routes, 'POST', '/permgate/decide', { id: itemA4.id, action: 'deny', lang: 'zh' })
   await Promise.race([pA4, new Promise((r) => setTimeout(r, 200))])
 

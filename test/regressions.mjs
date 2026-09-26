@@ -1017,7 +1017,74 @@ group('13. 例外三态（ask / allow / deny）：ask 是可写、可命中的�
 // reason 与 note 必须保持两个字段：前者是回给 AI 的拒绝原因，后者是命中时显示在弹窗上供日后回看的备注，不可合并
 ok('reason（deny→AI）与 note（ask→弹窗备注）按动作各归其位', src.includes("if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }") && src.includes("if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }") && !src.includes("if (r.action !== 'allow' && typeof r.reason === 'string'"))
 ok('resolveCategory 按动作分别带回 reason / note', (src.match(/reason: \(r\.action === 'deny' && r\.reason\) \? r\.reason : undefined, note: \(r\.action === 'ask' && r\.note\) \? r\.note : undefined/g) || []).length === 2)
-ok('exReason/exReasonEn 按动作取对应字段（ask 用 note）', src.includes("if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'") && src.includes("if (d && d.action === 'ask' && d.note) return '（' + d.note + '）'") && src.includes("if (d && d.action === 'ask' && d.note) return ' (' + d.note + ')'"))
+// 防回退：note 必须与 reason **在数据层分离**。reason 会被 recordDecision 写入决策记录、
+// 再随 perm_status 的 recentDecisions 下发给 AI；note 只该在弹窗上给人看（走 entry.note →
+// /permgate/pending → 客户端 p.note 展示位）。曾把 note 拼进 reason 文案，等于搭着审计链路
+// 一起被 AI 读到，故此处禁止 exReason/exReasonEn 再从 note 取文字。
+ok('exReason/exReasonEn 只取 deny 的 reason，不再把 ask 的 note 拼进文案',
+  src.includes("if (d && d.action === 'deny' && d.reason) return '（' + d.reason + '）'")
+  && src.includes("if (d && d.action === 'deny' && d.reason) return ' (' + d.reason + ')'")
+  && !src.includes("if (d && d.action === 'ask' && d.note) return '（' + d.note + '）'")
+  && !src.includes("if (d && d.action === 'ask' && d.note) return ' (' + d.note + ')'"))
+ok('★ ask 例外的 note 经独立字段 exNote 下发（弹窗用，不混入 reason）',
+  src.includes('const exNote = (d) => (d && d.action === \'ask\' && d.note ? d.note : null)'))
+// 防回退（结构性，替代原先的 === 7 / === 4 计数）：decide() 内每个「可能返回 ask 且 note 有来源」
+// 的出口都必须带 note。计数式断言只能挡「多带」、挡不住「漏带」——新增一个 ask 判定分支时漏写 note，
+// 计数不变、两套测试全绿，而用户当初填的备注会在弹窗上静默消失（entry.note 落为 null，
+// client.js 的 p.note 分支不渲染）；反过来正常带上还会让计数变 8 而误报失败，方向与语义相反。
+//
+// 出口的切分走**花括号配平**而非按行匹配：按行匹配会把「return 对象被重排成多行」这种纯排版
+// 重构误判成出口消失（实测：把 subagent 出口拆成多行后，按行只数到 10 个出口而误报失败）。
+// 配平解析对排版免疫，故断言只表达语义、不绑定排版。
+{
+  const decideBody = src.slice(src.indexOf('function decide(exec) {'), src.indexOf('function recordDecision'))
+  // 切出 decide() 内每个 return { ... } 的完整字面量（配平到与之匹配的 }）
+  const returnsOf = (body) => {
+    const out = []
+    let k = 0
+    while ((k = body.indexOf('return {', k)) !== -1) {
+      let depth = 0
+      let end = -1
+      for (let i = k + 'return '.length; i < body.length; i++) {
+        if (body[i] === '{') depth++
+        else if (body[i] === '}') { depth--; if (depth === 0) { end = i; break } }
+      }
+      if (end === -1) break
+      out.push(body.slice(k, end + 1))
+      k = end + 1
+    }
+    return out
+  }
+  const exitBlocks = returnsOf(decideBody)
+  // 出口 = 字面量 'ask'，或动作取自 resolveCategory 的 d.action。
+  // quickAction / 兜底 / 自定义规则三处虽也可能返回 ask，但其配置模型里根本没有 note 字段
+  // （normalizeQuickEntry 与 normalizeRule 只留 deny 的 reason、fallbackSetting 只有 reason），
+  // 不存在「有备注却丢失展示」的路径，故不要求它们带 note。
+  const askExits = exitBlocks.filter((b) => /action: 'ask'/.test(b) || /action: d\.action/.test(b))
+  const askMissing = askExits.filter((b) => !/[,{]\s*note:/.test(b))
+  // 解析自检：doomloop/subagent 是既有的 d.action 出口，必须被切到。缺了说明 slice/配平失效，
+  // 那种情况下 askExits 会静默变少、断言假通过 —— 故用锚点而非出口总数当守卫（总数会随新增分支变化，
+  // 拿它做下限又会变成同类脆弱断言）。
+  const parsed = askExits.some((b) => /cat: 'doomloop'/.test(b)) && askExits.some((b) => /cat: 'subagent'/.test(b))
+  ok('★ decide() 内每个可能返回 ask 的出口都带 note（防漏带）',
+    parsed && askMissing.length === 0,
+    'parsed=' + parsed + ' exits=' + askExits.length + ' missing=' + askMissing.length)
+  // 工作区外 ask 出口的 note 必须取自 m.src（例外来源），不能取 m 本身：
+  // m 是 outsideMatrix 的合并结果 {action, src, cat, pz, pe}，其上没有 note，写成 exNote(m) 会静默丢备注。
+  // 同样不写死条数（新增一个工作区外分类时，正确写法不该被判失败）。
+  const outsideExits = askExits.filter((b) => /m\.src/.test(b))
+  ok('★ 工作区外 ask 出口的 note 取自 m.src（写成 exNote(m) 会丢备注）',
+    outsideExits.length > 0 && outsideExits.every((b) => /note: m\.src \? exNote\(m\.src\) : null/.test(b)),
+    'outsideExits=' + outsideExits.length)
+  // 反向：note 是 ask 专属，allow/deny 出口不得带（带了说明「按动作分派」的口径已被破坏）
+  const nonAsk = exitBlocks.filter((b) => /action: 'allow'/.test(b) || /action: 'deny'/.test(b))
+  ok('★ allow/deny 出口不带 note（note 为 ask 专属）',
+    nonAsk.every((b) => !/[,{]\s*note:/.test(b)))
+}
+// 弹窗的 note 来源：优先本次判定命中的 ask 例外备注，无则回退 opts.note（auto 异常回落预留）。
+// 两者都必须过 normalizeText（与 reason 同口径），否则又是无上界的弹窗文本通道。
+ok('★ 弹窗 note 由 d.note 优先、opts.note 回退，且两者都过 normalizeText',
+  /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| null/.test(src))
 ok('落盘时 reason 只随 deny、note 只随 ask（allow 两者都不存）', src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined") && src.includes("const note = decision === 'ask' ? normalizeText(o.note) : undefined") && src.includes('reason ? { reason } : {}, note ? { note } : {}'))
 // 防回退：addProjectException 曾自建一份 trim200（会对非字符串 String() 强转），与 normalizeText 分叉
 ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有第二份 trim200）', !src.includes('const trim200 =') && src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
@@ -3639,7 +3706,7 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // 裸 String(o.note) 是全文件唯一无上界的弹窗文本通道，会经 pending 原样下发并渲染进
   // 卡片（卡片只有 max-height:82vh），超长文本会把允许/拒绝按钮挤出可视区。
   ok('★ note 走 normalizeText（与 reason/例外 note 同口径，不会无界下发）',
-    /note: normalizeText\(o\.note\) \|\| null/.test(ask)
+    /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| null/.test(ask)
     && !/note: o\.note \? String\(o\.note\) : null/.test(ask))
   // timeoutMs 只写不读会被误当成「还有人依赖」：客户端只认绝对 deadline。
   ok('★ 不存只写不读的 entry.timeoutMs（有无超时由 deadline 表达）',
