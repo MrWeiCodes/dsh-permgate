@@ -1784,6 +1784,22 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && /const v = Math\.max\(minN, Math\.floor\(n\)\);/.test(cli)
     && !/const v = Math\.max\(1, Math\.floor\(n\)\);/.test(cli)
     && !/min: minN,\s*\n\s*max:/.test(cli))
+  // ★★ 阈值 placeholder 的来源必须按 tab 区分，两个方向都会「面板说谎」：
+  //   · 项目 tab 用内置默认值 → 全局设 8、项目未配置时写「默认 6」，而宿主按 8 裁决；
+  //   · 全局 tab 用 effective  → effective 按**当前项目**算（doomloopSetting(root) 项目优先），
+  //     于是「全局未配置 + 当前项目设了 10」会显示 10 —— 那是项目的值，不是全局的值。
+  // 反例 ①：`const defN = typeof dl.defaultThreshold === 'number' ? dl.defaultThreshold : 6;`
+  // 反例 ②：`const defN = effN !== null ? effN : dfltN;`（丢掉 tab 判据）
+  ok('★★ 阈值 placeholder 按 tab 取来源（项目取跨层生效值、全局取内置默认，两个方向都不说谎）',
+    /const effN = dl\.effective && typeof dl\.effective\.threshold === 'number' \? dl\.effective\.threshold : null;/.test(cli)
+    && /const dfltN = typeof dl\.defaultThreshold === 'number' \? dl\.defaultThreshold : 6;/.test(cli)
+    && /const defN = tab === 'global' \? dfltN : \(effN !== null \? effN : dfltN\);/.test(cli)
+    // 文案也按 tab 区分：全局 tab 写「默认」、项目 tab 写「实际生效」
+    && /placeholder: \(tab === 'global' \? T\('panel\.loopThresholdPh'\) : T\('panel\.loopThresholdPhEff'\)\)\.replace\('\{n\}', String\(defN\)\)/.test(cli)
+    // 两个文案键都要在字典里（缺任一个，T() 会回退显示原始 key）
+    && cli.includes("'panel.loopThresholdPh': '默认 {n}'")
+    && cli.includes("'panel.loopThresholdPhEff': '实际生效 {n}'")
+    && cli.includes("'panel.loopThresholdPhEff': 'in effect {n}'"))
   // ★★ 阈值草稿必须受保护（loopThDirty）：applyStatus 由 SSE status/refresh 推送触发，
   // 而动作与阈值按设计分两处提交 —— 「先填阈值 → 再改动作」必然踩坑：改动作回填 status
   // 会清空阈值框，用户再点保存就走空串分支把阈值清成 inherit（提示「已恢复为默认」），
@@ -1808,14 +1824,42 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   ok('★ 段级信息随判定下发（segments + code）',
     src.includes('segments: a.segments,') && src.includes('code: a.code,')
     && src.includes('argLines: humanArgsPreview(exec.name, exec.arguments, exec, d),'))
-  // ★ 设置页有子设置控件，且名单只读展示（D-12）
-  ok('★ 设置页有「破坏性命令」子设置控件（仅 command 分类渲染）',
-    cli.includes("c === 'command' ? commandSubRow() : null")
-    && cli.includes("invoke('permgate:set-command-sub'")
-    && cli.includes("'permgate:set-command-sub': ['POST', '/permgate/set-command-sub']"))
-  ok('★ 设置页名单只读展示（不可编辑，D-12）',
-    cli.includes("T('panel.subLabels') + T('panel.subLabelsNote')")
-    && !cli.includes("permgate:set-command-labels"))
+  // ★ 设置页有子设置控件（D-12）
+  // 断言「排在例外之后」：界面顺序必须与判定链顺序一致（例外 → 子设置 → 分类默认值）。
+  // 反例：把 commandSubRow() 挪回例外列表之前 —— 用户自上而下读到的次序就与实际生效次序相反
+  // （例外优先于子设置，界面却把子设置画在上面），本条即失败。
+  ok('★ 设置页有「破坏性命令」子设置控件，且排在例外之后（界面顺序 = 判定链顺序）', (function () {
+    if (!cli.includes("c === 'command' ? commandSubRow() : null")) return false
+    if (!cli.includes("invoke('permgate:set-command-sub'")) return false
+    if (!cli.includes("'permgate:set-command-sub': ['POST', '/permgate/set-command-sub']")) return false
+    // 在 catBlock 里定位「例外块」与「子设置行」，比较出现位置
+    const iAddExc = cli.indexOf("T('panel.addExc')")
+    const iSub = cli.indexOf("c === 'command' ? commandSubRow() : null")
+    return iAddExc > 0 && iSub > iAddExc
+  })())
+  // ★ 名单**不在界面上列出**（用户定）：它只读、不可编辑，逐条列出占四行却给不出可操作信息。
+  // 判据分两层：
+  //   ① 不再渲染名单 —— 既不能读 labels 字段、也不能出现 join 展开（只删文案是不够的，
+  //      把 `labels.join(' / ')` 那行留下就会渲染出 undefined）；
+  //   ② 两条 i18n 文案删干净（避免留下无人引用的键）。
+  // 注意宿主**仍然**下发 labels（statusView）——那是协议的一部分，别处可能用；这里只管界面。
+  ok('★ 设置页不列出破坏性命令名单（只留一行说明，且无编辑入口）', (function () {
+    const iRow = cli.indexOf('const commandSubRow = ()')
+    // 函数体边界用**显式锚点**切，不用固定字符窗口：窗口（曾写 2200）会随注释增删
+    // 越界到下一个函数（doomloopRow）里 —— 那里一旦出现 labels 字样，本断言就会对着
+    // 无关代码失败，而修的人会去改 commandSubRow，方向完全错。窗口小了又会漏检函数尾部。
+    const iEnd = cli.indexOf('// 循环检测（doomloop）阈值行', iRow)
+    const row = (iRow < 0 || iEnd <= iRow) ? '' : cli.slice(iRow, iEnd)
+    // 切片失败（锚点被改名/移动）时必须**报错**而不是退化成空串：空串会让下面四条
+    // includes 全部为真，断言变成恒真的空转 —— 这正是它要防的那种静默失效。
+    if (!row) return false
+    return !row.includes('commandSub.labels')
+      && !row.includes('.labels.join(')
+      && !cli.includes('panel.subLabels')
+      && !cli.includes('subLabelsNote')
+      && !cli.includes('permgate:set-command-labels')
+      && cli.includes("T('panel.subDestructiveHint')")
+  })())
   // ★ 「匹配任意段」的警告判据必须与匹配器同构：字面量 `=== '*'` 会漏报 `**`/`***`/`* *`
   //（命令侧 globMatch 里 `*` 之间无特殊含义；`**` 是本仓库路径侧的惯用写法，用户极易照搬）。
   // 反例：把判据写回 `String(r.match || '').trim() === '*'`，本条即失败。

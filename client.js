@@ -1437,7 +1437,7 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': '底层沙箱已保存（{t}）：{v}',
 				'panel.fallbackSaved': '兜底策略已保存（{t}）：{v}',
 				'panel.fallback': '兜底策略（未匹配任何规则）',
-				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、cordis_run）如何处理。默认「询问」：每个未匹配的调用都会弹出审批。',
+				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、cordis_run）如何处理。',
 				'panel.needValue': '请先输入例外匹配',
 				'panel.excRemaining': '该路径仍有 {n} 条同值例外，可继续逐条删除',
 				'panel.delFailed': '删除失败',
@@ -1449,28 +1449,30 @@ window.__ModuleLoader__.load({
 				'panel.excPathHint': '：路径 glob，优先于分类默认',
 				'panel.excNone': '无例外',
 				'panel.subDestructive': '破坏性命令',
-				'panel.subDestructiveHint': '：段首命令命中内置名单时按此动作（更细的判定，优先于上方默认动作）',
-				'panel.subLabels': '命中名单',
-				'panel.subLabelsNote': '（内置，不可编辑）',
-				'panel.subSourceDefault': '默认值',
-				'panel.subSourceGlobal': '全局设置',
-				'panel.subSourceProject': '本项目设置',
-				'panel.subEffective': '当前生效',
+				// 一行说清作用即可，不列具体名单：这里曾展开「段首命令命中内置名单时按此动作
+				// （更细的判定，优先于上方默认动作）」——括号里那句与当时下方那行「当前生效」
+				// 说的是同一件事（那行已删），不必再用文字复述判定优先级。
+				// 也不列名单内容：它只读、不可编辑，逐条列出占四行却给不出可操作信息；
+				// 这里只举几个典型例子让人一眼认出「这类命令」，权威定义在 shell-parse.js
+				// 的 DESTRUCTIVE_LABELS（删除/磁盘/进程电源/提权/权限属主/注册表六类）。
+				'panel.subDestructiveHint': '：除例外外，删除文件、格式化磁盘、关机重启、提权等危险操作按此动作',
 				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置是「{sub}」—— 判定链上子设置优先，破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把子设置也改成「{cat}」或「跟随全局」。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
+				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
+				// 那是实现细节，用户改不了也用不上），也不写 Markdown 语法 —— 这里是纯文本，
+				// `**x**` 会原样显示成星号（实测过）。
+				// 也不说「静默放行」这类术语：那是实现内部的叫法，界面上只说「相同调用」。
 				'panel.loopThreshold': '触发阈值',
-				'panel.loopThresholdHint': '：连续【静默放行】多少次相同调用后触发（不含弹窗批准的）。留空 = 用默认值。',
+				'panel.loopThresholdHint': '：连续多少次相同调用后触发。留空 = 用默认值。',
 				'panel.loopThresholdPh': '默认 {n}',
+				'panel.loopThresholdPhEff': '实际生效 {n}',
 				'panel.loopThresholdUnit': '次',
 				'panel.loopThresholdSave': '保存',
-				'panel.loopThresholdBad': '阈值需为正整数（当前不支持上限，填多大都按实际值生效）',
-				'panel.loopThresholdSaved': '循环检测阈值已保存（{t}）：连续静默放行 {n} 次后触发',
+				'panel.loopThresholdBad': '阈值需为正整数',
+				'panel.loopThresholdSaved': '循环检测阈值已保存（{t}）：连续 {n} 次后触发',
 				'panel.loopThresholdCleared': '循环检测阈值已恢复为默认（{t}）',
-				'panel.loopEffective': '当前生效',
 				'panel.loopOff': '⚠ 「重复操作」的动作是「允许」—— 循环检测已关闭，AI 连续重复相同调用时不会有任何提醒。',
 				'panel.loopDenyWarn': '⚠ 动作是「拒绝」：命中时直接中断 AI、不弹窗，你不会有确认机会。判据是「连续 N 次逐字节相同」的调用，误判概率极低但并非零。',
-				'panel.loopNote': '只统计**静默放行**的调用：弹窗批准、被拒绝、沙箱升级被拒的都不计入，且会把连续计数清零。',
-				'panel.loopNotCustom': '（当前会话未选择「自定义审查」，循环检测不生效）',
 				'panel.excTooBroad': '匹配范围过宽',
 				'panel.excTooBroadHint': '这条例外匹配任意单个命令段，等于不再审查任何命令。建议改成具体命令（如 git status *）。',
 				'quick.web_search': '网页搜索',
@@ -1651,7 +1653,7 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
 				'panel.fallbackSaved': 'Fallback policy saved ({t}): {v}',
 				'panel.fallback': 'Fallback policy (no rule matched)',
-				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, cordis_run) are handled. Default Ask: every unmatched call prompts for approval.',
+				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, cordis_run) are handled.',
 				'panel.needValue': 'Enter a match value first',
 				'panel.excRemaining': '{n} exception(s) with the same value remain on this path; delete them individually if not wanted',
 				'panel.delFailed': 'Delete failed',
@@ -1661,28 +1663,20 @@ window.__ModuleLoader__.load({
 				'panel.excPathHint': ': path glob, overrides category default',
 				'panel.excNone': 'No exceptions',
 				'panel.subDestructive': 'Destructive commands',
-				'panel.subDestructiveHint': ': applies when the segment\'s leading command matches the built-in list (finer verdict, overrides the default action above)',
-				'panel.subLabels': 'Matched list',
-				'panel.subLabelsNote': '(built-in, read-only)',
-				'panel.subSourceDefault': 'default',
-				'panel.subSourceGlobal': 'global setting',
-				'panel.subSourceProject': 'project setting',
-				'panel.subEffective': 'Currently effective',
+				'panel.subDestructiveHint': ': except for exceptions, risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow this action',
 				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
 				// ── doom loop threshold ────────────────────────────────────────────
 				'panel.loopThreshold': 'Trigger threshold',
-				'panel.loopThresholdHint': ': how many identical calls silently allowed in a row before it triggers (approvals via dialog do not count). Leave empty to use the default.',
+				'panel.loopThresholdHint': ': how many identical calls in a row before it triggers. Leave empty to use the default.',
 				'panel.loopThresholdPh': 'default {n}',
+				'panel.loopThresholdPhEff': 'in effect {n}',
 				'panel.loopThresholdUnit': 'calls',
 				'panel.loopThresholdSave': 'Save',
-				'panel.loopThresholdBad': 'The threshold must be a positive integer (there is no upper bound; any value is used as-is)',
-				'panel.loopThresholdSaved': 'Doom loop threshold saved ({t}): triggers after {n} identical calls silently allowed in a row',
+				'panel.loopThresholdBad': 'The threshold must be a positive integer',
+				'panel.loopThresholdSaved': 'Doom loop threshold saved ({t}): triggers after {n} calls in a row',
 				'panel.loopThresholdCleared': 'Doom loop threshold reset to default ({t})',
-				'panel.loopEffective': 'Currently effective',
 				'panel.loopOff': '⚠ The "repeat" action is "allow" — doom loop detection is OFF; repeated identical calls by the AI will produce no reminder at all.',
 				'panel.loopDenyWarn': '⚠ The action is "deny": a hit aborts the AI immediately without a dialog, so you get no chance to confirm. The criterion is N byte-identical consecutive calls, so false positives are very unlikely but not impossible.',
-				'panel.loopNote': 'Only calls that were silently allowed are counted: approvals via dialog, denials, and rejected sandbox upgrades neither count nor keep the streak — they reset it.',
-				'panel.loopNotCustom': '(This session has not selected "Custom Review"; doom loop detection is inactive)',
 				'panel.excTooBroad': 'Very broad',
 				'panel.excTooBroadHint': 'This exception matches any single command segment — effectively no command review at all. Prefer a concrete command such as git status *.',
 				'quick.web_search': 'web search',
@@ -2946,7 +2940,8 @@ window.__ModuleLoader__.load({
 				setSubDestructive(subNext);
 				// doomloop 阈值：只回填**本层显式配置**（null → 空串 = 未配置，界面显示 placeholder）。
 				// 不回填 effective/defaultThreshold —— 那会让「未配置」看起来像「已设为默认值」，
-				// 与上面 subNext 的口径一致（effective 另起一行展示「当前生效」）。
+				// 与上面 subNext 的口径一致（生效值只在阈值行的 placeholder 里给，
+				// 不混进本层输入框的值 —— 那会让「未配置」看起来像「已设为该值」）。
 				// 有**未保存草稿**的那一层保留本地值（见 loopThDirty 的说明）：否则后台 status
 				// 推送会清空用户刚填的数字，再点保存就变成「清除阈值」。
 				const thNext = {
@@ -3161,7 +3156,7 @@ window.__ModuleLoader__.load({
 			//   · 为什么不在宿主里联动改写：写入侧无法区分「子设置是默认值」与「用户显式设成了它」
 			//     —— 两者值完全相同。联动会静默覆盖用户的显式表态，还会造成「先设 A 后设 B」
 			//     与「先设 B 后设 A」结果不同（顺序依赖）。所以这里只把事实讲清楚，
-			//     要不要一并改由用户决定（面板上「当前生效」一行始终显示实际取值与来源）。
+			//     要不要一并改由用户决定（下方子设置行与例外行的排列次序即判定次序）。
 			const changeCat = (c) => (e) => {
 				const mode = e.target.value;
 				setCats(Object.assign({}, cats, { [tab]: Object.assign({}, cats[tab], { [c]: mode }) }));
@@ -3332,17 +3327,23 @@ window.__ModuleLoader__.load({
 			);
 
 			// command 分类的子设置行「破坏性命令」。
-			// 三个要点体现在界面上：
+			// 两个要点体现在界面上：
 			//   ① 它**独立于**上方「默认动作」—— 默认动作设为「允许」时它仍生效（更细优先于更粗），
-			//      所以它不随 mode 隐藏，提示文案也明说「优先于上方默认动作」；
-			//   ② 名单是内置的、只读的：给用户看见「到底哪些命令算破坏性」，但不给编辑入口
-			//      （判定内容可编辑会出现「名单被清空后用户以为还有保护」的假象）；
-			//   ③ 显示当前值来自哪一层（默认值 / 全局设置 / 本项目设置），与快捷工具面板同口径。
+			//      所以它不随 mode 隐藏；
+			//   ② 一行说清它管什么（删除/格式化/关机/提权这类命令）。
+			//
+			// 名单（chgrp/chmod/rm/… 那份内置清单）**不在界面上列出**：它只读、不可编辑，
+			// 逐个列出来占掉四行却给不出可操作的信息，而「哪些命令算破坏性」的权威定义在
+			// shell-parse.js 的 DESTRUCTIVE_LABELS。宿主仍照旧下发 labels（statusView），
+			// 需要时可在别处展示；这里只留一行说明它管哪类命令。
+			//
+			// 这里曾有一行「当前生效：询问（全局设置）」。删掉的理由：它与上方那个下拉框
+			// 显示的是**同一个值**（下拉框本来就按本层渲染，项目层未配置时显示 inherit），
+			// 于是它只在复述用户刚看到的东西。它当初想回答的「这个值来自哪一层」，现在
+			// 由本行在分类内的位置间接表达（排在例外之后 = 判定链上晚于例外）。
+			// 代价是「生效值到底取自全局还是本项目」在项目 tab 上不再直说 —— 那一点改由
+			// 下拉框自身的取值表达（显示 inherit = 本层未表态、穿透全局）。
 			const commandSubRow = () => {
-			 const eff = (status && status.commandSub && status.commandSub.effective) || null;
-			 const labels = (status && status.commandSub && status.commandSub.labels) || [];
-			 const src = eff ? eff.source : 'default';
-			 const srcLabel = src === 'project' ? T('panel.subSourceProject') : (src === 'global' ? T('panel.subSourceGlobal') : T('panel.subSourceDefault'));
 			 return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
 				React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 					React.createElement('span', { style: { fontSize: 12, fontWeight: 600 } },
@@ -3362,12 +3363,6 @@ window.__ModuleLoader__.load({
 						sel(subDestructive[tab] || (tab === 'project' ? 'inherit' : 'ask'), changeSubDestructive, tab === 'project' ? ALL_MODES : MODES, busy),
 					),
 				),
-				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)' } },
-					T('panel.subLabels') + T('panel.subLabelsNote') + '：' + labels.join(' / '),
-				),
-				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } },
-					T('panel.subEffective') + '：' + modeLabel(eff ? eff.action : 'ask') + '（' + srcLabel + '）',
-				),
 			 );
 			};
 
@@ -3384,14 +3379,19 @@ window.__ModuleLoader__.load({
 			//      但那两种状态下用户最需要知道的信息就在这一行旁边。
 			const doomloopRow = () => {
 				const dl = (status && status.doomloop) || {};
-				const eff = dl.effective || null;
-				const defN = typeof dl.defaultThreshold === 'number' ? dl.defaultThreshold : 6;
+				// placeholder 显示「本层未配置时实际会用的值」，故按 tab 取不同的来源：
+				//   · 项目 tab → 生效值（effective.threshold）：可能来自全局，正是要显示的那个；
+				//   · 全局 tab → 内置默认值：全局层下面没有别的层，未配置时用的就是它。
+				// 全局 tab 不能用 effective —— 它是按**当前项目**算的（doomloopSetting(root)
+				// 项目优先），于是「全局未配置 + 当前项目设了 10」时会显示 10，那是项目的值，
+				// 不是全局的值（反向的面板说谎）。
+				const effN = dl.effective && typeof dl.effective.threshold === 'number' ? dl.effective.threshold : null;
+				const dfltN = typeof dl.defaultThreshold === 'number' ? dl.defaultThreshold : 6;
+				const defN = tab === 'global' ? dfltN : (effN !== null ? effN : dfltN);
 				// 下限由宿主下发（doomloop.min）—— 不在客户端写死字面量：那会让下限出现第二份来源，
 				// 宿主把 MIN_REPEAT_STREAK 调大后面板仍按旧下限归一，提交值与落盘值分叉
 				// （面板显示 1、实际按 2 裁决）。缺字段时回退 1 只是协议异常兜底，不是决策链一环。
 				const minN = typeof dl.min === 'number' && dl.min > 0 ? dl.min : 1;
-				const src = eff ? eff.source : 'default';
-				const srcLabel = src === 'project' ? T('panel.subSourceProject') : (src === 'global' ? T('panel.subSourceGlobal') : T('panel.subSourceDefault'));
 				// 本层动作：取 cats 的当前值（与上方下拉同源），项目层 inherit 时穿透全局
 				const catMode = tab === 'global'
 					? ((cats.global && cats.global.doomloop) || 'ask')
@@ -3431,7 +3431,9 @@ window.__ModuleLoader__.load({
 								type: 'number',
 								// min 用宿主下发的下限、**不设 max**：与宿主一致（无上限）。设了 max 会变成双份钳制。
 								min: minN,
-								placeholder: T('panel.loopThresholdPh').replace('{n}', String(defN)),
+								// 文案按 tab 区分：全局 tab 显示的是内置默认值，写「实际生效」会与语义不符
+								// （那里未配置时用的就是默认值）；项目 tab 显示的才是跨层生效值。
+								placeholder: (tab === 'global' ? T('panel.loopThresholdPh') : T('panel.loopThresholdPhEff')).replace('{n}', String(defN)),
 								title: T('panel.loopThresholdHint'),
 								value: loopTh[tab] || '',
 								onChange: (e) => {
@@ -3448,16 +3450,11 @@ window.__ModuleLoader__.load({
 							React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: commitTh }, T('panel.loopThresholdSave')),
 						),
 					),
-					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)' } },
-						T('panel.loopEffective') + '：' + (eff ? String(eff.threshold) : String(defN)) + ' ' + T('panel.loopThresholdUnit') + '（' + srcLabel + '）',
-					),
-					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } }, T('panel.loopNote')),
 					// G2-3：动作设为 allow = 知情关闭，但必须**说出来** —— 此前关掉后毫无提示，
 					// 用户不知道检测已经没了（面板上那一行看起来和别的分类没区别）。
 					catMode === 'allow' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopOff')) : null,
 					// L-5：deny 不弹窗、直接中断 AI，用户不容易察觉，故用面板提示补上这个信息缺口
 					catMode === 'deny' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopDenyWarn')) : null,
-					(status && status.activeForSession === false) ? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } }, T('panel.loopNotCustom')) : null,
 				);
 			};
 
@@ -3569,11 +3566,6 @@ window.__ModuleLoader__.load({
 					// 故不放进下面的 EXC_CATS 分支，否则这一行永远不会渲染。
 					c === 'doomloop' ? doomloopRow() : null,
 					EXC_CATS.indexOf(c) !== -1 ? React.createElement('div', { style: { marginTop: 2 } },
-						// command 分类的子设置「破坏性命令」：判定链是 例外 → 子设置 → 分类默认值，
-						// 子设置比大分类知道得更多，故它**独立于上方默认动作**生效 ——
-						// 默认动作设成「允许」时，破坏性命令仍按这里的动作走（这是修复一个
-						// 失效的原有意图，不是新增一层）。名单固定，只读展示（不可编辑）。
-						c === 'command' ? commandSubRow() : null,
 						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } },
 							T('panel.excCount').replace('{n}', String(excList.length)) + (c === 'command' ? T('panel.excCmdHint') : T('panel.excPathHint')),
 						),
@@ -3627,6 +3619,17 @@ window.__ModuleLoader__.load({
 							exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exOf(c).note || '', onChange: (e) => setExField(c, { note: e.target.value }), disabled: busy }) : null,
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => addException(c) }, T('panel.addExc')),
 						),
+						// command 分类的子设置「破坏性命令」排在**例外之后**，与判定链的
+						// 「例外 → 子设置」两段一致（例外优先于子设置，故例外画在上面）。
+						// 注意**不要**把这句话推广成「界面顺序 = 判定链顺序」：分类默认动作的
+						// 下拉框在分类标题行、位于这两者之上，而它在判定链里是**最后**才生效的
+						// （例外与子设置都比它更细、优先于它）。界面自上而下读到的次序与生效
+						// 次序在这一点上并不一致，这是布局取舍（默认动作是分类的总开关，必须
+						// 与分类名同行），不是可以靠调换位置修好的。
+						// 子设置比大分类知道得更多，故它**独立于上方默认动作**生效 —— 默认动作设成
+						// 「允许」时，破坏性命令仍按这里的动作走（这是修复一个失效的原有意图，
+						// 不是新增一层）。
+						c === 'command' ? commandSubRow() : null,
 					) : null,
 				);
 			};
