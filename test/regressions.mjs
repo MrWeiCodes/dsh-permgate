@@ -52,6 +52,30 @@ if (mod) {
   ok('overMaxChars 超限为真', mod.overMaxChars('a'.repeat(1048576), 'b') === true)
   ok('readFail 形状', mod.readFail(new Error('x')).zh === '读取失败: x' && mod.readFail('y').en === 'Read failed: y')
   ok('normLang 归一化', mod.normLang('en') === 'en' && mod.normLang('jp') === 'zh')
+  // ★★ L() 必须同时接受 bi() 对象与**裸字符串**。reason 有两种合法形态，来源不同、都不可改：
+  //    · bi() 对象 —— 宿主自己拼的文案（24 个出口）；
+  //    · 裸字符串 —— **用户写进配置的**文字（自定义规则的 reason 经 normalizeRule 的
+  //      String(r.reason) 落盘；分类/兜底/子设置的 reason 经 normalizeText，同样是字符串）。
+  // 第二种必须是字符串（配置是给人读改的 JSON，落成 {zh,en} 会让用户没法手写），
+  // 故兼容放在 L 这一处。旧实现只认对象，对字符串取 .zh/.en 恒 undefined → 回落空串，
+  // 于是**用户在自定义规则里填的拒绝原因被静默丢弃**：实测「填了 reason → 空串，
+  // 不填 → 反倒能显示『自定义规则 r1 命中』的回落文案」，填了的人以为写进去了。
+  // 这条断言按**行为**复算（不是匹配源码），故改法换了也仍然成立。
+  ok('★★ L() 接受裸字符串（用户写的 reason 不得被静默丢弃）',
+    mod.L('规则拒绝', 'zh') === '规则拒绝' && mod.L('规则拒绝', 'en') === '规则拒绝')
+  ok('★ L() 仍按语言取 bi() 对象，非法语言回落中文',
+    mod.L(mod.bi('中文', 'English'), 'zh') === '中文'
+    && mod.L(mod.bi('中文', 'English'), 'en') === 'English'
+    && mod.L(mod.bi('中文', 'English'), 'fr') === '中文')
+  ok('★ L() 对空值/空串恒返回空串（不产出 undefined 文案）',
+    mod.L(null, 'zh') === '' && mod.L(undefined, 'en') === '' && mod.L('', 'zh') === '')
+  // 防回退：不得再有「消费点自行判类型」的守卫 —— 那种形态必然会再漏
+  // （实测：3 处写了 `typeof x === 'string' ? x : L(x)`，另 2 处漏了，本 bug 正是漏出来的）。
+  // 判据只针对**显示路径**的三个字段（reason / intent / error），且按变量名排除 HTTP 请求体：
+  // `a.reason` 是路由入参（走 normalizeText 落盘，与 L 无关），它那个 typeof 判断是正当的。
+  ok('★★ 消费点不再各自判类型（L 是唯一取值点，守卫散落必然再漏）',
+    !/typeof (?!a\.)\w+\.(reason|intent|error) === 'string'/.test(src)
+    && src.includes('if (typeof o === \'string\') return o'))
   // CATEGORY_ENUM / EXC_CATEGORY_ENUM 已随权限写工具移除（它们原本只是工具 schema 的 enum 来源，
   // 且旧断言是恒真式：常量定义为 CATS.slice()，与自己比较必然相等）。这里直接守住两份清单本身。
   ok('CATS 含全部八个分类且 undo 在内', mod.CATS.length === 8 && mod.CATS.indexOf('undo') !== -1 && mod.CATS.indexOf('doomloop') !== -1)
@@ -121,7 +145,7 @@ ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id�
   ok('快照形状不认识时返回 undefined（不冒充有会话）',
     api2.pgCurrentSessionId({ phase: 'ready' }) === undefined && api2.pgCurrentSessionId(undefined) === undefined)
 }
-ok('normTarget 定义 + 五个设置路由统一使用（含 set-category / set-quick / set-command-sub）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 5)
+ok('normTarget 定义 + 六个设置路由统一使用（含 set-category / set-quick / set-command-sub / set-doomloop）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 6)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
 // ─────────────────────────────────────────────────────────────
@@ -267,7 +291,9 @@ ok('删除按钮只给「自加且本层有键」的行', cli.includes('(!isPres
 ok('删除不做本地乐观删除', !cli.includes('delete next[tool]'))
 ok('确认态 key 含层级', cli.includes("'quick:' + tab + ':' + t"))
 // notice 也一并清掉：提示说的是「某一层的大分类与子设置不一致」，换层后它指向的对象已不在渲染中
-ok('切 tab 清空确认态与提示（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);'))
+// loopThDirty 同样要清：换层后阈值框会重新渲染成新层的值，残留的 dirty 标记会让新层的
+// 服务端值被旧层的草稿挡住（而旧层草稿已经不在界面上了）。
+ok('切 tab 清空确认态与提示（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; }, [tab]);'))
 ok('兜底文案不再以 todo/cordis 举例', !cli.includes('如 MCP、todo、cordis') && !cli.includes('(e.g. MCP, todo, cordis)'))
 ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'"))
 {
@@ -1051,14 +1077,22 @@ ok('★ ask 例外的 note 经独立字段 exNote 下发（弹窗用，不混入
 // 配平解析对排版免疫，故断言只表达语义、不绑定排版。
 {
   const decideBody = src.slice(src.indexOf('function decide(exec) {'), src.indexOf('function recordDecision'))
-  // 切出 decide() 内每个 return { ... } 的完整字面量（配平到与之匹配的 }）
+  // 切出 decide() 内每个 return 的对象字面量（配平到与之匹配的 }）。
+  // 做法 A 之后出口形状是 `return out({ ... })` —— 合并包装 out() 是出口的**唯一**收口点，
+  // 故这里必须同时认 `return {` 与 `return out({`：只认前者会让 exitBlocks 变空、
+  // 下面所有断言静默假通过（那正是本条断言存在的意义）。
   const returnsOf = (body) => {
     const out = []
     let k = 0
-    while ((k = body.indexOf('return {', k)) !== -1) {
+    while (true) {
+      const a = body.indexOf('return {', k)
+      const b = body.indexOf('return out({', k)
+      if (a === -1 && b === -1) break
+      k = (a === -1) ? b : (b === -1 ? a : Math.min(a, b))
+      const open = body.indexOf('{', k)
       let depth = 0
       let end = -1
-      for (let i = k + 'return '.length; i < body.length; i++) {
+      for (let i = open; i < body.length; i++) {
         if (body[i] === '{') depth++
         else if (body[i] === '}') { depth--; if (depth === 0) { end = i; break } }
       }
@@ -1075,13 +1109,28 @@ ok('★ ask 例外的 note 经独立字段 exNote 下发（弹窗用，不混入
   // 不存在「有备注却丢失展示」的路径，故不要求它们带 note。
   const askExits = exitBlocks.filter((b) => /action: 'ask'/.test(b) || /action: d\.action/.test(b))
   const askMissing = askExits.filter((b) => !/[,{]\s*note:/.test(b))
-  // 解析自检：doomloop/subagent 是既有的 d.action 出口，必须被切到。缺了说明 slice/配平失效，
-  // 那种情况下 askExits 会静默变少、断言假通过 —— 故用锚点而非出口总数当守卫（总数会随新增分支变化，
-  // 拿它做下限又会变成同类脆弱断言）。
-  const parsed = askExits.some((b) => /cat: 'doomloop'/.test(b)) && askExits.some((b) => /cat: 'subagent'/.test(b))
+  // 解析自检：缺了说明 slice/配平失效，那种情况下 askExits 会静默变少、断言假通过 ——
+  // 故用锚点而非出口总数当守卫（总数会随新增分支变化，拿它做下限又会变成同类脆弱断言）。
+  //
+  // ★ 锚点随做法 A 换过一次（**换锚点，不删断言**）：
+  //   · 旧锚点 `cat: 'doomloop'` 依赖 decide() 里存在一个「action: d.action 且带 cat:'doomloop'」
+  //     的 ask 出口；做法 A 把 doomloop 从「命中即 return」改成「算候选 → 最后取更严者」，
+  //     那个出口不复存在，锚点必然失效。
+  //   · 新锚点改成做法 A 之后仍然稳定的两个形状：① 合并点 `const out = (base) =>` 存在；
+  //     ② subagent 出口仍在（它与本次改动无关，仍是 d.action 出口）。
+  //   · 同时由下面那条 `exitBlocks.every(...)` 断言 decide() 内**没有裸 `return {`** ——
+  //     每个对象出口都必须经 out() 收口。这是做法 A 的结构性守卫：漏包一个出口 = 那一支
+  //     不再参与「取更严者」合并，后果是 doomloop 在该分支被静默忽略（fail-open），
+  //     而 askExits 计数不会变红。
+  const parsed = askExits.some((b) => /cat: 'subagent'/.test(b))
+    && /const out = \(base\) => \{/.test(decideBody)
   ok('★ decide() 内每个可能返回 ask 的出口都带 note（防漏带）',
     parsed && askMissing.length === 0,
     'parsed=' + parsed + ' exits=' + askExits.length + ' missing=' + askMissing.length)
+  // 做法 A 的结构性断言：出口一律经 out() 合并（doomloop 只能升级严格度，不能削弱）
+  ok('★★ decide() 的对象出口全部经 out() 合并（漏包即 doomloop 在该支被静默忽略）',
+    exitBlocks.length > 10 && exitBlocks.every((b) => b.indexOf('return out({') === 0),
+    'exits=' + exitBlocks.length + ' unwrapped=' + exitBlocks.filter((b) => b.indexOf('return out({') !== 0).length)
   // 工作区外 ask 出口的 note 必须取自 m.src（例外来源），不能取 m 本身：
   // m 是 outsideMatrix 的合并结果 {action, src, cat, pz, pe}，其上没有 note，写成 exNote(m) 会静默丢备注。
   // 同样不写死条数（新增一个工作区外分类时，正确写法不该被判失败）。
@@ -1606,7 +1655,7 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 用户意图是「pwsh 一律拒绝，但 git status 例外」，最严命中下 git status 也变 deny —— 意图无法表达。
   // 参考工程的「顺序无关」是为文本规则行（顺序不可见、可能由 LLM 生成）设计的，前提在 permgate 不成立。
   ok('★ 自定义规则首条命中即返回（数组顺序 = 优先级，规则顺序完全归用户）',
-    /for \(const rule of rules\) \{\s*if \(ruleMatches\(rule, name, args\)\) \{\s*return \{ action: rule\.action/.test(src)
+    /for \(const rule of rules\) \{\s*if \(ruleMatches\(rule, name, args\)\) \{\s*return out\(\{ action: rule\.action/.test(src)
     && !src.includes('RULE_SEVERITY'))
   // ★ 规则插入位置：**尾部**（后加的排最后），顺序完全归用户 —— 用户定。
   // 曾短暂改为 unshift（新规则插到头部），已回退：那会让用户看到自己没动过的顺序变了。
@@ -1622,6 +1671,139 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 它们不在本次改动范围内，此断言只为记录「这两处没被顺手改掉」。
   ok('弹窗记住规则的两处写入保持 HEAD 原状（unshift，不在本次改动范围）',
     (src.match(/block\.custom\.unshift\(/g) || []).length === 2)
+  // ══ 循环检测（doomloop）结构性断言（doomloop-plan §3.3）══════════════════
+  // 这些断言守的是「删掉的东西不许复活」与「做法 A 的形状不许回退」。
+  // 运行时行为由 smoke group22 覆盖；这里只钉结构 —— 两者分工见文件头。
+  //
+  // ★★ 数组与窗口必须保持删除。recent / RECENT_MAX / REPEAT_STREAK_MAX 三者的存在
+  // 互为因果：数组的窗口长度同时充当 streak 上限，于是需要 REPEAT_STREAK_MAX 来堵
+  // 「阈值 > 窗口 = 静默失效」，还需要「两常量必须联动」的约束。换成按会话分桶的
+  // (键, 次数) 之后这些全都不需要 —— 若哪天有人把数组加回来，这条会立刻报出。
+  // 注意：注释里出现这些名字是**允许**的（它们解释了为什么删），故判据按**代码形态**取，
+  // 不按名字出现次数取 —— 否则「解释为什么删」的注释本身会让断言失败（实测踩过）。
+  ok('★★ 循环检测不再用数组/窗口（recent / RECENT_MAX / REPEAT_STREAK_MAX 均未复活）',
+    !/\bconst recent = \[\]/.test(src) && !/\brecent\.push\(/.test(src) && !/\brecent\.splice\(/.test(src)
+    && !/\bconst RECENT_MAX\b/.test(src) && !/[^\w.]RECENT_MAX\s*[);,<>=]/.test(src)
+    && !/\bconst REPEAT_STREAK_MAX\b/.test(src) && !/[^\w.]REPEAT_STREAK_MAX\s*[);,<>=]/.test(src)
+    && src.includes('const streakBySession = new Map()'))
+  ok('★ 循环状态按会话分桶且桶数有上限（SESSION_BUCKET_MAX + LRU 淘汰）',
+    src.includes('const SESSION_BUCKET_MAX = 32')
+    && /while \(streakBySession\.size > SESSION_BUCKET_MAX\)/.test(src)
+    // LRU 而非 FIFO：命中后必须把桶移到 Map 末尾（delete + set 重排插入顺序）。
+    // 少了这一步就退化成 FIFO，会把**正在活跃**的会话桶淘汰掉（其计数凭空归零）。
+    && /s\.count \+= 1[\s\S]{0,400}?streakBySession\.delete\(sessionKey\)\s*\n\s*streakBySession\.set\(sessionKey, s\)/.test(src))
+  ok('★ 会话键取不到时既不读也不写（不回落共享桶、也不每次建独立桶）',
+    /function loopSessionKey\(exec\) \{[\s\S]{0,300}?return typeof id === 'string' && id \? id : null/.test(src)
+    && (src.match(/if \(!sessionKey\) return/g) || []).length === 3)
+  // ★★ 计数口径：只有**静默放行**才计数，其余一律清零（L-2 / L-11）。
+  // 三条都要在，缺任何一条都会静默改变语义：
+  //   · 非 allow 先清零 —— 覆盖 ask 被拒 / deny / 升级被拒 / 抛错四条路径（逐条写就是四个漏改点）；
+  //   · 非 customReview 也要清零（decide() 恒 allow，否则计数只增不减，切回审查模式即误触发）；
+  //   · 升级被拒那条路径还要**再清一次**（它在清零之后才发生，见 pre-execute 里的顺序）；
+  //   · 计数点必须在 needsUpgrade 之后（判定 allow ≠ 执行了）。
+  ok('★★ 计数口径：非静默放行先清零、升级被拒再清零（L-2 / L-11）',
+    /if \(d\.action !== 'allow' \|\| !customReview\) resetStreak\(sk\)/.test(src)
+    && (src.match(/resetStreak\(sk\)/g) || []).length === 2)
+  ok('★★ 计数点在沙箱升级闸之后（判定 allow ≠ 已执行；被升级闸拦下的不计数）', (function () {
+    const i = src.indexOf("ctx.on('tools/pre-execute'")
+    if (i < 0) return false
+    const body = src.slice(i)
+    const iUpg = body.indexOf('if (needsUpgrade(exec))')
+    const iNote = body.indexOf('noteLoopCall(sk,')
+    const iNext = body.indexOf('return next()')
+    return iUpg > 0 && iNote > iUpg && iNext > iNote
+  })())
+  ok('★ perm_* 仍被排除在循环计数之外（权限查询反复调用不代表卡死）',
+    /if \(customReview && d\.action === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src))
+  // ★★ 做法 A：doomloop 从「命中即 return」改为「算候选 → 出口合并、取更严者」。
+  // 这是本次最重要的改动（G2-2 / G2-4 两条 fail-open 的修复点），故按形状钉死：
+  //   ① 候选只在 customReview 下读取（L-6：非该模式时 decide 首行就放行，不该读计数）；
+  //   ② 合并函数存在，且严格度取自模块级 MODE_STRICTNESS 单点（不在 decide 内另写一份比较）；
+  //   ③ 不更严时以 base 为准、否则 doom 接管 —— 两个分支都要在（只留一个就是「永远 base」
+  //      或「永远 doom」，后者会让 doomloop 无视一切更严判定，方向相反但同样错）；
+  //   ④ decide() 内**不再有 doomloop 的 return 出口**（旧形状是 `return { action: d.action … cat: 'doomloop' }`）。
+  //      判据取「doomloop 的 cat 只出现在候选对象里、不出现在任何 return 里」——
+  //      候选对象本身带 cat: 'doomloop' 是正确的（它要作为最终判定下发），
+  //      所以不能简单断言 `!cat: 'doomloop'`（那样会误伤，实测踩过）。
+  ok('★★ 做法 A：doomloop 算候选 + 出口合并取更严者（不再是命中即 return）', (function () {
+    const i = src.indexOf('function decide(exec) {')
+    const body = src.slice(i, src.indexOf('function recordDecision'))
+    const doomCats = (body.match(/cat: 'doomloop'/g) || []).length
+    const doomReturns = (body.match(/return \{[^}]*cat: 'doomloop'/g) || []).length
+    // `return doom` 必须**只出现在 out() 的函数体里**：写成 out() 之前的 `if (doom) return doom`
+    // 就是「命中即 return」的旧语义复活（那一句会让 doomloop 重新覆盖一切下游判定）。
+    // 判据取「out 定义位置 < return doom 位置 < out 体结束位置」。
+    const iOut = body.indexOf('const out = (base) => {')
+    const iRetDoom = body.indexOf('return doom')
+    const iAfterOut = body.indexOf("if (!customReview) {", iOut)
+    const doomOnlyInsideOut = iOut > 0 && iRetDoom > iOut && iAfterOut > iRetDoom
+    return /let doom = null/.test(body)
+      && /if \(customReview\) \{/.test(body)
+      && iOut > 0
+      && /if \(b === undefined \|\| d === undefined \|\| d < b\) return base/.test(body)
+      && doomOnlyInsideOut
+      && src.includes('const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }')
+      // 候选恰好一处、且没有任何 return 直接产出 doomloop 判定
+      && doomCats === 1 && doomReturns === 0
+  })())
+  // ★ 阈值：默认 6、下限 1、**无上限**（无 MAX 常量）。上限唯一的用途是「不许超过窗口」，
+  // 窗口已删故不需要 —— 加回 MAX 就等于把「阈值 > 上限 = 静默失效」这个坑重新挖出来。
+  ok('★ 阈值默认 6、下限 1、无上限常量（MIN 在、MAX 不存在）',
+    src.includes('const DEFAULT_REPEAT_STREAK = 6') && src.includes('const MIN_REPEAT_STREAK = 1')
+    && !/const MAX_REPEAT_STREAK/.test(src) && !/MAX_REPEAT_STREAK/.test(src))
+  // ★★ 默认阈值**不物化落盘**：freshCategory 不得补 threshold，归一化只在用户显式写下时保留。
+  // 物化 = 把推导值变成「用户表态」，日后改默认阈值对存量配置零效果，且此后任何一次
+  // 无关写盘都会把旧值固化 —— 这正是 QUICK_RETIRED_DEFAULTS 当年要造一次性收敛迁移的原因。
+  ok('★★ 默认阈值不物化落盘（freshCategory 不补 threshold；非法值丢弃而非落默认）', (function () {
+    const i = src.indexOf('function freshCategory(key, inheritDefault)')
+    const body = src.slice(i, i + 2600)
+    if (/threshold/.test(body)) return false
+    return /if \(th !== null\) cat\.threshold = th/.test(src)
+      && !/cat\.threshold = th === null \?/.test(src)
+  })())
+  ok('★ 阈值读取侧推导（doomloopSetting：项目 → 全局 → 默认，非法值防御性回落）',
+    /function doomloopSetting\(root\) \{[\s\S]{0,900}?return \{ threshold: DEFAULT_REPEAT_STREAK, source: 'default' \}/.test(src))
+  ok('★ 阈值归一化：非数字/≤0 丢弃、非整数取整并钳到下限 1、不钳上限',
+    /function normalizeThreshold\(v, inheritDefault\) \{[\s\S]{0,700}?return Math\.max\(MIN_REPEAT_STREAK, Math\.floor\(v\)\)/.test(src))
+  // ★ 设置路由与面板控件同口径：路由存在 + 面板 invoke 过它（WRITE_METHODS 那条断言另行覆盖）
+  ok('★ /permgate/set-doomloop 路由存在且走 persist（阈值可配，L-3）',
+    src.includes("pathname === '/permgate/set-doomloop' && method === 'POST'")
+    && cli.includes("'permgate:set-doomloop': ['POST', '/permgate/set-doomloop']"))
+  // ★ G2-3 / L-5：面板必须给出「allow = 检测已关闭」与「deny 误判无申诉」两种提示。
+  // 这两条是「可配置」这个决定的配套 —— 没有提示，用户关掉后不知道检测没了。
+  ok('★ 面板给出 allow 关闭提示与 deny 误判警告（G2-3 / L-5）',
+    cli.includes("catMode === 'allow' ? React.createElement('div'") && cli.includes("catMode === 'deny' ? React.createElement('div'")
+    && cli.includes("T('panel.loopOff')") && cli.includes("T('panel.loopDenyWarn')"))
+  // ★ 面板阈值输入框**不设 max**（与宿主同口径）：设了就是双份钳制，会出现
+  // 「面板显示 999、实际按 100 跑」那类分叉。
+  // 下限必须消费宿主下发的 doomloop.min，不得回退成字面量：那会让下限出现第二份来源，
+  // 宿主调大 MIN_REPEAT_STREAK 后面板仍按旧下限归一，提交值与落盘值分叉。
+  ok('★ 面板阈值输入框不设 max，且下限取宿主下发的 doomloop.min（不再硬编码）',
+    /className: 'pg-field',\s*\n\s*style: \{ maxWidth: 80 \},\s*\n\s*type: 'number',[\s\S]{0,400}?min: minN,/.test(cli)
+    && /const minN = typeof dl\.min === 'number' && dl\.min > 0 \? dl\.min : 1;/.test(cli)
+    && /const v = Math\.max\(minN, Math\.floor\(n\)\);/.test(cli)
+    && !/const v = Math\.max\(1, Math\.floor\(n\)\);/.test(cli)
+    && !/min: minN,\s*\n\s*max:/.test(cli))
+  // ★★ 阈值草稿必须受保护（loopThDirty）：applyStatus 由 SSE status/refresh 推送触发，
+  // 而动作与阈值按设计分两处提交 —— 「先填阈值 → 再改动作」必然踩坑：改动作回填 status
+  // 会清空阈值框，用户再点保存就走空串分支把阈值清成 inherit（提示「已恢复为默认」），
+  // 而不是保存他刚填的数字。反例：把 applyStatus 里的 setLoopTh 写回无条件整表重建。
+  ok('★★ 阈值草稿不被后台 status 推送清空（loopThDirty 保护）',
+    cli.includes('const loopThDirty = React.useRef({ global: false, project: false });')
+    && /setLoopTh\(\(prev\) => \{[\s\S]{0,400}?loopThDirty\.current\[t\]/.test(cli)
+    && cli.includes('loopThDirty.current[tab] = true;')
+    && (cli.match(/loopThDirty\.current\[tab\] = false;/g) || []).length >= 2)
+  // ★★ 计数点必须受 customReview 闸门约束：非「自定义审查」时 decide() 恒返回 allow，
+  // 若只靠 `d.action !== 'allow'` 清零，计数会只增不减，用户切回审查模式后第一次相同调用
+  // 就命中一个**审查模式下从未发生过**的连续次数（默认 ask 立刻弹窗、deny 直接中断 AI），
+  // 而面板还写着「循环检测不生效」。反例：把清零判据写回 `if (d.action !== 'allow') resetStreak(sk)`
+  // 且计数点不带 customReview。
+  ok('★★ 计数与清零都受 customReview 闸门约束（非审查模式不累积）',
+    /if \(d\.action !== 'allow' \|\| !customReview\) resetStreak\(sk\)/.test(src)
+    && /if \(customReview && d\.action === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src)
+    && src.includes("const customReview = sessionPresetName(exec) === 'custom-review'"))
+
+
   // ★ 段级信息随判定下发（弹窗分段渲染与决策日志依赖它）
   ok('★ 段级信息随判定下发（segments + code）',
     src.includes('segments: a.segments,') && src.includes('code: a.code,')

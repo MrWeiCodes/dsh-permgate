@@ -299,6 +299,7 @@ window.__ModuleLoader__.load({
 			'permgate:set-categories': ['POST', '/permgate/set-categories'],
 			'permgate:set-category': ['POST', '/permgate/set-category'],
 			'permgate:set-command-sub': ['POST', '/permgate/set-command-sub'],
+			'permgate:set-doomloop': ['POST', '/permgate/set-doomloop'],
 			'permgate:set-quick': ['POST', '/permgate/set-quick'],
 			'permgate:add-exception': ['POST', '/permgate/add-exception'],
 			'permgate:remove-exception': ['POST', '/permgate/remove-exception'],
@@ -1456,6 +1457,20 @@ window.__ModuleLoader__.load({
 				'panel.subSourceProject': '本项目设置',
 				'panel.subEffective': '当前生效',
 				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置是「{sub}」—— 判定链上子设置优先，破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把子设置也改成「{cat}」或「跟随全局」。',
+				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
+				'panel.loopThreshold': '触发阈值',
+				'panel.loopThresholdHint': '：连续【静默放行】多少次相同调用后触发（不含弹窗批准的）。留空 = 用默认值。',
+				'panel.loopThresholdPh': '默认 {n}',
+				'panel.loopThresholdUnit': '次',
+				'panel.loopThresholdSave': '保存',
+				'panel.loopThresholdBad': '阈值需为正整数（当前不支持上限，填多大都按实际值生效）',
+				'panel.loopThresholdSaved': '循环检测阈值已保存（{t}）：连续静默放行 {n} 次后触发',
+				'panel.loopThresholdCleared': '循环检测阈值已恢复为默认（{t}）',
+				'panel.loopEffective': '当前生效',
+				'panel.loopOff': '⚠ 「重复操作」的动作是「允许」—— 循环检测已关闭，AI 连续重复相同调用时不会有任何提醒。',
+				'panel.loopDenyWarn': '⚠ 动作是「拒绝」：命中时直接中断 AI、不弹窗，你不会有确认机会。判据是「连续 N 次逐字节相同」的调用，误判概率极低但并非零。',
+				'panel.loopNote': '只统计**静默放行**的调用：弹窗批准、被拒绝、沙箱升级被拒的都不计入，且会把连续计数清零。',
+				'panel.loopNotCustom': '（当前会话未选择「自定义审查」，循环检测不生效）',
 				'panel.excTooBroad': '匹配范围过宽',
 				'panel.excTooBroadHint': '这条例外匹配任意单个命令段，等于不再审查任何命令。建议改成具体命令（如 git status *）。',
 				'quick.web_search': '网页搜索',
@@ -1654,6 +1669,20 @@ window.__ModuleLoader__.load({
 				'panel.subSourceProject': 'project setting',
 				'panel.subEffective': 'Currently effective',
 				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
+				// ── doom loop threshold ────────────────────────────────────────────
+				'panel.loopThreshold': 'Trigger threshold',
+				'panel.loopThresholdHint': ': how many identical calls silently allowed in a row before it triggers (approvals via dialog do not count). Leave empty to use the default.',
+				'panel.loopThresholdPh': 'default {n}',
+				'panel.loopThresholdUnit': 'calls',
+				'panel.loopThresholdSave': 'Save',
+				'panel.loopThresholdBad': 'The threshold must be a positive integer (there is no upper bound; any value is used as-is)',
+				'panel.loopThresholdSaved': 'Doom loop threshold saved ({t}): triggers after {n} identical calls silently allowed in a row',
+				'panel.loopThresholdCleared': 'Doom loop threshold reset to default ({t})',
+				'panel.loopEffective': 'Currently effective',
+				'panel.loopOff': '⚠ The "repeat" action is "allow" — doom loop detection is OFF; repeated identical calls by the AI will produce no reminder at all.',
+				'panel.loopDenyWarn': '⚠ The action is "deny": a hit aborts the AI immediately without a dialog, so you get no chance to confirm. The criterion is N byte-identical consecutive calls, so false positives are very unlikely but not impossible.',
+				'panel.loopNote': 'Only calls that were silently allowed are counted: approvals via dialog, denials, and rejected sandbox upgrades neither count nor keep the streak — they reset it.',
+				'panel.loopNotCustom': '(This session has not selected "Custom Review"; doom loop detection is inactive)',
 				'panel.excTooBroad': 'Very broad',
 				'panel.excTooBroadHint': 'This exception matches any single command segment — effectively no command review at all. Prefer a concrete command such as git status *.',
 				'quick.web_search': 'web search',
@@ -2779,6 +2808,24 @@ window.__ModuleLoader__.load({
 			const [subDestructive, setSubDestructive] = React.useState({ global: null, project: null });
 			// 子设置的拒绝原因草稿：{ global: '', project: '' }（结构与 fbReason 同形）
 			const [subReasons, setSubReasons] = React.useState({ global: '', project: '' });
+			// 循环检测（doomloop）的阈值输入框：{ global: '', project: '' }，值为**字符串**
+			// （输入框的中间态，如用户清空准备重打）。空串表示「本层未配置」，
+			// 由宿主下发的 defaultThreshold 在界面上以 placeholder 呈现 —— 不预填数字，
+			// 否则用户分不清「我设过 6」还是「默认就是 6」。
+			const [loopTh, setLoopTh] = React.useState({ global: '', project: '' });
+			// 阈值草稿的「未保存」标记：{ global: false, project: false }。
+			//
+			// 为什么需要它：applyStatus 会整表重建 loopTh，而 applyStatus 不只由本面板的 invoke
+			// 回调触发，还由 SSE 的 status/refresh 推送触发（宿主在 persist 成功、init、
+			// session/event 时都 broadcast）。动作与阈值按设计**分两处提交**（见 doomloopRow 的
+			// 注释①），于是「先填阈值 → 再改动作」这个自然顺序必然踩坑：改动作那次 invoke 落盘后
+			// 回填 status → 阈值框被重置成服务端值（未配置时为 ''）→ 用户再点「保存」走的是空串
+			// 分支，把阈值清成 inherit 并提示「已恢复为默认」，而不是保存他刚填的数字。
+			//
+			// 判据是「本层有未保存的草稿」而不是「本格正在聚焦」：点「保存」按钮前必然先 blur，
+			// 用焦点判据会在 blur 那一刻就失效（reason 那套 reasonFocus 之所以能用焦点判据，
+			// 是因为它的输入框靠回车/blur 提交，而这里的提交按钮独立于输入框）。
+			const loopThDirty = React.useRef({ global: false, project: false });
 			const [fbReason, setFbReason] = React.useState({ global: '', project: '' });
 			// 拒绝原因刚保存成功的那一格：{ key: 'kind:tab:key', seq }，显示短暂的对勾反馈。
 			const [reasonSaved, setReasonSaved] = React.useState(null);
@@ -2857,7 +2904,7 @@ window.__ModuleLoader__.load({
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
 			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点与编辑态（换层后它们指向的行已不在渲染中，
 			// 编辑态若残留，切回来时同一格会莫名其妙还处于可输入状态）。
-			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); }, [tab]);
+			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -2897,6 +2944,23 @@ window.__ModuleLoader__.load({
 					project: (s.commandSub && s.commandSub.project && s.commandSub.project.reason) || '',
 				};
 				setSubDestructive(subNext);
+				// doomloop 阈值：只回填**本层显式配置**（null → 空串 = 未配置，界面显示 placeholder）。
+				// 不回填 effective/defaultThreshold —— 那会让「未配置」看起来像「已设为默认值」，
+				// 与上面 subNext 的口径一致（effective 另起一行展示「当前生效」）。
+				// 有**未保存草稿**的那一层保留本地值（见 loopThDirty 的说明）：否则后台 status
+				// 推送会清空用户刚填的数字，再点保存就变成「清除阈值」。
+				const thNext = {
+					global: (s.doomloop && typeof s.doomloop.global === 'number') ? String(s.doomloop.global) : '',
+					project: (s.doomloop && typeof s.doomloop.project === 'number') ? String(s.doomloop.project) : '',
+				};
+				setLoopTh((prev) => {
+					if (!prev) return thNext;
+					const keep = {};
+					for (const t of ['global', 'project']) {
+						if (loopThDirty.current[t]) keep[t] = prev[t];
+					}
+					return Object.assign({}, thNext, keep);
+				});
 				setSubReasons((prev) => {
 					if (focusNow && focusNow.kind === 'sub' && prev && subNext[focusNow.tab] === 'deny') {
 						return Object.assign({}, subReasonNext, { [focusNow.tab]: prev[focusNow.tab] });
@@ -3008,6 +3072,7 @@ window.__ModuleLoader__.load({
 			const WRITE_METHODS = [
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
 				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
+				'permgate:set-doomloop',
 				'permgate:add-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 			];
@@ -3306,6 +3371,96 @@ window.__ModuleLoader__.load({
 			 );
 			};
 
+			// 循环检测（doomloop）阈值行 + 状态提示。
+			// 与「破坏性命令」子设置的区别：那个是**动作**（三态），这个是**数字**，故不复用 sel()。
+			// 三个要点：
+			//   ① 阈值与动作分两处写：动作仍走上方分类下拉（走 set-categories），阈值走本行
+			//      （set-doomloop）。不做成一个「保存」同时提交两者 —— 两处的空值语义不同
+			//      （阈值空串 = 清除回落默认，动作没有「空」这一态），混在一起会出现
+			//      「只想改阈值却把动作也重写了一遍」的副作用。
+			//   ② 校验与宿主同口径（正整数、**无上限**）：不做上限钳制，否则会出现
+			//      「面板显示 999、实际按 100 跑」那类双份钳制。非法值只提示、不提交。
+			//   ③ 关闭提示（G2-3）与 deny 误判警告（L-5）都在这里给：动作本身在别的行，
+			//      但那两种状态下用户最需要知道的信息就在这一行旁边。
+			const doomloopRow = () => {
+				const dl = (status && status.doomloop) || {};
+				const eff = dl.effective || null;
+				const defN = typeof dl.defaultThreshold === 'number' ? dl.defaultThreshold : 6;
+				// 下限由宿主下发（doomloop.min）—— 不在客户端写死字面量：那会让下限出现第二份来源，
+				// 宿主把 MIN_REPEAT_STREAK 调大后面板仍按旧下限归一，提交值与落盘值分叉
+				// （面板显示 1、实际按 2 裁决）。缺字段时回退 1 只是协议异常兜底，不是决策链一环。
+				const minN = typeof dl.min === 'number' && dl.min > 0 ? dl.min : 1;
+				const src = eff ? eff.source : 'default';
+				const srcLabel = src === 'project' ? T('panel.subSourceProject') : (src === 'global' ? T('panel.subSourceGlobal') : T('panel.subSourceDefault'));
+				// 本层动作：取 cats 的当前值（与上方下拉同源），项目层 inherit 时穿透全局
+				const catMode = tab === 'global'
+					? ((cats.global && cats.global.doomloop) || 'ask')
+					: ((cats.project && cats.project.doomloop && cats.project.doomloop !== 'inherit') ? cats.project.doomloop : ((cats.global && cats.global.doomloop) || 'ask'));
+				const commitTh = () => {
+					const raw = String(loopTh[tab] || '').trim();
+					// 空串 = 显式恢复默认。全局层没有 inherit（宿主对 global+inherit 会拒绝），
+					// 故全局层的「空」也走同一条路径：删除该键 → 读取侧回落默认值。
+					if (raw === '') {
+						loopThDirty.current[tab] = false;
+						invoke('permgate:set-doomloop', { target: tab, threshold: 'inherit' }, () => setMsg(T('panel.loopThresholdCleared').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject'))));
+						return;
+					}
+					const n = Number(raw);
+					// 与宿主 normalizeThreshold 同口径：非数字 / 非有限 / ≤0 → 拒绝（不静默回落默认）。
+					// 小数向下取整后钳到**宿主下发的下限** —— 与宿主一致，避免「面板显示 1.5、实际按 1 跑」。
+					if (!Number.isFinite(n) || n <= 0) { setNotice(T('panel.loopThresholdBad')); return; }
+					const v = Math.max(minN, Math.floor(n));
+					// 提交成功才清 dirty：invoke 失败（回 error / saveError）时保留草稿，
+					// 否则用户填的值会在他还没成功保存时就被下一次 status 回填冲掉。
+					invoke('permgate:set-doomloop', { target: tab, threshold: v }, () => {
+						loopThDirty.current[tab] = false;
+						setLoopTh((prev) => Object.assign({}, prev, { [tab]: String(v) }));
+						setMsg(T('panel.loopThresholdSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{n}', String(v)));
+					});
+				};
+				return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
+						React.createElement('span', { style: { fontSize: 12, fontWeight: 600 } },
+							T('panel.loopThreshold'),
+							React.createElement('span', { style: { fontWeight: 400, color: 'rgba(128,128,128,0.85)' } }, T('panel.loopThresholdHint')),
+						),
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+							React.createElement('input', {
+								className: 'pg-field',
+								style: { maxWidth: 80 },
+								type: 'number',
+								// min 用宿主下发的下限、**不设 max**：与宿主一致（无上限）。设了 max 会变成双份钳制。
+								min: minN,
+								placeholder: T('panel.loopThresholdPh').replace('{n}', String(defN)),
+								title: T('panel.loopThresholdHint'),
+								value: loopTh[tab] || '',
+								onChange: (e) => {
+									loopThDirty.current[tab] = true;
+									setLoopTh(Object.assign({}, loopTh, { [tab]: e.target.value }));
+								},
+								onKeyDown: (e) => {
+									if (e.nativeEvent && (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return;
+									if (e.key === 'Enter') { e.preventDefault(); commitTh(); }
+								},
+								disabled: busy,
+							}),
+							React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.loopThresholdUnit')),
+							React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: commitTh }, T('panel.loopThresholdSave')),
+						),
+					),
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)' } },
+						T('panel.loopEffective') + '：' + (eff ? String(eff.threshold) : String(defN)) + ' ' + T('panel.loopThresholdUnit') + '（' + srcLabel + '）',
+					),
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } }, T('panel.loopNote')),
+					// G2-3：动作设为 allow = 知情关闭，但必须**说出来** —— 此前关掉后毫无提示，
+					// 用户不知道检测已经没了（面板上那一行看起来和别的分类没区别）。
+					catMode === 'allow' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopOff')) : null,
+					// L-5：deny 不弹窗、直接中断 AI，用户不容易察觉，故用面板提示补上这个信息缺口
+					catMode === 'deny' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopDenyWarn')) : null,
+					(status && status.activeForSession === false) ? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.7)', marginTop: 2 } }, T('panel.loopNotCustom')) : null,
+				);
+			};
+
 			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 
 			// 拒绝原因控件：四处（分类默认值 / 快捷工具 / 兜底 / 快捷工具新增行）共用一个渲染函数，
@@ -3410,6 +3565,9 @@ window.__ModuleLoader__.load({
 							sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 						),
 					),
+					// 循环检测（doomloop）的阈值与状态提示。该分类**不挂例外**（EXC_CATS 不含它），
+					// 故不放进下面的 EXC_CATS 分支，否则这一行永远不会渲染。
+					c === 'doomloop' ? doomloopRow() : null,
 					EXC_CATS.indexOf(c) !== -1 ? React.createElement('div', { style: { marginTop: 2 } },
 						// command 分类的子设置「破坏性命令」：判定链是 例外 → 子设置 → 分类默认值，
 						// 子设置比大分类知道得更多，故它**独立于上方默认动作**生效 ——

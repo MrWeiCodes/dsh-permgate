@@ -11,6 +11,9 @@ const CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent
 const EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo']
 const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
+// 严格度序：allow < ask < deny（越大越严）。做法 A 的「取更严者」合并与面板的
+// warnSubMismatch 判据同源 —— 两处都表达「谁更严」，不该各写一份比较逻辑。
+const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
 const MAX_DECISIONS = 30
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
@@ -90,7 +93,21 @@ const RETIRE_QUICK_DEFAULTS_MIGRATION = 'retire-quick-defaults-cordis_define'
 // eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
-const REPEAT_STREAK = 4
+// 循环检测的默认阈值：连续【静默放行】多少次相同调用后触发提醒（第 N+1 次触发）。
+// 可配置（global.doomloop.threshold / 项目层可 inherit 穿透），默认值由读取侧推导，
+// **不物化落盘** —— 理由与 destructive 子设置完全同构（见 doomloopSetting 的注释）：
+// 推导值一旦落盘就成了「用户表态」，日后调整默认阈值对存量配置零效果。
+const DEFAULT_REPEAT_STREAK = 6
+// 阈值下限：1（= 第 2 次触发），**不钳到 2**。参考工程的「1 would turn EVERY auto-allowed
+// call into an ask」在 permgate 不成立 —— 它是先记后查，我们是先查后记（decide 在记录之前），
+// 阈值 1 只会让第 2 次触发。既然不存在「每次都问」，就不该设人为下限。
+const MIN_REPEAT_STREAK = 1
+// 阈值上限：**没有**。上限唯一的用途是「不许超过窗口」，而窗口（recent 数组）已随
+// (键, 次数) 计数实现一并删除 —— 计数能数到任意大，阈值 999 就是「连续静默放行 999 次后提醒」，
+// 语义准确，不是静默失效。故这里刻意不定义 MAX 常量（曾有的 REPEAT_STREAK_MAX 是数组实现的副产品）。
+// 每会话循环状态桶的上限：按 LRU 淘汰最久未更新的会话（参考工程 LOOP_GUARD_MAX_KEYS 是同一手法）。
+// 每桶只占两个字段（键 + 次数），32 足够覆盖同时活跃的对话数。
+const SESSION_BUCKET_MAX = 32
 // PS_KEYWORDS / ROUTER_CMDS / ROUTER_OPT_VALUE 已随命令判定一起迁到 shell-parse.js：
 // 「哪些是 PowerShell 关键字」「哪些命令是子命令路由器」属于解析器的词汇表，
 // 留一份在宿主里就会与解析器实际用的那份漂移（候选生成与判定各按一张表走）。
@@ -279,9 +296,27 @@ function overMaxChars(a, b) {
   return String(a == null ? '' : a).length + String(b == null ? '' : b).length > DIFF_MAX_CHARS
 }
 
-// 双语文案：bi(zh, en) 生成 {zh,en}；L(obj, lang) 按语言取值（缺省回退中文）
+// 双语文案：bi(zh, en) 生成 {zh,en}；L(obj, lang) 按语言取值（缺省回退中文）。
+//
+// L 必须同时接受**字符串**：reason 有两种合法形态，来源不同、都不可改 ——
+//   · bi() 对象 —— 宿主自己拼的文案（分类默认值、兜底、工作区外…共 24 个出口）；
+//   · 裸字符串 —— **用户写进配置的**文字（自定义规则的 reason、分类/兜底/子设置的
+//     reason 都经 normalizeText 落盘成字符串，例外同理）。
+// 第二种必须是字符串：配置是给人读改的 JSON，把 reason 落成 {zh,en} 会让用户没法手写，
+// 也会破坏存量配置。故**兼容放在 L 这一处**，而不是要求每个出口都包 bi()。
+//
+// 曾经的写法只认对象：`(o && (o[lang] || o.zh)) || ''`。对字符串取 .zh/.en 恒为 undefined
+// → 回落空串，于是**用户在自定义规则里填的拒绝原因被静默丢弃**（实测：填了 reason 的规则
+// 回给 AI 的是空串，而不填时反倒能显示「自定义规则 r1 命中」这句回落文案）。
+// 之所以只在 L 修：当时有 3 个消费点自行写了 `typeof x === 'string' ? x : L(x)` 守卫
+// （statusView 的 recentDecisions、/permgate/pending、file-diff 的错误），另 2 个
+// （console.log 与 deny 回传）漏了。这种「同一守卫散落在 N 个消费点」的形态必然会再漏 ——
+// 根治点是让唯一的取值函数本身正确，消费点就不必记得任何事。
 const bi = (zh, en) => ({ zh, en })
-const L = (o, lang) => (o && (o[lang] || o.zh)) || ''
+const L = (o, lang) => {
+  if (typeof o === 'string') return o
+  return (o && (o[lang] || o.zh)) || ''
+}
 // 语言参数归一化：只有 en 用英文，其余（缺失/空/非法）一律中文
 const normLang = (v) => (v === 'en' ? 'en' : 'zh')
 
@@ -661,7 +696,18 @@ export default {
     let loadError = null
     let saveError = null
     const decisions = []
-    const recent = []
+    // 循环检测状态：每会话只存「上次静默放行的调用键 + 连续次数」。
+    //
+    // 这里曾经是一个全局数组 recent（push 调用键、超过 12 条从头截断），判定时从尾部回扫、
+    // 遇不同键就 break。两个结构性缺陷：
+    //   ① 全局共享 → A 会话连续 4 次，B 会话**第 1 次**同一调用就被牵连弹窗；
+    //   ② 数组的窗口长度同时充当了 streak 的上限 → 「阈值 > 12」变成静默失效
+    //      （故当时才需要 REPEAT_STREAK_MAX 来堵它，并产生「两常量必须联动」的约束）。
+    // 而回扫只读**最后那段连续区**，更早的条目永远读不到（push 序列 A,A,B,B,B → 查 A 得 0），
+    // 所以数组本身是纯冗余：实测对拍 270,000 次随机查询，数组实现与 (键,次数) 计数零不一致。
+    // 换成按会话分桶的 (键, 次数) 后，① 由分桶解决，② 从根上消失（计数能数到任意大），
+    // 于是 REPEAT_STREAK_MAX 与「窗口」一起被删掉 —— 简化即修复。
+    const streakBySession = new Map()
     const pendingApprovals = new Map()
     // SSE 订阅者：/permgate/events 长连接的响应对象集合（状态/待审批变化即推）
     const sseClients = new Set()
@@ -829,6 +875,23 @@ export default {
       return out
     }
 
+    // doomloop 子设置「阈值」的归一化（L-3/L-7/L-8）。
+    //   缺失 / 非数字 / 非有限 / ≤ 0 → **null（丢弃该键）**，由读取侧 doomloopSetting 推导默认值；
+    //   非整数 → 向下取整后钳到下限 1；
+    //   上限 → **不设**（窗口已删，计数能数到任意大，阈值多大都能触发，不存在静默失效）；
+    //   项目层额外接受 'inherit'（穿透全局，与 mode 同口径）。
+    //
+    // 为什么非法值「丢弃」而不是落一个默认值：normalizeCategory 的产物会被 persist 整体序列化
+    // 落盘，落一个 6 就等于把**推导值**变成**用户表态** —— 日后把默认阈值从 6 改成 8 时，
+    // 这些配置不会跟随，且此后任何一次无关写盘都会把 6 固化。这与 destructive 子设置
+    // 踩过的坑完全同构（见 normalizeCategory 的注释与 QUICK_RETIRED_DEFAULTS 的历史）。
+    // 「关闭检测」不是把阈值写 0，而是把 mode 设为 allow —— 语义明确且在面板上有提示（G2-3）。
+    function normalizeThreshold(v, inheritDefault) {
+      if (inheritDefault && v === 'inherit') return 'inherit'
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return null
+      return Math.max(MIN_REPEAT_STREAK, Math.floor(v))
+    }
+
     function normalizeCategory(raw, key, inheritDefault) {
       const def = freshCategory(key, inheritDefault)
       const c = raw && typeof raw === 'object' ? raw : {}
@@ -854,6 +917,12 @@ export default {
       if (key === 'command') {
         const sub = normalizeSubSetting(c.destructive, inheritDefault)
         if (sub) cat.destructive = sub
+      }
+      // doomloop 的阈值：与 destructive 同口径 —— **只保留用户显式写下的值**，
+      // 缺键/非法值一律留空（推导交给读取侧 doomloopSetting）。理由见 normalizeThreshold。
+      if (key === 'doomloop') {
+        const th = normalizeThreshold(c.threshold, inheritDefault)
+        if (th !== null) cat.threshold = th
       }
       return cat
     }
@@ -1691,6 +1760,28 @@ export default {
       return { action: derived, reason: undefined, source: useProject ? 'project-default' : 'default' }
     }
 
+    // doomloop 阈值的读取单点（与 commandSubSetting 同构）：项目显式 → 全局显式 → 默认。
+    // **推导在这里做，不在 normalizeCategory/freshCategory 里做** —— 那边的产物会经 persist
+    // 落盘成显式键，于是「推导值」与「用户表态」在磁盘上不可区分：日后把默认阈值从 6 调成 8 时，
+    // 存量配置里那条固化的 6 会永久压过新默认（面板显示 8、实际按 6 裁决），
+    // 且此后任何一次无关写盘都会把 6 固化 —— 这正是 QUICK_RETIRED_DEFAULTS 当年要造
+    // 一次性收敛迁移的原因，不值得再犯一次。
+    // 优先级：
+    //   ① 项目层显式数字 → 用它
+    //   ② 全局层显式数字 → 用它
+    //   ③ 都没显式值 → DEFAULT_REPEAT_STREAK（6）
+    // 非法值（非数字/≤0/非有限）在加载时已被 normalizeThreshold 丢弃，故这里只会看到合法值；
+    // 仍做一次防御性校验：万一有路径绕过归一化，回落默认而不是把 NaN 带进比较
+    // （NaN 参与 >= 比较恒为 false，那会变成「循环检测静默失效」—— fail-open，必须避免）。
+    function doomloopSetting(root) {
+      const proj = projectBlock(root)
+      const pv = proj && proj.doomloop && proj.doomloop.threshold
+      if (typeof pv === 'number' && Number.isFinite(pv) && pv > 0) return { threshold: Math.max(MIN_REPEAT_STREAK, Math.floor(pv)), source: 'project' }
+      const gv = config.global.doomloop && config.global.doomloop.threshold
+      if (typeof gv === 'number' && Number.isFinite(gv) && gv > 0) return { threshold: Math.max(MIN_REPEAT_STREAK, Math.floor(gv)), source: 'global' }
+      return { threshold: DEFAULT_REPEAT_STREAK, source: 'default' }
+    }
+
     // 子设置写入单点（设置页路由专用）。reason 语义与 setCategoryMode 完全一致：
     // 未提供（undefined）保留原值；空串/纯空白显式清除；有内容覆盖。
     // 全局层不接受 inherit（与 setCategoryMode 同口径：inherit 是项目层专属的「穿透」语义）。
@@ -1707,6 +1798,27 @@ export default {
       const t = normalizeText(reason)
       if (t) block.command.destructive.reason = t
       else delete block.command.destructive.reason
+      return true
+    }
+
+    // doomloop 阈值写入单点（设置页路由专用）。
+    //   threshold === 'inherit' → **删除本层的 threshold 键**（= 本层没有表态，穿透到下一级）。
+    //     两层都接受：threshold 是数字字段，不像 mode 那样有「inherit 这个动作取值」的语义，
+    //     「本层不表态」在数据上就是缺键。全局层删掉即回落内置默认值，与项目层删掉即回落
+    //     全局是同一件事 —— 故这里不像 setCommandSub 那样对全局层拒绝（那里 inherit 是一个
+    //     动作取值，全局层没有「穿透」的对象，写进去会变成非法 mode）。
+    //   合法数字 → 落盘；非法 → 返回 false，由路由回错误（**不静默回落默认**：那会让用户
+    //              以为自己设的值生效了，而实际按默认走 —— 面板与实际裁决分叉）。
+    function setDoomloopThreshold(root, targetKey, threshold) {
+      const block = targetKey === 'global' ? config.global : ensureProject(root)
+      if (!block.doomloop) block.doomloop = freshCategory('doomloop', targetKey !== 'global')
+      if (threshold === 'inherit') {
+        delete block.doomloop.threshold
+        return true
+      }
+      const th = normalizeThreshold(threshold, false)
+      if (th === null) return false
+      block.doomloop.threshold = th
       return true
     }
 
@@ -3006,14 +3118,64 @@ export default {
       return name + '\u0000' + safeJson(args)
     }
 
-    function repeatStreak(name, args) {
+    // 循环状态按**会话**分桶：键取 exec.agent.session.id（与 askUser 里下发给客户端的
+    // sessionId 同源）。取不到时返回 null，调用方据此**既不读也不写**。
+    //
+    // 为什么取不到时直接跳过检测，而不是回落成一个全局共享桶：共享桶等于把「A 会话连续 4 次
+    // → B 会话第 1 次就被牵连」原样保留。方向虽然不危险（多弹窗），但会误伤正常工作流。
+    // 循环检测只是「额外提醒」，拿不准会话身份时不提醒是安全的（最坏少一次提醒，
+    // 不会放宽任何权限）—— 方向 fail-closed。
+    // 也**不能**为每次调用建一个独立桶：那会让 Map 无界增长，或把真实会话的桶挤出淘汰。
+    function loopSessionKey(exec) {
+      try {
+        const id = exec && exec.agent && exec.agent.session && exec.agent.session.id
+        return typeof id === 'string' && id ? id : null
+      } catch (e) { return null }
+    }
+
+    // 判定：本次调用**之前**已连续静默放行了几次。decide() 在记录之前调用，故读到的是「之前」。
+    // 键不同（或该会话没有桶）一律返回 0 —— 断链即重新计数，不需要数组那种回扫。
+    function repeatStreak(sessionKey, name, args) {
+      if (!sessionKey) return 0
+      const s = streakBySession.get(sessionKey)
+      if (!s || s.key !== callKey(name, args)) return 0
+      return s.count
+    }
+
+    // 记录：**只在静默放行时**调用（L-2）。其余动作走 resetStreak（L-11）。
+    // 两者口径不同是**有意的**：循环检测要抓的是「用户没看见的重复」（静默放行在烧 token
+    // 而无人察觉）；弹窗批准时用户本来就在环里、每次都看到了，提醒是冗余的。
+    // 审计（recordDecision）则是另一回事，它记全部动作、保持原位不动 —— 不要在这一点上「统一」。
+    function noteLoopCall(sessionKey, name, args) {
+      if (!sessionKey) return
       const key = callKey(name, args)
-      let n = 0
-      for (let i = recent.length - 1; i >= 0; i--) {
-        if (recent[i] === key) n++
-        else break
+      const s = streakBySession.get(sessionKey)
+      if (s && s.key === key) {
+        s.count += 1
+        // LRU：命中后把该桶移到 Map 末尾（delete + set 重排插入顺序），
+        // 这样淘汰掉的总是「最久没活动」的会话，活跃会话不会被误伤。
+        streakBySession.delete(sessionKey)
+        streakBySession.set(sessionKey, s)
+      } else {
+        streakBySession.set(sessionKey, { key, count: 1 })
       }
-      return n
+      while (streakBySession.size > SESSION_BUCKET_MAX) {
+        const oldest = streakBySession.keys().next()
+        if (oldest.done) break
+        streakBySession.delete(oldest.value)
+      }
+    }
+
+    // 清零（L-11 / fire-and-reset）：**任何非静默放行的调用**都把该会话的连续计数清零。
+    //
+    // 为什么清零而不是继续累积：累积模式下，触发后用户点一次「允许」并不能让提醒停下来
+    // ——计数仍 ≥ 阈值，之后每次相同调用都弹窗。这与「用户已表态」的直觉相反。
+    // 顺带解决了「被拒调用是否清零」这个 L-2 没说清的问题：否则会出现
+    // 「4 次静默放行 → 被拒 → 再静默放行」时计数仍停在 4 的怪状态。
+    // 与参考工程一致（其注释原文：a human allow never buys a permanent exemption）。
+    function resetStreak(sessionKey) {
+      if (!sessionKey) return
+      streakBySession.delete(sessionKey)
     }
 
     function quickAction(name, root) {
@@ -3283,15 +3445,65 @@ export default {
       // 现在那 9 个写工具已整体移除（理由见 QUICK_DEFAULTS 处注释），只剩只读的 perm_status
       // （QUICK_DEFAULTS 钉为 allow）；这条注释保留为历史记录 —— 若将来重新引入权限写工具，
       // 必须回到「不特判、由 QUICK_DEFAULTS 钉动作」的做法，绝不能在此无条件放行。
-      if (sessionPresetName(exec) !== 'custom-review') {
-        return { action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null }
-      }
-      if (repeatStreak(name, args) >= REPEAT_STREAK) {
-        const d = resolveCategory('doomloop', null, null, root)
-        if (d.action !== 'allow') {
-          // 分类默认值的拒绝原因同样带上（doomloop 无例外，d.reason 只可能来自分类默认值）
-          return { action: d.action, reason: bi('重复操作(Doom Loop)：' + name + ' 已连续重复 ' + (REPEAT_STREAK + 1) + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' repeated ' + (REPEAT_STREAK + 1) + ' identical calls' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'doomloop', value: null, kind: null }
+      const customReview = sessionPresetName(exec) === 'custom-review'
+      // ── 循环检测（doomloop）：算出**候选**，不在这里 return ────────────────────
+      //
+      // 旧实现是「命中即 return」，它是判定链的**第一道**，于是覆盖了下游任何更严的判定：
+      //   · 用户把 command 分类设为 deny（「命令一律拒绝」）→ 前 4 次 DENY，第 5 次起变 ASK
+      //     （本该 DENY，一次误点即放行）；
+      //   · 自定义规则 deny + doomloop=ask → 同样被降级为弹窗。
+      // 两者都是 **fail-open**：用户显式写的拒绝被削弱。根因与段级解析修掉的那类问题同源 ——
+      // **放宽方向的判定覆盖了收紧方向的判定**。
+      //
+      // 语义上 doomloop 不是「一类判定」，而是「对重复行为的额外提醒」：它只应把 allow 升级为
+      // 提醒，**永不应把 deny 降级**。故改为「参与合并、取更严者」（做法 A），与段级合并
+      // 「拒绝面取并集、放行面取交集」是同一条原则。
+      //
+      // 行为变更面（实测推演）只有一处：`doomloop=ask` 遇上「下游 deny」时由 ask 变回 deny
+      // —— 那正是修复本身。allow/ask 与 allow/ask 的组合、以及 doomloop=deny 的组合全部不变。
+      //
+      // 生效范围保持现状（L-6）：仅「自定义审查」模式。非该模式时下面第一行就放行了，
+      // 那时连计数都不该发生 —— 故 doom 的读取也被 customReview 挡住，不放进 out() 里懒算。
+      let doom = null
+      if (customReview) {
+        const sk = loopSessionKey(exec)
+        const th = doomloopSetting(root).threshold
+        const streak = repeatStreak(sk, name, args)
+        if (streak >= th) {
+          const d = resolveCategory('doomloop', null, null, root)
+          // d.action === 'allow' = 用户知情关闭（L-3/L-5），此时 doom 保持 null，完全不参与合并
+          if (d.action !== 'allow') {
+            doom = {
+              action: d.action,
+              // L-10：doomloop 触发时理由优先。N 取**实际连续次数**（正常等于阈值；
+              // 若用户在计数途中调低了阈值，它可能已经更大 —— 报真实值比报配置值准确）。
+              reason: bi('重复操作(Doom Loop)：' + name + ' 已连续放行 ' + streak + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' silently allowed ' + streak + ' identical calls in a row' + exReasonEn(d)),
+              note: exNote(d),
+              ruleId: d.ruleId,
+              cat: 'doomloop',
+              value: null,
+              kind: null,
+            }
+          }
         }
+      }
+      // 判定出口的统一包装：把候选按「取更严者」并进最终判定。
+      // 为什么做成出口包装而不是在末尾合并：decide() 有二十多个 return 出口，
+      // 在末尾合并要求每个出口都先赋给同一个变量再落到末尾 —— 那会把「就近返回」
+      // 这个可读性优势换掉，且漏改一个出口就是静默的 fail-open（最危险的方向）。
+      // 包装后每个出口的语义不变：写出来的仍是我这一支的判定，doomloop 只是额外收紧。
+      const out = (base) => {
+        if (!doom) return base
+        const b = MODE_STRICTNESS[base.action]
+        const d = MODE_STRICTNESS[doom.action]
+        // 取更严者：doom 不更严（含相等）时一律以 base 为准。
+        // 相等时让 doom 接管：动作相同、只是理由换成循环提醒 —— 与旧行为一致（L-10 理由优先），
+        // 也是「提醒」这一语义该有的表现（用户需要知道为什么这次被拦）。
+        if (b === undefined || d === undefined || d < b) return base
+        return doom
+      }
+      if (!customReview) {
+        return out({ action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null })
       }
       const proj = projectBlock(root)
       const rules = []
@@ -3318,7 +3530,7 @@ export default {
       // 间接控制，无法直接调整既有条目的先后 —— 需要时再补 UI。
       for (const rule of rules) {
         if (ruleMatches(rule, name, args)) {
-          return { action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' }
+          return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' })
         }
       }
       if (isFileRead(name, args)) {
@@ -3327,14 +3539,14 @@ export default {
           // 与 image/edit/undo 同口径：工作区外先过「目录访问」闸，再过「读取文件」闸。
           // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
           const m = outsideMatrix('read', fp, root)
-          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
-          return { action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          return out({ action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('read', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' }
+        return out({ action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
       }
       // 读图与读文件同一条判定链（工作区外先过「目录访问」闸，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
@@ -3344,28 +3556,28 @@ export default {
           // 工作区外读图：directory + image 合并矩阵（不能用 directory 的动作短路，
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
           const m = outsideMatrix('image', fp, root)
-          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
-          return { action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          return out({ action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('image', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' }
+        return out({ action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
       }
       if (isFileWrite(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
           const m = outsideMatrix('edit', fp, root)
-          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
-          return { action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          return out({ action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('edit', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' }
+        return out({ action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过「目录访问」闸（directory + undo 合并矩阵）。
@@ -3373,21 +3585,21 @@ export default {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
           const m = outsideMatrix('undo', fp, root)
-          if (m.action === 'deny') return { action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' }
-          if (m.action === 'ask') return { action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
-          return { action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' }
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          return out({ action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('undo', fp, 'path', root)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return { action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' }
+        return out({ action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
       }
       if (COMMAND_TOOLS[name]) {
-        return commandDecision(exec, root, exReason, exReasonEn, exNote)
+        return out(commandDecision(exec, root, exReason, exReasonEn, exNote))
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
-        return { action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null }
+        return out({ action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null })
       }
       const q = quickAction(name, root)
       if (q) {
@@ -3397,14 +3609,14 @@ export default {
         // 该工具被显式设成 deny 且写了拒绝原因时带上它（回给 AI）；预设默认值没有原因
         const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''
         const qrEn = q.action === 'deny' && q.reason ? ' (' + q.reason + ')' : ''
-        return { action: q.action, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' }
+        return out({ action: q.action, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' })
       }
       const fb = fallbackSetting(root)
-      if (fb.mode === 'allow') return { action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null }
+      if (fb.mode === 'allow') return out({ action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null })
       // 兜底的拒绝原因同样回给 AI（ask 时它只是弹窗文案的一部分，不参与回传）
       const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
       const frEn = fb.mode === 'deny' && fb.reason ? ' (' + fb.reason + ')' : ''
-      return { action: fb.mode, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' }
+      return out({ action: fb.mode, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
     }
 
     function recordDecision(d, exec) {
@@ -4323,9 +4535,15 @@ export default {
         counts: {
           globalCustom: (config.global.custom || []).length,
           projectCustom: (proj && proj.custom ? proj.custom : []).length,
+          // 循环状态当前跟踪的会话桶数（只读诊断）。
+          // 为什么要下发它：这个 Map 是**唯一**无上界风险的状态（每会话一个桶，按 LRU 淘汰到
+          // SESSION_BUCKET_MAX）。它的两个失败模式（取不到会话时「每次调用建一个桶」而增长、
+          // 或淘汰逻辑写错而超限）在外部**完全不可观察** —— 行为上看不出区别，只有内存慢慢涨。
+          // 故把桶数下发出来，让测试与面板都能直接断言/看到它没有失控。
+          loopBuckets: streakBySession.size,
         },
         stats,
-        recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: typeof d.reason === 'string' ? d.reason : L(d.reason, l) })),
+        recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: L(d.reason, l) })),
         cats: CATS,
         // command 分类的子设置「破坏性命令」：下发当前生效值与来源（global / project / default），
         // 与 quickTools/quickDefaults 同口径 —— 面板显示的就是裁决实际用的那个值。
@@ -4344,6 +4562,21 @@ export default {
           globalDefault: destructiveDefaultOf(config.global.command && config.global.command.mode, false),
           projectDefault: destructiveDefaultOf(proj && proj.command && proj.command.mode, true),
           labels: [...DESTRUCTIVE_LABELS].sort(),
+        },
+        // doomloop 的阈值下发（与 commandSub 同口径）：effective 是**实际生效值 + 来源**，
+        // global/project 是该层的**显式配置**（null = 用户没设过），defaultThreshold 是内置默认。
+        // 三者必须分开下发：面板要「未配置时显示默认」，但默认值的推导在宿主（读取侧单一来源），
+        // 客户端不能自己写死一个 6 —— 否则日后改默认阈值时，面板会显示旧值而裁决按新值走（面板说谎）。
+        doomloop: {
+          key: 'threshold',
+          effective: doomloopSetting(root),
+          global: (config.global.doomloop && typeof config.global.doomloop.threshold === 'number') ? config.global.doomloop.threshold : null,
+          project: (proj && proj.doomloop && typeof proj.doomloop.threshold === 'number') ? proj.doomloop.threshold : null,
+          defaultThreshold: DEFAULT_REPEAT_STREAK,
+          min: MIN_REPEAT_STREAK,
+          // 无上限（§2.4）：窗口已删，计数能数到任意大。下发 null 而不是一个具体数，
+          // 免得客户端把「某个大数」当成上限去钳制 —— 那正是本计划要避免的双份钳制。
+          max: null,
         },
         editorKernel: resolveEditorKernel(exec, root),
         fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
@@ -4541,8 +4774,8 @@ export default {
           const out = []
           for (const e of pendingApprovals.values()) {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
-            const reason = typeof e.reason === 'string' ? e.reason : L(e.reason, lang)
-            const intent = typeof e.intent === 'string' ? e.intent : L(e.intent, lang)
+            const reason = L(e.reason, lang)
+            const intent = L(e.intent, lang)
             // projRoot 下发给客户端：打开 DSH 右侧栏的 file tab 需要它来把工作区内的绝对路径
             // 折算成工作区相对路径（工作区外的绝对路径则原样进地址），与上游 fileAddressFor 同口径
             // projRoot/sessionId 下发给客户端：打开 DSH 右侧栏的 file tab 需要它们来构造
@@ -4564,7 +4797,7 @@ export default {
             // 客户端指定一页就会与工具实际写入的那一页脱钩（详见 readPreviewText 的 ③）。
             const r = await buildFileDiffData(entry, fs)
             if (!r) return json(res, { ok: false, error: lang === 'en' ? 'Cannot build comparison' : '无法生成对比' })
-            if (!r.ok) return json(res, { ok: false, error: typeof r.error === 'string' ? r.error : L(r.error, lang) })
+            if (!r.ok) return json(res, { ok: false, error: L(r.error, lang) })
             return json(res, r)
           } catch (e) {
             // 记录真实错误，避免生产故障只以泛化文案呈现而不可见
@@ -4733,6 +4966,20 @@ export default {
           // target 与其它设置路由同口径归一（缺失/非法一律 global），理由见 set-category 处注释
           const target = normTarget(a)
           if (!setCommandSub(rootOf(exec), target, a.action, a.reason)) return json(res, { error: '非法的 target/action 组合' })
+          await persist(exec)
+          return json(res, statusView(exec))
+        }
+        if (pathname === '/permgate/set-doomloop' && method === 'POST') {
+          await init(exec)
+          const target = normTarget(a)
+          // threshold 语义与 set-category 的 reason 同口径：undefined = 不动（本路由当前只写阈值，
+          // 动作仍走 set-category 的 doomloop 分类，故这里不重复一个 action 参数）。
+          // 非法值**回错误而不是静默回落默认** —— 静默回落会让面板显示的值与实际裁决分叉
+          // （用户以为设了 999，实际按 6 走）。
+          if (a.threshold === undefined) return json(res, { error: 'threshold 不能为空' })
+          if (!setDoomloopThreshold(rootOf(exec), target, a.threshold)) {
+            return json(res, { error: '非法阈值: ' + a.threshold + '（需为正数，或项目层的 inherit）' })
+          }
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -4974,12 +5221,29 @@ export default {
         // 注意：聊天/工具调用绝不改写会话 sandbox knob（否则权限选择器显示会漂移）；
         // 底层沙箱只在设置页显式切换（/permgate/set-sandbox）或用户切换
         // 「自定义审查」预设时（session/event → permission/preset 自动同步）写入。
+        // 会话键在这里算一次：decide() 内部读计数、下面写计数都用它，避免两处各自从
+        // exec 派生（派生逻辑一旦分叉，就会变成「读的是 A 会话、写的是 B 会话」）。
+        const sk = loopSessionKey(exec)
+        // 审查是否生效：与 decide() 内那一处**同一个函数、同一个 exec**（不是第二份判据），
+        // 故不会漂移。这里需要它是因为计数点在 decide() 之外，而计数必须受同一个闸门约束。
+        const customReview = sessionPresetName(exec) === 'custom-review'
         const d = decide(exec)
         recordDecision(d, exec)
-        if (typeof exec.name !== 'string' || exec.name.indexOf('perm_') !== 0) {
-          recent.push(callKey(exec.name, exec.arguments))
-          if (recent.length > 12) recent.splice(0, recent.length - 12)
-        }
+        // ── 循环检测的计数口径（L-2 / L-11）──────────────────────────────────
+        // 只有**真正静默放行并执行了**的调用才推进连续计数；其余一切路径都清零。
+        // 为什么清零要在这里先做：`d.action !== 'allow'`（deny / ask）无论后面弹窗结果如何，
+        // 都不是「用户没看见的重复」—— 弹窗批准时用户本来就在环里、每次都看到了（提醒是冗余的），
+        // 而累积模式会让用户点一次「允许」之后仍被反复提醒，与「用户已表态」的直觉相反。
+        // 清零放在这里而不是各 return 之前：那些路径有四条（ask 被拒 / deny / 升级被拒 / 抛错），
+        // 逐条写就是四个漏改点，而漏改的方向恰好是「提醒偏多」之外还让计数卡住不清。
+        //
+        // ★ `!customReview` 也必须清零：非「自定义审查」时 decide() 恒返回 allow（它自己
+        //   第一行就早退），于是 `d.action !== 'allow'` 恒不成立、计数只增不减。用户之后把
+        //   该会话切到「自定义审查」，第一次相同调用就会命中一个**从未在审查模式下发生过**
+        //   的连续次数（默认 ask 下立刻弹窗报出那个虚高的 N，doomloop=deny 时直接中断 AI
+        //   且不弹窗）—— 而面板此刻还写着「循环检测不生效」。触发时机取决于审查关闭期间的
+        //   调用，用户无从预期。清零（而非仅仅跳过计数）同时抹掉切换前可能残留的桶。
+        if (d.action !== 'allow' || !customReview) resetStreak(sk)
         console.log('[permgate]', d.action, exec.name, L(d.reason, uiLang) || '')
         if (d.action === 'ask') {
           const out = await askUser(exec, d)
@@ -5000,11 +5264,24 @@ export default {
         flushStaleUpgrades()
         if (needsUpgrade(exec)) {
           const ok = await requireSandboxUpgrade(exec)
-          if (!ok) return { kind: 'deny', reason: uiLang === 'en' ? 'Sandbox upgrade denied (write outside workspace)' : '沙箱升级被拒绝（工作区外写入）' }
+          // 升级被拒 = 本次调用最终未执行 → 不计数，且清零（与上面同口径）
+          if (!ok) { resetStreak(sk); return { kind: 'deny', reason: uiLang === 'en' ? 'Sandbox upgrade denied (write outside workspace)' : '沙箱升级被拒绝（工作区外写入）' } }
+        }
+        // 计数点必须在**所有拦截之后**：`d.action === 'allow'` 只是「判定放行」，
+        // 上面的沙箱升级闸仍可能拦下它。放在这里才真正等价于「静默放行且执行了」。
+        // `perm_*` 的排除保持现状：权限查询工具反复调用不代表卡死，不是循环。
+        // `customReview` 是**硬前提**：非该模式下 decide() 恒 allow，若不挡就会攒出一个
+        // 审查模式下从未发生过的连续次数（理由见上方清零处）。与清零用同一个变量，
+        // 保证「跳过计数」与「清零」两个方向不会各自漂移。
+        if (customReview && d.action === 'allow' && (typeof exec.name !== 'string' || exec.name.indexOf('perm_') !== 0)) {
+          noteLoopCall(sk, exec.name, exec.arguments)
         }
         return next()
       } catch (e) {
         console.error('[permgate] pre-execute error:', e)
+        // 抛错 = 未确认放行 → 不计数。这里**不清零**：异常可能来自与本调用无关的宿主故障，
+        // 拿它清掉用户的连续计数会让「提醒」被无关故障吞掉；而计数本身不会因异常前进，
+        // 方向安全（最坏是少一次清零，不是放宽权限）。
         return next()
       }
     })

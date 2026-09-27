@@ -1130,6 +1130,38 @@ group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三
   const sq2 = await post('/permgate/set-quick', { target: 'global', tool: 'web_search', action: 'allow', reason: '不该被存下' })
   ok('group16: 非 deny 动作不保留快捷工具原因', !!(sq2.data && sq2.data.quickTools.global.web_search && sq2.data.quickTools.global.web_search.reason === undefined && sq2.data.quickTools.global.web_search.action === 'allow'), JSON.stringify(sq2.data && sq2.data.quickTools.global.web_search))
 
+  // (e2) ★★ 自定义规则的 reason（本组唯一的**裸字符串** reason 来源）→ 必须回给 AI。
+  // 回归背景：normalizeRule 把 reason 收敛成 String（配置是给人读改的 JSON，落成 {zh,en}
+  // 会让用户没法手写），而其余 24 个出口都走 bi() 产出 {zh,en}。pre-execute 回传时统一走
+  // L(d.reason, uiLang)，旧实现只认对象 → 对字符串取 .zh/.en 恒 undefined → 回落空串。
+  // 实测症状：**填了 reason 的规则回给 AI 的是空串，不填时反倒能显示回落文案**。
+  // 这条必须端到端断言（走真实 pre-execute 返回值），只测 L() 本身不够 ——
+  // 当初的缺陷正是「L 用对了地方、但用错了语义」。
+  const addR = await post('/permgate/add-rule', { target: 'project', action: 'deny', tool: 'my_custom_tool', reason: '自定义规则的拒绝原因' })
+  ok('group16: 自定义规则带 reason 写入成功', !!(addR.data && addR.data.added && addR.data.added.reason === '自定义规则的拒绝原因'), JSON.stringify(addR.data && (addR.data.error || addR.data.added)))
+  const outRule = await runTool('my_custom_tool', {})
+  ok('★★ group16: 自定义规则的 reason 回给 AI（裸字符串不得被静默丢弃）',
+    !!outRule && outRule.kind === 'deny' && String(outRule.reason).indexOf('自定义规则的拒绝原因') !== -1, JSON.stringify(outRule))
+  // 对照：未填 reason 时走回落文案 —— 证明上一条不是「恒返回某个非空串」导致的假通过
+  const addR2 = await post('/permgate/add-rule', { target: 'project', action: 'deny', tool: 'my_custom_tool2' })
+  ok('group16: 无 reason 的规则写入成功（对照前置）', !!(addR2.data && addR2.data.added), JSON.stringify(addR2.data && addR2.data.error))
+  const outRule2 = await runTool('my_custom_tool2', {})
+  ok('★ group16: 无 reason 时回落「自定义规则 rx 命中」文案（与上一条互为对照）',
+    !!outRule2 && outRule2.kind === 'deny'
+    && String(outRule2.reason).indexOf('自定义规则') !== -1 && String(outRule2.reason).indexOf('自定义规则的拒绝原因') === -1,
+    JSON.stringify(outRule2))
+  // 决策记录（会随 perm_status 下发给 AI）同样必须带上它 —— 这条走的是 statusView 的
+  // recentDecisions 分支，与 pre-execute 的返回值是**两条独立的取值路径**，都要覆盖。
+  const decRule = await lastDecision('my_custom_tool')
+  ok('★★ group16: 决策记录里也带自定义规则的原因（recentDecisions 是另一条取值路径）',
+    !!decRule && String(decRule.reason).indexOf('自定义规则的拒绝原因') !== -1, JSON.stringify(decRule && decRule.reason))
+  // 清掉这两条规则，避免影响本组后续用例（它们都是 deny 且匹配具体工具名，影响面有限，
+  // 但 my_custom_tool 前缀与后续「兜底」用例的未匹配工具名形态相近，清掉更稳）
+  for (const rr of [addR, addR2]) {
+    const id = rr.data && rr.data.added && rr.data.added.id
+    if (id) await post('/permgate/remove-rule', { target: 'project', id: id })
+  }
+
   // (f) 未提供 reason 的写入必须保留原值：perm_*/HTTP 只想重设动作或确认当前值时，
   // 不得把用户写好的拒绝原因静默删掉（曾经「不传 reason」被当成「清除 reason」）
   const keep1 = await post('/permgate/set-category', { target: 'project', category: 'command', mode: 'deny', reason: '保留测试' })
@@ -2178,6 +2210,600 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
   try {
     rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
   } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
+group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取更严者 / 阈值可配')
+{
+  // 本组全部走**真实 tools/pre-execute 链路**（不调 decide()，那是内部函数）。
+  // 计数口径是「只有真正静默放行并执行了才计数」，故探测函数必须能区分三种落点：
+  //   'allow' —— next() 被调用且**没有弹窗**（= 唯一会推进计数的情形）
+  //   'deny'  —— decide() 直接拒绝（不弹窗、不计数）
+  //   'ask'   —— 出现了审批弹窗（结案后不计数，且清零）
+  // 注意 'allow' 与「弹窗后点允许」必须分开：后者也走 next()，但它不该计数（L-2）。
+  // 故弹窗分支在返回前就定成 'ask'，不去看 nexted。
+  const probe = async (h, ws, sess, name, args, answer) => {
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: name, arguments: args || {}, callId: 'call-1', token: 'tok-1',
+      agent: sess ? { cwd: ws, session: { id: sess } } : { cwd: ws },
+      signal: undefined,
+    }
+    let nexted = false
+    let settled = false
+    let result = null
+    const p = pre(exec, async () => { nexted = true; return { kind: 'allow' } })
+    // 不用固定睡眠判定「是否弹窗」。askUser 的 Promise executor 是**同步**执行的
+    //（pendingApprovals.set(id, entry) 在 executor 内完成），故 hook 一旦挂在弹窗上，
+    // /permgate/pending 立刻就有条目；而 allow/deny 路径只需等 init() 的文件 I/O 完成即可 settle。
+    // 原先的 `Promise.race([p, setTimeout(250)])` 会让**每个 ask 落点都实打实空等满 250 ms**
+    //（该组约 20 次 ask 探测合计近 5 s），且该开销只与 ask 探测次数成正比 —— 后续再补用例会线性放大。
+    //
+    // 现在分两段：先只让出事件循环等 settle（**不查 pending**，allow/deny 这条多数路径因此
+    // 零额外开销），超过 SUSPECT_MS 仍未 settle 才认定「可能挂在弹窗上」，开始查 pending 确认。
+    // 阈值大小只影响性能、不影响正确性：若 allow 路径因系统负载超过该阈值，多查一次 pending
+    // 得到空列表后会继续等 settle，落点判据不变。
+    p.then((r) => { settled = true; result = r }, () => { settled = true })
+    let items = []
+    const t0 = Date.now()
+    const deadline = t0 + 15000
+    const SUSPECT_MS = 30
+    while (Date.now() < deadline) {
+      if (nexted || settled) break
+      if (Date.now() - t0 >= SUSPECT_MS) {
+        const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+        items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === name)
+        if (items.length) break
+      }
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    if (nexted) return 'allow'
+    if (!items.length) {
+      // 没有弹窗：按 hook 的实际落点归类。settle 后仍无落点属探测异常，
+      // 显式抛出而不是静默归成某类 —— 后者会让用例假通过。
+      if (result && result.kind === 'deny') return 'deny'
+      if (result && result.kind === 'allow') return 'allow'
+      if (!settled) throw new Error('probe 超时：hook 既未返回也未进入审批弹窗（' + name + '）')
+      return 'deny'
+    }
+    // 走到这里 = 弹窗还挂着：结案（默认拒绝，传 'allow' 则模拟用户点允许）后收尾
+    for (const it of items) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: answer === 'allow' ? 'allow' : 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    return 'ask'
+  }
+  // 配置工厂：只写全局层（项目层另有专门用例）。fallbackMode=allow 让 my_tool 这类
+  // 未分类工具的判定完全由兜底决定 —— 计数的前进/中断都能被单独观察，不受分类默认值干扰。
+  const mkHost = (globalExtra, projects) => {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-loop-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-loop-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+      global: Object.assign({ fallbackMode: 'allow' }, globalExtra || {}),
+      projects: projects || {},
+    }, null, 2), 'utf8')
+    return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home }) }
+  }
+  const readCfg = (home) => JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+  // 未分类工具：quickAction 不命中 → 落兜底 allow。用它观察计数，避免被 command 分类的
+  // 默认值（ask）干扰 —— 那会让「静默放行」这个前提不成立。
+  const T = 'my_tool'
+  const A = { a: 1 }
+  const run = async (h, ws, sess, n, args) => {
+    const seq = []
+    for (let i = 0; i < n; i++) seq.push(await probe(h, ws, sess, T, args || A))
+    return seq
+  }
+
+  // ── S1：T5（默认阈值 6 → 第 7 次触发）+ 默认值不物化落盘 ──────────────────
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask' } })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    const dl = st.data && st.data.doomloop
+    ok('★ group22 S1: 默认阈值 6 由读取侧推导（effective.source = default，本层无显式配置）',
+      !!(dl && dl.effective && dl.effective.threshold === 6 && dl.effective.source === 'default' && dl.global === null && dl.project === null),
+      JSON.stringify(dl))
+    const seq = await run(h, ws, 's1', 7)
+    ok('★★ group22 T5: 默认阈值 6 → 前 6 次静默放行、第 7 次触发 ASK',
+      seq.slice(0, 6).every((v) => v === 'allow') && seq[6] === 'ask', JSON.stringify(seq))
+    // 推导值**不得**落盘：落盘就成了「用户表态」，日后改默认阈值对存量配置零效果
+    // （QUICK_RETIRED_DEFAULTS 当年正因此才需要一次性收敛迁移）。
+    const disk = readCfg(home)
+    ok('★★ group22 S1: 默认阈值不物化落盘（推导值不得变成用户表态）',
+      !disk.global.doomloop || disk.global.doomloop.threshold === undefined,
+      JSON.stringify(disk.global.doomloop))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S2：T9（threshold=1 原样接受 → 第 2 次触发，**不钳到 2**）──────────────
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 1 } })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    const dl = st.data && st.data.doomloop
+    ok('★ group22 T9: threshold=1 原样接受（不钳到 2）',
+      !!(dl && dl.effective && dl.effective.threshold === 1 && dl.effective.source === 'global' && dl.global === 1),
+      JSON.stringify(dl))
+    const seq = await run(h, ws, 's2', 2)
+    ok('★★ group22 T9: 阈值 1 = 第 2 次触发（先查后记的直接推论，不是「每次都问」）',
+      seq[0] === 'allow' && seq[1] === 'ask', JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S3：T10b（threshold=13 > 旧数组窗口 12 → 第 14 次触发）───────────────
+  // 这条是「删掉窗口」的**运行时证据**：旧实现用长度 12 的数组回扫，streak 被窗口截断在 12，
+  // 于是阈值 13 永远触发不了（静默失效）—— 那正是 REPEAT_STREAK_MAX 存在的原因。
+  // 现在 (键,次数) 计数能数到任意大，阈值多大都能触发，故上限也不需要。
+  // 注意触发点是**第 N+1 次**（先查后记：decide 在计数之前），故阈值 13 → 第 14 次。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 13 } })
+    const seq = await run(h, ws, 's3', 14)
+    ok('★★ group22 T10: 阈值 13（> 旧窗口 12）仍能触发 —— 窗口已删，不存在「阈值超窗口即静默失效」',
+      seq.slice(0, 13).every((v) => v === 'allow') && seq[13] === 'ask', JSON.stringify(seq.slice(10)))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S4：T1（会话分桶：A 的连续计数不得牵连 B 的第 1 次）──────────────────
+  // 修复前 recent 是**全局数组**：A 连续 4 次后 B 第 1 次同一调用即 ASK。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
+    const a3 = await run(h, ws, 'sessA', 3)
+    const b1 = await probe(h, ws, 'sessB', T, A)
+    ok('★★ group22 T1: A 会话连续 3 次后，B 会话第 1 次同一调用不受影响（不共享计数）',
+      a3.every((v) => v === 'allow') && b1 === 'allow', JSON.stringify({ a3: a3, b1: b1 }))
+    // 对照：A 自己的第 4 次确实触发了 —— 证明上一条不是因为「计数根本没工作」
+    const a4 = await probe(h, ws, 'sessA', T, A)
+    ok('★★ group22 T1: 同一配置下 A 的第 4 次确实触发（对照，证明计数在工作）',
+      a4 === 'ask', JSON.stringify({ a4: a4 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S5：T7（A/B 交错：各自独立计数，都不提前触发）──────────────────────
+  // 交错序列里每个会话的**调用键完全相同**（同工具同参数），故共享桶的实现会在 A 的第 3 次
+  // 就看到 streak=5 ≥ 3 而提前触发 —— 本组因此能区分「分桶」与「共享」。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
+    const seq = []
+    for (let i = 0; i < 3; i++) {
+      seq.push(await probe(h, ws, 'sessA', T, A))
+      seq.push(await probe(h, ws, 'sessB', T, A))
+    }
+    ok('★★ group22 T7: A/B 交错各 3 次同一调用 → 6 次全静默放行（两个会话各自独立计数）',
+      seq.every((v) => v === 'allow'), JSON.stringify(seq))
+    const a4 = await probe(h, ws, 'sessA', T, A)
+    const b4 = await probe(h, ws, 'sessB', T, A)
+    ok('★★ group22 T7: 交错之后 A/B 各自的第 4 次都触发（两条独立的连续链都数满了）',
+      a4 === 'ask' && b4 === 'ask', JSON.stringify({ a4: a4, b4: b4 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S6：T8（断链：中途一次别的调用即重新计数）──────────────────────────
+  // 阈值 3 → 触发点是**第 4 次**连续（先查后记）。故断链后 A 需要重新数满 3 次才触发。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
+    const s1 = await probe(h, ws, 's6', T, A)
+    const s2 = await probe(h, ws, 's6', T, A)
+    const s3 = await probe(h, ws, 's6', T, { a: 2 })
+    const s4 = await probe(h, ws, 's6', T, A)
+    const s5 = await probe(h, ws, 's6', T, A)
+    const s6 = await probe(h, ws, 's6', T, A)
+    const s7 = await probe(h, ws, 's6', T, A)
+    ok('★★ group22 T8: 中途插入一次不同调用即断链（断链后的 3 次仍全放行）',
+      [s1, s2, s3, s4, s5, s6].every((v) => v === 'allow'), JSON.stringify([s1, s2, s3, s4, s5, s6]))
+    ok('★★ group22 T8: 断链后重新数满 3 次才触发（第 4 次）—— 证明计数确实从断链处重来',
+      s7 === 'ask', JSON.stringify({ s7: s7 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S7：T6（精确键的已知边界：参数微调即换键 → 全部放行）────────────────
+  // 这是**有意行为**（L-1），不是缺陷：段级签名会把「git add file1/2/3.txt」这类
+  // 完全正常的工作折叠成「循环」而误报，误报率零的精确键是权衡后的选择。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    const seq = []
+    for (let i = 0; i < 8; i++) seq.push(await probe(h, ws, 's7', T, { dir: 'dir' + i }))
+    ok('★ group22 T6: 参数微调 8 次全部放行（精确键的已知边界，记录为有意行为）',
+      seq.every((v) => v === 'allow'), JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S8：T11 + T15（doomloop=deny：被拒调用不推进计数，触发后清零）─────────
+  // 期望序列：allow allow allow deny | allow allow allow deny
+  // 若「被拒调用推进计数」或「触发后不清零」，第 4 次之后会**连续** deny（不再放行）。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'deny', threshold: 3 } })
+    const seq = await run(h, ws, 's8', 8)
+    ok('★★ group22 T11+T15: doomloop=deny 时 3 次放行→拒绝，之后**重新数**（被拒不计数且清零）',
+      JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'allow', 'deny', 'allow', 'allow', 'allow', 'deny']),
+      JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S9：T12（用户点「允许」的 ask 调用不计入）───────────────────────────
+  // 期望序列：allow allow ask | allow allow ask
+  // 若弹窗批准也计数，第 4 次就会立刻 ask（而不是放行两次之后）。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    const seq = []
+    seq.push(await probe(h, ws, 's9', T, A))
+    seq.push(await probe(h, ws, 's9', T, A))
+    seq.push(await probe(h, ws, 's9', T, A, 'allow'))
+    seq.push(await probe(h, ws, 's9', T, A))
+    seq.push(await probe(h, ws, 's9', T, A))
+    seq.push(await probe(h, ws, 's9', T, A, 'allow'))
+    ok('★★ group22 T12: 弹窗批准的调用不计入（弹过窗 = 用户已经知道，提醒是冗余的）',
+      JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'ask', 'allow', 'allow', 'ask']),
+      JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S10：T13（用户点「拒绝」的 ask 调用不计入且清零）────────────────────
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    const seq = []
+    seq.push(await probe(h, ws, 's10', T, A))
+    seq.push(await probe(h, ws, 's10', T, A))
+    seq.push(await probe(h, ws, 's10', T, A, 'deny'))
+    seq.push(await probe(h, ws, 's10', T, A))
+    seq.push(await probe(h, ws, 's10', T, A))
+    seq.push(await probe(h, ws, 's10', T, A, 'deny'))
+    ok('★★ group22 T13: 弹窗拒绝的调用不计入且清零（与「允许」同口径）',
+      JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'ask', 'allow', 'allow', 'ask']),
+      JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S11：T16（非静默放行清零：4 次放行 → 一次 ask 被拒 → 再 4 次放行不得触发）──
+  // 若不清零，第二次的 4 次放行会从计数 4 继续数到 6/7 而误触发。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 6 } })
+    const first = await run(h, ws, 's11', 4)
+    // 用一条 ask 规则制造一次弹窗（用户拒绝），再把规则删掉
+    const addAsk = await callRoute(h.routes, 'POST', '/permgate/add-rule', { target: 'global', action: 'ask', tool: T, lang: 'zh' })
+    ok('group22 S11: 临时 ask 规则写入成功', !!(addAsk.data && addAsk.data.added), JSON.stringify(addAsk.data && addAsk.data.error))
+    const asked = await probe(h, ws, 's11', T, A, 'deny')
+    const ruleId = addAsk.data && addAsk.data.added && addAsk.data.added.id
+    await callRoute(h.routes, 'POST', '/permgate/remove-rule', { target: 'global', id: ruleId, lang: 'zh' })
+    const second = await run(h, ws, 's11', 4)
+    ok('★★ group22 T16: 一次弹窗（被拒）把连续计数清零 —— 之后再 4 次放行不得触发',
+      first.every((v) => v === 'allow') && asked === 'ask' && second.every((v) => v === 'allow'),
+      JSON.stringify({ first: first, asked: asked, second: second }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S12：T14 + T3（做法 A 的核心：doomloop 命中时下游是 deny → 取更严者）──
+  // 这是本次改动**唯一**的行为变更面，也是 G2-4 的修复点：
+  // 前两次合法放行把 streak 数满，第 3 次时下游出现 deny（刚加的规则）——
+  // 修复前 doomloop 命中即 return，会把这条 deny 覆盖成 ask（一次误点即放行）。
+  //
+  // ★ 必须带**对照会话**：只断言「第 3 次是 deny」是无效的 —— 下游本来就是 deny，
+  //   即使 doomloop 完全没触发也会得到 deny（断言会假通过）。故用同一宿主、同一配置下的
+  //   另一个会话先证明「streak=2 时第 3 次确实会触发 doomloop（ask）」，
+  //   再证明「同样的 streak 遇上 deny 时落点是 deny」——两者合起来才排除了假通过。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    // ① 两个会话各自数满 2 次（此时还没有 deny 规则）
+    const ctl1 = await probe(h, ws, 's12ctl', T, A)
+    const ctl2 = await probe(h, ws, 's12ctl', T, A)
+    const own1 = await probe(h, ws, 's12', T, A)
+    const own2 = await probe(h, ws, 's12', T, A)
+    // ② 对照：同配置下第 3 次确实触发 doomloop（证明 streak 已数满、doom 真的会命中）
+    const ctl3 = await probe(h, ws, 's12ctl', T, A)
+    ok('★★ group22 S12(对照): 无 deny 规则时第 3 次触发 doomloop → ASK（证明 streak 已数满、doom 确实命中）',
+      [ctl1, ctl2, own1, own2].every((v) => v === 'allow') && ctl3 === 'ask',
+      JSON.stringify({ ctl: [ctl1, ctl2, ctl3], own: [own1, own2] }))
+    // ③ 现在给同一个工具加一条 deny 规则，再让 s12 走第 3 次
+    const addDeny = await callRoute(h.routes, 'POST', '/permgate/add-rule', { target: 'global', action: 'deny', tool: T, reason: '规则拒绝', lang: 'zh' })
+    ok('group22 S12: deny 规则写入成功', !!(addDeny.data && addDeny.data.added), JSON.stringify(addDeny.data && addDeny.data.error))
+    const own3 = await probe(h, ws, 's12', T, A)
+    // ★★ 这条断言才是做法 A 的核心：doomloop（ask）不得把下游的 deny 削弱成 ask。
+    // 修复前这里是 'ask'（doomloop 命中即 return，覆盖了规则判定）。
+    ok('★★★ group22 T14: doomloop 命中（ask）+ 下游 deny → 取更严者 DENY（不得被降级为 ask）',
+      own3 === 'deny', JSON.stringify({ own3: own3, ctl3: ctl3 }))
+    // 反向：doomloop 比下游更严时必须由它接管（否则「取更严者」被写成了「永远以 base 为准」）
+    // 用 deny 型 doomloop + allow 型兜底验证：命中后必须 deny，且理由换成循环提醒。
+    {
+      const r2 = mkHost({ fallbackMode: 'allow', doomloop: { mode: 'deny', threshold: 1 } })
+      const a1 = await probe(r2.h, r2.ws, 's12b', T, A)
+      const a2 = await probe(r2.h, r2.ws, 's12b', T, A)
+      ok('★★ group22 T14(反向): doomloop=deny 比下游 allow 更严 → 由 doomloop 接管（DENY）',
+        a1 === 'allow' && a2 === 'deny', JSON.stringify({ a1: a1, a2: a2 }))
+      try { rmSync(r2.ws, { recursive: true, force: true }); rmSync(r2.home, { recursive: true, force: true }) } catch (e) {}
+    }
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S13：T2（command 收紧为 deny 后，doomloop 不得把它降级为 ask）────────
+  // G2-2 的原始场景：用户把「命令」设为拒绝，前几次 DENY，之后 doomloop 命中 → 变 ASK。
+  // 对抗性判据：断言**一次 ASK 都不出现**（fail-open 的表现正是「中间某几次变成 ask」）。
+  {
+    const { ws, home, h } = mkHost({ command: { mode: 'allow' }, doomloop: { mode: 'ask', threshold: 3 } })
+    const pre3 = []
+    for (let i = 0; i < 3; i++) pre3.push(await probe(h, ws, 's13', 'bash', { command: 'git status' }))
+    await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'command', mode: 'deny', reason: '命令一律拒绝', lang: 'zh', sessionId: 'sess-1' })
+    const after = []
+    for (let i = 0; i < 3; i++) after.push(await probe(h, ws, 's13', 'bash', { command: 'git status' }))
+    ok('★★★ group22 T2: command=deny 后 doomloop=ask 不得削弱它 —— 6 次全 DENY、一次 ASK 都不出现',
+      pre3.every((v) => v === 'allow') && after.every((v) => v === 'deny'),
+      JSON.stringify({ pre3: pre3, after: after }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S14：T2 字面形态（command=deny 全程 6 次 → 6 次全 DENY）────────────
+  {
+    const { ws, home, h } = mkHost({ command: { mode: 'deny', reason: '命令一律拒绝' }, doomloop: { mode: 'ask', threshold: 3 } })
+    const seq = []
+    for (let i = 0; i < 6; i++) seq.push(await probe(h, ws, 's14', 'bash', { command: 'rm -rf x' }))
+    ok('★★ group22 T2(字面): command=deny 全程 6 次同一命令 → 6 次全 DENY（无一次 ASK）',
+      seq.every((v) => v === 'deny'), JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S15：T4（doomloop=allow = 知情关闭：行为不变，但 status 必须能让面板提示）──
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'allow', threshold: 1 } })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    ok('★ group22 T4: doomloop=allow 时 status 仍下发动作与阈值（面板据此给出「检测已关闭」提示）',
+      !!(st.data && st.data.effective && st.data.effective.doomloop === 'allow'
+        && st.data.categories && st.data.categories.global && st.data.categories.global.doomloop
+        && st.data.categories.global.doomloop.mode === 'allow'),
+      JSON.stringify({ eff: st.data && st.data.effective && st.data.effective.doomloop, cat: st.data && st.data.categories && st.data.categories.global && st.data.categories.global.doomloop }))
+    const seq = await run(h, ws, 's15', 10)
+    ok('★ group22 T4: doomloop=allow 时连续 10 次同一调用全部放行（知情关闭，行为不变）',
+      seq.every((v) => v === 'allow'), JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S16：阈值可配的归一化与层级（T9/T10 的配置面）────────────────────────
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask' } })
+    const setTh = (body) => callRoute(h.routes, 'POST', '/permgate/set-doomloop', Object.assign({ lang: 'zh', sessionId: 'sess-1' }, body))
+    // 非法值必须**回错误**，不得静默回落默认（静默回落会让面板显示与实际裁决分叉）
+    const bad = []
+    for (const v of [0, -3, 'abc', null, true]) {
+      const r = await setTh({ target: 'global', threshold: v })
+      if (!(r.data && r.data.error)) bad.push(v)
+    }
+    ok('★★ group22 S16: 非法阈值（0 / 负数 / 非数字 / null / true）一律回错误，不静默回落默认',
+      bad.length === 0, JSON.stringify(bad))
+    // 小数向下取整（与宿主同口径，避免「面板显示 1.5、实际按 1 跑」）
+    const dec = await setTh({ target: 'global', threshold: 2.7 })
+    ok('★ group22 S16: 小数阈值向下取整后落盘（2.7 → 2）',
+      !!(dec.data && dec.data.doomloop && dec.data.doomloop.global === 2), JSON.stringify(dec.data && dec.data.doomloop))
+    // ★★ 小于 1 的小数（0.5）必须被**钳到下限 1**，不得落盘成 0。
+    // 这条是下限存在的唯一理由：0.5 通过了「> 0」这道校验，但 Math.floor 之后是 0，
+    // 而 0 会让「streak >= 0」恒真 —— 变成**每次调用都触发**。而且它还会造成面板与实际
+    // 裁决分叉：读取侧 doomloopSetting 对 0 会判非法并回落默认 6，于是 status 里
+    // `global: 0`（面板显示 0）与 `effective: 6`（实际按 6 走）同时存在。
+    // 实测：把 normalizeThreshold 的下限去掉，只测 2.7 的版本完全测不出来。
+    const frac = await setTh({ target: 'global', threshold: 0.5 })
+    const fd = frac.data && frac.data.doomloop
+    ok('★★ group22 S16: 小于 1 的小数被钳到下限 1（不得落盘成 0 → 恒触发 + 面板与实际分叉）',
+      !!(fd && fd.global === 1 && fd.effective && fd.effective.threshold === 1),
+      JSON.stringify(fd))
+    // 大值原样接受：**无上限**（窗口已删，阈值多大都能触发）
+    const big = await setTh({ target: 'global', threshold: 999 })
+    ok('★★ group22 T10: 阈值 999 原样接受且原样下发（无上限、不是静默失效）',
+      !!(big.data && big.data.doomloop && big.data.doomloop.global === 999
+        && big.data.doomloop.effective && big.data.doomloop.effective.threshold === 999
+        && big.data.doomloop.max === null),
+      JSON.stringify(big.data && big.data.doomloop))
+    // 项目层：显式值优先于全局；恢复 inherit 后回落全局
+    const pSet = await setTh({ target: 'project', threshold: 4 })
+    ok('★ group22 S16: 项目层阈值生效并标记来源为 project',
+      !!(pSet.data && pSet.data.doomloop && pSet.data.doomloop.effective
+        && pSet.data.doomloop.effective.threshold === 4 && pSet.data.doomloop.effective.source === 'project'),
+      JSON.stringify(pSet.data && pSet.data.doomloop))
+    const pInh = await setTh({ target: 'project', threshold: 'inherit' })
+    ok('★ group22 S16: 项目层恢复 inherit 后穿透全局（回落 999）',
+      !!(pInh.data && pInh.data.doomloop && pInh.data.doomloop.effective
+        && pInh.data.doomloop.effective.threshold === 999 && pInh.data.doomloop.effective.source === 'global'
+        && pInh.data.doomloop.project === null),
+      JSON.stringify(pInh.data && pInh.data.doomloop))
+    // 项目层阈值在真实判定链上生效：阈值 2 → 第 3 次触发
+    const pv = await setTh({ target: 'project', threshold: 2 })
+    ok('group22 S16: 项目层阈值 2 写入成功', !!(pv.data && pv.data.doomloop && pv.data.doomloop.effective.threshold === 2), JSON.stringify(pv.data && pv.data.doomloop))
+    const seq = await run(h, ws, 's16', 3)
+    ok('★★ group22 S16: 项目层阈值在真实判定链上生效（阈值 2 → 第 3 次触发）',
+      seq[0] === 'allow' && seq[1] === 'allow' && seq[2] === 'ask', JSON.stringify(seq))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S17：T17（计数实现的等价性：模型级对拍）──────────────────────────────
+  // 这条验证的是 §2.3 里「数组是纯冗余」这个**结论本身**（它是删掉窗口与 REPEAT_STREAK_MAX
+  // 的依据）。故它是模型级断言：用同一串随机记录分别喂给「旧数组回扫」与「(键,次数) 计数」，
+  // 逐次比较**查询结果**（两者都在记录之前查，与 decide() 的次序一致）。
+  // 两件事要分开说清：
+  //   ① 与**无窗口**的数组语义**完全等价**（零不一致）—— 所以计数不是近似，是等价替换；
+  //   ② 与**带 12 窗口**的旧实现只在「连续长度 > 12」处不同，且差异恒为「数组被截断成 12」
+  //      —— 这正是旧实现「阈值 > 窗口即静默失效」的来源，也是删窗口的理由。
+  {
+    let s = 123456789
+    const rnd = () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s |= 0; return (s >>> 0) / 4294967296 }
+    const KEYS = ['a', 'b', 'c', 'd']
+    const tail = (arr, k) => { let n = 0; for (let i = arr.length - 1; i >= 0; i--) { if (arr[i] === k) n++; else break } return n }
+    const N = 270000
+    let arrFree = []
+    let arrWin = []
+    let cur = null
+    let badFree = 0
+    let badWin = 0
+    let badWinOther = 0
+    for (let i = 0; i < N; i++) {
+      const k = KEYS[Math.floor(rnd() * KEYS.length)]
+      const free = tail(arrFree, k)
+      const win = tail(arrWin, k)
+      const cnt = (cur && cur.key === k) ? cur.count : 0
+      if (free !== cnt) badFree++
+      if (win !== cnt) { badWin++; if (!(win === 12 && cnt > 12)) badWinOther++ }
+      arrFree.push(k)
+      arrWin.push(k)
+      if (arrWin.length > 12) arrWin.splice(0, arrWin.length - 12)
+      if (cur && cur.key === k) cur.count += 1
+      else cur = { key: k, count: 1 }
+    }
+    ok('★★ group22 T17: (键,次数) 计数与无窗口数组回扫 270,000 次对拍零不一致（等价替换，不是近似）',
+      badFree === 0, 'badFree=' + badFree)
+    ok('★★ group22 T17: 与带 12 窗口的旧实现只在「连续长度 > 12」处不同，且差异恒为数组被截断成 12',
+      badWinOther === 0, 'badWin=' + badWin + ' badWinOther=' + badWinOther)
+  }
+  // ── S18：T18（会话键取不到时 → 不读不写、不触发）────────────────────────
+  // 取不到会话身份时**跳过循环检测**，而不是回落到一个全局共享桶：
+  // 共享桶等于把「A 连续 N 次 → B 第 1 次就被牵连」原样保留；方向虽不危险（多弹窗），
+  // 但会误伤正常工作流。循环检测只是「额外提醒」，拿不准身份时不提醒是安全的。
+  //
+  // ★ 构造难点：createHost 的 sessions.list 默认返回 []，而 sessionPresetName 依赖
+  //   currentSession(exec) —— exec.agent.session 缺失时会回退到 sessions.list() 的最后一个。
+  //   若它也是空，sessionPresetName 返回 null → decide() 第一行就放行，
+  //   那样本用例会因为「不是自定义审查」而通过，**测不到**会话键缺失这条路径（假通过）。
+  //   故这里把 sessions.list 换成有会话的版本，让审查生效、只缺 exec 上的会话 id。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 1 } })
+    h.ctx.sessions.list = () => [{ id: 'fallback-sess' }]
+    // 先确认审查确实生效（否则下面的「不触发」无法归因于会话键缺失）
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    ok('group22 S18: 前置条件 —— 审查生效（custom-review），故下面的「不触发」不是因为它没生效',
+      !!(st.data && st.data.activeForSession === true), JSON.stringify({ active: st.data && st.data.activeForSession, preset: st.data && st.data.preset }))
+    // 会话键缺失（exec.agent 无 session）：阈值 1 = 第 2 次就该触发，但这里必须一次都不触发
+    const bucketsBefore = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    const noSess = []
+    for (let i = 0; i < 4; i++) noSess.push(await probe(h, ws, null, T, A))
+    ok('★★ group22 T18: 会话键取不到时不触发循环检测（阈值 1 也一次都不触发）',
+      noSess.every((v) => v === 'allow'), JSON.stringify(noSess))
+    // ★★ 桶数不增长 —— 这是「不建桶」的**唯一可观察证据**（plan §2.3 明确要求断言它）。
+    // 只断言「不触发」是不够的：一个「取不到会话就每次调用建一个独立桶」的实现同样不触发，
+    // 但它会让 Map 无界增长（或把真实会话的桶挤出 LRU）。实测：把 loopSessionKey 改成
+    // 每次返回唯一值，只断言落点的版本**完全测不出来**。
+    const bucketsAfter = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    ok('★★ group22 T18: 会话键取不到时不建桶（桶数不因这 4 次调用增长）—— 防 Map 无界增长',
+      bucketsAfter === bucketsBefore, JSON.stringify({ before: bucketsBefore, after: bucketsAfter }))
+    // 对照：同一个宿主、同一配置下带上会话 id → 第 2 次立即触发。
+    // 这一条排除了「阈值 1 根本没生效」或「探测函数恒返回 allow」这类假通过。
+    const withSess = [await probe(h, ws, 's18', T, A), await probe(h, ws, 's18', T, A)]
+    ok('★★ group22 T18(对照): 同一配置下带会话 id 时第 2 次立即触发（证明阈值 1 确实生效）',
+      withSess[0] === 'allow' && withSess[1] === 'ask', JSON.stringify(withSess))
+    // 对照二：带会话 id 且**不触发**时确实建了桶 —— 证明上面那条「桶数不变」不是因为计数根本没在写。
+    // 注意不能用上面那对调用读桶数：第 2 次触发 ask → resetStreak 把桶删掉了（那是正确行为），
+    // 读到的必然是 0。故这里用一个**新会话只调一次**（阈值 1 下第 1 次恒为 allow、不会清零）。
+    await probe(h, ws, 's18b', T, A)
+    const bucketsWith = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    ok('★★ group22 T18(对照): 带会话 id 且未触发时确实建桶（证明「桶数不变」不是计数没写）',
+      bucketsWith === bucketsBefore + 1, JSON.stringify({ before: bucketsBefore, withSess: bucketsWith }))
+    // ★ LRU 淘汰：桶数不得超过 SESSION_BUCKET_MAX（32）。这里用 40 个会话各调一次，
+    // 断言桶数被压在 32 —— 防「淘汰逻辑写错导致 Map 无界增长」。
+    // 每个会话只调一次（阈值 1 下恒为 allow、不清零），故 40 个都会留下桶。
+    for (let i = 0; i < 40; i++) await probe(h, ws, 'lru-' + i, T, A)
+    const bucketsLru = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    ok('★★ group22 T18: 会话桶数被 LRU 压在 SESSION_BUCKET_MAX(32) 以内（40 个会话后仍 ≤ 32）',
+      bucketsLru <= 32, JSON.stringify({ buckets: bucketsLru }))
+    // 淘汰的必须是**最久未更新**的桶（LRU，不是 FIFO/随机）：最早那批（s18b 与 lru-0…）
+    // 应已被淘汰，而最后写入的 lru-39 必须还在。
+    // 判据：给 lru-39 再调一次（阈值 1 → 第 2 次触发 ask），能触发就说明它的桶还在。
+    const lruLast = await probe(h, ws, 'lru-39', T, A)
+    ok('★★ group22 T18: LRU 保留最近活动的桶（lru-39 的第 2 次仍能触发 → 它的桶未被淘汰）',
+      lruLast === 'ask', JSON.stringify({ lruLast: lruLast }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+  // ── S19：T18 补 —— LRU 而非 FIFO（淘汰的必须是「最久未更新」，不是「最早创建」）──
+  // 为什么单独测：LRU 与 FIFO 在「桶数不超限」这条断言下**完全等价**（都压到 32），
+  // 只有「一个老会话在中间被重新活动过」才能区分二者。写错方向的后果是真实的：
+  // FIFO 会把**正在活跃**的会话桶淘汰掉，那个会话的连续计数凭空归零（提醒静默失效）。
+  // 判据构造（阈值 3，触发点是第 4 次）：
+  //   s_old 调 1 次 → 31 个新会话（此时桶满 32，s_old 在插入序最前）
+  //   → s_old 再调 1 次（LRU 下它被移到末尾；FIFO 下仍留在最前）
+  //   → 再开 1 个新会话（超限淘汰：LRU 淘汰 lru-0，FIFO 淘汰 s_old）
+  //   → s_old 调第 3、4 次：桶还在则第 4 次触发；被淘汰则计数从 0 重来、第 4 次仍放行
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
+    await probe(h, ws, 's_old', T, A)
+    for (let i = 0; i < 31; i++) await probe(h, ws, 'lru2-' + i, T, A)
+    const b1 = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    await probe(h, ws, 's_old', T, A)
+    await probe(h, ws, 'lru2-new', T, A)
+    const b2 = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    const s3 = await probe(h, ws, 's_old', T, A)
+    const s4 = await probe(h, ws, 's_old', T, A)
+    ok('★★ group22 T18: 桶数在插入 32 个会话后达到上限、再插入仍不超限',
+      b1 === 32 && b2 === 32, JSON.stringify({ b1: b1, b2: b2 }))
+    ok('★★ group22 T18: 淘汰的是最久未更新的桶（LRU）—— 被重新活动过的老会话计数不丢',
+      s3 === 'allow' && s4 === 'ask', JSON.stringify({ s3: s3, s4: s4 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S20：计数点必须在**所有拦截之后**（沙箱升级被拒 = 未执行 → 不计数）────────
+  // §2.2 的表格明确要求「沙箱升级被拒 → 不计数」，而这是唯一一条「判定放行（d.action==='allow'）
+  // 但最终没执行」的路径。计数点若放在升级闸之前，这条路径会推进计数 —— 方向是「提醒偏多」，
+  // 不危险，但会让「连续静默放行」这个语义失真（用户看到的是「已连续放行 N 次」，
+  // 而其中几次其实被沙箱闸拦下了、根本没放行）。
+  // 判据构造（阈值 3）：先让 3 次工作区外写入全部卡在升级闸（overrideOf=workspace-write、
+  // 升级审批被拒）→ 再把沙箱放开，同一调用第 4 次：计数正确则放行，计数错误则触发 ASK。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
+    // 工作区外写入 + 编辑/目录分类都 allow → decide 给 allow，但 needsUpgrade 为真
+    await callRoute(h.routes, 'POST', '/permgate/set-categories', { target: 'global', global: { edit: 'allow', directory: 'allow' }, lang: 'zh', sessionId: 'sess-1' })
+    const outDir = mkdtempSync(join(tmpdir(), 'pg-loop-out-'))
+    const outFile = join(outDir, 'x.txt')
+    h.ctx.sandboxPolicy.overrideOf = () => 'workspace-write'
+    const deniedSeq = []
+    for (let i = 0; i < 3; i++) deniedSeq.push(await probe(h, ws, 's20', 'write', { file_path: outFile, content: 'x' }))
+    ok('group22 S20: 前置条件 —— 沙箱受限时工作区外写入被升级闸拦下（3 次全 deny）',
+      deniedSeq.every((v) => v === 'deny'), JSON.stringify(deniedSeq))
+    // 放开沙箱：同一调用不再需要升级 → 直接放行
+    h.ctx.sandboxPolicy.overrideOf = () => 'danger-full-access'
+    const s4 = await probe(h, ws, 's20', 'write', { file_path: outFile, content: 'x' })
+    ok('★★ group22 S20: 被沙箱升级闸拦下的调用不推进连续计数（第 4 次仍放行，未误触发）',
+      s4 === 'allow', JSON.stringify({ denied: deniedSeq, s4: s4 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); rmSync(outDir, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S21：perm_* 的排除保持现状（权限查询反复调用不代表卡死，不是循环）──────────
+  // perm_status 是当前唯一保留的 perm_* 工具（只读），QUICK_DEFAULTS 钉为 allow。
+  // 它若被计入，AI 每轮开头查一次权限就会攒出「循环」并弹窗 —— 那是纯噪音。
+  // 阈值 2 → 若计数则第 3 次 ASK；不计数则 4 次全 allow。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    const seq = []
+    for (let i = 0; i < 4; i++) seq.push(await probe(h, ws, 's21', 'perm_status', {}))
+    ok('★★ group22 S21: perm_* 不计入循环检测（反复查询权限状态不触发提醒）',
+      seq.every((v) => v === 'allow'), JSON.stringify(seq))
+    // 对照：同一宿主下换一个普通工具、同样 4 次 → 第 3 次触发（证明阈值 2 确实生效）
+    const ctl = []
+    for (let i = 0; i < 3; i++) ctl.push(await probe(h, ws, 's21b', T, A))
+    ok('★★ group22 S21(对照): 同一配置下普通工具第 3 次触发（证明阈值 2 确实生效）',
+      ctl[0] === 'allow' && ctl[1] === 'allow' && ctl[2] === 'ask', JSON.stringify(ctl))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── S22：非「自定义审查」模式不累积计数（切回审查模式不得凭空触发）──────────────
+  // 非该模式下 decide() 恒返回 allow（它自己第一行就早退），若计数点只靠
+  // `d.action !== 'allow'` 清零，计数会只增不减。用户之后把该会话切到「自定义审查」，
+  // 第一次相同调用就会命中一个**审查模式下从未发生过**的连续次数（默认 ask 立刻弹窗，
+  // doomloop=deny 时直接中断 AI 且不弹窗）—— 而面板此刻还写着「循环检测不生效」。
+  //
+  // 判据构造（阈值 2，触发点是第 3 次）：
+  //   ① 审查关闭时同一会话连续 5 次（远超阈值）→ 全 allow 且不得留下计数；
+  //   ② 打开审查后，同一会话第 1、2 次必须仍放行（若①累积了 5，这里第 1 次就会 ask）。
+  // ②是**必需的对照片段**：只断言①无效 —— 一个「完全不计数」的实现同样让①通过。
+  {
+    const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 2 } })
+    // 审查关闭：permissionPresets 报一个非 custom-review 的预设
+    h.ctx.permissionPresets = { permissionState: () => ({ preset: 'default' }), current: () => 'default', resolved: () => ({ preset: 'default' }) }
+    const offSeq = []
+    for (let i = 0; i < 5; i++) offSeq.push(await probe(h, ws, 's22', T, A))
+    ok('group22 S22: 前置条件 —— 审查关闭时 5 次同一调用全放行',
+      offSeq.every((v) => v === 'allow'), JSON.stringify(offSeq))
+    const bucketsOff = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
+    ok('★★ group22 S22: 审查关闭期间不建桶（计数不累积）',
+      bucketsOff === 0, JSON.stringify({ buckets: bucketsOff }))
+    // 打开审查：同一会话、同一调用。若①期间累积过计数，这里第 1 次就会立刻 ask。
+    h.ctx.permissionPresets = { permissionState: () => ({ preset: 'custom-review' }), current: () => 'custom-review', resolved: () => ({ preset: 'custom-review' }) }
+    const on1 = await probe(h, ws, 's22', T, A)
+    const on2 = await probe(h, ws, 's22', T, A)
+    const on3 = await probe(h, ws, 's22', T, A)
+    ok('★★ group22 S22: 切回审查模式后计数从零开始（第 1 次不得凭空触发；第 3 次才 ask）',
+      on1 === 'allow' && on2 === 'allow' && on3 === 'ask', JSON.stringify({ on1: on1, on2: on2, on3: on3 }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
 }
 
 if (fail.length) {
