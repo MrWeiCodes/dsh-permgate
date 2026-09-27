@@ -1244,6 +1244,12 @@ window.__ModuleLoader__.load({
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
+		// 长列表的滚动区高度上限（px）。三处列表（快捷工具 / 例外 / 规则）共用同一个值：
+		// 它们在同一次滚动里上下相邻，高度不一致会让面板看起来一段一段的。
+		// 选 260 的理由：约 6-7 行（单行 ~36px），与 EXC_COLLAPSE_THRESHOLD=6 的折叠阈值
+		// 量级一致 —— 折叠与滚动两个机制在「多长算长」这件事上口径一致，不会一个说长、一个说短。
+		// 超过则出纵向滚动条；不超过时容器按内容高度收缩（不出现空白区）。
+		const LIST_SCROLL_MAX_H = 260;
 		// 文件对比缓存：按审批 id 缓存 /permgate/file-diff 结果（弹窗详情与右侧抽屉共用）
 		const diffCache = new Map();
 		const diffFetching = new Set();
@@ -1448,6 +1454,10 @@ window.__ModuleLoader__.load({
 				'panel.excCmdHint': '：匹配单个命令段（glob），优先于子设置与分类默认',
 				'panel.excPathHint': '：路径 glob，优先于分类默认',
 				'panel.excNone': '无例外',
+				// ── 长列表的过滤器与空态（快捷工具 / 例外 / 规则三处共用）──────────
+				'panel.listFilterPh': '过滤…',
+				'panel.listNoMatch': '没有匹配的条目',
+				'panel.listMatchCount': '{n} / {m}',
 				'panel.subDestructive': '破坏性命令',
 				// 一行说清作用即可，不列具体名单：这里曾展开「段首命令命中内置名单时按此动作
 				// （更细的判定，优先于上方默认动作）」——括号里那句与当时下方那行「当前生效」
@@ -1650,6 +1660,9 @@ window.__ModuleLoader__.load({
 				'panel.openConfig': 'Open',
 				'panel.openConfigDone': 'Opened with default editor',
 				'panel.saved': 'Saved',
+				'panel.savedToGlobal': 'Saved to global',
+				'panel.savedToProject': 'Saved to this project',
+				'panel.all': '(all)',
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
 				'panel.fallbackSaved': 'Fallback policy saved ({t}): {v}',
 				'panel.fallback': 'Fallback policy (no rule matched)',
@@ -1662,6 +1675,10 @@ window.__ModuleLoader__.load({
 				'panel.excCmdHint': ': matches a single command segment (glob); overrides sub-setting and category default',
 				'panel.excPathHint': ': path glob, overrides category default',
 				'panel.excNone': 'No exceptions',
+				// ── filter and empty state for long lists (quick tools / exceptions / rules) ──
+				'panel.listFilterPh': 'Filter…',
+				'panel.listNoMatch': 'No matching entries',
+				'panel.listMatchCount': '{n} / {m}',
 				'panel.subDestructive': 'Destructive commands',
 				'panel.subDestructiveHint': ': except for exceptions, risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow this action',
 				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
@@ -2873,6 +2890,15 @@ window.__ModuleLoader__.load({
 			// 与 msg（保存结果，蓝色）分开，提示用橙色以示「需要注意但不是错误」。
 			const [notice, setNotice] = React.useState(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
+			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
+			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
+			//   exc    —— 例外，按分类分（{ [分类]: '词' }），因为 6 个分类各有一份列表
+			//   rule   —— 自定义规则，按 tab 分（全局/项目各一份列表）
+			// 按 tab 分开的理由与 excCollapsed 一致：换层后列表内容不同，沿用上一层的过滤词
+			// 会让新层看起来「空了一块」，而用户并没有输入过任何东西。
+			const [quickFilter, setQuickFilter] = React.useState('');
+			const [excFilter, setExcFilter] = React.useState({});
+			const [ruleFilter, setRuleFilter] = React.useState({ global: '', project: '' });
 			// 当前正在编辑（尚未保存）的拒绝原因格：{ kind: 'cat'|'quick'|'fb', tab, key }。
 			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
 			// 面板自身的 invoke 回调触发，还由 SSE 的 status/refresh 事件触发——宿主在 init()、
@@ -2898,7 +2924,9 @@ window.__ModuleLoader__.load({
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
 			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点与编辑态（换层后它们指向的行已不在渲染中，
 			// 编辑态若残留，切回来时同一格会莫名其妙还处于可输入状态）。
-			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; }, [tab]);
+			// 换层时也清掉规则过滤词（例外/快捷工具的过滤词另有处理：例外按分类存、与层无关，
+			// 快捷工具列表内容不分层，故两者都不需要在这里清）。
+			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; setRuleFilter({ global: '', project: '' }); }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -3326,6 +3354,66 @@ window.__ModuleLoader__.load({
 				options.map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
 			);
 
+			// ── 长列表容器：过滤器 + 定高滚动区（快捷工具 / 例外 / 规则三处共用）──────────
+			//
+			// 三处的共同问题：条目数**无上界**（用户可无限添加），而面板把它们全部平铺 ——
+			// 列表一长，后面的卡片被顶到很远，滚动条要拉很久才够得着。两个机制各管一件事：
+			//   · 过滤器 —— 按内容快速定位到某一条（用户知道要找什么时最快）；
+			//   · 定高滚动 —— 无论多少条都只占一块固定高度（用户不知道要找什么时靠翻）。
+			//
+			// **过滤只作用于展示**：不过滤掉的是渲染出来的行，底层数据、增删改、保存一律照旧。
+			// 否则「输入过滤词 → 删除某行 → 过滤词还留着」这类状态会让用户以为删错了东西。
+			//
+			// 参数：
+			//   items    —— 全部条目（数组）
+			//   filter   —— 当前过滤词（字符串；空串 = 不过滤）
+			//   onFilter —— 过滤词变更回调
+			//   match    —— (item) => string，返回该条目用于匹配的文本（调用方决定搜哪些字段）
+			//   render   —— (item) => ReactNode，渲染单行
+			//   empty    —— 底层没有条目时显示的节点（与「过滤后无匹配」区分开）
+			//
+			// 曾有第 7 个参数 hint（渲染在过滤框右侧的说明行），三处调用点一个都没传，
+			// 属只写不读的死参数 —— 三处列表的说明行都在各自的卡片标题下，位置比这里更合适。
+			const listBox = (o) => {
+				const all = Array.isArray(o.items) ? o.items : [];
+				const q = String(o.filter || '').trim().toLowerCase();
+				// 匹配是**不区分大小写**的纯子串：用户输 `job` 要能命中 job_list / job_output。
+				// 不做 glob / 正则：那是给「按模式筛」的场景用的，而这里用户只想快速缩范围；
+				// 引入正则还会让 `*`、`(` 这类字符变成语法，用户输进去反而匹配不到东西。
+				const shown = q ? all.filter((it) => String(o.match ? o.match(it) : '').toLowerCase().indexOf(q) !== -1) : all;
+				// 过滤框的显示判据：条目够多（>3，两三条还要先过滤是负担）**或**当前有过滤词。
+				//
+				// 两个条件缺一不可，且都不能换成「过滤后的数量」：
+				//   ① 只按 all.length 判断 —— 用户可在过滤状态下删条目，把列表降到 ≤3 条，
+				//      输入框随之消失，而 state 里的过滤词还在，列表只剩「没有匹配的条目」。
+				//      此后新加的每一条都被这个看不见的词挡掉，用户只能刷新页面（实测复现：
+				//      4 条时输 `alpha` → 删到 2 条 → 过滤框消失、过滤词仍在）。
+				//   ② 只按 shown.length 判断 —— 输入一个字把结果缩到 1 条时输入框自己消失，
+				//      用户同样清不掉过滤词（这是原注释已经记下的坑）。
+				// 故「有过滤词就一定要留着输入框」是硬要求：它是用户清空过滤词的**唯一**入口。
+				return React.createElement('div', null,
+					(all.length > 3 || q) ? React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
+					React.createElement('input', {
+						className: 'pg-field',
+						style: { maxWidth: 200, fontSize: 12 },
+						placeholder: T('panel.listFilterPh'),
+						value: o.filter || '',
+						onChange: (e) => o.onFilter(e.target.value),
+						disabled: busy,
+					}),
+					q ? React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)' } },
+						T('panel.listMatchCount').replace('{n}', String(shown.length)).replace('{m}', String(all.length))) : null,
+				) : null,
+					all.length === 0
+						? o.empty
+						: (shown.length === 0
+							? React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.listNoMatch'))
+							// 滚动区：maxHeight + overflowY:auto。用 maxHeight 而非 height ——
+							// 条目少时容器按内容收缩，不出现一块空白（那样看起来像加载失败）。
+							: React.createElement('div', { style: { maxHeight: LIST_SCROLL_MAX_H, overflowY: 'auto', overflowX: 'hidden' } }, shown.map(o.render))),
+				);
+			};
+
 			// command 分类的子设置行「破坏性命令」。
 			// 两个要点体现在界面上：
 			//   ① 它**独立于**上方「默认动作」—— 默认动作设为「允许」时它仍生效（更细优先于更粗），
@@ -3578,12 +3666,22 @@ window.__ModuleLoader__.load({
 								React.createElement('div', { style: { fontSize: 12, color: '#1f6feb', cursor: 'pointer', userSelect: 'none', padding: '2px 0', marginBottom: 2 }, onClick: toggleExc, title: T('panel.excCollapse') },
 									'▾ ' + T('panel.excCollapse'),
 								),
-								excList.map((r) => React.createElement('div', { key: r.id, style: rowStyle },
-									badge(r.action),
-									React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
-									// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
-									r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny, marginLeft: 6 } }, '「' + r.reason + '」') : null,
-									r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', marginLeft: 6 } }, '(' + r.note + ')') : null,
+								// 展开后加过滤器 + 定高滚动：折叠管「默认不占地方」，滚动管
+								// 「展开后不撑爆面板」。两者不冲突，故都保留。
+								// 过滤词按分类存（6 个分类各有一份列表，共用一份会互相干扰）。
+								listBox({
+									items: excList,
+									filter: excFilter[c] || '',
+									onFilter: (v) => setExcFilter(Object.assign({}, excFilter, { [c]: v })),
+									// 匹配字段与用户看到的行一致：匹配内容（path/match）+ 拒绝原因 + 备注。
+									// 只搜 path/match 的话，「按原因找那条例外」就做不到。
+									match: (r) => [r.path, r.match, r.reason, r.note].filter(Boolean).join(' '),
+									render: (r) => React.createElement('div', { key: r.id, style: rowStyle },
+										badge(r.action),
+										React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
+										// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
+										r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny, marginLeft: 6 } }, '「' + r.reason + '」') : null,
+										r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', marginLeft: 6 } }, '(' + r.note + ')') : null,
 									// 「匹配任意单段」的判据：命令例外里这几乎等于「不再审查任何命令」。
 									// 不拦（那是用户的权利），但必须给出黄色提示，否则它看起来和普通例外没区别。
 									// 只对命令分类提示：路径侧的 `*` 在 glob 语义下范围受限（不跨分隔符），不属同一问题。
@@ -3608,7 +3706,8 @@ window.__ModuleLoader__.load({
 										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
 										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
 									),
-								)),
+								),
+								}),
 							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 							React.createElement('input', { className: 'pg-field', placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'), value: exVals[c] || '', onChange: (e) => setExVals(Object.assign({}, exVals, { [c]: e.target.value })), disabled: busy }),
@@ -3647,7 +3746,7 @@ window.__ModuleLoader__.load({
 				const gqMap = status && status.quickTools ? status.quickTools.global : null;
 				const pqMap = status && status.quickTools ? status.quickTools.project : null;
 				const mode = quickSel[t] && quickSel[t][key] ? quickSel[t][key] : (tab === 'project' ? 'inherit' : quickGlobalValue(t, gqMap));
-				// 删除按钮只给「用户自己添加的名字」（不在 22 个预设清单里的行），且本行在当前 tab 的配置里
+				// 删除按钮只给「用户自己添加的名字」（不在预设清单 QUICK_PRESET 里的行），且本行在当前 tab 的配置里
 				// 确实存在该键时才显示：预设行始终会列出，删掉配置键也只是回退默认值，容易被误读成「收紧」。
 				const isPreset = QUICK_PRESET.indexOf(t) !== -1;
 				const hasKey = key === 'g' ? hasOwnKey(gqMap, t) : hasOwnKey(pqMap, t);
@@ -3772,7 +3871,16 @@ window.__ModuleLoader__.load({
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.quick')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)', marginBottom: 6 } }, T('panel.quickHint')),
-					quickTools.map(quickRow),
+					// 预设清单（QUICK_PRESET，数量随宿主下发，不在这里写死）+ 用户自定义（无上界）
+					// → 过滤器 + 定高滚动。
+					// 匹配工具名与描述两栏：用户可能记得中文描述（「任务清单」）而不记得工具名（todo_write）。
+					listBox({
+						items: quickTools,
+						filter: quickFilter,
+						onFilter: setQuickFilter,
+						match: (t) => t + ' ' + (quickDesc(t) || ''),
+						render: quickRow,
+					}),
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 						React.createElement('input', { className: 'pg-field', placeholder: T('panel.quickAdd'), value: newTool, onChange: (e) => setNewTool(e.target.value), disabled: busy }),
 						sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy),
@@ -3802,7 +3910,17 @@ window.__ModuleLoader__.load({
 					),
 					React.createElement('div', { style: { marginTop: 8 } },
 						React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 4 } }, T('panel.ruleList').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{n}', String(customList ? customList.length : 0))),
-						customList && customList.length ? customList.map(ruleRow) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noRules')),
+						// 规则条目数无上界，且单行比快捷工具长（tool= / path= / args="…" 三段拼接）
+						// → 同样加过滤器 + 定高滚动。过滤词按 tab 分（全局/项目各一份列表）。
+						listBox({
+							items: customList || [],
+							filter: ruleFilter[tab] || '',
+							onFilter: (v) => setRuleFilter(Object.assign({}, ruleFilter, { [tab]: v })),
+							// 四个字段都可搜：用户可能按原因找规则（「那条不许删的规则」）。
+							match: (r) => [r.tool, r.path, r.args, r.reason].filter(Boolean).join(' '),
+							render: ruleRow,
+							empty: React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noRules')),
+						}),
 					),
 				),
 				React.createElement('div', { style: card },

@@ -293,7 +293,22 @@ ok('确认态 key 含层级', cli.includes("'quick:' + tab + ':' + t"))
 // notice 也一并清掉：提示说的是「某一层的大分类与子设置不一致」，换层后它指向的对象已不在渲染中
 // loopThDirty 同样要清：换层后阈值框会重新渲染成新层的值，残留的 dirty 标记会让新层的
 // 服务端值被旧层的草稿挡住（而旧层草稿已经不在界面上了）。
-ok('切 tab 清空确认态与提示（并丢弃草稿焦点与编辑态）', cli.includes('React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; }, [tab]);'))
+// ruleFilter 同理：规则列表按 tab 是两份，沿用上一层的过滤词会让新层看起来「空了一块」。
+//
+// 判据按「该清的东西都在 effect 里」取，**不逐字比对整行**：逐字比对在合法新增一项清理时
+// 也会失败（实测：加 ruleFilter 时这条就红了），而那种失败给出的信号是「文案变了」，
+// 与它要守的「换层后残留状态」无关 —— 修的人容易顺手把断言改成新的整行，等于没守。
+// 这里改成：切出 [tab] 的 effect 体，逐项要求出现。
+ok('切 tab 清空确认态与提示（并丢弃草稿焦点、编辑态、阈值草稿与规则过滤词）', (function () {
+  const i = cli.indexOf('}, [tab]);');
+  if (i < 0) return false
+  const start = cli.lastIndexOf('React.useEffect(', i)
+  if (start < 0) return false
+  const body = cli.slice(start, i)
+  return ['setConfirm(null)', 'setNotice(null)', 'reasonFocus.current = null', 'setReasonEditing(null)',
+    'loopThDirty.current = { global: false, project: false }', 'setRuleFilter({ global: \'\', project: \'\' })']
+    .every((s) => body.includes(s))
+})())
 ok('兜底文案不再以 todo/cordis 举例', !cli.includes('如 MCP、todo、cordis') && !cli.includes('(e.g. MCP, todo, cordis)'))
 ok('自定义规则优先级说明已移除', !cli.includes("'panel.rulesHint'"))
 {
@@ -4261,6 +4276,187 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     } catch (e) { factoryErr = e }
     ok('★ client.js factory 可真实求值（无 TDZ / ReferenceError 等加载期错误）',
       factoryErr === null, factoryErr ? (factoryErr.name + ': ' + factoryErr.message) : '')
+  }
+  // ★★ 长列表容器（listBox）：过滤器 + 定高滚动。三处列表（快捷工具 / 例外 / 规则）
+  // 条目数都无上界，面板原本全部平铺 —— 列表一长，后面的卡片被顶到很远。
+  // 判据按**行为**复算（不是匹配源码）：抠出 listBox 的实现，用最小 React 桩驱动，
+  // 断言过滤、计数、空态、滚动区四个行为。改法换了（比如换成 useMemo 或抽成组件）仍然成立。
+  {
+    const i = cli.indexOf('const listBox = (o) => {')
+    const j = cli.indexOf('\n\t\t\t};', i)
+    // 滚动高度上限：从源码里读出来（而不是在这里再写一个字面量）—— 两处各写一份的话，
+    // 源码改了高度而断言仍按旧值找滚动区，断言会以「找不到滚动区」失败，指向错误的方向。
+    const SCROLL_H = Number((cli.match(/const LIST_SCROLL_MAX_H = (\d+);/) || [])[1])
+    let err = null
+    let box = null
+    try {
+      if (i < 0 || j < 0) throw new Error('未找到 listBox 定义')
+      if (!SCROLL_H) throw new Error('未找到 LIST_SCROLL_MAX_H')
+      // 切片末端 +6：'\n\t\t\t};' 是 6 个字符，取 +5 会把末尾的分号切掉
+      // （拼上 '\nreturn listBox;' 后仍能解析，故此前不报错，但属 off-by-one）。
+      const body = cli.slice(i, j + 6)
+      // 桩：createElement 只记录结构，便于断言「渲染了几行 / 有没有滚动区」。
+      const el = (type, props, ...kids) => ({ type, props: props || {}, kids: kids.filter((k) => k !== null && k !== undefined) })
+      const Tstub = (k) => k
+      const busy = false
+      box = new Function('React', 'T', 'LIST_SCROLL_MAX_H', 'busy', body + '\nreturn listBox;')(
+        { createElement: el }, Tstub, SCROLL_H, busy)
+    } catch (e) { err = e }
+    ok('★ listBox 可独立求值（行为复算的前置）', err === null && typeof box === 'function', err ? (err.name + ': ' + err.message) : '')
+    if (typeof box === 'function') {
+      const mk = (filter, items, extra) => box(Object.assign({
+        items: items,
+        filter: filter,
+        onFilter: () => {},
+        match: (x) => x,
+        render: (x) => ({ type: 'row', props: {}, kids: [x] }),
+        empty: { type: 'empty', props: {}, kids: [] },
+      }, extra || {}))
+      // 找到滚动容器（style.maxHeight 等于上限的那个 div）与其中的行。
+      // 注意两点：maxHeight 在 props.style 里（不在 props 顶层）；行是 `shown.map(render)`
+      // 的结果，即**一个数组**作为单个 child 传入，故要摊平后再数。
+      const scrollOf = (node) => (node && node.kids || []).find((k) => k && k.props && k.props.style && k.props.style.maxHeight === SCROLL_H)
+      const flat = (node) => { const s = scrollOf(node); return s ? s.kids.flat(Infinity).filter(Boolean) : [] }
+      const rowsIn = (node) => { const s = scrollOf(node); return s ? flat(node).length : -1 }
+      const ITEMS = ['job_list', 'job_output', 'job_kill', 'web_search', 'todo_write']
+      // ① 过滤生效且不区分大小写，纯子串
+      // ★ 大小写必须用**混合大小写**的条目来验：全部小写的条目下，「把 haystack 也转小写」
+      //   与「不转」结果相同（查询词本身已被 toLowerCase），断言会漏掉后者（实测过）。
+      const MIXED = ['JOB_List', 'web_Search', 'Todo_Write', 'other_tool']
+      ok('★★ listBox：过滤生效（不区分大小写，纯子串）',
+        rowsIn(mk('job', ITEMS)) === 3 && rowsIn(mk('', ITEMS)) === ITEMS.length
+        && rowsIn(mk('job', MIXED)) === 1 && rowsIn(mk('JOB', MIXED)) === 1
+        && rowsIn(mk('search', MIXED)) === 1 && rowsIn(mk('SEARCH', MIXED)) === 1,
+        JSON.stringify({ job: rowsIn(mk('job', ITEMS)), none: rowsIn(mk('', ITEMS)), mixedLower: rowsIn(mk('job', MIXED)), mixedUpper: rowsIn(mk('JOB', MIXED)) }))
+      // ② 过滤后无匹配 → 显示空态提示，且**不**渲染滚动区（空滚动条没有意义）
+      // 文本子节点在 kids 里（createElement 的第 3 个参数），不在 props.children。
+      ok('★★ listBox：过滤后无匹配时显示空态、不渲染滚动区',
+        (function () {
+          const n = mk('zzz-no-such', ITEMS)
+          const hasEmpty = (n.kids || []).some((k) => k && (k.kids || []).indexOf('panel.listNoMatch') !== -1)
+          return hasEmpty && scrollOf(n) === undefined
+        })())
+      // ③ 底层为空 → 用调用方的 empty 节点（与「过滤后无匹配」区分开）
+      ok('★ listBox：底层无条目时用调用方的 empty 节点（不误报「没有匹配」）',
+        (function () {
+          const n = mk('', [])
+          return (n.kids || []).some((k) => k && k.type === 'empty')
+            && !(n.kids || []).some((k) => k && (k.kids || []).indexOf('panel.listNoMatch') !== -1)
+        })())
+      // ④ 条目少（≤3）不给过滤框 —— 两三条还要先过滤是负担
+      ok('★ listBox：条目 ≤3 时不显示过滤框（少条目不必先过滤）',
+        (function () {
+          const few = mk('', ['a', 'b', 'c'])
+          const many = mk('', ['a', 'b', 'c', 'd'])
+          const hasInput = (n) => (n.kids || []).some((k) => k && k.type === 'div' && (k.kids || []).some((x) => x && x.props && x.props.className === 'pg-field'))
+          return hasInput(few) === false && hasInput(many) === true
+        })())
+      // ⑤ 过滤框的显示条件按**全部**条目数，不按过滤后的数量 ——
+      // 否则用户输入一个字把结果缩到 1 条时，输入框自己消失，用户无法清空过滤词。
+      ok('★★ listBox：过滤框不随匹配数变化而消失（否则用户清不掉过滤词）',
+        (function () {
+          const n = mk('job_list', ITEMS)   // 只剩 1 条匹配
+          return (n.kids || []).some((k) => k && k.type === 'div' && (k.kids || []).some((x) => x && x.props && x.props.className === 'pg-field'))
+        })())
+      // ⑥ ★ 过滤框在「有过滤词」时必须始终保留，即使条目数掉到 ≤3。
+      //
+      // 这条与 ⑤ 是**同一个失效模式的两半**，但触发路径不同，必须分开守：
+      //   ⑤ 守的是「过滤后的数量」不能决定输入框存亡（用户刚输一个字就消失）；
+      //   ⑥ 守的是「全部数量」也不能单独决定（用户可以在过滤状态下**删条目**，
+      //      把 all.length 降到 ≤3）。只按 all.length 判断时，实测：4 条 → 输 `alpha`
+      //      → 删到 2 条 → 输入框消失，而 state 里的过滤词还在，列表只剩「没有匹配的条目」，
+      //      此后新加的每一条都被这个看不见的词挡掉 —— 用户只能刷新页面。
+      // 判据：过滤词非空时，无论剩几条（含 0 条），过滤框都必须在。
+      ok('★★ listBox：有过滤词时过滤框始终保留（条目被删到 ≤3 也不消失）',
+        (function () {
+          const hasInput = (n) => (n.kids || []).some((k) => k && k.type === 'div' && (k.kids || []).some((x) => x && x.props && x.props.className === 'pg-field'))
+          // 过滤状态下删条目：all.length 依次降到 2 / 1 / 0，过滤词仍在 state 里
+          const afterDeletes = [['beta', 'gamma'], ['beta'], []]
+          const kept = afterDeletes.every((items) => hasInput(mk('alpha', items)))
+          // 反向对照：没有过滤词时，≤3 条仍不给过滤框（⑥ 不能把 ④ 的取舍吃掉）
+          const stillQuiet = hasInput(mk('', ['a', 'b', 'c'])) === false
+          return kept && stillQuiet
+        })())
+    }
+  }
+  // ★★ 三处长列表必须**都**走 listBox（快捷工具 / 例外 / 规则）。
+  // 为什么单独守这一条：listBox 本身的行为上面已按行为复算过，但「某一处忘了用它、
+  // 退回 map 平铺」不会被任何行为断言发现 —— listBox 照样正确，只是没人调它。
+  // 三处的条目数都无上界，漏掉任何一处，那一处就仍然是「列表一长把后面的卡片顶到很远」。
+  // 判据：每个调用点按它的 items 行定位，再要求该调用点附近出现对应的渲染函数 ——
+  // 这样同时挡住「都调了 listBox 但传错数据源」。
+  // 注意 `listBox(` 在 `items:` **之前**（它是调用表达式的开头），故切片要向前取。
+  ok('★★ 三处长列表都走 listBox（快捷工具 / 例外 / 规则），且各自传对数据源', (function () {
+    const need = [
+      ['items: quickTools', 'quickRow'],
+      ['items: excList', 'r.path || r.match'],
+      ['items: customList || []', 'ruleRow'],
+    ]
+    return need.every((pair) => {
+      const i = cli.indexOf(pair[0])
+      if (i < 0) return false
+      const back = cli.slice(Math.max(0, i - 200), i)
+      const fwd = cli.slice(i, i + 700)
+      return back.includes('listBox(') && fwd.includes(pair[1])
+    })
+  })())
+  // 声明与**用法**都要守：只断言 state 声明的话，把用法改成共用一份（`excFilter.global`）
+  // 仍然通过 —— 而「6 个分类共用一份过滤词」正是这条要防的（在 A 分类输的词会让 B 分类
+  // 看起来空了一块，用户以为例外丢了）。实测过：只断言声明时该变异漏网。
+  ok('★ 三处列表的过滤词状态都按层/分类分开（换层或换分类不串用）', (function () {
+    if (!cli.includes("const [quickFilter, setQuickFilter] = React.useState('');")) return false
+    if (!cli.includes('const [excFilter, setExcFilter] = React.useState({});')) return false
+    if (!cli.includes("const [ruleFilter, setRuleFilter] = React.useState({ global: '', project: '' });")) return false
+    // 例外：读写都必须按分类（c）取，不能落到固定键上
+    if (!cli.includes('filter: excFilter[c] || \'\',')) return false
+    if (!cli.includes('setExcFilter(Object.assign({}, excFilter, { [c]: v }))')) return false
+    // 规则：读写都必须按 tab 取
+    if (!cli.includes('filter: ruleFilter[tab] || \'\',')) return false
+    if (!cli.includes('setRuleFilter(Object.assign({}, ruleFilter, { [tab]: v }))')) return false
+    return true
+  })())
+  // ★ i18n 中英字典键集合必须一致。
+  //
+  // 为什么需要这条（而不是逐键写死字符串）：T() 在英文环境下取不到条目时**回落成原始 key**
+  // （T = ctx.locale.bind('permgate')，缺条目就直接把 'panel.xxx' 画到界面上）。这种失败
+  // 只在英文环境可见、不报错、不影响任何行为断言，靠逐键断言只能覆盖「有人想起来写的那几个」。
+  // 实测：本次改动前字典是 zh 207 键 / en 204 键，panel.savedToGlobal、panel.savedToProject、
+  // panel.all 三个键只有中文 —— 英文界面会把它们原样显示成 key。
+  // 判据按**键集合相等**取（两个方向都比），故新增文案漏翻英文、或删中文留下英文孤儿键，都会红。
+  {
+    // 用括号配对切出 I18N 对象（正则数键会漏掉跨行/注释里的引号形态）
+    const i18nOf = (function () {
+      const start = cli.indexOf('const I18N = {')
+      if (start < 0) return null
+      let depth = 0
+      let end = -1
+      for (let k = cli.indexOf('{', start); k < cli.length; k++) {
+        if (cli[k] === '{') depth++
+        else if (cli[k] === '}') { depth--; if (depth === 0) { end = k; break } }
+      }
+      if (end < 0) return null
+      const body = cli.slice(start, end + 1)
+      const objAt = (marker) => {
+        const i = body.indexOf(marker)
+        if (i < 0) return null
+        let d = 0
+        for (let k = body.indexOf('{', i); k < body.length; k++) {
+          if (body[k] === '{') d++
+          else if (body[k] === '}') { d--; if (d === 0) return body.slice(body.indexOf('{', i), k + 1) }
+        }
+        return null
+      }
+      const zhSrc = objAt('zh: {')
+      const enSrc = objAt('en: {')
+      if (!zhSrc || !enSrc) return null
+      try { return { zh: new Function('return ' + zhSrc)(), en: new Function('return ' + enSrc)() } }
+      catch (e) { return null }
+    })()
+    const onlyZh = i18nOf ? Object.keys(i18nOf.zh).filter((k) => !(k in i18nOf.en)) : ['<字典不可求值>']
+    const onlyEn = i18nOf ? Object.keys(i18nOf.en).filter((k) => !(k in i18nOf.zh)) : []
+    ok('★★ i18n 中英字典键集合一致（缺条目会回落显示原始 key）',
+      onlyZh.length === 0 && onlyEn.length === 0,
+      JSON.stringify({ zh: i18nOf ? Object.keys(i18nOf.zh).length : -1, en: i18nOf ? Object.keys(i18nOf.en).length : -1, onlyZh: onlyZh, onlyEn: onlyEn }))
   }
 }
 
