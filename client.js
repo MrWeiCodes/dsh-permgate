@@ -1553,6 +1553,11 @@ window.__ModuleLoader__.load({
 				// 这里只举几个典型例子让人一眼认出「这类命令」，权威定义在 shell-parse.js
 				// 的 DESTRUCTIVE_LABELS（删除/磁盘/进程电源/提权/权限属主/注册表六类）。
 				'panel.subDestructiveHint': '：除例外外，删除文件、格式化磁盘、关机重启、提权等危险操作按此动作',
+				// 免责说明：内置名单靠命令名与参数形态识别，不可能穷尽所有写法
+				// （脚本文件、编码混淆、间接调用都读不出来）。不写这句的话，用户会把
+				// 「没弹窗」当成「这条命令被检查过且安全」，而实际可能是根本没识别出来。
+				// 措辞只陈述能力边界，不解释原理 —— 用户要的是「别把没拦住当成拦住了」。
+				'panel.subDestructiveNote': '注：基于命令文本识别，不能保证覆盖所有破坏性命令。',
 				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置是「{sub}」—— 判定链上子设置优先，破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把子设置也改成「{cat}」或「跟随全局」。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
 				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
@@ -1786,6 +1791,7 @@ window.__ModuleLoader__.load({
 				'panel.moveDown': 'Move down (takes effect later)',
 				'panel.subDestructive': 'Destructive commands',
 				'panel.subDestructiveHint': ': except for exceptions, risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow this action',
+				'panel.subDestructiveNote': 'Note: detection is text-based and cannot cover every destructive command.',
 				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
 				// ── doom loop threshold ────────────────────────────────────────────
 				'panel.loopThreshold': 'Trigger threshold',
@@ -3796,6 +3802,11 @@ window.__ModuleLoader__.load({
 			// shell-parse.js 的 DESTRUCTIVE_LABELS。宿主仍照旧下发 labels（statusView），
 			// 需要时可在别处展示；这里只留一行说明它管哪类命令。
 			//
+			// 第三行是**能力边界说明**（subDestructiveNote）：名单靠命令文本识别，不可能
+			// 穷尽所有写法（脚本文件、编码混淆、间接调用都读不出来）。必须写出来，否则
+			// 用户会把「没弹窗」当成「这条命令被检查过且安全」—— 而实际可能是根本没识别出来。
+			// 这与「名单不列出」不冲突：那句是「不列内容」，这句是「说清它拦不住什么」。
+			//
 			// 这里曾有一行「当前生效：询问（全局设置）」。删掉的理由：它与上方那个下拉框
 			// 显示的是**同一个值**（下拉框本来就按本层渲染，项目层未配置时显示 inherit），
 			// 于是它只在复述用户刚看到的东西。它当初想回答的「这个值来自哪一层」，现在
@@ -3822,6 +3833,9 @@ window.__ModuleLoader__.load({
 						sel(subDestructive[tab] || (tab === 'project' ? 'inherit' : 'ask'), changeSubDestructive, tab === 'project' ? ALL_MODES : MODES, busy),
 					),
 				),
+				// 能力边界说明：独立一行、灰小字。不放进上面那个 span（与标题同行会被挤成
+				// 一长串，而它要传达的是「别高估这道闸」，值得单独一行让人读到）。
+				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)' } }, T('panel.subDestructiveNote')),
 			 );
 			};
 

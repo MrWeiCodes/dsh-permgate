@@ -2173,6 +2173,28 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
       && !cli.includes('permgate:set-command-labels')
       && cli.includes("T('panel.subDestructiveHint')")
   })())
+  // ★ 破坏性命令那行必须给出**能力边界说明**（「不能保证覆盖所有破坏性命令」）。
+  // 为什么必须有：内置名单靠命令文本识别（命令名 + 参数形态），不可能穷尽所有写法
+  // —— 脚本文件、编码混淆、间接调用都读不出来。不写这句，用户会把「没弹窗」当成
+  // 「这条命令被检查过且安全」，而实际可能是根本没识别出来。
+  // 三个方向都要守，缺一不可：
+  //   ① 中英两个键都在（缺英文键时英文界面显示裸键名 panel.subDestructiveNote）；
+  //   ② 文案里确实有「不能保证」这类**边界声明**，不是一句空泛的「注意安全」
+  //      （后者给了等于没给：用户读不出它到底做不到什么）；
+  //   ③ 它在 commandSubRow 里**真的渲染出来**（只写键不渲染等于没有）。
+  ok('★ 破坏性命令行给出能力边界说明（中英齐备 + 声明不可穷尽 + 真渲染）', (function () {
+    const zh = "panel.subDestructiveNote': '注：基于命令文本识别，不能保证覆盖所有破坏性命令。"
+    const en = "panel.subDestructiveNote': 'Note: detection is text-based and cannot cover every destructive command."
+    if (!cli.includes(zh) || !cli.includes(en)) return false
+    // 边界声明必须落在文案本身里，而不是只存在于注释
+    if (!/panel\.subDestructiveNote': '[^']*不能保证[^']*'/.test(cli)) return false
+    if (!/panel\.subDestructiveNote': '[^']*cannot cover[^']*'/.test(cli)) return false
+    // 真渲染：commandSubRow 内出现该键
+    const iRow = cli.indexOf('const commandSubRow = ()')
+    const iEnd = cli.indexOf('// 循环检测（doomloop）阈值行', iRow)
+    const row = (iRow < 0 || iEnd <= iRow) ? '' : cli.slice(iRow, iEnd)
+    return !!row && row.includes("T('panel.subDestructiveNote')")
+  })())
   // ★ 「匹配任意段」的警告判据必须与匹配器同构：字面量 `=== '*'` 会漏报 `**`/`***`/`* *`
   //（命令侧 globMatch 里 `*` 之间无特殊含义；`**` 是本仓库路径侧的惯用写法，用户极易照搬）。
   // 反例：把判据写回 `String(r.match || '').trim() === '*'`，本条即失败。
@@ -4861,6 +4883,31 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       clickErr === null && !!req && req.body.kind === 'rule' && req.body.id === 'r2'
       && req.body.anchor === 'r1' && req.body.position === 'before' && req.body.target === 'global',
       JSON.stringify({ err: clickErr && clickErr.message, req: req && req.body }))
+
+    // ── 破坏性命令行「能力边界说明」的**渲染级**验证 ─────────────────────────
+    // 结构断言只能证明「键写了、commandSubRow 里引用了它」，证明不了「它真的渲染成一行」。
+    // 这里按渲染结果复算，并守住位置（必须排在标题行之后，而不是被塞进标题里）。
+    //
+    // 判据写法有两个坑（都实测踩过）：
+    //   ① 不能用 textOf 递归匹配 —— 标题行的**父 div** 的 textOf 也含 'panel.subDestructive'
+    //      （它含标题 span），findIndex 取第一个匹配会命中那个祖先，下标反而小于 note；
+    //   ② 标题 span 的 kids 有**两个**（标题文本 + Hint span），故不能要求 length === 1。
+    // 正确判据：按「直接文本子节点」定位标题 span，再比较它与 note 在同一父容器里的兄弟次序。
+    {
+      const noteNodes = nodes.filter((n) => n.type === 'div' && (n.kids || []).length === 1 && n.kids[0] === 'panel.subDestructiveNote')
+      const titleSpan = nodes.find((n) => n.type === 'span' && (n.kids || []).length >= 1 && n.kids[0] === 'panel.subDestructive')
+      const parentOf = (t) => nodes.find((n) => (n.kids || []).indexOf(t) !== -1)
+      const noteParent = noteNodes.length ? parentOf(noteNodes[0]) : null
+      const titleRow = titleSpan ? parentOf(titleSpan) : null
+      const commonParent = titleRow ? parentOf(titleRow) : null
+      const sibs = noteParent ? (noteParent.kids || []) : []
+      const orderOk = !!(noteParent && noteParent === commonParent
+        && sibs.indexOf(noteNodes[0]) > sibs.indexOf(titleRow))
+      const st = noteNodes.length ? (noteNodes[0].props.style || {}) : {}
+      ok('★★ 面板渲染出「注：不能保证覆盖所有破坏性命令」一行（灰小字，排在标题行之后）',
+        noteNodes.length === 1 && orderOk && st.fontSize === 11,
+        JSON.stringify({ n: noteNodes.length, orderOk: orderOk, fontSize: st.fontSize }))
+    }
 
     // ── 爆炸半径的**两处渲染**（弹窗警告条 / 面板例外列表标注）────────────────
     // 这两处此前只有源码匹配，而「写了但渲染不出来」「位置排在命令之后」都测不到。
