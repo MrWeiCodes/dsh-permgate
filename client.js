@@ -1275,10 +1275,29 @@ window.__ModuleLoader__.load({
 		// 故不进 React state —— 每份 status 都是完整替换，没有需要局部更新的场景。
 		// 默认空对象（不是 null）：渲染处直接下标取值，null 会让每次渲染都要判空。
 		let EXCEPTION_BLAST = {};
+		// 例外遮蔽关系（宿主下发 { global: { [例外id]: {byId, byAction} }, project: {...} }）。
+		//
+		// 含义：该条目**被上方更早的一条反向例外遮蔽，当前不生效**（判定只取首个匹配）。
+		// 与 EXCEPTION_BLAST 同样是**读侧派生视图**，同样按层分开（理由见上）。
+		//
+		// 为什么必须由宿主现算、不能在客户端推：判据是「前面那条的模式能否命中这一条的目标」，
+		// 命令侧要跑 matchCommand（词边界前缀语义）、路径侧要跑 glob + 路径规范化 ——
+		// 客户端重写一份必然与裁决用的那份漂移，标注就会说谎。
+		//
+		// **顺序变了标注必须跟着变**：它在每次 status 里整体替换，而排序（↑↓ / 拖动）
+		// 落盘后宿主会回带新 status，故「调整顺序后重新处理标注」是自动的 ——
+		// 前提是这里不能像缓存那样只在首次赋值。
+		let EXCEPTION_SHADOW = {};
 		// 取某层某条例外的爆炸半径。层名非法或缺失时返回 undefined（渲染处据此不标注）。
 		function exceptionBlastOf(layer, id) {
 			const t = layer === 'project' ? 'project' : 'global';
 			const m = EXCEPTION_BLAST && EXCEPTION_BLAST[t];
+			return m && id ? m[id] : undefined;
+		}
+		// 取某层某条例外的遮蔽信息。返回 { byId, byAction } 或 undefined。
+		function exceptionShadowOf(layer, id) {
+			const t = layer === 'project' ? 'project' : 'global';
+			const m = EXCEPTION_SHADOW && EXCEPTION_SHADOW[t];
 			return m && id ? m[id] : undefined;
 		}
 		function applyStatusLists(s) {
@@ -1291,6 +1310,9 @@ window.__ModuleLoader__.load({
 			// 爆炸半径：**每次 status 都整体替换**（含清空）。不能写成「只在有值时赋值」——
 			// 用户删掉那条例外后，旧标注会留在界面上，指向一个已经不存在的 id（看似还在生效）。
 			EXCEPTION_BLAST = (s && s.exceptionBlast && typeof s.exceptionBlast === 'object') ? s.exceptionBlast : {};
+			// 遮蔽关系：与上面同理**每次 status 都整体替换**（含清空）—— 用户把条目拖到前面
+			// 或删掉遮蔽者之后，旧标注必须立刻消失，否则界面会继续说「未生效」而实际已生效。
+			EXCEPTION_SHADOW = (s && s.exceptionShadow && typeof s.exceptionShadow === 'object') ? s.exceptionShadow : {};
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
@@ -1553,6 +1575,12 @@ window.__ModuleLoader__.load({
 				// 与上面那条是**两个不同的失效模式**：过宽说的是「覆盖了太多命令」，
 				// 这条说的是「例外本身很具体，但指向的目标删了就没」。悬停 title 给出完整路径与后果。
 				'panel.excBlast': '目标范围过大',
+				// 遮蔽标注（宿主下发 exceptionShadow）：写入侧 push 到末尾、读侧首条命中即生效，
+				// 故新加的例外若与前面某条同目标且方向相反就**不会生效**。不标出来的话，
+				// 用户只看到列表里多了一行、面板还提示「已保存」，会以为决定已生效。
+				// {a} 是遮蔽它的那条的动作（allow / deny / ask），{id} 是那条的 id。
+				'panel.excShadowed': '未生效',
+				'panel.excShadowedHint': '被上方更早的例外（{a}，id={id}）遮蔽：判定只取首个匹配，故这一条当前不起作用。用 ↑ 把它移到那条之前即可生效。',
 				'quick.web_search': '网页搜索',
 				'quick.skill': '加载技能',
 				'quick.grep': '内容检索',
@@ -1774,6 +1802,12 @@ window.__ModuleLoader__.load({
 				'panel.excTooBroad': 'Very broad',
 				'panel.excTooBroadHint': 'This exception matches any single command segment — effectively no command review at all. Prefer a concrete command such as git status *.',
 				'panel.excBlast': 'Target too broad',
+				// Shadowed marker (host sends exceptionShadow): writes append to the tail while the
+				// reader takes the first match, so an exception whose opposite-direction twin comes
+				// first never takes effect. Without this marker the user only sees a new row plus a
+				// "saved" notice and assumes the decision is live.
+				'panel.excShadowed': 'Not in effect',
+				'panel.excShadowedHint': 'Shadowed by an earlier exception above ({a}, id={id}): the decision uses the first match only, so this row currently has no effect. Move it above that row with ↑ to make it take effect.',
 				'quick.web_search': 'web search',
 				'quick.skill': 'load skill',
 				'quick.grep': 'content search',
@@ -3010,6 +3044,13 @@ window.__ModuleLoader__.load({
 			// 会让新层看起来「空了一块」，而用户并没有输入过任何东西。
 			const [quickFilter, setQuickFilter] = React.useState('');
 			const [excFilter, setExcFilter] = React.useState({});
+			// 「滚到列表末尾」的标记：每次添加成功后 +1，对应的 effect 依赖它。
+			// 用计数器而不是布尔：连续添加两次时布尔值不变（true→true），effect 不会重跑，
+			// 第二次添加就不会滚 —— 而那正是用户最需要看到新条目的时候。
+			//
+			// 快捷工具的计数器不按分类分（它只有一个列表）；例外那个按分类分，
+			// 理由见 excScrollRefs 处的说明（多个分类默认同时展开，共用一个 ref 会滚错列表）。
+			const [quickScrollEnd, setQuickScrollEnd] = React.useState(0);
 			const [ruleFilter, setRuleFilter] = React.useState({ global: '', project: '' });
 			// 拖动排序的当前状态：{ id, overId, pos } 或 null（没在拖）。
 			// **只存这一份、两个列表共用**：同一时刻只可能拖着一行，而规则与例外的 id 前缀
@@ -3042,6 +3083,49 @@ window.__ModuleLoader__.load({
 				const id = setTimeout(() => setNotice(null), 8000);
 				return () => clearTimeout(id);
 			}, [notice]);
+
+			// 「添加成功后滚到列表末尾」的 ref 与 effect。
+			//
+			// **必须放在组件这一层，不能放进 listBox 或 catBlock**：那两个都是普通函数，
+			// 而例外列表的 listBox 调用位于「展开/折叠」的条件分支里 —— 在分支内调 hook
+			// 会让 hook 数量随折叠状态变化，React 抛「Rendered more hooks than during the
+			// previous render」。组件层的 hook 数量恒定，与任何条件分支无关。
+			//
+			// 两个 ref 分别对应「快捷工具」与「例外列表」。快捷工具只有一个列表，故一个 ref 够；
+			// 例外必须**按分类各持一个**（见下）。
+			//
+			// ── 为什么例外不能只用一个 ref ─────────────────────────────────────────
+			// 这里曾经断言「同一时刻只有一个分类的列表被展开（折叠状态下 listBox 根本不渲染），
+			// 故一个 ref 就够」—— 该前提**不成立**：折叠状态按分类独立存（excCollapsed[c]），
+			// 默认折叠判据是 `excList.length > EXC_COLLAPSE_THRESHOLD`（=6），而例外分类有 6 个，
+			// 于是「多个分类同时展开」是**默认态**而不是边缘情况。
+			//
+			// 后果（实测复现）：CATS.map(catBlock) 会同时渲染多个 listBox，它们把**同一个** ref
+			// 挂到各自的滚动容器上；React 中同一 ref 被多元素共用时按挂载顺序依次赋值，
+			// current 最终只指向**最后挂载**的那个。于是用户在靠前的分类（directory/command）
+			// 添加例外后，effect 滚的是**别的分类**的列表 —— 自己刚加的那条仍在视口外，
+			// 而另一个无关列表被莫名拽到底部。这正是本次改动（push 到末尾 + 滚到底）要消除的症状。
+			//
+			// 用「按分类存 DOM 元素的 map」而不是「每个分类一个 useRef」：后者要按分类数调 hook，
+			// 而分类清单由宿主下发、长度不固定，hook 数量不能依赖它。
+			const quickScrollRef = React.useRef(null);
+			const excScrollRefs = React.useRef({});
+			// 本次添加的分类：计数器与分类一起存（{ c, n }），effect 才知道该滚哪一个列表。
+			// 只存计数器的话，effect 无从得知「这次是哪个分类加的」，仍会退回「滚最后一个」。
+			const [excScrollEnd, setExcScrollEnd] = React.useState({ c: null, n: 0 });
+			// 滚到底：依赖是计数器 —— 只在「添加成功」时 +1，故只有那时才滚。
+			// 不依赖条目数：删除条目也会改变条目数，而那时用户正在看被删的位置，
+			// 把他拽到底部是反效果。
+			React.useEffect(() => {
+				const el = quickScrollRef.current;
+				if (el && typeof el.scrollTop === 'number') el.scrollTop = el.scrollHeight;
+			}, [quickScrollEnd]);
+			React.useEffect(() => {
+				// 只滚**本次添加的那个分类**的列表（按分类存 ref 的理由见上）。
+				// 分类已折叠 / 尚未渲染时取到 undefined，直接空转（不报错、不误滚别的列表）。
+				const el = excScrollEnd.c ? excScrollRefs.current[excScrollEnd.c] : null;
+				if (el && typeof el.scrollTop === 'number') el.scrollTop = el.scrollHeight;
+			}, [excScrollEnd]);
 
 			// 切换全局/项目 tab 时清掉未完成的二次确认：确认的对象是「某一层的某个键」，换层后不能沿用
 			// 同一确认态，否则再点会删掉另一层。同时丢弃草稿焦点与编辑态（换层后它们指向的行已不在渲染中，
@@ -3419,7 +3503,14 @@ window.__ModuleLoader__.load({
 					tool: String(newTool).trim(),
 					action: newToolAction,
 					reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
-				}, () => { setNewTool(''); setNewToolReason(''); });
+				}, () => {
+					setNewTool(''); setNewToolReason('');
+					// 清过滤器 + 滚到底部（用户定）：新加的条目排在最末，而过滤器可能正遮着它
+					// —— 不清掉用户就看不到自己刚加的那条，会以为没加上而重复添加。
+					// 两者必须同时做：只滚不清 = 新条目被过滤掉、列表看起来没变；只清不滚 = 它在最底下看不见。
+					setQuickFilter('');
+					setQuickScrollEnd((n) => n + 1);
+				});
 			};
 
 			// 删除该行在当前 tab 的快捷工具设置（服务端收到 action=inherit 即删除该键）；
@@ -3444,6 +3535,12 @@ window.__ModuleLoader__.load({
 					// 只有 deny 会带拒绝原因（回给 AI），只有 ask 会带备注（显示在弹窗上供日后回看）
 					reason: f.action === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined,
 					note: f.action === 'ask' ? (String(f.note || '').trim() || undefined) : undefined,
+				}, () => {
+					// 清过滤器 + 滚到底部（同 addQuick 的理由）。都**只作用于本分类**：
+					// 清全部会把用户在别的分类输的过滤词一并抹掉（他可能正靠着那个词找东西）；
+					// 计数器带上分类名，effect 才知道该滚哪一个列表（见 excScrollRefs 的说明）。
+					setExcFilter((prev) => Object.assign({}, prev, { [c]: '' }));
+					setExcScrollEnd((prev) => ({ c: c, n: prev.n + 1 }));
 				});
 			};
 
@@ -3529,6 +3626,18 @@ window.__ModuleLoader__.load({
 			//           listBox 只负责**算**（谁还能上移/下移、落点画在哪一行），按钮与事件
 			//           由调用方插进自己的行里 —— 行内布局归调用方，容器不替它决定。
 			//           故 render 多收一个参数：render(item, sortUi)。sortUi 为 null = 本列表无排序。
+			//   scrollRef —— 可选，挂到滚动区容器上的 ref（可以是 ref 对象或 callback ref）。
+			//           **滚动动作由调用方在自己的 effect 里做**，listBox 只负责把 ref 挂上去。
+			//           例外列表那处传的是 callback ref（按分类各存一个元素）：它的调用点位于
+			//           「展开/折叠」的条件分支里，且多个分类默认同时展开 —— 共用一个 ref 对象
+			//           会让 current 只指向最后挂载的那个，滚动落到别的分类的列表上。
+			//
+			//           为什么不在 listBox 内部 useRef + useEffect 自己滚：listBox 是普通函数，
+			//           而例外列表那处调用位于「展开/折叠」的**条件分支**里（见 catBlock）。
+			//           在里面调 hook 会让 hook 数量随折叠状态变化，React 直接抛
+			//           「Rendered more hooks than during the previous render」。
+			//           这不是理论风险：本轮就是这么写的，regressions 的渲染断言当场崩了
+			//           （React.useRef is not a function —— 桩里没有，但真 React 会抛上面那条）。
 			const listBox = (o) => {
 				const all = Array.isArray(o.items) ? o.items : [];
 				const q = String(o.filter || '').trim().toLowerCase();
@@ -3596,7 +3705,6 @@ window.__ModuleLoader__.load({
 					};
 				};
 				// 过滤框的显示判据：条目够多（>3，两三条还要先过滤是负担）**或**当前有过滤词。
-				//
 				// 两个条件缺一不可，且都不能换成「过滤后的数量」：
 				//   ① 只按 all.length 判断 —— 用户可在过滤状态下删条目，把列表降到 ≤3 条，
 				//      输入框随之消失，而 state 里的过滤词还在，列表只剩「没有匹配的条目」。
@@ -3627,7 +3735,7 @@ window.__ModuleLoader__.load({
 							// 显式传下标（而不是 `shown.map(o.render)`）：render 的第二个参数是
 							// 排序上下文，靠 map 的隐式下标传参虽然等价，但读代码的人看不出
 							// 「render 还能收第二个参数」，改动时容易把它当无用参数删掉。
-							: React.createElement('div', { style: { maxHeight: LIST_SCROLL_MAX_H, overflowY: 'auto', overflowX: 'hidden' } }, shown.map((it, i) => o.render(it, sortUiOf(it, i))))),
+							: React.createElement('div', { ref: o.scrollRef, style: { maxHeight: LIST_SCROLL_MAX_H, overflowY: 'auto', overflowX: 'hidden' } }, shown.map((it, i) => o.render(it, sortUiOf(it, i))))),
 				);
 			};
 
@@ -3936,6 +4044,13 @@ window.__ModuleLoader__.load({
 									items: excList,
 									filter: excFilter[c] || '',
 									onFilter: (v) => setExcFilter(Object.assign({}, excFilter, { [c]: v })),
+									// 添加成功后滚到底（宿主把新例外追加到末尾，见 addProjectException）。
+									// **按分类各存一个 DOM 元素**：多个分类默认同时展开（见 excScrollRefs
+									// 处的说明），共用一个 ref 会让滚动落到别的分类的列表上。
+									// 用 callback ref 而不是 ref 对象：后者没法按分类区分。
+									// 卸载时 React 以 null 调用它，故要判空再写，否则会把 null 存进去、
+									// 之后 effect 拿到 null（表现为「有时不滚」）。
+									scrollRef: (el) => { if (el) excScrollRefs.current[c] = el; else delete excScrollRefs.current[c]; },
 									// 匹配字段与用户看到的行一致：匹配内容（path/match）+ 拒绝原因 + 备注。
 									// 只搜 path/match 的话，「按原因找那条例外」就做不到。
 									match: (r) => [r.path, r.match, r.reason, r.note].filter(Boolean).join(' '),
@@ -3986,6 +4101,29 @@ window.__ModuleLoader__.load({
 											style: { fontSize: 11, color: meta.color, marginLeft: 6, whiteSpace: 'nowrap' },
 											title: T(meta.key).replace('{p}', b.path || ''),
 										}, meta.icon + ' ' + T('panel.excBlast'));
+									})(),
+									// 遮蔽标注（宿主下发 exceptionShadow）：这条例外被上方更早的一条反向例外
+									// 遮蔽，**当前不生效**。
+									//
+									// 与上面两条是**第三种**失效模式，必须分开显示：
+									//   · 过宽    —— 覆盖了太多命令；
+									//   · 爆炸半径 —— 本身很具体，但目标删了就没；
+									//   · 被遮蔽  —— 完全没生效（顺序问题，用户拖一下就能修）。
+									// 第三条最隐蔽：面板提示「已保存」、列表里也看得见那一行，用户会以为
+									// 决定已生效 —— 而实际裁决仍按上面那条走。
+									//
+									// 配色用**错误红**（不是警告橙）：前两条是「范围不理想」，这一条是
+									// 「你设的东西根本没起作用」，严重程度与它们不同级。
+									//
+									// 与上面 explosionBlast 同样用 IIFE：都要「先取值、无则返回 null」，
+									// 用三元表达式写会多一次取值或引入重复判空。
+									(() => {
+										const sh = exceptionShadowOf(tab, r.id);
+										if (!sh) return null;
+										return React.createElement('span', {
+											style: { fontSize: 11, color: MODE_COLORS.deny, marginLeft: 6, whiteSpace: 'nowrap', fontWeight: 600 },
+											title: T('panel.excShadowedHint').replace('{a}', sh.byAction || '').replace('{id}', sh.byId || ''),
+										}, '⛔ ' + T('panel.excShadowed'));
 									})(),
 									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
 										moveButtons(ui),
@@ -4165,6 +4303,8 @@ window.__ModuleLoader__.load({
 						items: quickTools,
 						filter: quickFilter,
 						onFilter: setQuickFilter,
+						// 添加成功后滚到底（新行追加在末尾，见 addQuick）
+						scrollRef: quickScrollRef,
 						match: (t) => t + ' ' + (quickDesc(t) || ''),
 						render: quickRow,
 					}),

@@ -1028,7 +1028,202 @@ ok('两条候选主文案是纯路径、范围各走 hint（目录 / 文件）',
 ok('dirGlob 盘根直接拼 /*（不再产生匹配不到的 G://*）', src.includes("if (/^[a-zA-Z]:$/.test(dir)) return dir + '/*'") && !src.includes("if (/^[a-zA-Z]:$/.test(dir)) dir += '/'") )
 ok('choice 路径复用例外写入单点', src.includes("addProjectException(entry.cat, 'path', String(entry.value), action, root, { target })") && src.includes("addProjectException('command', 'command', String(entry.value), action, root, { target })") && !src.includes('cat.exceptions[idx].action = action'))
 ok('客户端删除用返回 promise 的 call 并反馈结果', cli.includes("call('permgate:remove-exception', { target: tab, category: c, id })") && !cli.includes("invoke('permgate:remove-exception'") && cli.includes("T('panel.delFailed')"))
-ok('同向去重命中后把条目提到头部并回写文字', src.includes('const hit = c.exceptions.splice(idx, 1)[0]') && (src.match(/c\.exceptions\.unshift\(hit\)/g) || []).length === 2 && src.includes('textPatch(hit)'))
+// 新条目**追加到末尾**（用户定）：顺序即优先级，新加的排最后，由用户在面板上调整。
+// 这里曾断言「提到头部」（unshift）—— 那是旧语义，已按用户要求改掉。
+// 判据分两层，缺一不可：
+//   ① 新条目走 push（不是 unshift）；
+//   ② 同向去重命中时**原地更新**（不再 splice + unshift 移动位置）——
+//      只改 ① 会让去重路径仍把条目搬到头部，用户看到自己没动过的列表变了样。
+ok('新例外追加到末尾，同向去重命中时原地回写文字（不移动位置）',
+  (src.match(/c\.exceptions\.push\(item\)/g) || []).length === 2
+  && !src.includes('c.exceptions.unshift(')
+  && src.includes('const hit = c.exceptions[idx]')
+  && src.includes('textPatch(hit)'))
+// ★★ 行为复算：真跑一遍 addProjectException，验证「新条目在末尾」与「去重原地更新」。
+// 只查源码文本会把「push 写了但顺序仍不对」判成通过（例如先 unshift 再 push、或用了
+// 别的插入点）。这里抠出真实实现，喂两次写入，直接看数组顺序。
+{
+  const sliceFn3 = (name) => {
+    const s = src.indexOf('function ' + name + '(')
+    if (s < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', s); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+    }
+    return ''
+  }
+  let A = null
+  try {
+    A = new Function('EXC_CATS', [
+      "const fallbackRoot = 'X:/FALLBACK'",
+      "let config = { global: {}, projects: {} }",
+      "function norm(p) { let s = String(p).replace(/\\\\/g, '/'); let e = s.length; while (e > 0 && s.charCodeAt(e - 1) === 47) e -= 1; return e === s.length ? s : s.slice(0, e) }",
+      "function normPathKey(p) { return norm(p).toLowerCase() }",
+      "function normAbsPath(p, root) { const s = norm(p); return /^([a-zA-Z]:|\\/)/.test(s) ? s : norm(root) + '/' + s }",
+      "function pathKey(p, root) { return normPathKey(normAbsPath(p, root)) }",
+      "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
+      "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
+      "function ensureProject(root) { if (!config.projects[root]) { config.projects[root] = { custom: [] }; for (const c of EXC_CATS) config.projects[root][c] = freshCategory(c, true) } return config.projects[root] }",
+      sliceFn3('addProjectException'),
+      'return { add: addProjectException, cfg: () => config }',
+    ].join('\n'))(['directory', 'command', 'read', 'image', 'edit', 'undo'])
+  } catch (e) { A = null }
+  ok('★ addProjectException 可独立求值（追加语义行为复算的前置）', A !== null, '')
+  if (A) {
+    const R = 'X:/ws'
+    const seq = () => (A.cfg().global.image.exceptions || []).map((e) => e.action)
+    // ① 三次写入 → 顺序应等于写入顺序（追加），而不是倒序（unshift）
+    A.add('image', 'path', 'X:/ws/a.png', 'allow', R, { target: 'global' })
+    A.add('image', 'path', 'X:/ws/b.png', 'deny', R, { target: 'global' })
+    A.add('image', 'path', 'X:/ws/c.png', 'ask', R, { target: 'global' })
+    ok('★★ addProjectException：新条目追加在末尾（顺序 = 写入顺序，不是倒序）',
+      JSON.stringify(seq()) === JSON.stringify(['allow', 'deny', 'ask']), JSON.stringify(seq()))
+    // ② 同向去重命中：不新增条目、且**位置不变**
+    const before = seq()
+    A.add('image', 'path', 'X:/ws/b.png', 'deny', R, { target: 'global', reason: '补的理由' })
+    const after = seq()
+    const hit = (A.cfg().global.image.exceptions || [])[1]
+    ok('★★ addProjectException：同向去重命中时原地更新（不新增条目、位置不变、文字回写）',
+      JSON.stringify(before) === JSON.stringify(after) && after.length === 3
+      && hit && hit.action === 'deny' && hit.reason === '补的理由',
+      JSON.stringify({ before: before, after: after, hitReason: hit && hit.reason }))
+    // ③ 命令例外走同一语义（command 分支是另一段代码，必须单独验）
+    A.add('command', 'command', 'rm -rf ./build', 'allow', R, { target: 'global' })
+    A.add('command', 'command', 'git status', 'deny', R, { target: 'global' })
+    const cmdSeq = (A.cfg().global.command.exceptions || []).map((e) => e.match)
+    ok('★★ addProjectException：命令例外同样追加在末尾',
+      JSON.stringify(cmdSeq) === JSON.stringify(['rm -rf ./build', 'git status']), JSON.stringify(cmdSeq))
+  }
+}
+// ★★ 遮蔽标注（exceptionShadow）：面板要能告诉用户「你刚加的这条没生效」。
+//
+// 为什么必须有它：写入侧 push 到末尾、读侧首条命中即生效，于是新加的例外若与前面某条
+// 同目标且方向相反就**不会生效** —— 而面板会提示「已保存」、列表里也看得见那一行，
+// 用户以为决定已生效（实测最危险的是「以为拦住了破坏性命令，实际仍放行」）。
+//
+// 判据按**行为**复算（不是匹配源码）：抠出 exceptionShadow 的 IIFE 真跑一遍。
+// 只查源码文本会把「标注写了但判据反了」判成通过（例如把 hits 的参数顺序写反，
+// 那会让所有条目都不被标注或全被标注）。
+{
+  const sliceShadow = (function () {
+    // exceptionShadow 是 `exceptionShadow: (function () { ... })(),` 形式。
+    // 按 `(function () {` 起的括号配对抠出函数体，再补上包裹括号与调用：`)()`。
+    // 少补这个 `)` 会得到 `(function () {…}()` —— 语法错误，前置断言直接变红（不是静默跳过）。
+    const s = src.indexOf('exceptionShadow: (function () {')
+    if (s < 0) return ''
+    const open = src.indexOf('(function () {', s)
+    if (open < 0) return ''
+    let d = 0
+    for (let k = src.indexOf('{', open); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(open, k + 1) + ')()' }
+    }
+    return ''
+  })()
+  let S = null
+  try {
+    // ★ 依赖必须是**从源码抠出的真实实现**，不能手写桩。
+    //   这里曾经写着手写的 norm/normAbsPath/globToRegExp/matchGlob/matchCommand 桩，
+    //   而桩与真实实现有三处实质偏差（实测确认）：
+    //     · globToRegExp 真实实现带 `i` 标志（大小写不敏感），桩没带；
+    //     · matchCommand 真实实现对 `cmd *` 有尾随通配分支（`git status *` 要匹配 `git status`），桩没有；
+    //     · normAbsPath 真实实现走 pathResolve（会折叠 `..`），桩只是字符串拼接。
+    //   桩错了会让复算的结论**不适用于运行时**：断言可能在真实实现下不成立（假绿），
+    //   也可能漏掉真实实现才有的场景（大小写、`..`、尾随通配）。
+    //   故与 addProjectException 那处同口径 —— 抠真实函数体，只补它依赖的模块级符号。
+    const sliceIn = (text, name) => {
+      const i = text.indexOf('function ' + name + '(')
+      if (i < 0) return ''
+      let d = 0
+      for (let k = text.indexOf('{', i); k < text.length; k++) {
+        if (text[k] === '{') d++
+        else if (text[k] === '}') { d--; if (d === 0) return text.slice(i, k + 1) }
+      }
+      return ''
+    }
+    // 路径相对**本测试文件**（它在 test/ 下，故要上溯一级到仓库根）。
+    // 曾经写成 './shell-parse.js' —— 那是相对 test/ 解析，ENOENT 直接让前置断言变红。
+    const spSrc = readFileSync(new URL('../shell-parse.js', import.meta.url), 'utf8')
+    S = new Function('config', 'proj', 'EXC_CATS', 'root', 'pathResolve', [
+      // matchCommand 的记忆化变量（真实实现是模块级 let，抠函数体时要一并补上）
+      'let memoHay = null; let memoLow = "";',
+      sliceIn(src, 'norm'),
+      sliceIn(src, 'normAbsPath'),
+      sliceIn(src, 'globToRegExp'),
+      sliceIn(src, 'matchGlob'),
+      sliceIn(spSrc, 'globMatch'),
+      sliceIn(spSrc, 'matchCommand'),
+      'return (' + sliceShadow + ')',
+    ].join('\n'))
+  } catch (e) { S = null }
+  ok('★ exceptionShadow 可独立求值（遮蔽标注行为复算的前置）', S !== null && sliceShadow !== '', '')
+  if (S) {
+    // pathResolve 由调用方传入（真实实现的 normAbsPath 用它折叠 `..`）
+    const Srun = (cfg, cats, root) => S(cfg, null, cats, root, pathResolve)
+    const CATS6 = ['directory', 'command', 'read', 'image', 'edit', 'undo']
+    // 按分类建块：命令用例必须落在 command 分类下（都塞进 image 的话，命令侧判据
+    // 根本没被执行到，断言会在「实现正确」时变红）。
+    const mk = (exceptions, cat) => ({ global: { [cat || 'image']: { mode: 'allow', exceptions: exceptions } }, projects: {} })
+    const run = (exceptions, cat) => {
+      const cfg = mk(exceptions, cat)
+      // 下发形状是 { global: { [例外id]: {...} }, project: {...} } —— **按 id 直接索引**，
+      // 不像 categories 那样再分一层分类（照 categories 的形状取值会得到 undefined，
+      // 症状是断言全红而根因在测试自己的取值路径）。
+      const view = Srun(cfg, CATS6, 'X:/ws')
+      return (view && view.global) || {}
+    }
+    // ① [allow, deny] 同目标：后面的 deny 被前面的 allow 遮蔽 → 必须标注
+    const r1 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/x.png' }, { id: 'd1', action: 'deny', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：后面的反向条目被标注（[allow, deny] → deny 未生效）',
+      !!r1.d1 && r1.d1.byId === 'a1' && r1.d1.byAction === 'allow' && !r1.a1,
+      JSON.stringify(r1))
+    // ② 反向顺序 [deny, allow]：allow 被 deny 遮蔽 → 同样必须标注（方向无关）
+    const r2 = run([{ id: 'd1', action: 'deny', path: 'X:/ws/x.png' }, { id: 'a1', action: 'allow', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：反向顺序同样标注（[deny, allow] → allow 未生效）',
+      !!r2.a1 && r2.a1.byId === 'd1' && r2.a1.byAction === 'deny' && !r2.d1,
+      JSON.stringify(r2))
+    // ③ 同向条目**不得**标注：读侧首条命中即生效，同向时结论相同，标注只会制造噪音
+    const r3 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/x.png' }, { id: 'a2', action: 'allow', path: 'X:/ws/x.png' }])
+    ok('★ exceptionShadow：同向条目不标注（结论相同，标了是噪音）',
+      Object.keys(r3).length === 0, JSON.stringify(r3))
+    // ④ 目标不同**不得**标注（不能把「同分类」当成「同目标」）
+    const r4 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/x.png' }, { id: 'd1', action: 'deny', path: 'X:/ws/y.png' }])
+    ok('★★ exceptionShadow：目标不同不标注（判据是「前面的能命中这一条的目标」）',
+      Object.keys(r4).length === 0, JSON.stringify(r4))
+    // ⑤ 前面那条的模式能覆盖这一条的目标时也要标注（glob 覆盖：`X:/ws/*` 压过精确路径）
+    const r5 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/*' }, { id: 'd1', action: 'deny', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：glob 覆盖也算遮蔽（`X:/ws/*` 压过精确路径）',
+      !!r5.d1 && r5.d1.byId === 'a1', JSON.stringify(r5))
+    // ⑥ ask 例外同样构成遮蔽：它先命中会改变结果（弹窗 vs 静默放行），是真实冲突
+    const r6 = run([{ id: 'k1', action: 'ask', path: 'X:/ws/x.png' }, { id: 'a1', action: 'allow', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：ask 例外也算遮蔽（它先命中就轮不到后面的）',
+      !!r6.a1 && r6.a1.byId === 'k1' && r6.a1.byAction === 'ask', JSON.stringify(r6))
+    // ⑦ 命令分类走 matchCommand（词边界前缀），与路径侧不是同一套判据
+    const r7 = run([{ id: 'a1', action: 'allow', match: 'git status' }, { id: 'd1', action: 'deny', match: 'git status *' }], 'command')
+    ok('★★ exceptionShadow：命令例外用词边界前缀判据（前面的 `git status` 遮蔽后面的 `git status *`）',
+      !!r7.d1 && r7.d1.byId === 'a1', JSON.stringify(r7))
+    // ⑧ 命令侧不得把「无关命令」误判成遮蔽（子串/词边界写错时的典型症状）
+    const r8 = run([{ id: 'a1', action: 'allow', match: 'git status' }, { id: 'd1', action: 'deny', match: 'rm -rf /' }], 'command')
+    ok('★ exceptionShadow：无关命令不标注（词边界判据不得退化成子串匹配）',
+      Object.keys(r8).length === 0, JSON.stringify(r8))
+    // ⑨⑩⑪ 三条**只有真实实现才成立**的场景。它们存在的意义就是防止「抠源码」退化成
+    //     「手写桩」：桩与真实实现的三处偏差（大小写、`..` 折叠、尾随通配）恰好落在这里，
+    //     一旦有人把上面的依赖换回桩，这三条会立刻变红（而不是静默失去覆盖）。
+    //     ⑨ 路径侧大小写不敏感（真实 globToRegExp 带 `i` 标志）
+    const r9 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/*.PNG' }, { id: 'd1', action: 'deny', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：路径匹配大小写不敏感（与 globToRegExp 的 `i` 标志同口径）',
+      !!r9.d1 && r9.d1.byId === 'a1', JSON.stringify(r9))
+    //     ⑩ 路径两侧都走 normAbsPath（折叠 `..`），故含 `..` 的写法能与规范路径互相命中
+    const r10 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/*' }, { id: 'd1', action: 'deny', path: 'X:/ws/sub/../x.png' }])
+    ok('★★ exceptionShadow：含 `..` 的目标被折叠后再判（normAbsPath 口径）',
+      !!r10.d1 && r10.d1.byId === 'a1', JSON.stringify(r10))
+    //     ⑪ 命令侧 `cmd *` 尾随通配：`git status *` 能命中 `git status`（matchCommand 的特例分支）
+    const r11 = run([{ id: 'a1', action: 'allow', match: 'git status *' }, { id: 'd1', action: 'deny', match: 'git status' }], 'command')
+    ok('★★ exceptionShadow：命令尾随通配（`git status *` 遮蔽 `git status`，与 matchCommand 同口径）',
+      !!r11.d1 && r11.d1.byId === 'a1', JSON.stringify(r11))
+  }
+}
 ok('choice 路径不再套用候选的 deny-directory 过滤', !src.includes("if (!(action === 'deny' && entry.cat === 'directory'))"))
 // ─────────────────────────────────────────────────────────────
 group('11. 权限元操作纳入管控（issue #3：perm_* 曾无条件放行）')
@@ -1309,7 +1504,7 @@ ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位�
 // 防回退：新增行选了拒绝却无处填原因，只能先添加再补填。
 // 注意空值必须折叠成 undefined：新增行可以输入本层已存在的工具名，而宿主把「空串」定义为
 // 显式清除——用户没填原因就点「添加」，会静默删掉该键已保存的拒绝原因（改动前不传 reason 则保留）。
-ok('快捷工具新增行也带拒绝原因输入框并下发 reason（空值折叠为未提供）', cli.includes('const [newToolReason, setNewToolReason] = React.useState') && cli.includes("reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined") && cli.includes("() => { setNewTool(''); setNewToolReason(''); }"))
+ok('快捷工具新增行也带拒绝原因输入框并下发 reason（空值折叠为未提供）', cli.includes('const [newToolReason, setNewToolReason] = React.useState') && cli.includes("reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined") && cli.includes("setNewTool(''); setNewToolReason('');") && cli.includes('setQuickScrollEnd((n) => n + 1)'))
 // 防回退：输入框曾「永远可编辑 + 只在失焦时保存」，界面没有任何状态提示，用户填完不知道算不算数。
 // 现在改为只读展示 + 编辑/保存两态按钮：当前值可见、「改了有没有生效」有确定答案。
 ok('拒绝原因默认只读，点「编辑」才可输入（按钮变保存/取消）', cli.includes('const [reasonEditing, setReasonEditing] = React.useState(null)') && cli.includes("btn(T('panel.reasonEdit'), beginEdit)") && cli.includes("btn(T('panel.reasonSave'), () => { onCommit(focus); endEdit(); })") && cli.includes("btn(T('panel.cancel'), () => { onCancel(); endEdit(); })"))
@@ -1781,10 +1976,14 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const body = src.slice(i, i + 1200)
     return body.includes('block.custom.push(rule)') && !body.includes('block.custom.unshift(rule)')
   })())
-  // 弹窗「记住此决定」那两处是 HEAD 就有的 unshift（与面板 add-rule 的 push 并存）：
-  // 它们不在本次改动范围内，此断言只为记录「这两处没被顺手改掉」。
-  ok('弹窗记住规则的两处写入保持 HEAD 原状（unshift，不在本次改动范围）',
-    (src.match(/block\.custom\.unshift\(/g) || []).length === 2)
+  // 弹窗「记住此决定」那处写入**也改成 push**（本轮统一：新条目一律追加到末尾）。
+  // 这里曾经断言「保持 HEAD 原状（unshift）」—— 那条断言的前提（「不在改动范围」）已经变了。
+  // 现在守的是「三处写入口径一致」：若哪天有人把其中一处改回 unshift，
+  // 就会出现「面板加的排最后、弹窗加的排最前」这种同源入口行为分叉。
+  // 计数是 3：addProjectException 的 custom 分支、弹窗记住规则、面板 add-rule 路由。
+  ok('新规则一律追加到末尾（三处写入口径一致，无 unshift 残留）',
+    (src.match(/block\.custom\.push\(/g) || []).length === 3
+    && !src.includes('block.custom.unshift('))
   // ══ 循环检测（doomloop）结构性断言（doomloop-plan §3.3）══════════════════
   // 这些断言守的是「删掉的东西不许复活」与「做法 A 的形状不许回退」。
   // 运行时行为由 smoke group22 覆盖；这里只钉结构 —— 两者分工见文件头。
@@ -4805,6 +5004,294 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   }
   // 清理全局桩：后续断言（尤其涉及 window/document 的）不该看见本次渲染留下的痕迹
   try { delete globalThis.__pgRender; delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
+  // ── 27e. 「添加成功后清过滤器 + 滚到底部」的**渲染级**行为复算 ──────────────
+  //
+  // 为什么必须渲染级：这条链路的每一段都是「不报错但功能失效」——
+  //   · 调用点漏传 scrollRef → 列表照常渲染，只是不滚；
+  //   · effect 里没写 scrollTop 赋值 → ref 挂上了但不滚；
+  //   · 忘了清过滤器 → 新条目被过滤词遮住，用户看不到。
+  // 三者都不会让任何结构断言变红。这里真渲染面板、点「添加」、看滚动容器的 scrollTop。
+  {
+    let sErr = null
+    let res = null
+    try {
+      let loaded2 = null
+      new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded2 = m } } })
+      const stateBuckets = new Map()
+      const effects2 = []
+      let cursor2 = 0
+      let curComp = 'root'
+      const bucketOf = (n) => { if (!stateBuckets.has(n)) stateBuckets.set(n, []); return stateBuckets.get(n) }
+      const React2 = {
+        createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false) }),
+        memo: (c) => c, Fragment: 'Fragment',
+        Component: class { constructor(p) { this.props = p || {} } setState() {} render() { return null } },
+        useState: (init) => { const st = bucketOf(curComp); const i = cursor2++; if (!(i in st)) st[i] = typeof init === 'function' ? init() : init; return [st[i], (v) => { st[i] = typeof v === 'function' ? v(st[i]) : v }] },
+        useEffect: (fn) => { effects2.push(fn) },
+        useRef: (v) => ({ current: v === undefined ? null : v }),
+        useMemo: (f) => f(), useCallback: (f) => f(),
+      }
+      const render2 = (fn, props) => { const p = curComp; curComp = fn.name || 'anon'; cursor2 = 0; try { return fn(props) } finally { curComp = p } }
+      const T2 = (k) => k
+      const walk2 = (n, acc) => {
+        if (!n || typeof n !== 'object') return acc
+        acc.push(n)
+        for (const k of n.kids || []) walk2(k, acc)
+        if (n.props && n.props.children) walk2(n.props.children, acc)
+        return acc
+      }
+      const calls2 = []
+      const fixture = {
+        configPath: 'C:/x/config.json', active: true, preset: 'custom-review', activeForSession: true, platformPreset: 'custom-review', projectKey: 'X:/ws',
+        sandbox: { global: 'danger-full-access', project: 'inherit', effective: 'danger-full-access', session: 'danger-full-access' },
+        categories: { global: { command: { mode: 'ask', exceptions: [{ id: 'e1', action: 'deny', match: 'rm *' }] } }, project: null },
+        effective: {}, quickTools: { global: {}, project: {} },
+        // 预设给 5 条：过滤框的显示条件是「条目 >3 或有过滤词」，给 2 条时它根本不渲染，
+        // 场景跑不起来（实测「过滤框数量 = 0」→ 断言全部空转通过）。
+        quickPreset: ['job_list', 'web_search', 'todo_write', 'grep', 'glob'], quickDefaults: {},
+        custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
+        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
+        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
+        exceptionBlast: {},
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
+        fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
+      }
+      const fetch2 = (url, opts) => {
+        calls2.push({ url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null })
+        const u = String(url)
+        const payload = u.indexOf('/permgate/pending') !== -1 ? [] : (u.indexOf('/permgate/status') !== -1 ? fixture : {})
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload), text: () => Promise.resolve('') })
+      }
+      let Panel2 = null
+      const ctx2 = {
+        slots: {
+          inject: (name, fn) => { try { if (typeof fn === 'function') fn() } catch (e) {} },
+          register: (meta, comp) => { if (meta && meta.name === 'settings.section') Panel2 = comp; return () => {} },
+        },
+        locale: { register: () => {}, bind: () => T2 },
+        get: () => undefined,
+        effect: (fn) => { try { fn() } catch (e) {} return () => {} },
+        on: () => () => {},
+      }
+      const g2 = globalThis
+      g2.window = { addEventListener: () => {}, removeEventListener: () => {}, innerWidth: 1200, innerHeight: 800, location: { href: 'http://localhost/' }, fetch: fetch2 }
+      g2.fetch = fetch2
+      g2.EventSource = function () { this.close = () => {} }
+      g2.document = { querySelector: () => null, createElement: () => ({ dataset: {}, style: {}, appendChild: () => {}, remove: () => {} }), head: { appendChild: () => {} } }
+      loaded2.factory((n) => (n === 'react' ? React2 : {}))
+      const mod2 = loaded2.factory((n) => (n === 'react' ? React2 : {}))
+      mod2.apply(ctx2)
+      if (!Panel2) throw new Error('未注册面板组件')
+      render2(Panel2, { sessionId: 's1' })
+      for (const fn of effects2) { try { fn() } catch (e) {} }
+      await new Promise((r) => setTimeout(r, 60))
+      let tree = render2(Panel2, { sessionId: 's1' })
+      let nodes = walk2(tree, [])
+      const filters = nodes.filter((n) => n.type === 'input' && n.props && n.props.placeholder === 'panel.listFilterPh')
+      if (!filters.length) throw new Error('过滤框未渲染（前置不成立，场景会空转）')
+      // ★ 必须**在过滤之前**取到快捷工具的 ref 对象。
+      //   过滤后快捷列表被滤空（shown=0）→ 它的滚动区不再渲染 → 之后再也找不到它。
+      //   这里曾经是「过滤之后再找第一个 maxHeight=260 的容器」，而那时剩下的唯一一个是
+      //   **例外列表**的容器 —— 于是测试把假元素挂到了例外的 ref 上，却断言「快捷工具滚了」。
+      //   它能通过纯属桩的行为掩盖：桩无条件运行**所有** effect（不看依赖），
+      //   于是例外那条 effect 顺带把假元素滚了，断言看到 scrollTop=500 就绿了。
+      //   即那条断言实际验证的是例外列表，而不是它声称的快捷工具。
+      const boxesOf = (ns) => ns.filter((n) => n.props && n.props.style && n.props.style.maxHeight === 260)
+      const quickBox0 = boxesOf(nodes).find((n) => n.props.ref && typeof n.props.ref !== 'function')
+      if (!quickBox0) throw new Error('快捷工具的滚动区未渲染或它的 ref 未接线')
+      const quickRefObj = quickBox0.props.ref
+      const fakeEl = { scrollTop: 0, scrollHeight: 500 }
+      quickRefObj.current = fakeEl
+      // ① 填一个过滤词（验「添加后过滤器被清掉」）
+      filters[0].props.onChange({ target: { value: 'zzz-no-match' } })
+      tree = render2(Panel2, { sessionId: 's1' })
+      nodes = walk2(tree, [])
+      const addInput = nodes.find((n) => n.type === 'input' && n.props && n.props.placeholder === 'panel.quickAdd')
+      if (!addInput) throw new Error('新增工具输入框未渲染')
+      addInput.props.onChange({ target: { value: 'my_new_tool' } })
+      tree = render2(Panel2, { sessionId: 's1' })
+      nodes = walk2(tree, [])
+      const addBtn = nodes.find((n) => n.type === 'button' && (n.kids || []).includes('panel.quickAddBtn'))
+      if (!addBtn) throw new Error('添加按钮未渲染')
+      // ② 例外列表的滚动区必须是 **callback ref**（按分类各存一个元素；共用一个 ref 对象
+      //    会让 current 只指向最后挂载的那个，添加后滚到别的分类的列表上 —— 本次修复的点）。
+      const excBoxes = boxesOf(nodes).filter((n) => n.props.ref && typeof n.props.ref === 'function')
+      if (!excBoxes.length) throw new Error('例外列表的滚动区未渲染（本场景依赖它来验 callback ref）')
+      calls2.length = 0
+      addBtn.props.onClick()
+      await new Promise((r) => setTimeout(r, 40))
+      const req = calls2.find((c) => c.url.indexOf('/permgate/set-quick') !== -1)
+      // ③ 跑 effect（添加成功的回调里 setQuickFilter('') + setQuickScrollEnd(n+1)）
+      for (const fn of effects2) { try { fn() } catch (e) {} }
+      await new Promise((r) => setTimeout(r, 40))
+      tree = render2(Panel2, { sessionId: 's1' })
+      nodes = walk2(tree, [])
+      const filtersAfter = nodes.filter((n) => n.type === 'input' && n.props && n.props.placeholder === 'panel.listFilterPh')
+      // ④ 例外那条 effect 不得误滚**快捷工具**的列表：它按分类取元素，
+      //    快捷工具的 ref 是另一个对象，两者不可混（混了就是「给 A 添加、B 被拽到底」）。
+      //    注意本桩的 useRef 每次渲染新建对象（与真 React 的「同槽位复用」不同），
+      //    故不能断言「ref 对象跨渲染恒等」—— 那种断言在本桩下恒假。
+      //    能验的是：快捷工具的滚动区始终由**非函数** ref 承载（例外侧才是 callback ref）。
+      const quickBoxesAfter = boxesOf(nodes).filter((n) => n.props.ref && typeof n.props.ref !== 'function')
+      res = {
+        sent: !!req && req.body && req.body.tool === 'my_new_tool',
+        filterCleared: filtersAfter.every((n) => n.props.value === ''),
+        filterBoxGone: filtersAfter.length === 0,
+        scrolledTo: fakeEl.scrollTop,
+        scrollHeight: fakeEl.scrollHeight,
+        quickBoxesAfter: quickBoxesAfter.length,
+      }
+    } catch (e) { sErr = e }
+    ok('★★★ 添加后清过滤器并滚到底（渲染→事件→请求→状态→滚动的完整链路）',
+      sErr === null && res && res.sent && (res.filterCleared || res.filterBoxGone) && res.scrolledTo === res.scrollHeight && res.quickBoxesAfter === 1,
+      JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), ...(res || {}) }))
+  }
+  // 清理本次渲染留下的全局桩
+  try { delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
+  // ── 27f. 「多分类同时展开时，滚的是**本次添加的那个**分类」的行为复算 ──────────
+  //
+  // 这是 excScrollRefs 那次修复的**核心场景**，而静态断言覆盖不到它：
+  //   折叠状态按分类独立存，默认折叠判据是 `excList.length > 6` —— 例外 ≤6 的分类
+  //   默认就是**展开**的，而例外分类有 6 个，故「多个分类同时展开」是默认态。
+  //   此时 CATS.map(catBlock) 会同时渲染多个 listBox；若它们共用一个 ref 对象，
+  //   React 按挂载顺序依次赋值，current 最终只指向**最后挂载**的那个 ——
+  //   用户在靠前的分类添加例外，被滚到底的却是别的分类的列表。
+  //   这个 bug 不会让任何静态断言变红（代码形状完全正确），只有真渲染才能发现。
+  //
+  // 桩要求（与真 React 一致，否则本断言恒假 —— 实测踩过）：
+  //   · useRef 必须**跨渲染复用同一对象**（同槽位），不是每次新建；
+  //   · useEffect 必须按组件**每轮替换**，不是累积追加。
+  {
+    let sErr = null
+    let res = null
+    try {
+      let loaded3 = null
+      new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded3 = m } } })
+      const stBuckets = new Map()
+      const refBuckets = new Map()
+      const effBuckets = new Map()
+      let cur3 = 'root'
+      let stCur = 0
+      let refCur = 0
+      const stOf = (n) => { if (!stBuckets.has(n)) stBuckets.set(n, []); return stBuckets.get(n) }
+      const refOf = (n) => { if (!refBuckets.has(n)) refBuckets.set(n, []); return refBuckets.get(n) }
+      const React3 = {
+        createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false) }),
+        memo: (c) => c, Fragment: 'Fragment',
+        Component: class { constructor(p) { this.props = p || {} } setState() {} render() { return null } },
+        useState: (init) => { const st = stOf(cur3); const i = stCur++; if (!(i in st)) st[i] = typeof init === 'function' ? init() : init; return [st[i], (v) => { st[i] = typeof v === 'function' ? v(st[i]) : v }] },
+        // 每轮渲染替换该组件的 effect 列表（真 React：同一组件重渲染时 effect 是替换语义）
+        useEffect: (fn) => { if (!effBuckets.has(cur3)) effBuckets.set(cur3, []); effBuckets.get(cur3).push(fn) },
+        // ★ 跨渲染复用同一 ref 对象（真 React 语义）—— 每次新建会让本断言恒假
+        useRef: (v) => { const st = refOf(cur3); const i = refCur++; if (!(i in st)) st[i] = { current: v === undefined ? null : v }; return st[i] },
+        useMemo: (f) => f(), useCallback: (f) => f(),
+      }
+      const render3 = (fn, props) => {
+        const p = cur3; cur3 = fn.name || 'anon'; stCur = 0; refCur = 0
+        effBuckets.set(cur3, [])
+        try { return fn(props) } finally { cur3 = p }
+      }
+      const runEff3 = () => { for (const [, list] of effBuckets) for (const fn of list) { try { fn() } catch (e) {} } }
+      const T3 = (k) => k
+      const walk3 = (n, acc) => {
+        if (!n || typeof n !== 'object') return acc
+        acc.push(n)
+        for (const k of n.kids || []) walk3(k, acc)
+        if (n.props && n.props.children) walk3(n.props.children, acc)
+        return acc
+      }
+      // 六个例外分类各 1 条 → 全部 ≤6 → **默认全部展开**（多 listBox 同时渲染）
+      const mkC = (id, match) => ({ mode: 'ask', exceptions: [{ id, action: 'allow', match }] })
+      const fx = {
+        configPath: 'C:/x/config.json', active: true, preset: 'custom-review', activeForSession: true, platformPreset: 'custom-review', projectKey: 'X:/ws',
+        sandbox: { global: 'danger-full-access', project: 'inherit', effective: 'danger-full-access', session: 'danger-full-access' },
+        categories: {
+          global: {
+            directory: mkC('d1', 'X:/ws/a'), command: mkC('c1', 'git status'), read: mkC('r1', 'X:/ws/b'),
+            image: mkC('i1', 'X:/ws/c.png'), edit: mkC('e1', 'X:/ws/d'), undo: mkC('u1', 'X:/ws/e'),
+          },
+          project: null,
+        },
+        effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
+        custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
+        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
+        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
+        exceptionBlast: {},
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
+        fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
+      }
+      const calls3 = []
+      const fetch3 = (url, opts) => {
+        calls3.push({ url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null })
+        const u = String(url)
+        const payload = u.indexOf('/permgate/pending') !== -1 ? [] : (u.indexOf('/permgate/status') !== -1 ? fx : {})
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload), text: () => Promise.resolve('') })
+      }
+      let Panel3 = null
+      const ctx3 = {
+        slots: {
+          inject: (n, fn) => { try { if (typeof fn === 'function') fn() } catch (e) {} },
+          register: (meta, comp) => { if (meta && meta.name === 'settings.section') Panel3 = comp; return () => {} },
+        },
+        locale: { register: () => {}, bind: () => T3 }, get: () => undefined,
+        effect: (fn) => { try { fn() } catch (e) {} return () => {} }, on: () => () => {},
+      }
+      const g3 = globalThis
+      g3.window = { addEventListener: () => {}, removeEventListener: () => {}, innerWidth: 1200, innerHeight: 800, location: { href: 'http://localhost/' }, fetch: fetch3 }
+      g3.fetch = fetch3
+      g3.EventSource = function () { this.close = () => {} }
+      g3.document = { querySelector: () => null, createElement: () => ({ dataset: {}, style: {}, appendChild: () => {}, remove: () => {} }), head: { appendChild: () => {} } }
+      loaded3.factory((n) => (n === 'react' ? React3 : {}))
+      const mod3 = loaded3.factory((n) => (n === 'react' ? React3 : {}))
+      mod3.apply(ctx3)
+      if (!Panel3) throw new Error('未注册面板组件')
+      render3(Panel3, { sessionId: 's1' }); runEff3()
+      await new Promise((r) => setTimeout(r, 60))
+      let tree = render3(Panel3, { sessionId: 's1' })
+      let nodes = walk3(tree, [])
+      const boxesOf3 = (ns) => ns.filter((n) => n.props && n.props.style && n.props.style.maxHeight === 260)
+      const boxes = boxesOf3(nodes)
+      if (boxes.length < 2) throw new Error('同时展开的列表不足 2 个（前置不成立，场景会空转）')
+      // 给每个滚动区一个假 DOM，记录各自的 scrollTop
+      const fakes = boxes.map(() => ({ scrollTop: 0, scrollHeight: 500 }))
+      const mount = (ns) => {
+        const bs = boxesOf3(ns)
+        bs.forEach((b, i) => { const r = b.props.ref; if (typeof r === 'function') r(fakes[i]); else if (r && typeof r === 'object') r.current = fakes[i] })
+        return bs.length
+      }
+      mount(nodes); runEff3()
+      // 在**第一个**分类（directory）的添加行填内容并点添加
+      const addInputs = nodes.filter((n) => n.type === 'input' && n.props && (n.props.placeholder === 'panel.excPathPh' || n.props.placeholder === 'panel.excPh'))
+      if (!addInputs.length) throw new Error('例外添加输入框未渲染')
+      addInputs[0].props.onChange({ target: { value: 'X:/ws/new-thing' } })
+      tree = render3(Panel3, { sessionId: 's1' }); nodes = walk3(tree, [])
+      const addBtn = nodes.find((n) => n.type === 'button' && (n.kids || []).includes('panel.addExc'))
+      if (!addBtn) throw new Error('例外添加按钮未渲染')
+      calls3.length = 0
+      addBtn.props.onClick()
+      await new Promise((r) => setTimeout(r, 40))
+      const req = calls3.find((c) => c.url.indexOf('/permgate/add-exception') !== -1)
+      // 重渲染（状态已更新）→ 重新挂假 DOM（模拟 React 的 ref 重设）→ 跑 effect
+      tree = render3(Panel3, { sessionId: 's1' }); nodes = walk3(tree, [])
+      mount(nodes); runEff3()
+      const scrolled = fakes.map((f, i) => (f.scrollTop === f.scrollHeight ? i : -1)).filter((i) => i >= 0)
+      res = {
+        cat: req && req.body && req.body.category,
+        boxCount: boxes.length,
+        scrolled: scrolled,
+        tops: fakes.map((f) => f.scrollTop),
+      }
+    } catch (e) { sErr = e }
+    ok('★★★ 多分类同时展开时，滚的是**本次添加的那个**分类（不是最后挂载的）',
+      sErr === null && res && res.cat === 'directory' && res.scrolled.length === 1 && res.scrolled[0] === 0,
+      JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), ...(res || {}) }))
+  }
+  // 清理本次渲染留下的全局桩
+  try { delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
   // ★★ 长列表容器（listBox）：过滤器 + 定高滚动。三处列表（快捷工具 / 例外 / 规则）
   // 条目数都无上界，面板原本全部平铺 —— 列表一长，后面的卡片被顶到很远。
   // 判据按**行为**复算（不是匹配源码）：抠出 listBox 的实现，用最小 React 桩驱动，
@@ -4986,6 +5473,86 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       ok('★ listBox 排序：条目缺 id 时该行不提供排序上下文',
         noId.seen[0].ui === null && noId.seen[1].ui !== null,
         JSON.stringify(noId.seen.map((s) => s.ui === null)))
+      // ⑦h ★★ 滚动区必须把调用方给的 scrollRef 挂上去（「添加后滚到底」的唯一通路）。
+      //     判据：传了 scrollRef 时它出现在滚动容器的 props.ref 上；不传时为 undefined。
+      //     为什么单独守：ref 没挂上不会报错，只是「添加后不滚动」—— 用户看到的是
+      //     「我加的那条不见了」（它在列表末尾、视口外），会以为没加上而重复添加。
+      const withRef = box({ items: FOUR, filter: '', onFilter: () => {}, match: (x) => x.id, render: () => ({ type: 'row', props: {}, kids: [] }), empty: null, scrollRef: 'REF_SENTINEL' })
+      const withoutRef = box({ items: FOUR, filter: '', onFilter: () => {}, match: (x) => x.id, render: () => ({ type: 'row', props: {}, kids: [] }), empty: null })
+      const refOf = (n) => { const s = scrollOf(n); return s ? s.props.ref : '<无滚动区>' }
+      ok('★★ listBox：滚动区的 ref 来自调用方（scrollRef 未接线则「添加后滚到底」整条失效）',
+        refOf(withRef) === 'REF_SENTINEL' && refOf(withoutRef) === undefined,
+        JSON.stringify({ withRef: refOf(withRef), withoutRef: refOf(withoutRef) }))
+      // ⑦i ★★ listBox **内部不得调 hook**。例外列表那处调用位于「展开/折叠」的条件分支里
+      //     （catBlock 内），在分支内调 hook 会让 hook 数量随折叠状态变化，React 抛
+      //     「Rendered more hooks than during the previous render」。
+      //     本轮就是这么写坏的（regressions 的渲染断言当场崩在 React.useRef is not a function）。
+      //     判据按源码文本：抠出 listBox 的实现，里面不得出现 React.useXxx。
+      ok('★★ listBox 内部不得调用 hook（它在条件分支里被调用）',
+        !/React\.use[A-Z]/.test(cli.slice(cli.indexOf('const listBox = (o) => {'), cli.indexOf('\n\t\t\t};', cli.indexOf('const listBox = (o) => {')) + 6)),
+        '')
+      // ⑦j ★ 滚动标记必须是**计数器**，不能是布尔。
+      //    布尔在连续两次添加时不变（true→true），effect 不重跑 —— 第二次添加不滚动，
+      //    而那正是用户最需要看到新条目的时候。
+      //    例外那个计数器还必须**带上分类名**（{c, n}）：只存数字的话 effect 无从得知
+      //    「这次是哪个分类加的」，只能退回「滚最后一个渲染的列表」—— 而多个分类默认同时
+      //    展开，那正是「给 A 添加、B 被拽到底」的成因（见 excScrollRefs 的说明）。
+      // 判据刻意写得**宽松**（不钉死变量名与空白）：这些是「形状」断言，
+      // 钉太死会让纯重构（重命名、换写法）误报，而误报会训练人忽略失败。
+      // 真正防回归的是下面 ⑦k 的行为判据与 exceptionShadow 的行为复算。
+      ok('★ 滚动标记用计数器（布尔在连续添加时不变，第二次不会滚）',
+        /const \[quickScrollEnd, setQuickScrollEnd\] = React\.useState\(0\)/.test(cli)
+        && /const \[excScrollEnd, setExcScrollEnd\] = React\.useState\(\{/.test(cli)
+        && /setQuickScrollEnd\(\(?n\)? => n \+ 1\)/.test(cli)
+        && /setExcScrollEnd\(\(prev\) => \(\{ c[,:]/.test(cli))
+      // ⑦k ★★ 两个列表**都必须把 scrollRef 接上**，且各自的 effect 必须真的滚。
+      //     只断言「listBox 支持 scrollRef」（⑦h）不够：调用点漏传时 listBox 照样正确，
+      //     只是没人传 —— 表现为「添加后不滚动」，而用户看到的是「我加的那条不见了」。
+      //     四个方向都要守（实测：只查 listBox 内部时，三个变异全部漏网）：
+      //       ① 快捷工具调用点传了 quickScrollRef；
+      //       ② 例外调用点传的是**按分类存元素的 callback ref**（不是共用的 ref 对象）——
+      //          多个分类默认同时展开，共用对象时 current 只指向最后挂载的那个，
+      //          于是给 A 添加却把 B 拽到底（本次修复的点）；
+      //       ③ 两个 effect 里都有 scrollTop = scrollHeight 的实际动作
+      //          （只写 ref 不滚等于没接线）；
+      //       ④ 例外那条 effect 必须**按分类取**元素（否则 ② 存了分类映射也没人用，等于白改）。
+      // 判据按「形状 + 语义」而非逐字匹配：② 只要求「例外调用点的 scrollRef 是函数且写入
+      // 按分类的映射」，不要求写成某个具体的箭头函数体。
+      const excCall = (function () {
+        const i = cli.indexOf('items: excList')
+        if (i < 0) return ''
+        const start = cli.lastIndexOf('listBox(', i)
+        if (start < 0) return ''
+        let d = 0
+        for (let k = cli.indexOf('(', start); k < cli.length; k++) {
+          if (cli[k] === '(') d++
+          else if (cli[k] === ')') { d--; if (d === 0) return cli.slice(start, k + 1) }
+        }
+        return ''
+      })()
+      ok('★★ 两个列表的 scrollRef 都接线，且 effect 真的滚到底',
+        cli.includes('scrollRef: quickScrollRef,')
+        // ② 例外调用点的 scrollRef 是函数（callback ref），且函数体里按分类写入映射
+        && /scrollRef: \(?\w+\)? =>/.test(excCall) && /excScrollRefs\.current\[c\]/.test(excCall)
+        // ③ 两处都真的滚
+        && (cli.match(/\.scrollTop = \w+\.scrollHeight;/g) || []).length === 2
+        && /\[quickScrollEnd\]/.test(cli) && /\[excScrollEnd\]/.test(cli)
+        // ④ effect 按分类取元素（不写死某个变量名，只要求「用分类键取映射里的元素」）
+        && /excScrollRefs\.current\[excScrollEnd\.c\]/.test(cli),
+        JSON.stringify({
+          quick: cli.includes('scrollRef: quickScrollRef,'),
+          excCb: /scrollRef: \(?\w+\)? =>/.test(excCall) && /excScrollRefs\.current\[c\]/.test(excCall),
+          excByCat: /excScrollRefs\.current\[excScrollEnd\.c\]/.test(cli),
+          scrollWrites: (cli.match(/\.scrollTop = \w+\.scrollHeight;/g) || []).length,
+        }))
+      // ⑦l ★★ 添加成功后必须**清掉该列表的过滤器**。
+      //     为什么：新条目追加在末尾，而过滤器可能正遮着它 —— 不清掉用户就看不到自己
+      //     刚加的那条，会以为没加上而重复添加（这正是「追加到末尾」这个改动的配套）。
+      //     判据按调用点：两个 add 回调里都要有对应的 setFilter('')。
+      ok('★★ 添加成功后清掉本列表的过滤器（否则新条目被过滤词遮住，看起来没加上）',
+        cli.includes("setQuickFilter('');")
+        && /setExcFilter\(\(prev\) => Object\.assign\(\{\}, prev, \{ \[c\]: '' \}\)\)/.test(cli),
+        JSON.stringify({ quick: cli.includes("setQuickFilter('');"), exc: /setExcFilter\(\(prev\) => Object\.assign\(\{\}, prev, \{ \[c\]: '' \}\)\)/.test(cli) }))
       // ⑦g ★★ 行的基础样式必须**无条件**给出：sortRowProps 只在拖动/落点两个分支里设
       // style 时，正常态的行会丢掉整个 rowStyle（没有 flex、没有内边距、没有分隔线），
       // 多个条目挤成一团。这个 bug 不报错、不影响任何行为断言，只有渲染出来才看得见。
@@ -5034,19 +5601,31 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // 这样同时挡住「都调了 listBox 但传错数据源」。
   // 注意 `listBox(` 在 `items:` **之前**（它是调用表达式的开头），故切片要向前取。
   ok('★★ 三处长列表都走 listBox（快捷工具 / 例外 / 规则），且各自传对数据源', (function () {
+    // 抠出**完整的** listBox({...}) 调用（按括号配对，不用固定窗口）。
+    // 这里曾经用「items 之前 200 字符 + 之后 1000 字符」的固定窗口，而例外那处调用
+    // 中间夹着越来越长的注释（排序能力、scrollRef、遮蔽标注…）—— 窗口一满，
+    // 断言就会在「源码没写错」的情况下变红，失败方向还指向「没走 listBox」。
+    const callOf = (itemsKey) => {
+      const i = cli.indexOf(itemsKey)
+      if (i < 0) return null
+      const start = cli.lastIndexOf('listBox(', i)
+      if (start < 0) return null
+      const open = cli.indexOf('(', start)
+      let d = 0
+      for (let k = open; k < cli.length; k++) {
+        if (cli[k] === '(') d++
+        else if (cli[k] === ')') { d--; if (d === 0) return cli.slice(start, k + 1) }
+      }
+      return null
+    }
     const need = [
       ['items: quickTools', 'quickRow'],
       ['items: excList', 'r.path || r.match'],
       ['items: customList || []', 'ruleRow'],
     ]
     return need.every((pair) => {
-      const i = cli.indexOf(pair[0])
-      if (i < 0) return false
-      const back = cli.slice(Math.max(0, i - 200), i)
-      // 窗口 1000：例外那处调用点在 items 与 render 之间还有 sort/注释（排序能力），
-      // 700 会把 render 落到窗口外，断言失败的方向会指向「没走 listBox」而不是「窗口太小」。
-      const fwd = cli.slice(i, i + 1000)
-      return back.includes('listBox(') && fwd.includes(pair[1])
+      const call = callOf(pair[0])
+      return !!call && call.includes(pair[1])
     })
   })())
   // ★★ 排序能力只给「顺序即优先级」的两处列表（规则 / 例外），**不给快捷工具**。
@@ -5056,13 +5635,21 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // 优先级，实际什么都没发生。这属于「看起来能用、实际是假的」那类问题。
   // 判据按调用点定位：`sort:` 必须出现在规则与例外的 listBox 调用里，且不出现在快捷工具那个里。
   ok('★★ 排序能力只给规则与例外两处列表（快捷工具顺序与判定无关，不得给）', (function () {
+    // 同上一处：按括号配对抠出**完整**调用，不用固定窗口。
+    // 窗口版会随注释变长而把 sort 行挤出范围 —— 那会让这条断言在源码正确时变红，
+    // 且失败方向指向「快捷工具没传 sort」这种完全相反的解释。
     const callOf = (itemsKey) => {
       const i = cli.indexOf(itemsKey)
       if (i < 0) return null
-      // listBox( 在 items 之前，故向前找到调用起点、向后取到该调用的右括号范围（足够长的窗口）
-      const back = cli.lastIndexOf('listBox(', i)
-      if (back < 0) return null
-      return cli.slice(back, i + 700)
+      const start = cli.lastIndexOf('listBox(', i)
+      if (start < 0) return null
+      const open = cli.indexOf('(', start)
+      let d = 0
+      for (let k = open; k < cli.length; k++) {
+        if (cli[k] === '(') d++
+        else if (cli[k] === ')') { d--; if (d === 0) return cli.slice(start, k + 1) }
+      }
+      return null
     }
     const quick = callOf('items: quickTools')
     const exc = callOf('items: excList')

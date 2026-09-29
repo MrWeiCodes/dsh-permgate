@@ -3611,12 +3611,15 @@ export default {
       // 取决于他要哪一种。参考工程的「顺序无关」是为**文本规则行**（顺序不可见、可能由 LLM 生成）设计的，
       // permgate 的规则是面板上的结构化列表、顺序可见且由用户手动添加，前提不成立。
       //
-      // 与例外的差别（有意保留，不是不一致）：
-      //   例外 —— 写入侧把新条目 unshift 到头部（「最新决定先生效」，弹窗一键记住就立刻生效）；
-      //   规则 —— 写入侧 push 到尾部，**顺序完全归用户，不自动重排**。
-      // 差别的原因是交互：例外主要由弹窗候选「一键记住」写入（用户期待立即生效），
-      // 规则由面板表单逐条添加（用户期待顺序不变）。两者共用「首条命中」这一读侧语义。
-      // 代价（有意接受）：新规则若被前面命中的规则遮蔽就不生效，直到用户手动把它调到前面。
+      // 与例外的关系（本轮已统一，**不再有差别**）：
+      //   例外与规则**都是写入侧 push 到尾部**，顺序完全归用户、写入侧不自动重排。
+      //   这里曾经写着「例外 unshift 到头部（最新决定先生效），规则 push 到尾部」并把它
+      //   解释为「有意保留的差别」—— 那个差别已按用户要求取消：面板自上而下渲染，
+      //   unshift 会让新条目突然出现在最上面、与用户刚在底部添加行操作的位置脱节。
+      //   两者共用「首条命中」这一读侧语义。
+      // 代价（有意接受）：新条目若被前面命中的条目遮蔽就不生效，直到用户手动把它调到前面。
+      //   例外侧**有行内标注**（statusView 的 exceptionShadow → 面板显示「未生效」），
+      //   用户能看到「我加的这条没起作用」并知道要往上移；规则侧暂无标注。
       // 「调到前面」由面板的排序控件提供（↑↓ + 拖动），落盘走 /permgate/reorder →
       // reorderEntries 这一个原语：面板只报「把 id 放到 anchor 之前/之后」，宿主不做任何推断。
       // 这里曾经写着「面板拖动排序是独立议题（尚未实现）」—— 那个议题已经落地，注释随之更新。
@@ -4300,8 +4303,26 @@ export default {
         if (note) hit.note = note
         return hit
       }
-      // 新条目一律插到数组头部：resolveCategory 只取首个匹配，即「最新决定先生效」；
-      // 同方向重复写入直接跳过并返回既有条目，避免同一决定在列表里堆积。
+      // 新条目**追加到数组末尾**（用户定）：顺序即优先级，新加的排最后，
+      // 由用户自己在面板上拖动/上下移调整到想要的优先级。
+      //
+      // 这里曾经是 unshift（新条目插到头部，即「最新决定先生效」）。改成 push 的理由：
+      // 面板的列表是**自上而下**渲染的，unshift 会让新条目突然出现在最上面，
+      // 而用户刚在底部的添加行里填完内容、视线还在底部 —— 他看不到自己刚加的那条，
+      // 会以为没加上而重复添加。追加到末尾则新条目就出现在视线附近（配合面板自动滚到底）。
+      //
+      // 代价（有意接受，用户明确表态「用户会自己调整顺序」）：resolveCategory 仍是
+      // 首条命中即生效，故新加的例外若与前面某条**同目标且反向**，它不会生效 ——
+      // 面板会把它画在列表里（看得见），用户可自行把它拖到前面。这与规则列表的
+      // 语义一致（那边也是 push 到尾部、顺序完全归用户）。
+      //
+      // 但「看得见」不等于「看得出没生效」：面板会提示「已保存」，那一行也照常渲染，
+      // 用户会以为决定已生效（实测最危险的是「以为拦住了破坏性命令、实际仍放行」）。
+      // 故读侧配套了**行内标注**：statusView 现算 exceptionShadow，面板在该行显示
+      // 「未生效」并说明被哪一条遮蔽（用户按提示用 ↑ 移上去即可）。
+      //
+      // 同方向重复写入仍然跳过并返回既有条目（去重逻辑不变，只是不再提到头部）：
+      // 否则同一决定会在列表里堆积成一串。
       const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {}, note ? { note } : {})
       try {
         const block = target === 'global' ? config.global : ensureProject(rootKey)
@@ -4312,17 +4333,16 @@ export default {
           // 否则候选写规范绝对路径、面板写相对或含 .. 原文时会各存一条指向同一路径的例外。
           const idx = c.exceptions.findIndex((r) => pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision)
           if (idx !== -1) {
-            // 命中既有同向条目：提到数组头部，否则它会被前面的反向旧条目遮蔽（resolveCategory 只取首个匹配），
-            // 用户的决定等于被静默丢弃；带新理由时一并回写（reason 已在入口按 deny + trim + 200 规范化）。
-            const hit = c.exceptions.splice(idx, 1)[0]
+            // 命中既有同向条目：原地更新文字（不移动位置 —— 用户没要求改顺序，
+            // 静默重排会让他看到自己没动过的列表变了样）。
+            const hit = c.exceptions[idx]
             textPatch(hit)
-            c.exceptions.unshift(hit)
             block[cat] = c
             return hit
           }
           // 落盘统一存规范化路径，与判重/匹配口径一致
           const item = build({ path: normAbsPath(value, rootKey) })
-          c.exceptions.unshift(item)
+          c.exceptions.push(item)
           block[cat] = c
           return item
         }
@@ -4332,14 +4352,13 @@ export default {
           if (!c.exceptions) c.exceptions = []
           const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)
           if (idx !== -1) {
-            const hit = c.exceptions.splice(idx, 1)[0]
+            const hit = c.exceptions[idx]
             textPatch(hit)
-            c.exceptions.unshift(hit)
             block.command = c
             return hit
           }
           const item = build({ match: value })
-          c.exceptions.unshift(item)
+          c.exceptions.push(item)
           block.command = c
           return item
         }
@@ -4348,7 +4367,7 @@ export default {
         const idx = block.custom.findIndex((r) => r.tool === value)
         if (idx !== -1) { block.custom[idx].action = decision; return block.custom[idx] }
         const item = { id: 'r' + Math.random().toString(36).slice(2, 8), action: decision, tool: value }
-        block.custom.unshift(item)
+        block.custom.push(item)
         return item
       } catch (e) {
         console.error('[permgate] addProjectException error:', e)
@@ -4357,7 +4376,8 @@ export default {
     }
 
     // 例外删除单点（/permgate/remove-exception 路由专用）：
-    // 判定只取数组首个匹配，故同一 path 上可能并存方向相反的多条（最新在前生效）。
+    // 判定只取数组首个匹配，故同一 path 上可能并存方向相反的多条（**首条命中生效**，
+    // 即最早写入的那条在前；被它遮蔽的条目由 statusView 的 exceptionShadow 标注为「未生效」）。
     // 删除严格按 id：只删用户点的那一行。同值同向的其它条目（方向交替写入可能累积）留给用户
     // 自行逐条清理，否则删一条历史行会连带删掉正在生效的那条，权限会静默变化。
     function removeExceptionEntries(block, catKey, id) {
@@ -4452,7 +4472,10 @@ export default {
         if (idx !== -1) { block.custom[idx].action = action; return }
         const rule = { id: 'r' + Math.random().toString(36).slice(2, 8), action, tool: entry.tool }
         if (entry.cat === 'doomloop' && entry.argsJson) rule.args = entry.argsJson
-        block.custom.unshift(rule)
+        // 追加到末尾（与 addProjectException 的新条目同口径）：面板自上而下渲染，
+        // 插到头部会让新规则突然出现在最上面、与用户刚操作的位置脱节。
+        // 顺序即优先级，用户可在面板上自行调整。
+        block.custom.push(rule)
       } catch (e) {
         console.error('[permgate] addRememberedRule error:', e)
       }
@@ -4984,6 +5007,110 @@ export default {
           }
           return out
         })(),
+        // 例外遮蔽关系（只读派生，**不落盘**）：给面板标注「这条例外被前面某条更早的例外遮蔽，
+        // 当前不生效」。
+        //
+        // 为什么需要：写入侧已改为 push 到末尾（顺序即优先级、归用户），而读侧
+        // （resolveCategory / matchSegmentException）仍是**首条命中即生效**。于是新加的例外
+        // 若与前面某条同目标且方向相反，它不会生效 —— 用户却只看到列表里多了一行、
+        // 面板还提示「已保存」，会以为决定已生效。用户明确要求用「行内标注」来暴露这一点。
+        //
+        // 判据与读侧**同构**：对每条例外，检查它前面是否存在「会先命中同一目标」的反向条目。
+        // 逐条按同口径比较（命令走 matchCommand，路径走 matchGlob + normAbsPath），
+        // 不自行发明一套「同目标」判据 —— 否则标注会说「没被遮蔽」而实际被遮蔽（或反之）。
+        //
+        // ── 判据的方向性与边界（有意取舍）──────────────────────────────────────
+        // 两个 glob 模式是否**相交**在一般情况下不可判定，故这里不做那种判断，只判
+        // 「前面那条的模式能否命中**这一条的目标文本**」（hits(prev, curTarget)）：
+        //   · 命中 → 这条例外**永远轮不到**（任何会被 cur 命中的命令，都会先被 prev 命中），
+        //     标注「被遮蔽」是确定的结论，不是猜测；
+        //   · 不命中 → 不标注。这里会**漏报**「cur 比 prev 更宽泛」的情形（如 prev=`git status`、
+        //     cur=`git *`）：那种情况下 cur 对部分命令仍然生效，并非「不生效」，
+        //     标注它反而会让用户以为刚加的宽泛规则完全没用 —— 漏报比误报安全。
+        //
+        // 同向条目不标注：读侧首条命中即生效，同向时后面的那条即使被遮蔽，**结论也相同**
+        // （allow 被 allow 遮蔽仍是 allow），标注它只会制造噪音（狼来了）。
+        // ask 例外不排除：它同样会「先命中」并改变结果（弹窗 vs 静默放行），是真实冲突。
+        //
+        // 与 exceptionBlast 同样是**读侧现算**：顺序会随用户拖动而变，落盘会变成
+        // 「推导值物化成用户表态」（见 doomloopSetting / normalizeCategory 的注释），
+        // 且排序后必须重算才准 —— 现算天然满足「调整顺序后重新处理标注」。
+        //
+        // 形状 { global: { [例外id]: {byId, byAction} }, project: {...} }，与 exceptionBlast 分层同构。
+        //
+        // ── 为什么要预算规范化与正则（不是过早优化）────────────────────────────
+        // 判据是「逐条看它前面有没有能命中它的反向条目」，朴素写法是二重循环里直接调
+        // matchGlob / normAbsPath —— 那是 O(n²) 次**昂贵**调用：normAbsPath 内含 pathResolve
+        // （同步文件系统相关的路径解析），matchGlob 每次都 new RegExp。
+        // 实测（本机）朴素写法：n=100 → 3.2 ms、n=300 → 29 ms、n=600 → 119 ms，
+        // 而 statusView 由 GET /permgate/status、每次 SSE 推送、各写盘路由回带、
+        // perm_status 工具反复调用 —— 与 exceptionBlast 当初要消除的开销同量级。
+        // 故这里把「每条自身的规范化结果」与「每条模式的正则」各算一次（O(n)），
+        // 内层只做纯比较（正则 test 与手写 glob 匹配）。
+        //
+        // 注意：这里**不需要** exceptionBlast 那套按世代失效的记忆化 —— 本函数每次现算，
+        // 而缓存只活在本次调用内（局部 Map），不存在跨 status 的陈旧问题。
+        exceptionShadow: (function () {
+          const out = { global: {}, project: {} }
+          const lists = [[config.global, 'global'], [proj, 'project']]
+          for (const pair of lists) {
+            const blk = pair[0]
+            const layer = pair[1]
+            if (!blk) continue
+            for (const c of EXC_CATS) {
+              const cat = blk[c]
+              if (!cat || !Array.isArray(cat.exceptions)) continue
+              const exs = cat.exceptions
+              const isCmd = c === 'command'
+              // ① 预算：每条例外的「目标」与「自身作为模式时的正则」各算一次。
+              //    路径侧两侧都要 normAbsPath（写入口径不一：候选写规范绝对路径，
+              //    面板可写相对或含 .. 的原文），与 matchException 同口径。
+              const targets = new Array(exs.length)
+              const regexps = new Array(exs.length)
+              for (let i = 0; i < exs.length; i++) {
+                const r = exs[i]
+                if (!r) continue
+                const raw = isCmd ? r.match : r.path
+                if (!raw) continue
+                if (isCmd) { targets[i] = String(raw); continue }
+                try {
+                  const t = normAbsPath(raw, root)
+                  targets[i] = t
+                  // globToRegExp 内含 norm，而 t 已是规范化结果（幂等），故可直接复用。
+                  regexps[i] = globToRegExp(t)
+                } catch (e) { targets[i] = null }
+              }
+              // ② 判「前面的 prev 能否命中 target」。命令例外必须按读侧方向调用：
+              //    matchCommand 做的是词边界**前缀**匹配，方向不对称（模式在前、原文在后），
+              //    反过来传会得出完全不同的结论。
+              const hits = (prevIdx, target) => {
+                const prev = exs[prevIdx]
+                if (!prev || !target) return false
+                try {
+                  if (isCmd) return matchCommand(prev.match, target)
+                  const re = regexps[prevIdx]
+                  // 与 matchGlob 等价：globToRegExp(模式).test(规范化的值)，
+                  // 两侧都已规范化，故省掉 matchGlob 内部那两次 norm。
+                  return !!re && re.test(target)
+                } catch (e) { return false }
+              }
+              for (let i = 0; i < exs.length; i++) {
+                const cur = exs[i]
+                if (!cur || !cur.id) continue
+                const target = targets[i]
+                if (!target) continue
+                let blocker = null
+                for (let k = 0; k < i; k++) {
+                  const prev = exs[k]
+                  if (!prev || prev.action === cur.action) continue
+                  if (hits(k, target)) { blocker = prev; break }
+                }
+                if (blocker) out[layer][cur.id] = { byId: blocker.id, byAction: blocker.action }
+              }
+            }
+          }
+          return out
+        })(),
         modes: MODES,
         allModes: ALL_MODES,
       }
@@ -5400,8 +5527,9 @@ export default {
           if (!a.match || !String(a.match)) return json(res, { error: 'match 不能为空' })
           const e = normalizeException({ id: 'e' + Math.random().toString(36).slice(2, 8), action: a.action, reason: a.reason, note: a.note, path: a.category === 'command' ? undefined : a.match, match: a.category === 'command' ? a.match : undefined }, a.category)
           if (!e) return json(res, { error: '非法的例外参数' })
-          // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新决定插头部」的语义，
-          // 否则面板新加的例外会排在历史条目之后，被 resolveCategory 的首个匹配静默屏蔽。
+          // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新条目追加到末尾」的语义。
+          // 顺序即优先级（resolveCategory 首条命中即生效），而面板可拖动/上下移调整 ——
+          // 新加的排最后，用户自己把它调到想要的优先级（与规则列表同一套语义）。
           const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, rootOf(exec), { target: a.target, reason: a.reason, note: a.note })
           if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)

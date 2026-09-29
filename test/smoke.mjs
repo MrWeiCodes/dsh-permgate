@@ -752,7 +752,15 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   ok('尺寸确实无法解析时不下发缩略图（sizeUnknown）', !!(dUnknown && dUnknown.sizeUnknown === true && !dUnknown.dataUrl && !dUnknown.tooLarge), JSON.stringify(dUnknown && { sizeUnknown: dUnknown.sizeUnknown, tooLarge: dUnknown.tooLarge, hasUrl: !!dUnknown.dataUrl, w: dUnknown.width, h: dUnknown.height }))
   try { rmSync(join(workspace, 'unknown-size.jpg'), { force: true }) } catch (e) {}
 
-  // (b) 面板/工具新增的例外与历史条目方向相反时，新决定立即生效（插到数组头部）
+  // (b) 新条目**追加到末尾**（用户定）：顺序即优先级，由用户在面板上自己调整。
+  //
+  // 这里曾断言「新决定插到数组头部、立即生效」（unshift 语义）。改成 push 之后，
+  // 「先 allow 后 deny」的 deny 排在 allow 之后 → 首条命中即 allow → 新 deny **不生效**。
+  // 这是有意接受的代价（用户明确表态「用户会自己调整顺序」），故断言要钉的是
+  // **新语义本身**，而不是旧的「立即生效」：
+  //   ① 新条目确实在**末尾**（不是头部）；
+  //   ② 它**看得见**（在列表里，用户能找到并拖到前面）—— 这是「让用户自己调整」的前提；
+  //   ③ 手动把它调到前面后立即生效（顺序确实即优先级）。
   const ws5 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws5-'))
   const home5 = mkdtempSync(join(tmpdir(), 'pg-smoke-home5-'))
   mkdirSync(join(home5, 'dsh-permgate'), { recursive: true })
@@ -766,9 +774,25 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   ok('面板新增 deny 写入成功并返回新条目', !!(denied5.data && denied5.data.added && denied5.data.added.action === 'deny'), JSON.stringify(denied5.data && (denied5.data.error || denied5.data.added)))
   const st5 = await callRoute(h5.routes, 'GET', '/permgate/status')
   const rows5 = (((st5.data.categories || {}).project || {}).image || {}).exceptions || []
-  ok('新决定排在例外数组头部（最新先生效）', rows5[0] && rows5[0].action === 'deny' && rows5.some((e) => e.action === 'allow'), JSON.stringify(rows5.map((e) => e.action)))
+  ok('★★ 新例外追加在数组**末尾**（顺序归用户，不再插头部）',
+    rows5.length === 2 && rows5[0].action === 'allow' && rows5[1].action === 'deny',
+    JSON.stringify(rows5.map((e) => e.action)))
   const out5 = await Promise.race([pre5(makeExec(ws5, 'read_image', { file_path: img5 }), async () => ({ kind: 'allow' })), new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 400))])
-  ok('面板新增的 deny 直接生效（不再被历史 allow 屏蔽）', !!out5 && out5.kind === 'deny', JSON.stringify(out5))
+  // 首条命中即 allow —— 新 deny 排在后面故被遮蔽。这不是 bug，是「顺序即优先级」的直接后果。
+  ok('★ 新 deny 排在 allow 之后时被遮蔽（已知后果，由用户手动调节顺序解决）',
+    !!out5 && out5.kind === 'allow', JSON.stringify(out5))
+  // 对照：把 deny 调到前面（模拟用户拖动排序）→ 立即生效
+  {
+    const st = await callRoute(h5.routes, 'GET', '/permgate/status')
+    const list = (((st.data.categories || {}).project || {}).image || {}).exceptions || []
+    const allowId = (list.find((e) => e.action === 'allow') || {}).id
+    const denyId = (list.find((e) => e.action === 'deny') || {}).id
+    const mv = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'project', kind: 'exception', category: 'image', id: denyId, anchor: allowId, position: 'before', lang: 'zh' })
+    ok('★ 例外排序路由把 deny 提到前面', !!(mv.data && mv.data.reordered), JSON.stringify(mv.data && mv.data.error))
+    const out5b = await Promise.race([pre5(makeExec(ws5, 'read_image', { file_path: img5 }), async () => ({ kind: 'allow' })), new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 400))])
+    ok('★★ 用户手动把新例外调到前面后立即生效（顺序 = 优先级）',
+      !!out5b && out5b.kind === 'deny', JSON.stringify(out5b))
+  }
   try { rmSync(ws5, { recursive: true, force: true }); rmSync(home5, { recursive: true, force: true }) } catch (e) {}
 
   // (c) 拒绝语义下即便携带 allow 规则，服务端也必须拦截（不写 allow 例外）
@@ -862,7 +886,12 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   await Promise.race([p8, new Promise((r) => setTimeout(r, 200))])
   try { rmSync(ws8, { recursive: true, force: true }); rmSync(home8, { recursive: true, force: true }) } catch (e) {}
 
-  // (f) 同向重复写入必须让该决定生效：命中的旧条目要被提到头部，否则会被前面的反向条目遮蔽
+  // (f) 同向重复写入：命中的旧条目**原地更新文字**（不移动位置）。
+  //
+  // 这里曾断言「把命中的条目提到头部」（unshift 语义）—— 新语义下位置归用户，
+  // 去重命中只回写 reason/note，不动顺序。故断言改为：
+  //   ① 同向重复写入**不新增条目**（去重仍生效，否则列表会堆成一串）；
+  //   ② 位置不变（先 deny 后 allow 之后，再写 deny 不会把它挪到前面）。
   const ws9 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws9-'))
   const home9 = mkdtempSync(join(tmpdir(), 'pg-smoke-home9-'))
   mkdirSync(join(home9, 'dsh-permgate'), { recursive: true })
@@ -870,23 +899,34 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   const pre9 = h9.hooks.get('tools/pre-execute')
   const img9 = join(ws9, 'w.png')
   writeFileSync(img9, Buffer.from(PNG, 'base64'))
-  const add9 = (action) => callRoute(h9.routes, 'POST', '/permgate/add-exception', { target: 'project', category: 'image', action, match: img9 })
+  const add9 = (action, reason) => callRoute(h9.routes, 'POST', '/permgate/add-exception', { target: 'project', category: 'image', action, match: img9, reason })
   const rows9 = async () => {
     const st = await callRoute(h9.routes, 'GET', '/permgate/status')
     return ((((st.data || {}).categories || {}).project || {}).image || {}).exceptions || []
   }
   await add9('deny')
   await add9('allow')
-  ok('先 deny 后 allow 时 allow 排在头部生效', (await rows9())[0].action === 'allow')
+  ok('★ 先 deny 后 allow 时顺序为 [deny, allow]（新条目追加在末尾）',
+    JSON.stringify((await rows9()).map((e) => e.action)) === JSON.stringify(['deny', 'allow']),
+    JSON.stringify((await rows9()).map((e) => e.action)))
   await add9('deny')
   const rows9b = await rows9()
-  ok('同向重复写入把命中的 deny 提到头部', rows9b.length === 2 && rows9b[0].action === 'deny', JSON.stringify(rows9b.map((e) => e.action)))
+  ok('★ 同向重复写入不新增条目（去重生效，位置不变）',
+    rows9b.length === 2 && rows9b[0].action === 'deny' && rows9b[1].action === 'allow',
+    JSON.stringify(rows9b.map((e) => e.action)))
+  // 首条命中即 deny —— 这条路径本来就该拒绝（deny 排在第一位）
   const out9 = await Promise.race([pre9(makeExec(ws9, 'read_image', { file_path: img9 }), async () => ({ kind: 'allow' })), new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 400))])
-  ok('该路径按最新决定拒绝（不再被前面的 allow 遮蔽）', !!out9 && out9.kind === 'deny', JSON.stringify(out9))
+  ok('该路径按首条命中的 deny 拒绝', !!out9 && out9.kind === 'deny', JSON.stringify(out9))
+  // 同向去重要能回写文字：给 deny 补一个 reason，应落到既有那条上而不是新建
+  await add9('deny', '新理由')
+  const rows9c = await rows9()
+  ok('★ 同向重复写入回写文字（reason 落到既有条目上，不新建）',
+    rows9c.length === 2 && rows9c[0].action === 'deny' && rows9c[0].reason === '新理由',
+    JSON.stringify(rows9c.map((e) => ({ a: e.action, r: e.reason }))))
   // 同向重复写入带新理由时应更新既有条目的 reason（面板显示最新理由）
-  const add9r = (action, reason) => callRoute(h9.routes, 'POST', '/permgate/add-exception', { target: 'project', category: 'image', action, match: img9, reason })
-  await add9r('deny', '第一次理由')
-  await add9r('deny', '更新后的理由')
+  // 复用上面的 add9（两者请求体完全相同，各写一份会在加字段时只改一处）
+  await add9('deny', '第一次理由')
+  await add9('deny', '更新后的理由')
   const denyRow9 = (await rows9()).find((e) => e.action === 'deny')
   ok('同向重复写入会更新既有条目的 reason', !!denyRow9 && denyRow9.reason === '更新后的理由', JSON.stringify(denyRow9 && denyRow9.reason))
   try { rmSync(ws9, { recursive: true, force: true }); rmSync(home9, { recursive: true, force: true }) } catch (e) {}
@@ -1035,12 +1075,32 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   ok('group15: 从 ask 例外一键改为永久放行后本次即放行', !!outA5 && outA5.kind === 'allow', JSON.stringify(outA5))
   const stA5 = await callRoute(hA.routes, 'GET', '/permgate/status')
   const rowsA5 = ((((stA5.data || {}).categories || {}).project || {}).read || {}).exceptions || []
-  ok('group15: 新 allow 例外插到 ask 例外之前（最新决定先生效）', rowsA5.length === 2 && rowsA5[0].action === 'allow' && rowsA5[1].action === 'ask', JSON.stringify(rowsA5.map((e) => e.action)))
+  // 新语义：新条目追加在末尾 → 顺序为 [ask, allow]，首条命中的 ask 仍在生效。
+  // 这里曾断言「allow 插到 ask 之前、之后被静默放行」（unshift 语义）—— 已按用户要求改掉。
+  // 钉住新语义：位置在末尾，且该例外**确实看得见**（用户能自己拖到前面去）。
+  ok('★ group15: 新 allow 例外追加在 ask 例外之后（顺序归用户）',
+    rowsA5.length === 2 && rowsA5[0].action === 'ask' && rowsA5[1].action === 'allow',
+    JSON.stringify(rowsA5.map((e) => e.action)))
+  // 首条命中的仍是 ask → 同类读取继续弹窗（不是静默放行）。
+  // 判据是「没有静默放行」：ask 会去弹窗，而测试桩的 approval 永不 resolve，
+  // 故 Promise.race 超时返回 timeout —— 那正是「在等审批」的表现，不是失败。
   let nextedA5 = false
   const pA6 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => { nextedA5 = true; return { kind: 'allow' } })
   pA6.catch(() => {})
   await Promise.race([pA6, new Promise((r) => setTimeout(r, 300))])
-  ok('group15: 之后的同类读取被 allow 例外静默放行（ask 例外已被盖过）', nextedA5 === true)
+  ok('★ group15: ask 例外排在前面时仍弹窗等待（未被后面的 allow 静默放行）', nextedA5 === false)
+  // 对照：把 allow 调到前面（模拟用户拖动排序）→ 立即静默放行
+  {
+    const allowId = (rowsA5.find((e) => e.action === 'allow') || {}).id
+    const askId = (rowsA5.find((e) => e.action === 'ask') || {}).id
+    const mvA = await callRoute(hA.routes, 'POST', '/permgate/reorder', { target: 'project', kind: 'exception', category: 'read', id: allowId, anchor: askId, position: 'before', lang: 'zh' })
+    ok('group15: 例外排序路由把 allow 提到 ask 之前', !!(mvA.data && mvA.data.reordered), JSON.stringify(mvA.data && mvA.data.error))
+    let nextedA5b = false
+    const pA7 = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => { nextedA5b = true; return { kind: 'allow' } })
+    pA7.catch(() => {})
+    await Promise.race([pA7, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+    ok('★★ group15: 用户手动把 allow 调到前面后同类读取被静默放行（顺序 = 优先级）', nextedA5b === true)
+  }
 
   // (f) 工作区外的 ask 例外：cat / ruleId 同源，说明随弹窗展示
   const wsA2 = mkdtempSync(join(tmpdir(), 'pg-excask2-ws-'))
