@@ -2217,7 +2217,7 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && !src.includes('cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, destructiveDefaultOf'))
   // ★ 读取侧按本层 mode 推导默认值（commandSubSetting 的 ③ 分支）
   ok('★ commandSubSetting 在两层都无显式值时按本层 mode 推导（含项目层 deny）',
-    /function commandSubSetting\(root\) \{[\s\S]{0,1600}?const derived = destructiveDefaultOf\(mode, false\)[\s\S]{0,200}?return \{ action: derived/.test(src)
+    /function commandSubSetting\(root\) \{[\s\S]{0,1600}?const derived = destructiveDefaultOf\(mode, false\)[\s\S]{0,200}?return subView\(derived/.test(src)
     && /const pMode = proj && proj\.command && proj\.command\.mode/.test(src))
   // ★ 建块时不得为 command 物化 destructive（freshCategory(cat,true) 给的是 inherit，
   // 落盘后会变成「本层有表态」而穿透到全局 —— 这正是面板设项目 deny 被旁路的根因）

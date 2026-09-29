@@ -28,6 +28,47 @@ const fail = []
 const ok = (name, cond, extra) => { if (!cond) fail.push(name + (extra ? ' — ' + extra : '')) }
 const group = (t) => console.log('\n— ' + t)
 
+// ── 工具返回值的 lossless-JSON 校验 ─────────────────────────────────────────
+// DSH 0.2.0 起，dsh-tools 在工具返回后加了一道严格校验（snapshotToolValue →
+// dsh-util-values 的 walkJsonValue），规则**比 JSON 本身严**：
+//   · 属性值为 undefined → 整个返回值判失败（旧版只走 JSON.stringify，会静默丢弃它，
+//     所以这类泄漏在升级前完全不可见 —— perm_status 就是这么在 0.2.0 上直接报
+//     `tool "perm_status" returned invalid output: value is not lossless JSON` 的）；
+//   · number 必须有限且不是 -0；· 对象原型必须是 plain 或 null；
+//   · 数组必须 dense 且是 intrinsic Array；· 不得有 symbol 键或不可枚举自有属性；· 不得循环。
+// 这里复刻同一套规则：DSH 未导出该函数（它在 dsh-util-values 内部），而本插件的测试
+// 不依赖 DSH 内部包 —— 复刻的规则集一旦与上游分叉，断言会以「本该通过却失败」的形式
+// 暴露出来，方向是安全的（宁可误报，不可漏报）。
+function losslessViolation(value) {
+  const bad = []
+  const ancestors = new Set()
+  const walk = (v, path) => {
+    if (v === null) return
+    const t = typeof v
+    if (t === 'string' || t === 'boolean') return
+    if (t === 'number') { if (!Number.isFinite(v) || Object.is(v, -0)) bad.push(path + ' 非法 number: ' + String(v)); return }
+    if (t !== 'object') { bad.push(path + ' 非 JSON 类型 typeof=' + t); return }
+    if (ancestors.has(v)) { bad.push(path + ' 循环引用'); return }
+    ancestors.add(v)
+    try {
+      if (Array.isArray(v)) {
+        if (Object.getPrototypeOf(v) !== Array.prototype) { bad.push(path + ' 数组原型非 intrinsic'); return }
+        if (Reflect.ownKeys(v).length !== v.length + 1) { bad.push(path + ' 数组非 dense'); return }
+        for (let i = 0; i < v.length; i++) walk(v[i], path + '[' + i + ']')
+        return
+      }
+      const proto = Object.getPrototypeOf(v)
+      if (proto !== null && proto !== Object.prototype) { bad.push(path + ' 对象原型非 plain/null'); return }
+      for (const k of Reflect.ownKeys(v)) {
+        if (typeof k !== 'string' || !Object.prototype.propertyIsEnumerable.call(v, k)) { bad.push(path + ' symbol 键或不可枚举属性'); continue }
+        walk(v[k], path + '.' + k)
+      }
+    } finally { ancestors.delete(v) }
+  }
+  walk(value, '$')
+  return bad
+}
+
 const plugin = (await import(pathToFileURL(join(ROOT, 'index.js')).href)).default
 
 // ── 宿主 mock ────────────────────────────────────────────────
@@ -537,6 +578,12 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
   ok('perm_status 工具已注册', !!status && typeof status.execute === 'function')
   const view = await status.execute({}, makeExec(ws2, 'perm_status', {}))
   ok('perm_status 返回 status 视图', !!(view && view.configPath))
+  // ★ 工具返回值必须过 DSH 的 lossless-JSON 校验（0.2.0 起收紧）
+  // 反例：commandSubSetting 里 `reason: undefined`（键在、值为 undefined）—— 升级后
+  // perm_status 整个报错。这条断言就是那次缺陷的回归闸：任何新增的 undefined 属性值、
+  // -0、非 plain 原型或稀疏数组都会在这里被点名到具体路径。
+  const lv = losslessViolation(view)
+  ok('★ perm_status 返回值满足 DSH 的 lossless-JSON 校验', lv.length === 0, lv.join(' | '))
 
   const homeCfg = join(home2, 'dsh-permgate', 'config.json')
   ok('home 配置文件已生成', existsSync(homeCfg))

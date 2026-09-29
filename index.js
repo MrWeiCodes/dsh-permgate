@@ -1813,6 +1813,20 @@ export default {
       return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }
     }
 
+    // 子设置视图的统一构造：**reason 为空时不建这个键**，而不是建成 undefined。
+    //
+    // 为什么必须不建键：DSH 0.2.0 起，工具返回值要过一道 lossless-JSON 校验
+    // （dsh-tools 的 snapshotToolValue → dsh-util-values 的 walkJsonValue），
+    // 规则比 JSON 本身严 —— **属性值为 undefined 会让整个返回值判失败**。
+    // 旧版只走 JSON.stringify（静默丢弃 undefined），所以这个坑一直没暴露，
+    // 直到 DSH 升级后 perm_status 直接报：
+    //   tool "perm_status" returned invalid output: value is not lossless JSON
+    // 与 normalizeException 的写法同口径（那边 `if (t) e.reason = t`，无值不建键）。
+    const subView = (action, rawReason, source) => {
+      const reason = normalizeText(rawReason)
+      return reason ? { action, reason, source } : { action, source }
+    }
+
     // command 分类的子设置读取：与 resolveCategory 同口径（项目显式 → 全局 → 默认），
     // 项目层 inherit 穿透全局。单一读取点：assessCommand 的 destructive 钩子与 statusView
     // 的下发都走它，避免「面板显示一个值、实际裁决按另一个值」的双份真相。
@@ -1831,17 +1845,18 @@ export default {
       const proj = projectBlock(root)
       const pSub = proj && proj.command && proj.command.destructive
       const pv = pSub && pSub.action
-      if (pv && pv !== 'inherit') return { action: pv, reason: normalizeText(pSub.reason), source: 'project' }
+      if (pv && pv !== 'inherit') return subView(pv, pSub.reason, 'project')
       const gSub = config.global.command && config.global.command.destructive
       const gv = gSub && gSub.action
-      if (gv && gv !== 'inherit') return { action: gv, reason: normalizeText(gSub.reason), source: 'global' }
+      if (gv && gv !== 'inherit') return subView(gv, gSub.reason, 'global')
       // ③ 推导：取本层（项目优先，否则全局）的 command mode 决定默认动作
       const pMode = proj && proj.command && proj.command.mode
       const useProject = pMode && pMode !== 'inherit'
       const mode = useProject ? pMode : (config.global.command && config.global.command.mode)
       const derived = destructiveDefaultOf(mode, false)
       // derived 只可能是 deny / ask（inheritDefault=false），都是能直接用的动作
-      return { action: derived, reason: undefined, source: useProject ? 'project-default' : 'default' }
+      // 推导分支没有用户理由可给，故传 null —— subView 会因此不建 reason 键
+      return subView(derived, null, useProject ? 'project-default' : 'default')
     }
 
     // doomloop 阈值的读取单点（与 commandSubSetting 同构）：项目显式 → 全局显式 → 默认。
