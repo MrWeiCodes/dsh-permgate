@@ -3,7 +3,7 @@
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'
+import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, isDestructiveSegment, canCarryDestructivePayload, isPayloadCarrierLabel, blastRadiusOf, blastRadiusOfCommandPattern, BLAST_ORDER, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
@@ -15,6 +15,14 @@ const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 // warnSubMismatch 判据同源 —— 两处都表达「谁更严」，不该各写一份比较逻辑。
 const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
 const MAX_DECISIONS = 30
+// 候选值（例外模式）的字符上限：超限的候选**不产出**。
+//
+// 破坏性/载荷族段的候选值是「整段原文」，而命令行由 AI 生成、长度无上界 ——
+// 没有上限时一条 190,896 字符的命令一次「允许并记住」就把 config.json 撑到 194 KB，
+// 此后每次 statusView 全量下发（实测 GET /permgate/status 196,285 bytes、
+// perm_status 向 AI 下发 196,322 bytes），且重启后不会被截断。
+// 上限取 2000：正常破坏性命令（含几十个路径）远低于它，而单条例外的下发体积被限制在 2 KB 量级。
+const CAND_VALUE_MAX_CHARS = 2000
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
 // 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
@@ -277,8 +285,17 @@ function normTarget(a) {
 }
 
 // 路径归一化（better-edit store 路径匹配共用）：大小写/斜杠/尾斜杠归一化
+//
+// 尾部分隔符剥离用**线性 while**，与 apply() 内的 norm 同源同写法：`.replace(/\/+$/, '')`
+// 在 V8 上对「一段连续斜杠 + 非斜杠结尾」的输入呈平方增长（`\/+$` 在每个起点回退后
+// 重新扫描整段连续斜杠）。实测 40000 个连续斜杠：正则版 350 ms、while 版 0.01 ms。
+// 这里曾被漏掉（apply() 的 norm 改了，这一份没改），而它的入参同样是 AI 生成的路径原文。
 function normPathKey(p) {
-  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  let s = String(p || '').replace(/\\/g, '/')
+  let end = s.length
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1
+  if (end !== s.length) s = s.slice(0, end)
+  return s.toLowerCase()
 }
 
 // 「文件过大」预检统一口径：size 为字节数（多字节 UTF-8 下 ≥ 字符数），超过上限即可安全提前拒绝；
@@ -715,9 +732,52 @@ export default {
     const upgradedCalls = new Map()
     // 客户端最近请求的语言（zh/en），用于宿主即时文案（弹窗标签、升级审批提示）
     let uiLang = 'zh'
+    // 例外爆炸半径的**按模式文本记忆化**（statusView 每次都要现算，而例外文本无长度上限）。
+    //
+    // 为什么需要：exceptionBlast 对每条 allow 例外最多做 2 次 decomposeCommand（两门方言）
+    // + 判档，而 statusView 由 GET /permgate/status、每次 SSE status/refresh、各写盘路由回带、
+    // perm_status 工具反复调用 —— 一条长例外（候选值把整段原文无截断落盘）就让面板每次刷新
+    // 重付几十毫秒。实测 60000 个参数（649 KB）单条 164.6 ms。
+    //
+    // 键是**模式文本**（判档的唯一输入）＋ root（root 影响 isOutsideWorkspace，
+    // 同一次进程内 root 会随会话变化，故必须进键）。
+    //
+    // ── 不用「按条数 FIFO 淘汰」────────────────────────────────────────────────
+    // 这里曾经是「Map 满 500 就删最旧再插入」。那个策略在 key 数 > 上限时**命中率恒为 0**：
+    // 每次 get 未命中 → 插入前先删掉最旧的一条（很可能正是自己上一轮插入的），于是缓存
+    // 等于不存在。插桩实测（同一进程、只改例外条数）：n=500 → hit 500 / miss 0；
+    // n=501 → hit **0** / miss 501；n=1000 → hit 0 / miss 1000，且多轮 statusView 后仍是全 miss。
+    // 而 key 空间 = 例外数 × 会话根数，8 个会话根 + 63 条例外（504 keys）就会触发 ——
+    // 即「多项目 + 中等例外数」这一常见配置下，注释声称要消除的开销原封不动地留着。
+    //
+    // 改为**按配置世代失效**：配置变化时整体 clear()（见 invalidateBlastMemo 的调用点）。
+    // 例外是配置派生的、只在写盘/reload 时变化，故世代失效既不会读到陈旧结论，
+    // 也不会像条数淘汰那样在正常规模下自废武功。上限仍保留一个**远高于实际规模**的
+    // 兜底（防止极端情况下无界增长），取 20000：达到它意味着配置里有两万条不同例外，
+    // 那时真正的瓶颈是配置文件本身而不是这张表。
+    const blastPatternMemo = new Map()
+    const BLAST_PATTERN_MEMO_MAX = 20000
+    // 配置世代失效：任何一次写盘（persist）与 reload 之后调用。
+    // 只清空、不重建：下次 statusView 现算即可，正确性不依赖缓存内容。
+    function invalidateBlastMemo() {
+      if (blastPatternMemo.size) blastPatternMemo.clear()
+    }
 
     function norm(p) {
-      return String(p).replace(/\\/g, '/').replace(/\/+$/, '')
+      // 尾部分隔符剥离用**线性 while**，不能写 `.replace(/\/+$/, '')`：V8 对该正则在
+      // 「一段连续斜杠 + 非斜杠结尾」的输入上呈平方增长（`\/+$` 在每个起点回退后重新扫描
+      // 整段连续斜杠）。实测单次 replace：n=10000 → 21.6 ms、20000 → 100.6 ms、
+      // 40000 → 389.2 ms（倍率≈4.0，标准平方），而 while 版本 n=40000 时 0.005 ms。
+      //
+      // 这里必须与 shell-parse.js 的 blastRadiusOf 同步修：那里也做了一次同样的剥离，
+      // 但它把**未归一的原文**交给本文件的 isOutside → norm，于是那处优化被这一跳绕过 ——
+      // 实测端到端 `rm -rf <40000 个斜杠>x`（39 KB）仍是 382.7 ms，且它在判定热路径
+      // （tools/pre-execute）的逐词元循环里，词元长度由 AI 生成、无上界，挂起即该次调用不返回。
+      // 修在本函数一处即可覆盖全部调用点（isOutside / dirGlob / recordDecision …）。
+      let s = String(p).replace(/\\/g, '/')
+      let end = s.length
+      while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1
+      return end === s.length ? s : s.slice(0, end)
     }
 
     // ── 工作区根的唯一派生点 ────────────────────────────────────────────────
@@ -725,7 +785,7 @@ export default {
     // cwd 覆写。那是跨会话共享的可变单例：A 会话在 await 期间 B 会话 init，A 随后读到的
     // 就是 B 的根。实测危害分两类：
     //   ① 写盘归属：addProjectException 走 projectBlock()/ensureProject()，例外会写进
-    //      别的项目块（用户实测「在 ePicDLL 点的，写到了 MCP 项目里」）。
+    //      别的项目块（用户实测「在 proj-alpha 点的，写到了 MCP 项目里」）。
     //   ② 安全判定：isOutside 的 6 个调用点里 4 处在 decide()。root 漂移到「包含目标」
     //      的位置时判定翻转为 false，工作区外路径被判成区内、直接跳过目录闸（fail-open）。
     // 故 root 一律由调用方从自己的会话上下文显式取得，不再有全局状态：
@@ -753,7 +813,7 @@ export default {
     function normAbsPath(p, root) {
       const s = norm(p)
       if (!s) return s
-      // glob 不是文件路径：绝对化会改变匹配范围（`**/*.env` 会被拼成 `G:/MCP/**/*.env`，
+      // glob 不是文件路径：绝对化会改变匹配范围（`**/*.env` 会被拼成 `X:/ws/**/*.env`，
       // 从「任意目录」缩成「仅工作区内」），故只做斜杠归一，不绝对化也不折叠 ..。
       // 与 hasGlobMeta 同口径：只认 * 与 ?（[ ] 在 globToRegExp 里是字面量，不是通配符）。
       if (/[*?]/.test(s)) return s
@@ -1265,6 +1325,30 @@ export default {
         if (h) return norm(h + '/.dsh')
       } catch (e) {}
       return null
+    }
+
+    // **用户家目录**（`~` 的展开落点），与 homeFromEnv() 的 DSH home 是两回事。
+    //
+    // 爆炸半径的「家目录」档判的是「这一下会不会删掉用户的家目录」，而 `rm -rf ~`
+    // 删的是 `os.homedir()`，不是 `<家目录>/.dsh`。两者混用的后果（实测）：传 DSH home 时
+    // `rm -rf ~` 的警告条显示 `C:/Users/me/.dsh`（一个与真实删除目标不符的路径），
+    // 而真正删家目录的 `rm -rf C:/Users/me` 落到 system 档而非 home 档。
+    function userHomeDir() {
+      try {
+        const oh = osHomedir()
+        if (oh) return norm(String(oh))
+        const h = process.env.HOME || process.env.USERPROFILE
+        if (h) return norm(String(h))
+      } catch (e) {}
+      return null
+    }
+
+    // **平台**（供爆炸半径判档用），与方言（SHELL_OF_TOOL）是两回事：
+    // Linux/macOS 上跑 PowerShell Core（pwsh 工具）时方言是 pwsh、路径却是 POSIX 的。
+    // 判档需要平台来选「哪一套系统目录名单」与「`/x` 是不是 cmd 开关」——
+    // 把方言当平台会让 Linux 上的 `/etc` 被当开关跳过（漏报真系统目录）。
+    function shellPlatform() {
+      try { return process.platform === 'win32' ? 'win32' : 'posix' } catch (e) { return undefined }
     }
 
     // home 配置目标路径统一：ensureTarget/persist/probeHomeConfig/load 共用同一拼接，
@@ -3281,7 +3365,14 @@ export default {
     }
 
     function baseName(p) {
-      const s = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
+      // 尾部分隔符剥离用**线性 while**（同 normPathKey 的理由）：这一份曾经被漏掉，
+      // 而它的入参是**未归一的原始** `pathArg(args)`（工具调用里的 file_path 原文，
+      // 由 AI 生成、长度无上界），调用点是审批入口的 humanArgsPreview —— 40 KB 的
+      // 连续斜杠串会让弹窗出现前多付约 350 ms。语义与 norm() 完全一致。
+      let s = String(p || '').replace(/\\/g, '/')
+      let end = s.length
+      while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1
+      if (end !== s.length) s = s.slice(0, end)
       const idx = s.lastIndexOf('/')
       return idx >= 0 ? s.slice(idx + 1) : s
     }
@@ -3526,8 +3617,9 @@ export default {
       // 差别的原因是交互：例外主要由弹窗候选「一键记住」写入（用户期待立即生效），
       // 规则由面板表单逐条添加（用户期待顺序不变）。两者共用「首条命中」这一读侧语义。
       // 代价（有意接受）：新规则若被前面命中的规则遮蔽就不生效，直到用户手动把它调到前面。
-      // 面板拖动排序是**独立议题**（尚未实现）：顺序即优先级，但用户目前只能靠「后加的排最后」
-      // 间接控制，无法直接调整既有条目的先后 —— 需要时再补 UI。
+      // 「调到前面」由面板的排序控件提供（↑↓ + 拖动），落盘走 /permgate/reorder →
+      // reorderEntries 这一个原语：面板只报「把 id 放到 anchor 之前/之后」，宿主不做任何推断。
+      // 这里曾经写着「面板拖动排序是独立议题（尚未实现）」—— 那个议题已经落地，注释随之更新。
       for (const rule of rules) {
         if (ruleMatches(rule, name, args)) {
           return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' })
@@ -3629,7 +3721,12 @@ export default {
     }
 
     function dirGlob(p) {
-      const s = String(p).replace(/\\/g, '/').replace(/\/+$/, '')
+      // 尾部分隔符剥离用**线性 while**（同 normPathKey 的理由）：同一份拷贝里被漏掉的一份，
+      // 与 norm 语义一致。
+      let s = String(p).replace(/\\/g, '/')
+      let end = s.length
+      while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1
+      if (end !== s.length) s = s.slice(0, end)
       const idx = s.lastIndexOf('/')
       let dir = idx >= 0 ? s.slice(0, idx) : s
       // 盘根（G:）本身就是父目录，直接拼 /*；若补分隔符会得到 G://*，而 norm 不折叠中间双斜杠，
@@ -3715,6 +3812,12 @@ export default {
       }
       const a = assessCommand(cmd, shell, {
         home: homeFromEnv(),
+        // userHome 单独给爆炸半径的家目录档用（`~` 的展开落点 = 用户家目录，
+        // 而 home 是 DSH home）。两者混用会让「删家目录」这一档判错并显示错误路径。
+        userHome: userHomeDir(),
+        // platform 给爆炸半径判档用（选系统目录名单 + 判 `/x` 是不是 cmd 开关）：
+        // 方言不能代替它 —— Linux 上 pwsh 工具用的是 POSIX 路径。
+        platform: shellPlatform(),
         matchException: matchSegmentException,
         destructive: () => commandSubSetting(root),
         category: () => resolveCategory('command', null, null, root),
@@ -3740,6 +3843,8 @@ export default {
       const exEn = exReasonEn(a)
       // 段级信息随判定一起下发：弹窗按段渲染、决策日志记 code（「为什么问这一次」可追溯）。
       // 段数组只含判定所需的最小字段，不含命令全文以外的任何内容。
+      // blast 随段一起下发（只有破坏性段有）：弹窗据此把「这一下有多重」摆在审批人眼前，
+      // 见 blastRadiusOf 的注释（`rmdir /s /q B:\` 与删一个普通目录在判定链上完全一样）。
       return {
         action: a.action,
         reason: bi('执行命令' + describeSegments(a, 'zh') + exZh, 'Run command' + describeSegments(a, 'en') + exEn),
@@ -3750,7 +3855,29 @@ export default {
         kind: 'command',
         segments: a.segments,
         code: a.code,
+        // 取最严重的那一档（段之间取并集：任一段炸得大，整条命令就该带警告）
+        blast: worstBlast(a.segments),
       }
+    }
+
+    // 最严重的一档爆炸半径（段之间取并集）。等级顺序即严重度，**引用 shell-parse 导出的
+    // BLAST_ORDER**（全项目唯一一份）：曾经在这里手抄一份、键集合已经不同（缺 inside/broad），
+    // 而消费方式是「未知档静默跳过」—— shell-parse 侧日后新增或改名档位时不会报错、
+    // 不会告警，只会让爆炸半径警告整体静默失效，测试只覆盖已知键也发现不了。
+    function worstBlast(segments) {
+      let worst = null
+      for (const s of (segments || [])) {
+        if (!s || !s.blast) continue
+        // 未知档不再静默丢弃：它是「新增档位忘了接线」的信号，保留并告警（方向 fail-safe：
+        // 多显示一条警告好过把一条警告静默吃掉）。
+        if (!(s.blast.level in BLAST_ORDER)) {
+          console.warn('[permgate] unknown blast level:', s.blast.level)
+          if (!worst) worst = s.blast
+          continue
+        }
+        if (!worst || BLAST_ORDER[s.blast.level] < BLAST_ORDER[worst.level]) worst = s.blast
+      }
+      return worst
     }
 
     // 段级判定摘要（弹窗与拒绝文案共用）：把「哪一段为什么被拦」讲清楚。
@@ -3800,10 +3927,16 @@ export default {
         // 且**方言也同源** —— 判定侧按 SHELL_OF_TOOL[exec.name] 取方言，这里曾经硬编码 'bash'，
         // 于是 pwsh 工具下两侧对同一条命令的分段结果不同（bash 词法器把 `\` 当转义符）：
         //   `.\scripts\build.ps1 -Clean` 候选 label 成了 `.scriptsbuild`（写下的例外永不命中）；
-        //   `Remove-Item -Recurse -Force C:\Temp\` 在 bash 下直接 ok:false（一个候选都不产出）。
+        //   `Remove-Item -Recurse -Force B:\Temp\` 在 bash 下直接 ok:false（一个候选都不产出）。
         const shell = SHELL_OF_TOOL[entry.tool] || 'bash'
         const d = decomposeCommand(String(entry.value), shell)
-        const seen = {}
+        // 判重集合用 **Object.create(null)**，不能用 `{}`：键 `val` 来自命令文本，
+        // 而对象字面量继承 Object.prototype —— `seen['constructor']`、`seen['toString']`、
+        // `seen['valueOf']`、`seen['__proto__']` 全部恒为真值，那些候选会被**静默丢弃**，
+        // 用户看不到任何按钮（`__proto__` 更隐蔽：`seen['__proto__'] = true` 不写自有属性，
+        // 读回来仍是原型对象，故它也永远判为「已见过」）。
+        // 与 shell-parse.js 的 dict() 是同一条纪律，见那里的说明。
+        const seen = Object.create(null)
         if (d.ok) {
           for (const seg of d.segments) {
             const label = segmentLabel(seg.words)
@@ -3818,11 +3951,114 @@ export default {
             // 而 alreadyInProject 判重已把它当「已表态」，**下次弹窗候选变成空**，
             // 用户既没放行成功、也再没有按钮可点，形成死结。
             if (!label || seg.opaque || nestedInlineProgram(label, seg.words)) continue
-            if (seen[label]) continue
-            seen[label] = true
-            const val = label + ' *'
+            // ★ 破坏性命令**不给通配候选**。
+            //
+            // 原行为：一律给 `label + ' *'`。对 `rmdir /s /q B:\` 给出的候选是 `rmdir *`，
+            // 而它同时匹配
+            //   rmdir /s /q B:\                    ← 整个 B 盘
+            //   rmdir /s /q C:\Windows
+            //   rmdir /s /q B:\demo-app\build ← 一个构建目录
+            // 即：用户为「删一个构建目录」点一次「允许并记住」，从此**所有 rmdir 永久静默放行**，
+            // 包括下一次删盘根。而且这条 allow 例外会**压过 destructive=deny**（例外 > 子设置，
+            // 实测：设了「破坏性命令一律拒绝」后写一条 `rmdir *`=allow，三个目标全部静默放行）。
+            // 于是「一次点击」就能把用户显式设下的那道闸永久关掉，且他多半不知道。
+            //
+            // 现在的做法：破坏性段只给**精确到此命令**的例外（整段原文，无通配）。
+            // 代价（有意接受）：下次一条**不同**的 rmdir 还会弹窗。这正是破坏性命令该有的
+            // 待遇 —— 每次都要人看一眼。想少弹窗的用户可以自己在设置页写宽泛例外，
+            // 那是显式表态、看得见后果；而弹窗上的一键按钮不该替他把这件事做了。
+            //
+            // 判据必须与判定侧**完全同源**：用 isDestructiveSegment(seg.words)，它内部走
+            // 判定侧同一份 segmentLabels（会为 `find -delete` / `find -exec rm` 合成 `rm` label）。
+            //
+            // 这里曾经写 isDestructiveLabel(label)（只判段首主 label），对 find 族结论相反：
+            // `find . -delete` 的主 label 是 `find`（不在破坏性名单），于是仍走通配分支生成
+            // `find *`；而判定侧同一段是 destructive。用户点一次「允许并记住」后，
+            // `find . -delete` 在 destructive=deny 下由 deny 变 allow（实测）—— 正是上面
+            // 这段注释要堵的洞，只是换了个命令族（rm/rmdir 堵住了，find 没堵）。
+            const isDestructive = isDestructiveSegment(seg.words)
+            // ★ 破坏性命令**自带 glob 元字符时不给候选**。
+            //
+            // 候选值是**匹配模式**（判定侧 matchCommand 把 `*`/`?` 当通配符），所以「整段原文」
+            // 只在原文恰好不含元字符时才等于「精确到此命令」。实测：候选 `rm -rf *` 同时命中
+            // `rm -rf /`、`rm -rf /etc`、`rm -rf C:/Windows`；候选 `rm -rf ?` 命中 `rm -rf /`。
+            // 用户在**零警告**下点一次「允许并记住」，写下的就是一条能放行删盘根的 allow 例外，
+            // 并压过 destructive=deny —— 正是上面那段注释要堵的洞，只是换了命令形态。
+            //
+            // 路径候选侧（下方 hasGlobMeta）正因同一理由拒绝含 glob 的候选，此处与它同源。
+            // 代价（有意接受）：`rm -rf build/*` 这类命令不给按钮，用户想少弹窗就自己在设置页
+            // 写例外 —— 那是显式表态、看得见后果；一键按钮不该替他决定一个比点击目标更宽的范围。
+            if (isDestructive && /[*?]/.test(String(seg.text))) continue
+            // ★ 非破坏性段也要挡住「能携带破坏性载荷」的命令族的**裸通配候选**。
+            //
+            // `find` / `env` / `xargs` 的主 label 不在破坏性名单里（`find` 的破坏性只在
+            // `-delete` / `-exec rm` 被 segmentLabels 合成 label 时才成立），于是
+            // `find . -name x` 这类**非破坏性**段会照常生成通配候选 `find *` ——
+            // 而实测 `matchCommand('find *', 'find / -delete')` 为 true：用户为「找一下文件」
+            // 点一次「允许并记住」，从此 `find / -delete` 在 destructive=deny 下静默放行。
+            // 这是同一个洞的第三种形态（前两种是 rm/rmdir 的 `label + ' *'`、`rm -rf *` 的自带通配）。
+            //
+            // 处置与破坏性段一致：**用整段原文**而不是 `label + ' *'`。
+            // 不必额外加 `+ ' *'`：matchCommand 对无通配的 pattern 本就做**词边界前缀**匹配
+            // （`lh === lp || lh.startsWith(lp + ' ')`），故 `find . -name x` 已经覆盖
+            // `find . -name x -print`，与 `find . -name x *` 的匹配集**完全相同**（实测逐例对拍 0 差异）。
+            // 加通配只会让写入的模式与按钮上显示的原文不一致，且把 `*` 写进配置徒增歧义。
+            //
+            // 与破坏性段一样，原文自带 glob 元字符时不给候选（写下的模式会比所点命令更宽）。
+            const isCarrier = !isDestructive && isPayloadCarrierLabel(label)
+            if (isCarrier && /[*?]/.test(String(seg.text))) continue
+            // 用整段原文的两种情形：破坏性段、载荷族段 —— 两者的按钮都显示这段原文
+            // （见下方 push 的第一个参数：显示值必须与写入值同源，否则用户点的是
+            //  「find」而实际写入一条覆盖整条命令的例外，文案与行为不符）。
+            const useExactText = isDestructive || isCarrier
+            // ★ 候选值长度上限。
+            //
+            // 破坏性段/载荷族段的候选值现在是**整段原文**（不再是无长度上限的 `label + ' *'`，
+            // 但原文本身同样无上界：命令行由 AI 生成）。这个值会经 addProjectException
+            // 原样落盘进 config.json，此后每次 statusView 都全量下发 —— 实测一条
+            // 190,896 字符的命令行（`rm -rf` + 4000 个路径）一次「允许并记住」后
+            // config.json = 193,981 bytes，`GET /permgate/status` 每次 196,285 bytes、
+            // perm_status 每次向 AI 下发 196,322 bytes，且重启后不会被截断；
+            // 对照组（同长度参数的非破坏性 `git status`，走旧 `label + ' *'`）只落盘 12 字符。
+            // statusView 有 17 个宿主调用点、persist 每次成功写盘都 broadcast status，
+            // 于是这笔开销是**持续**的。
+            //
+            // 处置：超限时**不产出该候选**（而不是截断）。截断会让写下的模式与实际命令不符
+            // —— 用户点的是「这条命令」，落盘的却是一条被砍掉尾巴的**前缀模式**，
+            // 而 matchCommand 的前缀语义会让它匹配到一批他没看过的命令（授权面反而更大）。
+            // 不产出则与既有取舍一致：破坏性命令本来就不给宽泛候选，用户想少弹窗
+            // 就自己在设置页写例外（显式表态、看得见后果）。
+            // 上限取 2000：正常破坏性命令（含几十个路径）远低于它，
+            // 而它把单条例外的下发体积限制在 2 KB 量级。
+            const val = useExactText ? String(seg.text) : (label + ' *')
+            if (val.length > CAND_VALUE_MAX_CHARS) continue
+            // 判重键用**候选值**而不是 label：同一 label 可以同时产出两条候选 ——
+            // `find . -name x && find . -delete` 的两段 label 都是 `find`。
+            // 按 label 去重会让先出现的段占住键位、把后面那条丢掉。
+            if (seen[val]) continue
+            seen[val] = true
             if (alreadyInProject(val, 'command', null, root)) continue
-            push(label, val, 'command')
+            const exactLabel = String(seg.text).length > 60 ? String(seg.text).slice(0, 60) + '…' : String(seg.text)
+            push(useExactText ? exactLabel : label, val, 'command',
+              undefined,
+              // hint 只给破坏性段：它是「这次点击的授权面」说明，载荷族段（只读的 find 等）
+              // 的授权面就是那条命令本身，写「破坏性命令不给通配」会与实际不符。
+              //
+              // ── 措辞必须说「前缀」而不是「这一条命令本身」──────────────────────
+              // 这里的候选值是整段原文，**不含通配符**，而 matchCommand 对无通配的模式做的是
+              // 词边界**前缀**匹配（`lh === lp || lh.startsWith(lp + ' ')`），不是全串相等。
+              // 实测：写入候选 `rm -rf ./build` 后，`rm -rf ./build /`、
+              // `rm -rf ./build /etc`、`rm -rf ./build --no-preserve-root /` 全部被放行
+              // （无该例外时都是 deny）—— 与「仅放行这一条命令本身」的字面承诺不符。
+              // 载荷族同理：`find . -name x` 的候选放行 `find . -name x -delete`。
+              //
+              // 为什么是改文案而不是改匹配语义：让候选真正「只此一条」需要引入 exact 语义
+              // （整串相等或结束锚），那是**匹配格式的语义变更** —— 存量例外全是按前缀语义
+              // 写的，改了会让它们集体失效（用户已放行的命令突然重新弹窗），
+              // 代价远大于收益。而这里的实际授权面（前缀到命令名之后）比改动前的
+              // `label + ' *'`（如 `rm *`）已经窄得多，且用户仍可在设置页自行写宽泛例外。
+              // 文案与行为一致是本条要守的底线，故说清「这一条命令及其后续参数」。
+              isDestructive ? t('放行以这条命令开头的调用（含后续追加的参数；破坏性命令不给通配，避免一次点击放行所有同类操作）', 'Allows calls starting with this exact command (including appended arguments; destructive commands get no wildcard, so one click cannot allow every operation of this kind)') : undefined)
           }
         }
       } else if (entry.kind === 'path' && entry.value) {
@@ -3844,7 +4080,7 @@ export default {
           // 点一次后该类操作在该目录下都不再询问；「仅此文件」写自身分类例外 + directory 的精确路径例外。
           // 路径先规范化为绝对路径（折叠 .. 与重复分隔符）：判重与落盘值统一基于它。
           // 含通配符的原文不做折叠——pathResolve 会把 `*` 当普通目录名、被其后的 .. 吃掉
-          // （实测 C:/x/*/../y.txt → C:/x/y.txt），使通配路径被误当成精确路径生成候选。
+          // （实测 B:/x/*/../y.txt → B:/x/y.txt），使通配路径被误当成精确路径生成候选。
           const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)
           // 守卫按**原始值**判定：absVal 已折叠 ..，对它判 hasParentSeg 恒为 false，等于没有守卫。
           // 含 .. 的原文不给目录 glob——dirGlob 取父目录，`..` 可拼出覆盖整个盘根的 `G:/*`。
@@ -3924,6 +4160,9 @@ export default {
           cat: d.cat || null,
           value: d.value !== undefined && d.value !== null ? String(d.value) : null,
           kind: d.kind || null,
+          // 爆炸半径（只有破坏性命令段有）：弹窗据此把「这一下有多重」显式摆出来。
+          // 与 reason 分开存、不进 reason —— 它是给人看的信息，不是回给 AI 的拒绝理由。
+          blast: d.blast || null,
           reason: d.reason || bi('', ''),
           intent: taskText || describeIntent(exec, d),
           ts: Date.now(),
@@ -4042,7 +4281,7 @@ export default {
     // 那个根**：审批落盘用 entry.projRoot（发起时的快照，弹窗挂起期间可能已切会话），
     // 面板/工具入口用当前请求会话的根。
     // 不再走 opts.root：根有两条通道时，漏传不会报错而是静默落到部署根，例外会写进别的
-    // 项目块（正是旧实现「在 ePicDLL 点的例外写进了 MCP 项目块」那类归属错误），且 arity
+    // 项目块（正是旧实现「在 proj-alpha 点的例外写进了 MCP 项目块」那类归属错误），且 arity
     // 守卫只校验位置参数、拦不住 opts 里的漏传。
     // 缺根时显式回落 fallbackRoot（仍是非空兜底），但调用方必须显式传根。
     function addProjectException(cat, kind, value, decision, root, opts) {
@@ -4135,6 +4374,57 @@ export default {
       // 同值、方向相反的条目可能仍然留在列表里并继续生效：回传给 UI 提示，避免用户以为已彻底清除
       const remaining = kept.filter((r) => r[key] === value).length
       return { removed: true, count, remaining, exception: target }
+    }
+
+    // 列表排序单点（/permgate/reorder 路由专用）。管两个「顺序即优先级」的列表：
+    //   规则（block.custom）—— decide() 首条命中即返回，数组顺序就是优先级；
+    //   例外（block[cat].exceptions）—— resolveCategory / matchSegmentException 同样是首个匹配生效。
+    //
+    // **只实现一个原语：「把 id 移到 anchor 之前 / 之后」**，不提供「移到第 N 位」。
+    // 理由是面板的列表可以处于**过滤态**，此时用户看到的第 N 行与底层数组的第 N 项不是同一个东西：
+    // 传下标会让「按看到的顺序拖」变成「按看不见的顺序插」——两种解释都说得通，于是必有一方是 bug。
+    // anchor 是真实条目的 id，无论列表是否被过滤都唯一确定一个位置，没有这个歧义。
+    // 面板的 ↑↓ 按钮也归约到同一原语（anchor = 相邻的**可见**条目），故宿主只需实现一次。
+    //
+    // 越界与自反一律拒绝而不是「就近修正」：静默改写用户没要求过的顺序，比报错更难排查。
+    function reorderEntries(a, root) {
+      const kind = a.kind === 'rule' ? 'rule' : (a.kind === 'exception' ? 'exception' : null)
+      if (!kind) return { ok: false, reason: 'kind 必须是 rule 或 exception' }
+      const id = a.id ? String(a.id) : ''
+      const anchor = a.anchor ? String(a.anchor) : ''
+      if (!id || !anchor) return { ok: false, reason: 'id 与 anchor 不能为空' }
+      if (id === anchor) return { ok: false, reason: 'id 与 anchor 相同' }
+      // position **必须显式给出**：缺省值看似友好，实则把「面板忘了传」变成「静默按 before 处理」——
+      // 用户看到的顺序会莫名其妙地变（面板 bug 表现为权限顺序被改），比报错难查得多。
+      if (a.position !== 'before' && a.position !== 'after') return { ok: false, reason: 'position 必须是 before 或 after' }
+      const pos = a.position
+      const target = a.target === 'project' ? 'project' : 'global'
+      const block = target === 'global' ? config.global : ensureProject(root)
+      let list = null
+      let where = ''
+      if (kind === 'rule') {
+        if (!block.custom) block.custom = []
+        list = block.custom
+        where = '规则'
+      } else {
+        const cat = String(a.category || '')
+        if (EXC_CATS.indexOf(cat) === -1) return { ok: false, reason: '该分类不支持例外' }
+        const c = block[cat]
+        if (!c || !Array.isArray(c.exceptions)) return { ok: false, reason: '例外列表不存在' }
+        list = c.exceptions
+        where = cat + ' 例外'
+      }
+      const from = list.findIndex((r) => r && r.id === id)
+      if (from === -1) return { ok: false, reason: '未找到 id=' + id }
+      const hit = list.findIndex((r) => r && r.id === anchor)
+      if (hit === -1) return { ok: false, reason: '未找到 anchor=' + anchor }
+      const item = list.splice(from, 1)[0]
+      // 取出后 anchor 的下标会变：anchor 原本排在 from **之后**时要减一。
+      // 这一步错了不会报错，只会让条目落在相邻一格上（差一位），故单独说明。
+      const at = hit > from ? hit - 1 : hit
+      const to = pos === 'after' ? at + 1 : at
+      list.splice(to, 0, item)
+      return { ok: true, list: where, from: from, to: to }
     }
 
     // 弹窗「记住此决定」的落盘。root 取审批发起时的快照（entry.projRoot）：
@@ -4233,6 +4523,9 @@ export default {
         await fs.writeText(t, JSON.stringify(config, null, 2), undefined, undefined, writePolicy)
         lastDiskJson = JSON.stringify(config, null, 2)
         saveError = null
+        // 配置已变 → 例外爆炸半径的缓存作废（世代失效，见 blastPatternMemo 的注释）。
+        // 放在写盘成功之后：写盘失败时内存配置没变，缓存仍然有效。
+        invalidateBlastMemo()
         broadcast({ type: 'status' })
         return true
       } catch (e) {
@@ -4406,6 +4699,9 @@ export default {
         lastDiskJson = String(text).trim()
         loadError = null
         saveError = null
+        // 配置整体换了一份 → 例外爆炸半径的缓存作废（世代失效，见 blastPatternMemo 的注释）。
+        // 必须在下面那次可能的 persist() 之前也生效：那份 persist 只处理迁移落盘。
+        invalidateBlastMemo()
         // 历史预设默认值被收敛过就必须落盘（理由见 QUICK_RETIRED_DEFAULTS）：
         // 只改内存会让「面板显示 / 磁盘值 / 生效值」三者长期不一致，且下次加载还要再算一遍。
         // 落盘失败也不阻断加载——内存里已是收敛后的值，本次运行行为正确，persist 会设
@@ -4581,6 +4877,113 @@ export default {
         editorKernel: resolveEditorKernel(exec, root),
         fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null },
         excCats: EXC_CATS,
+        // 例外的爆炸半径（只读派生，**不落盘**）：给面板的例外列表标注「这条例外放开的目标
+        // 是盘根 / 系统目录 / 家目录 / 工作区外」。
+        //
+        // 为什么必须**读侧现算**而不是写进配置：那正是本文件反复警告的「推导值物化成用户表态」
+        // （见 doomloopSetting / normalizeCategory 的注释）—— 一旦落盘，日后改判据时存量配置里
+        // 的旧结论会永久压过新判据，且此后任何一次无关写盘都会把它固化。
+        //
+        // 只算 **allow 例外**：deny 例外指向盘根是**保护**而不是风险，标注它只会制造噪音，
+        // 而噪音会让真正的警告被忽略（狼来了）。
+        //
+        // 形状是 { global: { [例外id]: {level,path} }, project: {...} } 的分层表，
+        // 不改动 categories 的形状：categories 是原样下发的配置本体，
+        // 往里面塞派生字段会被 persist 带进磁盘。
+        exceptionBlast: (function () {
+          // home 给 expandTilde 用（DSH home，与既有约定一致）；**userHome 单独给档位判据用** ——
+          // `rm -rf ~` 删的是用户家目录，不是 DSH home。两者混用会让「家目录」这一档整个失效
+          // 并显示错误路径（实测：传 DSH home 时 `rm -rf ~` 显示 `C:/Users/me/.dsh`，
+          // 而 `rm -rf C:/Users/me` 落到 system 档）。
+          // platform 同样必需：它决定查哪一套系统目录名单、`/x` 是不是 cmd 开关。
+          const opts = { home: homeFromEnv(), userHome: userHomeDir(), platform: shellPlatform(), isOutsideWorkspace: (p) => isOutside(p, root) }
+          // 命令例外的 match 是**整条命令模式**，必须先按段分解再判档 ——
+          // 直接把 `rmdir /s /q B:\` 喂给 blastRadiusOf 会把它当成一个路径，
+          // 实测得到 {level:'outside', path:'rmdir /s /q B:'}（整个命令串被当路径、盘根信息丢失）。
+          //
+          // 哪些模式值得标注：用 canCarryDestructivePayload 而不是 isDestructiveSegment。
+          // 后者只认「这一段就是破坏性的」（`rm -rf *`），会漏掉**模式本身不含破坏性选项、
+          // 但 `*` 位置可能被填成删除动作**的族：`find *`（匹配 `find / -delete`）、
+          // `env *`（匹配 `env FOO=1 rm -rf /`）、`xargs *`（匹配 `xargs rm -rf /`）。
+          // 这三条正是 HEAD 的候选生成器写下的形态，属必然存在的存量配置，而它们实测能放行
+          // 删盘根 —— 只认 isDestructiveSegment 会让它们在面板上零标注。
+          // 反向仍要收住：`git status *` 这类普通命令不标注（噪音会让真警告被忽略）。
+          const blastOfCommand = (pattern) => {
+            // 记忆化：statusView 每次都要现算，而例外文本长度无上限（见 blastPatternMemo）。
+            // 键含 root：判档里的 isOutsideWorkspace 闭包捕获了 root，换项目根结论会变。
+            const memoKey = root + '\u0000' + String(pattern)
+            if (blastPatternMemo.has(memoKey)) return blastPatternMemo.get(memoKey)
+            const result = (() => {
+              let worst = null
+              // 方言必须与**候选侧**同源（SHELL_OF_TOOL）——例外没有工具信息，只能按两门都试。
+              // 但不能固定 pwsh 优先：bash 词法器把 `\` 当转义符，同一串两侧段划分不同，
+              // 于是同一条例外在弹窗与列表会得出不同档位（实测 `rm -rf C:\Users\me`：
+              // pwsh 分解 → home|C:/Users/me，bash 工具弹窗 → outside|C:Usersme）。
+              // 两门都跑、取更严重的一档：两侧都可能是用户实际使用的方言，取并集方向 fail-safe。
+              for (const sh of ['pwsh', 'bash']) {
+                let dd = null
+                try { dd = decomposeCommand(String(pattern), sh) } catch (e) { dd = null }
+                if (!dd || !dd.ok) continue
+                for (const seg of dd.segments) {
+                  if (!canCarryDestructivePayload(seg.words)) continue
+                  // 宽泛通配（`rm -rf *`）走 blastRadiusOfCommandPattern：它能放行盘根删除，
+                  // 但 globRootOf 归约后判成 inside 而返回 null —— 面板上零标注。
+                  const b = blastRadiusOfCommandPattern(seg.words, opts)
+                  if (b && BLAST_ORDER[b.level] !== undefined
+                    && (!worst || BLAST_ORDER[b.level] < BLAST_ORDER[worst.level])) worst = b
+                }
+              }
+              return worst
+            })()
+            // 上限兜底：达到它说明配置里有两万条不同例外，那时真正的瓶颈是配置文件本身。
+            // **不再逐条 FIFO 淘汰** —— 那个策略在 key 数 > 上限时命中率恒为 0（见 blastPatternMemo 的注释）。
+            if (blastPatternMemo.size >= BLAST_PATTERN_MEMO_MAX) invalidateBlastMemo()
+            blastPatternMemo.set(memoKey, result)
+            return result
+          }
+          // 路径例外的记忆化：与命令例外共用同一张表（问题同源 —— 路径例外同样是用户配置、
+          // 长度同样无上限，而它在同一循环里每次 statusView 都要现算）。
+          // 键前缀区分两类输入（命令模式 vs 路径），避免同文本互相串用结论。
+          const blastOfPath = (pathText) => {
+            const memoKey = root + '\u0000p\u0000' + String(pathText)
+            if (blastPatternMemo.has(memoKey)) return blastPatternMemo.get(memoKey)
+            const result = blastRadiusOf(pathText, opts)
+            if (blastPatternMemo.size >= BLAST_PATTERN_MEMO_MAX) invalidateBlastMemo()
+            blastPatternMemo.set(memoKey, result)
+            return result
+          }
+          // **按层分开**：`out` 曾是以例外 id 为唯一键的平表，而全局块与项目块的 id 空间
+          // 并不共享（normalizeException 只在缺失时才补随机 id，手写/存量配置可相同），
+          // 后遍历的项目块会覆盖全局块 → 标注串台。实测：全局 `{id:'same', match:'rmdir /s /q B:\'}`
+          // + 项目 `{id:'same', match:'git status *'}` → 无害的 `git status *` 被标成「目标是一整个盘」；
+          // 反向（全局无害 + 项目危险）则危险那条**丢掉警告**。面板按 tab 分别渲染，
+          // 两处都读同一份平表，故必须分层下发。
+          const out = { global: {}, project: {} }
+          const lists = [[config.global, 'global'], [proj, 'project']]
+          for (const pair of lists) {
+            const blk = pair[0]
+            const layer = pair[1]
+            if (!blk) continue
+            for (const c of EXC_CATS) {
+              const cat = blk[c]
+              if (!cat || !Array.isArray(cat.exceptions)) continue
+              for (const r of cat.exceptions) {
+                if (!r || !r.id || r.action !== 'allow') continue
+                const target = c === 'command' ? r.match : r.path
+                if (!target) continue
+                const b = c === 'command' ? blastOfCommand(target) : blastOfPath(target)
+                // 未知档不再静默丢弃（同 worstBlast 的理由：那是「忘了接线」的信号）
+                if (!b) continue
+                if (b.level === 'inside') continue
+                // 判「是否已知档」用属性取值而不是 `in`：`in` 会命中原型链
+                // （`'constructor' in BLAST_ORDER` 为 true），把未知档误判成已知档。
+                if (BLAST_ORDER[b.level] === undefined) console.warn('[permgate] unknown blast level:', b.level)
+                out[layer][r.id] = b
+              }
+            }
+          }
+          return out
+        })(),
         modes: MODES,
         allModes: ALL_MODES,
       }
@@ -4785,7 +5188,7 @@ export default {
             // 标签（缺失则永远回落通用扳手图标 + 裸工具名），倒计时条要按 deadline 倒数、
             // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位。
             // 白名单式投影漏字段不会报错，只会让客户端静默退化，故新增 entry 字段时必须同步此处。
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null, blast: e.blast || null })
           }
           return json(res, out)
         }
@@ -4856,7 +5259,7 @@ export default {
             // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
             // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
             // root 用 entry.projRoot（审批发起时的快照）：弹窗可能挂起很久、期间用户会切会话，
-            // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 ePicDLL 点的写进了 MCP）。
+            // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 proj-alpha 点的写进了 MCP）。
             const entryRoot = entry.projRoot || rootOf(exec)
             const writeException = (cat, kind, value, decision) => {
               if (decision === 'deny' && cat === 'directory') return
@@ -5020,7 +5423,7 @@ export default {
           const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           if (!block.custom) block.custom = []
           // 新规则**插到数组尾部**（后加的排最后）—— 用户定：保持这个顺序，优先级由用户之后
-          // 手动调节（面板拖动排序是**独立议题**，尚未实现，见 decide() 规则循环处的说明）。
+          // 手动调节（面板的 ↑↓ 与拖动排序走 /permgate/reorder，见 decide() 规则循环处的说明）。
           //
           // 已知后果（有意接受）：decide() 首条命中即返回，所以新规则若被前面任何一条命中遮蔽，
           // 就不会生效 —— 直到用户把它调到前面。面板上两条规则看起来一样，这一点不直观，
@@ -5039,6 +5442,13 @@ export default {
           const removed = list.splice(idx, 1)[0]
           await persist(exec)
           return json(res, { removed: true, rule: removed, status: statusView(exec) })
+        }
+        if (pathname === '/permgate/reorder' && method === 'POST') {
+          await init(exec)
+          const r = reorderEntries(a, rootOf(exec))
+          if (!r.ok) return json(res, { error: r.reason })
+          await persist(exec)
+          return json(res, { reordered: true, list: r.list, from: r.from, to: r.to, status: statusView(exec) })
         }
         if (pathname === '/permgate/reload' && method === 'POST') {
           // 重置 target 缓存：强制重新解析配置路径，保证竞态残留的项目路径配置可切回 home

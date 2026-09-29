@@ -383,11 +383,11 @@ function ensureProjectSim(norm, root, config, fresh) {
   return config.projects[root]
 }
 const normSim = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
-const cfgA = { projects: { 'g:/mcp': { tag: 'migrated' } } }
-ok('ensureProject 复用迁移条目', ensureProjectSim(normSim, 'G:\\MCP', cfgA, () => ({ tag: 'fresh' })).tag === 'migrated')
+const cfgA = { projects: { 'x:/ws': { tag: 'migrated' } } }
+ok('ensureProject 复用迁移条目', ensureProjectSim(normSim, 'X:\\ws', cfgA, () => ({ tag: 'fresh' })).tag === 'migrated')
 ok('ensureProject 不新增第二个 key', Object.keys(cfgA.projects).length === 1)
 const cfgB = { projects: {} }
-ok('ensureProject 无匹配时新建', ensureProjectSim(normSim, 'G:\\MCP', cfgB, () => ({ tag: 'fresh' })).tag === 'fresh')
+ok('ensureProject 无匹配时新建', ensureProjectSim(normSim, 'X:\\ws', cfgB, () => ({ tag: 'fresh' })).tag === 'fresh')
 
 function pathArgSim(args) {
   try {
@@ -445,9 +445,9 @@ function homeFromEnvSim(env, osHome, isWin) {
   const h = localAbs(env.HOME || env.USERPROFILE); if (h) return h + '/.dsh'
   return null
 }
-const A = process.platform === 'win32' ? 'C:\\a\\.dsh' : '/a/.dsh'
-const B = process.platform === 'win32' ? 'C:\\b' : '/b'
-const C = process.platform === 'win32' ? 'C:\\c' : '/c'
+const A = process.platform === 'win32' ? 'B:\\a\\.dsh' : '/a/.dsh'
+const B = process.platform === 'win32' ? 'B:\\b' : '/b'
+const C = process.platform === 'win32' ? 'B:\\c' : '/c'
 ok('home: DSH_HOME 优先', homeFromEnvSim({ DSH_HOME: A, HOME: B }, C, process.platform === 'win32').replace(/\\/g, '/') === A.replace(/\\/g, '/'))
 ok('home: os.homedir 优先于 HOME', homeFromEnvSim({ HOME: B }, C, process.platform === 'win32').replace(/\\/g, '/') === C.replace(/\\/g, '/') + '/.dsh')
 ok('home: 无 osHome 回退 HOME', homeFromEnvSim({ HOME: B }, '', process.platform === 'win32').replace(/\\/g, '/') === B.replace(/\\/g, '/') + '/.dsh')
@@ -573,7 +573,7 @@ if (mod) {
   // 会把本插件的**内部内存保护上限**当成业务信息展示（实现细节，且与别处口径不一致）。
   const fsTooLargeFs = {
     readText: async () => { throw new Error('invalid UTF-8 text') },
-    readBytes: async () => { const e = new Error('cannot read "C:/x/big.txt": 73400316 bytes exceeds the 67108864-byte limit'); e.code = 'FS_TOO_LARGE'; throw e },
+    readBytes: async () => { const e = new Error('cannot read "B:/x/big.txt": 73400316 bytes exceeds the 67108864-byte limit'); e.code = 'FS_TOO_LARGE'; throw e },
   }
   const r6b = await mod.readPreviewText(fsTooLargeFs, { displayPath: 'x' }, okSvc)
   ok('体积超限时走「文件过大」文案（不暴露内部保护上限与绝对路径）',
@@ -1305,7 +1305,7 @@ ok('status 下发三处的 reason（面板回填用）', src.includes('globalRea
 ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/兜底/命令子设置/快捷工具新增行）', cli.includes('const reasonInput = (value, onChange, onCommit, show, focus, onCancel) => {') && (cli.match(/reasonInput\(/g) || []).length === 5)
 // 防回退：快捷工具行的原因输入框必须在动作下拉**之后**——该行工具名 span 有 minWidth 撑出固定
 // 列宽，输入框插在它前面会把下拉右推（窄面板下换行），只有选「拒绝」的行会漂移。
-ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r) =>'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('sel(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
+ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('sel(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
 // 防回退：新增行选了拒绝却无处填原因，只能先添加再补填。
 // 注意空值必须折叠成 undefined：新增行可以输入本层已存在的工具名，而宿主把「空串」定义为
 // 显式清除——用户没填原因就点「添加」，会静默删掉该键已保存的拒绝原因（改动前不传 reason 则保留）。
@@ -1524,7 +1524,17 @@ ok('alreadyInProject 只认方向明确的例外（ask 不算已表态）', src.
 // 旧实现（commandFullyCovered 只认 allow + 整串匹配）已被删除 —— 那条断言随实现一起作废，
 // 换成对「段级判定是唯一路径」的结构断言（见 §6.3 单一来源断言）。
 ok('★ 命令判定委托给 shell-parse.js 的 assessCommand（不再有第二份实现）',
-  src.includes("import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'")
+  // import 名单随 shell-parse 的公开面演进（新增 isDestructiveSegment / blastRadiusOfCommandPattern /
+  // BLAST_ORDER，移除已无调用点的 isDestructiveLabel / blastRadiusOfSegment）。
+  // 判据用「逐个符号都在」而不是整串字面量：整串写法会让任何一次正当的导出调整都变成红灯，
+  // 而这条断言真正要守的是「判定委托出去了」+「旧的三份实现没有回潮」。
+  /import \{([^}]*)\} from '\.\/shell-parse\.js'/.test(src)
+  && ['assessCommand', 'matchCommand', 'codeLabel', 'decomposeCommand', 'segmentLabel',
+    'nestedInlineProgram', 'isDestructiveSegment', 'blastRadiusOf', 'blastRadiusOfCommandPattern',
+    'BLAST_ORDER', 'SHELL_OF_TOOL', 'DESTRUCTIVE_LABELS'].every((sym) => {
+    const m = src.match(/import \{([^}]*)\} from '\.\/shell-parse\.js'/)
+    return !!m && m[1].split(',').map((s) => s.trim()).indexOf(sym) !== -1
+  })
   && src.includes('const a = assessCommand(cmd, shell, {')
   // 按「定义」判而不是按「出现过」判：注释里会提到这些旧名字（记录为什么删掉它们），
   // 用 includes 会把注释也算成回潮（实测踩过）。
@@ -1568,10 +1578,24 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     /function describeIntent\(exec, d\) \{[\s\S]{0,900}?decomposeCommand\(v, SHELL_OF_TOOL\[exec\.name\] \|\| 'bash'\)/.test(src)
     && /function describeIntent\(exec, d\) \{[\s\S]{0,900}?d\.segments/.test(src))
   // ★ buildCandidates 走 segmentLabel 且方言与判定同源（entry.tool 派生，不再硬编码 'bash'）
+  //
+  // 用**函数体提取**而不是固定字符窗口：窗口宽度是脆的 —— 函数里加一段注释就会把
+  // 后面的锚点挤出窗口，断言变成假红（实测踩过）。这里只需要「同一函数体内同时出现
+  // 这三件事」，切片到函数结束即可。
   ok('★ buildCandidates 与判定同源（segmentLabel + 按 entry.tool 取方言）',
-    /function buildCandidates\(entry\) \{[\s\S]{0,1600}?segmentLabel\(seg\.words\)/.test(src)
-    && /function buildCandidates\(entry\) \{[\s\S]{0,1600}?decomposeCommand\(String\(entry\.value\), shell\)/.test(src)
-    && /function buildCandidates\(entry\) \{[\s\S]{0,1600}?SHELL_OF_TOOL\[entry\.tool\] \|\| 'bash'/.test(src))
+    (function () {
+      const s = src.indexOf('function buildCandidates(')
+      if (s < 0) return false
+      let d = 0
+      let body = ''
+      for (let k = src.indexOf('{', s); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(s, k + 1); break } }
+      }
+      return body.includes('segmentLabel(seg.words)')
+        && body.includes('decomposeCommand(String(entry.value), shell)')
+        && body.includes("SHELL_OF_TOOL[entry.tool] || 'bash'")
+    })())
   // ★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）
   ok('★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）',
     sp.includes('return lh === lp || lh.startsWith(lp + \' \')')
@@ -1649,11 +1673,14 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // ★★ wrapper 带值选项表必须兜底，否则 `command -v rm` 这类会让判定链抛异常 → fail-open。
   // 判据：不得直接对表取下标（WRAPPERS 里有几个成员根本没有条目）。
   // 按**去注释后**的代码判：注释里会引用旧写法说明为什么要改（用裸 includes 会误报，实测踩过）。
+  // 兜底值必须是 EMPTY_DICT 而不是 `{}`：本仓已确立「查表对象不得继承 Object.prototype」
+  // 的纪律（见 shell-parse.js 的 dict()），`|| {}` 会在兜底路径上退回有原型对象。
   ok('★★ wrapper 带值选项表访问有兜底（无条目不得抛异常 → 否则 pre-execute fail-open）',
     (function () {
       const code = sp.replace(/\/\/[^\n]*/g, '')
       return !/WRAPPER_VALUE_FLAGS\[name\]\[/.test(code)
-        && /const valueFlags = WRAPPER_VALUE_FLAGS\[name\] \|\| \{\}/.test(code)
+        && /const valueFlags = WRAPPER_VALUE_FLAGS\[name\] \|\| EMPTY_DICT/.test(code)
+        && /const valueFlags = PRIV_VALUE_FLAGS\[name\] \|\| WRAPPER_VALUE_FLAGS\[name\] \|\| EMPTY_DICT/.test(code)
     })())
   // ★★ `command -v/-V` 是查询、不是执行：不得把被查询的名字当命令判（实测误报）
   ok('★★ command -v/-V 判为查询而非执行（不误判被查询的名字）',
@@ -1664,6 +1691,77 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // ★★ segmentLabel 的关键字跳过必须循环（`case x in a) rm …` / `then nohup rm …`）
   ok('★★ segmentLabel 关键字跳过是循环（关键字后可能又是关键字或 wrapper）',
     /for \(let guard = 0; guard < 8; guard \+= 1\) \{[\s\S]{0,200}?if \(!STATEMENT_KEYWORDS\[head\]\) break/.test(sp))
+  // ★★ 查找表不得继承 Object.prototype（见 shell-parse.js 的 dict()）。
+  //
+  // 为什么需要**结构**断言，而不只有 shell-parse.mjs 里的行为断言：有三张表
+  // （PRIV_VALUE_IS_COMMAND / PAYLOAD_CARRIERS / EMPTY_DICT）的键域**当前不可达**
+  // 原型属性名，或查表处已用 `=== 1`，于是「退回字面量」这个变异在行为上**完全等价**
+  // —— 变异测试实测漏网。留着它们是给后人一个「`{}` 也能用」的错误示范，
+  // 而日后一旦有人放松键域或把 `=== 1` 改成真值判断，就会变成真漏洞。
+  // 所以这里按**构造方式**钉死：这些表的定义必须经 dict()。
+  //
+  // 判据按「定义行必须以 `dict(` 开头」取，不用裸 includes（注释里会引用旧写法，实测踩过）。
+  ok('★★ 查找表经 dict() 构造（不得继承 Object.prototype）', (function () {
+    const tables = ['PS_KEYWORDS', 'BASH_KEYWORDS', 'STATEMENT_KEYWORDS', 'ROUTER_CMDS',
+      'ROUTER_OPT_VALUE', 'WRAPPERS', 'WRAPPER_VALUE_FLAGS', 'NESTED_INTERPRETERS',
+      'NESTED_SHELLS', 'NESTED_EVAL', 'FIND_EXEC_FLAGS', 'PRIV_PREFIXES',
+      'PRIV_VALUE_FLAGS', 'PRIV_VALUE_IS_COMMAND', 'PAYLOAD_CARRIERS']
+    const bad = []
+    for (const t of tables) {
+      // 找 `const NAME = ` 那一行（可能跨行，故只取该行）
+      const re = new RegExp('^const ' + t + ' = (.+)$', 'm')
+      const m = re.exec(sp)
+      if (!m) { bad.push(t + '(未找到定义)'); continue }
+      if (!/^dict\(/.test(m[1].trim())) bad.push(t + ' -> ' + m[1].trim().slice(0, 50))
+    }
+    if (bad.length) console.log('      非 dict 构造的表: ' + bad.join(' ; '))
+    return bad.length === 0
+  })())
+  // 嵌套表（WRAPPER_VALUE_FLAGS / PRIV_VALUE_FLAGS 的内层）同样必须无原型：
+  // 内层是「某 wrapper 的带值选项集」，查表处用真值判断（`if (valueFlags[token])`）。
+  // 不钉死项数（那是脆的，加一个 wrapper 就要改断言）：只要求「内层没有裸 `{` 开头的项」，
+  // 且至少有 1 项 —— 这样新增 wrapper 时只要照 dict() 写就自动通过。
+  ok('★★ 嵌套带值选项表经 dict() 构造（内层不得出现裸 `{`）', (function () {
+    const check = (from, to) => {
+      const i = sp.indexOf(from)
+      if (i < 0) return false
+      const j = to ? sp.indexOf(to) : sp.length
+      if (j < i) return false
+      const seg = sp.slice(i, j)
+      const inners = seg.match(/^\s+\w+: dict\(\{/gm) || []
+      return inners.length >= 1 && !/^\s+\w+: \{/m.test(seg)
+    }
+    return check('const WRAPPER_VALUE_FLAGS = dict({', 'const NESTED_INTERPRETERS')
+      && check('const PRIV_VALUE_FLAGS = dict({', 'const PRIV_VALUE_IS_COMMAND')
+  })())
+  // EMPTY_DICT 必须是冻结的无原型空字典（兜底路径不得退回 `{}`）
+  ok('★★ 兜底空字典是无原型冻结对象（EMPTY_DICT，不是 {}）',
+    /const EMPTY_DICT = Object\.freeze\(dict\(\{\}\)\)/.test(sp)
+    && /const valueFlags = WRAPPER_VALUE_FLAGS\[name\] \|\| EMPTY_DICT/.test(sp)
+    && /const valueFlags = PRIV_VALUE_FLAGS\[name\] \|\| WRAPPER_VALUE_FLAGS\[name\] \|\| EMPTY_DICT/.test(sp))
+  // ★ 候选生成的判重集合无原型（键是命令文本，`seen['constructor']` 曾恒为真值 → 候选被静默丢弃）
+  ok('★★ buildCandidates 的判重集合无原型（Object.create(null)）',
+    (function () {
+      const i = src.indexOf('function buildCandidates(')
+      if (i < 0) return false
+      const body = src.slice(i, i + 2000)
+      return body.includes('const seen = Object.create(null)') && !body.includes('const seen = {}')
+    })())
+  // ★ rawCommandNames 的去重集合无原型（同上，键是 label）
+  ok('★★ rawCommandNames 的去重集合无原型（Object.create(null)）',
+    (function () {
+      const i = sp.indexOf('export function rawCommandNames(')
+      if (i < 0) return false
+      const body = sp.slice(i, i + 400)
+      return body.includes('const seen = Object.create(null)') && !body.includes('const seen = {}')
+    })())
+  // ★ opaque 段并集去重的集合无原型
+  ok('★★ opaque 段 label 并集的去重集合无原型（Object.create(null)）',
+    (function () {
+      const i = sp.indexOf('const extra = rawCommandNames(seg.text)')
+      if (i < 0) return false
+      return sp.slice(i, i + 400).includes('const seen = Object.create(null)')
+    })())
   // ★ 自定义规则：首条命中即返回（数组顺序 = 优先级，与例外同口径）
   // 曾经短暂改成「最严命中」，实测会毁掉「具体规则覆盖宽泛规则」这个最自然的写法：
   //   [0] allow tool=pwsh args="git status"  /  [1] deny tool=pwsh
@@ -1674,7 +1772,8 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && !src.includes('RULE_SEVERITY'))
   // ★ 规则插入位置：**尾部**（后加的排最后），顺序完全归用户 —— 用户定。
   // 曾短暂改为 unshift（新规则插到头部），已回退：那会让用户看到自己没动过的顺序变了。
-  // 优先级由用户之后手动调节（面板拖动排序是独立议题）。
+  // 优先级由用户之后**手动**调节：面板的 ↑↓ 与拖动排序 → /permgate/reorder →
+  // reorderEntries（写入侧只认「把 id 放到 anchor 之前/之后」，不自动重排任何东西）。
   // 判据按「add-rule 路由那一处」取，不按全仓计数 —— 弹窗「记住此决定」那处 HEAD 起就是 unshift。
   ok('★ add-rule 插到数组尾部（顺序只由用户改，不自动重排）', (function () {
     const i = src.indexOf("pathname === '/permgate/add-rule'")
@@ -2811,7 +2910,7 @@ group('20. 新会话界面（hero）的权限态：独立槽位 + 会话态为�
 group('21. 工作区根按会话派生（不再有跨会话共享的可变单例）')
 // 背景：root 曾是模块级闭包变量，由 ensureTarget 在每次 init(exec) 时按当前 exec 的 cwd
 // 覆写。实测危害两类：① 写盘归属 —— addProjectException 走 projectBlock()/ensureProject()，
-// 例外写进别的项目块（用户实测「在 ePicDLL 点的写到了 MCP 项目里」）；② 安全判定 ——
+// 例外写进别的项目块（用户实测「在 proj-alpha 点的写到了 MCP 项目里」）；② 安全判定 ——
 // isOutside 的 6 个调用点里 4 处在 decide()，root 漂移到「包含目标」的位置时判定翻转为
 // false，工作区外路径被判成区内、直接跳过目录闸（fail-open，实测 3/3 场景复现）。
 // 修法：root 一律由调用方从会话上下文显式取得，不再有全局状态。
@@ -2941,10 +3040,10 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     ok('根派生逻辑可独立求值：' + (e && e.message), false)
   }
   if (H) {
-    const execA = { agent: { session: { header: { cwd: 'D:/proj/ePicDLL' } } } }
-    const execB = { agent: { session: { header: { cwd: 'G:/MCP' } } } }
+    const execA = { agent: { session: { header: { cwd: 'D:/proj/proj-alpha' } } } }
+    const execB = { agent: { session: { header: { cwd: 'X:/ws' } } } }
     ok('rootOf 按会话取 cwd（两会话各得各的）',
-      H.rootOf(execA) === 'D:/proj/ePicDLL' && H.rootOf(execB) === 'G:/MCP')
+      H.rootOf(execA) === 'D:/proj/proj-alpha' && H.rootOf(execB) === 'X:/ws')
     ok('rootOf 取不到会话时回落非空兜底根（空串会 fail-open）',
       H.rootOf(null) === 'G:/FALLBACK' && H.rootOf({ agent: { session: {} } }) === 'G:/FALLBACK'
       && H.rootOf({ agent: { session: { header: { cwd: '' } } } }) === 'G:/FALLBACK')
@@ -2959,29 +3058,131 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     const cfg = H.cfg()
     ok('并发会话各写各的项目块（不再串台）',
       Object.keys(cfg.projects).length === 2
-      && cfg.projects['D:/proj/ePicDLL'].sandboxMode === 'workspace-write'
-      && cfg.projects['G:/MCP'].sandboxMode === 'danger-full-access',
+      && cfg.projects['D:/proj/proj-alpha'].sandboxMode === 'workspace-write'
+      && cfg.projects['X:/ws'].sandboxMode === 'danger-full-access',
       JSON.stringify(Object.keys(cfg.projects)))
     // 审批落盘用 entry.projRoot：发起会话与「期间切到的会话」不同，必须写进发起方
     const entryRoot = H.rootOf(execA)
     H.addProjectException('directory', 'path', 'D:/shared/lib/*', 'allow', entryRoot, { target: 'project' })
     H.addProjectException('read', 'path', 'D:/shared/lib/*', 'allow', entryRoot, { target: 'project' })
     const c2 = H.cfg()
-    const epi = c2.projects['D:/proj/ePicDLL']
+    const epi = c2.projects['D:/proj/proj-alpha']
     ok('审批落盘用 entry.projRoot：两条例外都进发起会话的项目块',
       !!(epi && epi.directory.exceptions.length === 1 && epi.read.exceptions.length === 1),
       JSON.stringify(epi && { d: epi.directory.exceptions.length, r: epi.read.exceptions.length }))
     ok('审批落盘不污染期间切到的那个会话的项目块',
-      c2.projects['G:/MCP'].directory.exceptions.length === 0 && c2.projects['G:/MCP'].read.exceptions.length === 0)
+      c2.projects['X:/ws'].directory.exceptions.length === 0 && c2.projects['X:/ws'].read.exceptions.length === 0)
     ok('effectiveSandboxConfig 按传入根取项目值（A=ww 生效、B=fa 生效）',
       H.effectiveSandboxConfig(H.rootOf(execA)) === 'workspace-write'
       && H.effectiveSandboxConfig(H.rootOf(execB)) === 'danger-full-access')
     // normAbsPath 的相对路径绝对化也必须按传入根，否则同一例外在判重/写入/匹配三处不同答案
     ok('normAbsPath 按传入根绝对化（同值不同根得不同结果）',
-      H.normAbsPath('a/b.txt', 'G:/MCP') === 'G:/MCP/a/b.txt'
-      && H.normAbsPath('a/b.txt', 'D:/proj/ePicDLL') === 'D:/proj/a/b.txt'.replace('/proj', '/proj/ePicDLL'))
+      H.normAbsPath('a/b.txt', 'X:/ws') === 'X:/ws/a/b.txt'
+      && H.normAbsPath('a/b.txt', 'D:/proj/proj-alpha') === 'D:/proj/a/b.txt'.replace('/proj', '/proj/proj-alpha'))
     ok('pathKey 也按传入根（判重口径与写入一致）',
-      H.pathKey('a.txt', 'G:/MCP') === H.pathKey('G:/MCP/a.txt', 'G:/MCP'))
+      H.pathKey('a.txt', 'X:/ws') === H.pathKey('X:/ws/a.txt', 'X:/ws'))
+  }
+
+  // 3.6) reorderEntries：排序原语（/permgate/reorder 的唯一实现）。
+  // 顺序即优先级（decide() 首条命中即返回、resolveCategory 首个匹配生效），故这个函数
+  // 直接决定权限 —— 它的失效模式是**静默错位**（差一位），不会有任何报错。
+  // 判据按行为复算：真跑一遍，比对落位后的 id 序列，而不是匹配源码。
+  {
+    const sliceFn2 = (name) => {
+      const s = src.indexOf('function ' + name + '(')
+      if (s < 0) return ''
+      let d = 0
+      for (let k = src.indexOf('{', s); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1) }
+      }
+      return ''
+    }
+    let R = null
+    try {
+      R = new Function('EXC_CATS', [
+        "const fallbackRoot = 'G:/FALLBACK'",
+        "let config = { global: { custom: [] }, projects: {} }",
+        "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
+        "function ensureProject(root) { if (!config.projects[root]) { config.projects[root] = { custom: [] }; for (const c of EXC_CATS) config.projects[root][c] = freshCategory(c, true) } return config.projects[root] }",
+        sliceFn2('reorderEntries'),
+        'return { reorderEntries, ensureProject, cfg: () => config }',
+      ].join('\n'))(EXC_L)
+    } catch (e) {
+      ok('reorderEntries 可独立求值：' + (e && e.message), false)
+    }
+    if (R) {
+      const mkRules = (ids) => { R.cfg().global.custom = ids.map((id) => ({ id: id, action: 'deny', tool: 't' })); return R.cfg().global.custom }
+      const ids = () => R.cfg().global.custom.map((r) => r.id)
+      const move = (id, anchor, position) => R.reorderEntries({ target: 'global', kind: 'rule', id: id, anchor: anchor, position: position }, 'X:/ws')
+
+      // ① 后移（anchor 原本排在 id **之后**）：取出 id 后 anchor 下标要减一。
+      // 这一步错了不会报错，只会差一位 —— 下面四条把这个方向钉死。
+      mkRules(['a', 'b', 'c', 'd'])
+      move('a', 'c', 'after')
+      ok('★★ reorderEntries 后移：anchor 在 id 之后时下标减一（不得差一位）',
+        JSON.stringify(ids()) === JSON.stringify(['b', 'c', 'a', 'd']), JSON.stringify(ids()))
+      // ② 后移（anchor 原本排在 id **之前**）：此时不减。
+      mkRules(['a', 'b', 'c', 'd'])
+      move('d', 'b', 'after')
+      ok('★★ reorderEntries 后移：anchor 在 id 之前时不减下标',
+        JSON.stringify(ids()) === JSON.stringify(['a', 'b', 'd', 'c']), JSON.stringify(ids()))
+      // ③ 前移（跨多条 / 相邻）两个方向都要对
+      mkRules(['a', 'b', 'c', 'd'])
+      move('d', 'a', 'before')
+      ok('★ reorderEntries 前移跨多条', JSON.stringify(ids()) === JSON.stringify(['d', 'a', 'b', 'c']), JSON.stringify(ids()))
+      mkRules(['a', 'b', 'c', 'd'])
+      move('c', 'b', 'before')
+      ok('★ reorderEntries 前移相邻（相邻时也必须真的换位，不能原地不动）',
+        JSON.stringify(ids()) === JSON.stringify(['a', 'c', 'b', 'd']), JSON.stringify(ids()))
+      // ④ 幂等/边界：把已经在目标位置上的条目再移一次，结果不变（用户连点 ↑ 到顶后不该乱序）
+      mkRules(['a', 'b', 'c'])
+      move('a', 'b', 'before')
+      ok('★ reorderEntries 幂等：已在目标位置时顺序不变（连点到顶不乱序）',
+        JSON.stringify(ids()) === JSON.stringify(['a', 'b', 'c']), JSON.stringify(ids()))
+      mkRules(['a', 'b', 'c'])
+      move('c', 'b', 'after')
+      ok('★ reorderEntries 幂等：已在末尾时顺序不变', JSON.stringify(ids()) === JSON.stringify(['a', 'b', 'c']), JSON.stringify(ids()))
+      // ⑤ 非法参数一律拒绝（不修改数组）
+      mkRules(['a', 'b', 'c'])
+      const bads = [
+        { id: 'a', anchor: 'a', position: 'before' },        // 自反
+        { id: 'zz', anchor: 'a', position: 'before' },       // id 不存在
+        { id: 'a', anchor: 'zz', position: 'before' },       // anchor 不存在
+        { id: 'a', anchor: 'b' },                            // 缺 position
+        { id: 'a', anchor: 'b', position: 'middle' },        // position 非法
+        { id: '', anchor: 'b', position: 'before' },         // id 为空
+        { id: 'a', anchor: '', position: 'before' },         // anchor 为空
+      ]
+      const rejected = bads.every((b) => {
+        const r = R.reorderEntries(Object.assign({ target: 'global', kind: 'rule' }, b), 'X:/ws')
+        return r.ok === false && typeof r.reason === 'string' && r.reason.length > 0
+      })
+      ok('★★ reorderEntries 非法参数一律拒绝（自反/不存在/缺 position/position 非法/空值）', rejected)
+      ok('★★ reorderEntries 被拒绝时数组原封不动（不得就近修正）',
+        JSON.stringify(ids()) === JSON.stringify(['a', 'b', 'c']), JSON.stringify(ids()))
+      // ⑥ kind 非法
+      const badKind = R.reorderEntries({ target: 'global', kind: 'bogus', id: 'a', anchor: 'b', position: 'before' }, 'X:/ws')
+      ok('★ reorderEntries 拒绝非法 kind', badKind.ok === false, JSON.stringify(badKind))
+      // ⑦ 例外列表：不支持例外的分类必须拒绝（否则会往 doomloop 这类无例外列表上写）
+      const badCat = R.reorderEntries({ target: 'global', kind: 'exception', category: 'doomloop', id: 'a', anchor: 'b', position: 'before' }, 'X:/ws')
+      ok('★ reorderEntries 例外拒绝 EXC_CATS 之外的分类（含理由文案，面板直接展示它）',
+        badCat.ok === false && badCat.reason === '该分类不支持例外', JSON.stringify(badCat))
+      // ⑧ 项目层例外：走 ensureProject，且落位正确
+      R.cfg().projects = {}
+      const pb = R.ensureProject('X:/ws')
+      pb.command.exceptions = [{ id: 'x' }, { id: 'y' }, { id: 'z' }]
+      const pr = R.reorderEntries({ target: 'project', kind: 'exception', category: 'command', id: 'z', anchor: 'x', position: 'before' }, 'X:/ws')
+      ok('★ reorderEntries 项目层例外落位正确',
+        pr.ok === true && JSON.stringify(pb.command.exceptions.map((r) => r.id)) === JSON.stringify(['z', 'x', 'y']),
+        JSON.stringify(pb.command.exceptions.map((r) => r.id)))
+      // ⑨ 例外的锚点只在**同分类内**查找：command 列表里的 id 不应被 directory 列表的锚点影响
+      pb.directory.exceptions = [{ id: 'w' }]
+      const cross = R.reorderEntries({ target: 'project', kind: 'exception', category: 'directory', id: 'z', anchor: 'w', position: 'before' }, 'X:/ws')
+      ok('★ reorderEntries 例外按分类隔离（跨分类的 id 找不到，不误改别的列表）',
+        cross.ok === false && JSON.stringify(pb.directory.exceptions.map((r) => r.id)) === JSON.stringify(['w']),
+        JSON.stringify(cross))
+    }
   }
 
   // 3.5) isOutside 的每个调用点都必须传「会话派生值」——这是安全判定，不能有固定根。
@@ -3012,10 +3213,14 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
       }
     }
     const bad = calls.filter((c) => c.arg !== 'root' && c.arg !== 'rootOf(exec)')
-    // 7 处：decide() 的 read/image/edit/undo 各 1（工作区外判定），commandDecision 的
-    // 重定向目标判定 1（D-8 只标注不设闸，但同样必须用会话派生的根），needsUpgrade 等 2 处。
+    // 8 处：decide() 的 read/image/edit/undo 各 1（工作区外判定），commandDecision 的
+    // 重定向目标判定 1（D-8 只标注不设闸，但同样必须用会话派生的根），needsUpgrade 等 2 处，
+    // statusView 的 exceptionBlast 1 处（例外的爆炸半径要按**本会话的根**判「工作区外」，
+    // 用固定根会让别的项目里的例外被误标/漏标）。
+    // 计数与 bad 两条都要守：只查计数会在「新增一处传了固定根」时漏网（计数对、根错），
+    // 只查 bad 会在「删掉一处」时漏网（少一处检查就少一道闸，而 bad 仍然为空）。
     ok('isOutside 的每个调用点都传会话派生的根（不得用固定兜底根）',
-      calls.length === 7 && bad.length === 0,
+      calls.length === 8 && bad.length === 0,
       JSON.stringify(bad.length ? bad : calls.length))
   }
 
@@ -3029,14 +3234,30 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     }
     const isOutside = new Function('norm', 'pathResolve', 'return (' + src.slice(iOut, j + 1) + ')')(
       (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, ''), pathResolve)
-    const target = 'D:/visual studio 2022/Projects/WeiHengLib/WeiHengLib/src/a.ts'
+    const target = 'D:/work/proj-beta/proj-beta/src/a.ts'
     ok('isOutside：会话根下工作区外路径必然过目录闸',
-      isOutside(target, 'D:/visual studio 2022/Projects/ePicDLL/ePicDLL') === true)
+      isOutside(target, 'D:/work/proj-alpha/proj-alpha') === true)
     // 防回退：空根是 fail-open 的（返回 false = 判为区内），故 rootOf 的兜底必须非空
     ok('isOutside 对空根返回 false（fail-open）—— 这正是兜底不可为空的原因',
       isOutside(target, '') === false)
     ok('isOutside 对 null/undefined 根返回 true（fail-closed，兜底方向的另一侧）',
       isOutside(target, null) === true && isOutside(target, undefined) === true)
+  }
+
+  // 4b) ★★ 爆炸半径的 home 语义：**必须把用户家目录单独传下去**。
+  //
+  // `rm -rf ~` 删的是用户家目录（os.homedir()），而宿主侧的 homeFromEnv() 返回的是
+  // DSH home（`<家目录>/.dsh`）。混用的后果（实测）：警告条把删除目标显示成
+  // `C:/Users/me/.dsh`（一个与真实删除目标不符的路径），而真正删家目录的
+  // `rm -rf C:/Users/me` 落到 system 档而非 home 档 —— 审批人据此判断就会判错。
+  // 两处调用点都要传 userHome：assessCommand 的钩子（弹窗警告条）与 exceptionBlast
+  // （例外列表标注）。只查一处会让另一处静默退回旧行为。
+  {
+    const hookOk = /const a = assessCommand\(cmd, shell, \{[\s\S]{0,400}?userHome: userHomeDir\(\)/.test(src)
+    const excOk = /const opts = \{ home: homeFromEnv\(\), userHome: userHomeDir\(\)/.test(src)
+    ok('★★ 爆炸半径的 home 档用 userHome（用户家目录），两处调用点都传',
+      hookOk && excOk && /function userHomeDir\(\) \{/.test(src),
+      JSON.stringify({ hook: hookOk, exceptionBlast: excOk, defined: /function userHomeDir\(\) \{/.test(src) }))
   }
 
   // 5) 路由级：decide 必须自解析会话（客户端载荷不带 sessionId）
@@ -3088,7 +3309,7 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     const fn = new Function('norm', 'return (' + src.slice(i, j + 1) + ')')(
       (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, ''))
     return fn('G:/') === 'G:/' && fn('G:') === 'G:/' && fn('Z:') === 'Z:/'
-      && fn('G:/MCP/proj') === 'G:/' && fn('//srv/share/p') === '//srv/share' && fn('/home/u') === '/'
+      && fn('X:/ws/proj') === 'X:/' && fn('//srv/share/p') === '//srv/share' && fn('/home/u') === '/'
   })())
   ok('清理失效工作区：stat 抛错（权限/IO）不得当成不存在而删除', (() => {
     const i = src.indexOf('async function cleanupStaleProjects')
@@ -4253,8 +4474,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // timeoutMs 只写不读会被误当成「还有人依赖」：客户端只认绝对 deadline。
   ok('★ 不存只写不读的 entry.timeoutMs（有无超时由 deadline 表达）',
     !/timeoutMs: timeoutMs \|\| null/.test(ask) && !/entry\.timeoutMs = null/.test(ask))
-  ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note（白名单漏字段即静默退化）',
-    /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \|\| null \}\)/.test(src))
+  ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note/blast（白名单漏字段即静默退化）',
+    /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \|\| null, blast: e\.blast \|\| null \}\)/.test(src))
 
   // ── 27c. 客户端 factory 真实求值（本组唯一「执行」而非「匹配」的断言）──
   // 起因：PG_CARD_CSS 在模块顶层拼接了声明在其后的 const，命中 TDZ 抛 ReferenceError，
@@ -4277,6 +4498,313 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     ok('★ client.js factory 可真实求值（无 TDZ / ReferenceError 等加载期错误）',
       factoryErr === null, factoryErr ? (factoryErr.name + ': ' + factoryErr.message) : '')
   }
+  // ── 27d. 面板**真实渲染**一次（本文件唯一渲染整棵面板的断言）──
+  //
+  // 起因：排序控件（↑↓ 按钮 + draggable 行）是本次新增的渲染路径，而 27a–27c 与下面
+  // 所有 listBox 断言都只看源码文本或只求值单个函数 —— 「渲染时抛异常」「按钮根本没渲染
+  // 出来」「行丢了 rowStyle」这三类问题全都看不见。这里把 Panel 用 React 桩真跑一遍。
+  //
+  // 判据按**渲染结果**：按钮个数、draggable 行数、禁用态、以及「点第 2 条规则的 ↑ 发出了
+  // 什么请求」。最后一条把「渲染 → 事件 → 请求体」整条链钉住 —— 它是唯一能发现
+  // 「按钮渲染了但 onClick 接错行」的断言。
+  {
+    let rErr = null
+    let out = null
+    try {
+      let loaded = null
+      new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded = m } } })
+      if (!loaded || typeof loaded.factory !== 'function') throw new Error('未捕获到 factory')
+      // React 桩：useState 有状态、useEffect 收集起来由外部按拍执行（真实 React 在渲染后跑）。
+      //
+      // **hook 槽位必须按组件分开**：共用一个 states 数组会让不同组件的同名槽位串台 ——
+      // 实测 OverlayRoot 的 useState(null)（pin）占了槽 0，于是 ApprovalOverlay 的
+      // useState([])（pending）读回 null，报 "pending.length of null"，整段渲染断言崩掉。
+      // 真实 React 按 fiber 分槽，这里用「组件名」近似。
+      const stateBuckets = new Map()
+      const effects = []
+      let cursor = 0
+      let curComp = 'root'
+      const bucketOf = (n) => { if (!stateBuckets.has(n)) stateBuckets.set(n, []); return stateBuckets.get(n) }
+      const React = {
+        createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false) }),
+        memo: (c) => c,
+        Fragment: 'Fragment',
+        Component: class { constructor(p) { this.props = p || {} } setState() {} render() { return null } },
+        useState: (init) => { const st = bucketOf(curComp); const i = cursor++; if (!(i in st)) st[i] = typeof init === 'function' ? init() : init; return [st[i], (v) => { st[i] = typeof v === 'function' ? v(st[i]) : v }] },
+        useEffect: (fn) => { effects.push(fn) },
+        useRef: (v) => ({ current: v === undefined ? null : v }),
+        useMemo: (f) => f(),
+        useCallback: (f) => f(),
+      }
+      // 渲染任何函数组件前切当前组件名并重置游标（真实 React 的按组件分槽语义）
+      const renderComp = (fn, props) => {
+        const prev = curComp
+        curComp = fn.name || 'anon'
+        cursor = 0
+        try { return fn(props) } finally { curComp = prev }
+      }
+      const Tstub = (k) => k
+      const statusFixture = {
+        configPath: 'B:/home/dsh-permgate/config.json', active: true, preset: 'custom-review', activeForSession: true,
+        platformPreset: 'custom-review', projectKey: 'X:/ws',
+        sandbox: { global: 'danger-full-access', project: 'inherit', effective: 'danger-full-access', session: 'danger-full-access' },
+        categories: {
+          global: {
+            command: { mode: 'ask', exceptions: [{ id: 'e1', action: 'deny', match: 'rm *', reason: 'r' }, { id: 'e2', action: 'allow', match: 'git *', note: 'n' }] },
+            read: { mode: 'allow', exceptions: [{ id: 'e3', action: 'ask', path: 'D:/x/*' }] },
+          },
+          project: null,
+        },
+        // 爆炸半径**按层**下发：只标 e2（allow），e1 是 deny 故不标 —— 面板应只给 e2 画标注。
+        // 与宿主 statusView 的形状一致（{ global: { [例外id]: {level,path} }, project: {...} }）。
+        // 分层是必需的：全局块与项目块的例外 id 空间不共享，平表会让一层覆盖另一层。
+        exceptionBlast: { global: { e2: { level: 'drive-root', path: 'B:' } }, project: {} },
+        effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
+        custom: { global: [{ id: 'r1', action: 'deny', tool: 'pwsh' }, { id: 'r2', action: 'allow', tool: 'git', args: 'status' }], project: [] },
+        counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
+        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
+        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
+        fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
+      }
+      const calls = []
+      const fetchStub = (url, opts) => {
+        calls.push({ url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null })
+        const u = String(url)
+        let payload = {}
+        if (u.indexOf('/permgate/pending') !== -1) {
+          // 待审批：一条带 blast 的破坏性命令（弹窗警告条的渲染前置）
+          payload = [{ id: 'p1', tool: 'pwsh', reason: '执行命令', ts: Date.now(), args: '{"command":"rmdir /s /q B:\\\\"}', intent: '执行命令', candidates: [{ id: 'c1', label: 'rmdir /s /q B:\\', value: 'rmdir /s /q B:\\', kind: 'command', writes: [], hint: '仅放行这一条命令本身' }], argLines: [{ label: '命令', value: 'rmdir /s /q B:\\' }], hasDiff: false, projRoot: 'X:/ws', sessionId: 's1', sessionTitle: null, cat: 'command', deadline: null, onTimeout: null, note: null, blast: { level: 'drive-root', path: 'B:' } }]
+        } else if (u.indexOf('/permgate/status') !== -1) {
+          payload = statusFixture
+        }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload), text: () => Promise.resolve('') })
+      }
+      let PanelComp = null
+      let OverlayComp = null
+      const ctx = {
+        slots: {
+          inject: (name, fn) => { try { if (typeof fn === 'function') fn() } catch (e) {} },
+          register: (meta, comp) => {
+            if (comp && typeof comp === 'function' && meta) {
+              if (meta.name === 'settings.section') PanelComp = comp
+              if (meta.name === 'shell.overlay') OverlayComp = comp
+            }
+            return () => {}
+          },
+        },
+        locale: { register: () => {}, bind: () => Tstub },
+        get: () => undefined,
+        effect: (fn) => { try { fn() } catch (e) {} return () => {} },
+        on: () => () => {},
+      }
+      const g = globalThis
+      g.window = { addEventListener: () => {}, removeEventListener: () => {}, innerWidth: 1200, innerHeight: 800, location: { href: 'http://localhost/' }, fetch: fetchStub }
+      g.fetch = fetchStub
+      g.EventSource = function () { this.close = () => {} }
+      g.document = { querySelector: () => null, createElement: () => ({ dataset: {}, style: {}, appendChild: () => {}, remove: () => {} }), head: { appendChild: () => {} } }
+      const mod = loaded.factory((name) => (name === 'react' ? React : {}))
+      mod.apply(ctx)
+      if (!PanelComp) throw new Error('apply 未注册 settings.section 面板组件')
+      if (!OverlayComp) throw new Error('apply 未注册 shell.overlay 审批组件')
+      // 三拍：首渲染 → 跑 effect（发 status 请求）→ 等 resolve → 用同一组 state 重渲染。
+      renderComp(PanelComp, { sessionId: 'sess-1' })
+      for (const fn of effects) { try { fn() } catch (e) {} }
+      out = { calls: calls, Panel: PanelComp, Overlay: OverlayComp, renderComp: renderComp, effects: effects }
+    } catch (e) { rErr = e }
+    ok('★★ 设置面板可真实渲染（无渲染期异常；排序控件真的渲染出来）', rErr === null,
+      rErr ? (rErr.name + ': ' + rErr.message) : '')
+    globalThis.__pgRender = { rErr: rErr, out: out }
+  }
+  if (globalThis.__pgRender && !globalThis.__pgRender.rErr) {
+    const { out } = globalThis.__pgRender
+    await new Promise((r) => setTimeout(r, 50))
+    let tree = null
+    let rErr2 = null
+    try { tree = out.renderComp(out.Panel, { sessionId: 'sess-1' }) } catch (e) { rErr2 = e }
+    // walk 也要走 props.children：PgApprovalCard 把子节点渲染在 props.children
+    // （调用方是 createElement(Card, {p}, child…)，而这里直接调 Card.type(props)，
+    //  props.children 得由调用方自己拼 —— 不拼的话警告条（children 里的一项）根本看不到）。
+    const walk = (n, acc) => {
+      if (!n || typeof n !== 'object') return acc
+      acc.push(n)
+      for (const k of n.kids || []) walk(k, acc)
+      if (n.props && n.props.children) walk(n.props.children, acc)
+      return acc
+    }
+    const nodes = tree ? walk(tree, []) : []
+    const moveBtns = nodes.filter((n) => n.type === 'button' && n.props && n.props.className === 'pg-btn pg-btn-move')
+    const dragRows = nodes.filter((n) => n.props && n.props.className === 'pg-row-drag')
+    ok('★★ 面板渲染出排序控件：↑↓ 按钮与可拖动行都到位',
+      rErr2 === null && moveBtns.length === 10 && dragRows.length === 5,
+      JSON.stringify({ err: rErr2 && rErr2.message, move: moveBtns.length, rows: dragRows.length }))
+    // 正常态的行必须带 rowStyle 的 flex（只在排序态给 style 会让行退化成裸块）
+    const noFlex = dragRows.filter((n) => !n.props.style || n.props.style.display !== 'flex').length
+    ok('★★ 渲染出的排序行都带 rowStyle（正常态也不丢 flex/内边距）', noFlex === 0, String(noFlex))
+    // 边界禁用而非隐藏：规则首行不能上移、末行不能下移；单条目列表两个方向都禁用
+    const disUp = moveBtns.filter((n) => n.kids[0] === '↑' && n.props.disabled === true).length
+    const disDown = moveBtns.filter((n) => n.kids[0] === '↓' && n.props.disabled === true).length
+    ok('★★ 首末行按方向禁用而非隐藏（禁用态可见，按钮位置不跳）', disUp === 3 && disDown === 3,
+      JSON.stringify({ up: disUp, down: disDown }))
+    // ★★★ 渲染 → 事件 → 请求体：点第 2 条规则的 ↑ 必须发出「r2 放到 r1 之前」。
+    // 这条是唯一能发现「按钮渲染了但 onClick 接错行」的断言（按渲染顺序取下标会取到例外行）。
+    const textOf = (n) => (typeof n === 'string' ? n : (!n || typeof n !== 'object') ? '' : (n.kids || []).map(textOf).join(' '))
+    const ruleRows = dragRows.filter((r) => textOf(r).indexOf('tool=') !== -1)
+    const upOf = (row) => walk(row, []).find((n) => n.type === 'button' && n.kids[0] === '↑')
+    out.calls.length = 0
+    let clickErr = null
+    try { upOf(ruleRows[1]).props.onClick() } catch (e) { clickErr = e }
+    await new Promise((r) => setTimeout(r, 30))
+    const req = out.calls.find((c) => c.url.indexOf('/permgate/reorder') !== -1)
+    ok('★★★ 点第 2 条规则的 ↑ 发出正确的 reorder 请求（渲染→事件→请求体整链）',
+      clickErr === null && !!req && req.body.kind === 'rule' && req.body.id === 'r2'
+      && req.body.anchor === 'r1' && req.body.position === 'before' && req.body.target === 'global',
+      JSON.stringify({ err: clickErr && clickErr.message, req: req && req.body }))
+
+    // ── 爆炸半径的**两处渲染**（弹窗警告条 / 面板例外列表标注）────────────────
+    // 这两处此前只有源码匹配，而「写了但渲染不出来」「位置排在命令之后」都测不到。
+    // 下面按渲染结果复算。
+    // ① 例外列表标注：statusFixture 里给 e2 标了 drive-root，e1（deny）没标
+    const blastMarks = nodes.filter((n) => n.type === 'span' && typeof (n.kids || [])[0] === 'string' && n.kids[0].indexOf('panel.excBlast') !== -1)
+    ok('★★ 面板例外列表渲染出爆炸半径标注（宿主下发了 exceptionBlast）',
+      blastMarks.length === 1, JSON.stringify(blastMarks.map((n) => n.kids[0])))
+    // 标注必须带完整路径与后果说明（title），否则用户只知道「范围过大」而不知道指哪里
+    ok('★ 例外标注带 title（完整路径 + 后果），且用警告色区分档位',
+      blastMarks.length === 1 && !!blastMarks[0].props.title && !!blastMarks[0].props.style && !!blastMarks[0].props.style.color,
+      JSON.stringify(blastMarks[0] && { title: blastMarks[0].props.title, color: blastMarks[0].props.style.color }))
+    // ② 弹窗警告条：三拍渲染审批卡片
+    let cardErr = null
+    let cardNodes = []
+    try {
+      // 注意 effect 的收集时机：每次 renderComp 都会往 effects 里**追加**，故这里要先清空，
+      // 只跑本次（ApprovalOverlay）挂上的 effect。不清空的话跑的是前面 Panel 留下的旧
+      // effect（它们的闭包指向 Panel 的 setState），pending 永远回填不上 ——
+      // 实测表现是「未找到审批卡片（pending 未回填？）」。
+      out.effects.length = 0
+      out.renderComp(out.Overlay, { useSessions: () => 's1' })
+      for (const fn of out.effects) { try { fn() } catch (e) {} }
+      await new Promise((r) => setTimeout(r, 60))
+      const ovTree = out.renderComp(out.Overlay, { useSessions: () => 's1' })
+      const ovNodes = walk(ovTree, [])
+      const layer = ovNodes.find((n) => typeof n.type === 'function' && n.type.name === 'ApprovalOverlay')
+      if (!layer) throw new Error('未找到 ApprovalOverlay')
+      // 内层组件（ApprovalOverlay）也有自己的 effect（poll），同样要先清空再跑
+      out.effects.length = 0
+      out.renderComp(layer.type, layer.props)
+      for (const fn of out.effects) { try { fn() } catch (e) {} }
+      await new Promise((r) => setTimeout(r, 60))
+      const inner = walk(out.renderComp(layer.type, layer.props), [])
+      const card = inner.find((n) => typeof n.type === 'function' && n.props && n.props.p)
+      if (!card) throw new Error('未找到审批卡片（pending 未回填？）')
+      // 子节点在 props.children：直接调用 Card.type(props) 时必须自己拼上（真实 React 会拼）
+      cardNodes = walk(out.renderComp(card.type, Object.assign({}, card.props, { children: card.kids })), [])
+    } catch (e) { cardErr = e }
+    const banners = cardNodes.filter((n) => n.props && n.props.className === 'pg-blast')
+    ok('★★★ 审批弹窗渲染出爆炸半径警告条（盘根删除时）',
+      cardErr === null && banners.length === 1,
+      JSON.stringify({ err: cardErr && cardErr.message, n: banners.length }))
+    ok('★ 警告条带完整路径（title）与分档配色（盘根 = 错误红）',
+      banners.length === 1 && !!banners[0].props.title
+      && !!banners[0].props.style && banners[0].props.style.color === '#c62828',
+      JSON.stringify(banners[0] && { title: banners[0].props.title, color: banners[0].props.style.color }))
+    // ★★ 位置：必须排在参数框**之前**。审批人自上而下读，排在后面等于先读完命令、
+    //    形成判断，才看到警告 —— 那时已经晚了。
+    const iBlast = cardNodes.indexOf(banners[0])
+    const argsIdx = cardNodes.findIndex((n) => n.props && n.props.className === 'pg-args')
+    ok('★★ 警告条排在参数框之前（审批人先看到「这是整个盘」再读命令）',
+      iBlast > 0 && argsIdx > 0 && iBlast < argsIdx,
+      JSON.stringify({ blast: iBlast, args: argsIdx }))
+    // ★★ 派生值不得**残留**：applyStatusLists 每次都必须整体替换 EXCEPTION_BLAST
+    //    （含清空）。写成「只在有值时赋值」的话，用户删掉那条例外后旧标注会留在界面上，
+    //    指向一个已经不存在的 id —— 看起来像「它还在生效」。
+    //    判据按**行为**：连续两次 status（第一次带标注、第二次不带）后，模块内的值必须为空。
+    //    只查源码字面量会把「只在有值时替换」判成通过（实测该变异会漏网）。
+    {
+      const applySrc = (function () {
+        const i = cli.indexOf('function applyStatusLists(s) {')
+        if (i < 0) return null
+        let d = 0
+        for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+          if (cli[k] === '{') d++
+          else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+        }
+        return null
+      })()
+      let seqOk = false
+      let detail = 'applyStatusLists 未找到'
+      if (applySrc) {
+        try {
+          // 抠出真实实现，喂三次 status，每次都断言当前值：
+          //   ① 带标注 → 必须有 e1
+          //   ② **整个键缺席**（旧宿主 / 残缺响应）→ 必须清空
+          //   ③ 空对象 → 必须清空
+          //
+          // ② 才是真正的判据，且**必须排在 ③ 之前**：空对象在两种写法下都会被赋成 {}，
+          // 分不出差别；而「键缺席」正是「只在有值时赋值」会漏掉的那一种。
+          // 实测顺序写反（先喂空对象）时该变异会漏网 —— 因为 ③ 已经把值清成 {}，
+          // ② 再检查就永远是空的，断言变成空转。
+          const fn = new Function('return (function(){ let CATS=[], EXC_CATS=[], MODES=[], ALL_MODES=[], QUICK_PRESET=[], QUICK_DEFAULTS={}, EXCEPTION_BLAST={};\n'
+            + applySrc + '\n'
+            + 'return { apply: applyStatusLists, get: () => EXCEPTION_BLAST }; })()')()
+          fn.apply({ exceptionBlast: { global: { e1: { level: 'drive-root', path: 'B:' } }, project: {} } })
+          const after1 = fn.get()
+          fn.apply({})                       // ② 键缺席
+          const after2 = fn.get()
+          fn.apply({ exceptionBlast: {} })   // ③ 空对象
+          const after3 = fn.get()
+          seqOk = !!(after1.global && after1.global.e1)
+            && Object.keys(after2).length === 0 && Object.keys(after3).length === 0
+          detail = JSON.stringify({ after1: Object.keys(after1.global || {}), after2: Object.keys(after2), after3: Object.keys(after3) })
+        } catch (e) { detail = e.name + ': ' + e.message }
+      }
+      ok('★★ 例外标注每次整体替换（删掉例外后旧标注不得残留）', seqOk, detail)
+    }
+    // 反向对照：非破坏性命令**不该**出现警告条（否则每次弹窗都有一条，用户很快学会忽略它）。
+    // 判据分两半，缺一不可：
+    //   ① 渲染侧：blastBanner 对 null / 无 level 的输入返回 null（不是渲染一个空条）；
+    //   ② 判定侧：blast 只在破坏性段上算（非破坏性段恒为 null）。
+    // 只查 ① 会漏掉「判定侧给每个段都算了 blast」——那时警告条照样每次都出现。
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    ok('★ 无 blast 时警告条不渲染（渲染侧对 null 短路 + 判定侧只在破坏性段上算）',
+      /const blastBanner = \(b\) => \{\s*\n\s*if \(!b \|\| !b\.level\) return null;/.test(cli)
+      // 判定侧只在破坏性段上算。**不再钉 `shell: sh`**：开关判据只看 opts.platform，
+      // 方言不等于平台（Linux 上 pwsh 工具用的是 POSIX 路径），故那个参数已删 ——
+      // 它是死参数（全模块无 opts.shell 读取点），钉住它等于把死参数焊在代码里。
+      && /const blast = destructive \? blastRadiusOfSegment\(seg\.words, h\)/.test(spSrc))
+    // ★ 反向：`opts.shell` 不得复活成「看起来有用」的死参数（判据只看 platform）
+    ok('★ shell-parse 不读 opts.shell（开关判据只看 platform，方言不是平台的替身）',
+      !/opts\.shell|o\.shell\b/.test(spSrc), 'found opts.shell read')
+
+    // ★★ 渲染侧的档位表必须覆盖宿主会下发的**全部**档位，否则那个档位的警告条静默不显示
+    //    （blastBanner 对未知档返回 null）。这里按 shell-parse 导出的 BLAST_ORDER 逐键核对，
+    //    而不是手写一份档位清单 —— 后者正是「两处各存一份而漂移」的老问题。
+    const spMod = await import('../shell-parse.js')
+    const levelKeys = Object.keys(spMod.BLAST_ORDER).filter((k) => k !== 'inside')
+    // 从 BLAST_LEVELS 的**定义块**里取键，而不是在整个 client.js 里 indexOf：
+    // 后者会把注释里提到档位名的普通文字也算成「已覆盖」（实测漏网）。
+    const blkM = cli.match(/const BLAST_LEVELS = \{([\s\S]*?)\n\t\t\};/)
+    const blk = blkM ? blkM[1] : ''
+    const missing = levelKeys.filter((k) => !new RegExp("(^|[\\s{,])'?" + k.replace(/-/g, '\\-') + "'?\\s*:").test(blk))
+    ok('★★ 客户端 BLAST_LEVELS 覆盖宿主全部档位（含新增的 broad；缺一档即该警告静默不显示）',
+      !!blk && missing.length === 0, JSON.stringify({ levels: levelKeys, missing: missing }))
+    // 每个档位都要有对应文案键，否则 T() 回落成裸键名（用户看到 app.blast.xxx）。
+    // 中英各一份，故键名字面量在文件里应出现两次。
+    const noText = levelKeys.filter((k) => {
+      const m = blk.match(new RegExp("'?" + k.replace(/-/g, '\\-') + "'?\\s*:\\s*\\{[^}]*key:\\s*'([^']+)'"))
+      if (!m) return true
+      const lit = "'" + m[1] + "'"
+      let n = 0
+      let at = cli.indexOf(lit)
+      while (at !== -1) { n += 1; at = cli.indexOf(lit, at + 1) }
+      return n < 2
+    })
+    ok('★ 每个档位都有中英两处文案（只写一处会让另一语言显示裸键名）',
+      noText.length === 0, JSON.stringify(noText))
+  }
+  // 清理全局桩：后续断言（尤其涉及 window/document 的）不该看见本次渲染留下的痕迹
+  try { delete globalThis.__pgRender; delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
   // ★★ 长列表容器（listBox）：过滤器 + 定高滚动。三处列表（快捷工具 / 例外 / 规则）
   // 条目数都无上界，面板原本全部平铺 —— 列表一长，后面的卡片被顶到很远。
   // 判据按**行为**复算（不是匹配源码）：抠出 listBox 的实现，用最小 React 桩驱动，
@@ -4377,6 +4905,125 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
           const stillQuiet = hasInput(mk('', ['a', 'b', 'c'])) === false
           return kept && stillQuiet
         })())
+      // ⑦ ★★ 排序上下文（sortUi）：listBox 只**算**，把「谁还能上下移、落点画在哪」交给
+      // 调用方的 render。这里用记录型 render 把每行收到的 sortUi 抓出来，逐个复算。
+      // 为什么要行为复算而不是匹配源码：这段的核心是**下标运算**（上一个可见项 / 下一个可见项），
+      // 差一位不会有任何报错，只会在界面上表现为「按了没反应」或「跨了两格」。
+      const uiOf = (filter, items, drag, onMove) => {
+        const seen = []
+        const node = box(Object.assign({
+          items: items,
+          filter: filter,
+          onFilter: () => {},
+          match: (x) => x.id + ' ' + x.text,
+          // ui 归一成 null（而不是留 undefined）：listBox 少传第二个参数时 render 收到的是
+          // undefined，下面 `s.ui.canUp` 会直接抛 TypeError，整个套件崩在断言之前 ——
+          // 输出里没有 FAIL 行、只有一个看不出所以然的堆栈。归一后失败是可读的断言失败。
+          render: (x, ui) => { seen.push({ id: x.id, ui: ui === undefined ? null : ui }); return { type: 'row', props: {}, kids: [x.id] } },
+          empty: { type: 'empty', props: {}, kids: [] },
+          sort: { drag: drag || null, onDrag: () => {}, onMove: onMove || (() => {}) },
+        }))
+        return { seen: seen, node: node }
+      }
+      const FOUR = [{ id: 'a', text: 'aa' }, { id: 'b', text: 'bb' }, { id: 'c', text: 'cc' }, { id: 'd', text: 'dd' }]
+      // ⑦a 首行不能上移、末行不能下移，中间行两个方向都能
+      const base = uiOf('', FOUR, null)
+      ok('★★ listBox 排序：首行不可上移、末行不可下移、中间行两者皆可',
+        base.seen.length === 4 && base.seen.every((s) => s.ui)
+        && base.seen[0].ui.canUp === false && base.seen[0].ui.canDown === true
+        && base.seen[1].ui.canUp === true && base.seen[1].ui.canDown === true
+        && base.seen[3].ui.canUp === true && base.seen[3].ui.canDown === false,
+        JSON.stringify(base.seen.map((s) => ({ id: s.id, up: s.ui && s.ui.canUp, dn: s.ui && s.ui.canDown }))))
+      // ⑦b onUp / onDown 必须指向**相邻的可见条目**，且 position 与方向一致：
+      //    上移 = 放到上一个之前（'before'），下移 = 放到下一个之后（'after'）。
+      //    两个方向写反是这类代码最常见的错，且后果是「按 ↑ 反而往下走」。
+      const calls = []
+      const spied = uiOf('', FOUR, null, (id, anchor, pos) => calls.push([id, anchor, pos]))
+      // 逐项判空后再调：缺 sortUi 时直接 .onUp() 会抛 TypeError，套件崩在断言之前
+      const callIf = (s, m) => { if (s && s.ui && typeof s.ui[m] === 'function') s.ui[m]() }
+      callIf(spied.seen[1], 'onUp')
+      callIf(spied.seen[1], 'onDown')
+      callIf(spied.seen[0], 'onDown')
+      callIf(spied.seen[3], 'onUp')
+      ok('★★★ listBox 排序：↑↓ 归约为「相邻可见条目 + 正确 position」（写反即按 ↑ 往下走）',
+        JSON.stringify(calls) === JSON.stringify([['b', 'a', 'before'], ['b', 'c', 'after'], ['a', 'b', 'after'], ['d', 'c', 'before']]),
+        JSON.stringify(calls))
+      // ⑦c **过滤态下按可见序列移动**，不是按底层数组：这是有意的取舍（见 listBox 注释）。
+      //    若改成按底层相邻项移动，过滤时按一次 ↑ 可能只是与一个看不见的条目换了位 ——
+      //    界面上毫无变化，用户会以为按钮坏了。判据：过滤后 b 的 onUp 锚点是 a（可见的前一个），
+      //    而不是底层里排在 b 前面的、已被滤掉的那个条目。
+      const filtered = uiOf('b', FOUR, null, (id, anchor, pos) => calls.push([id, anchor, pos]))
+      ok('★ listBox 排序：过滤态下按可见序列算相邻项（不可见条目被跳过）',
+        filtered.seen.length === 1 && filtered.seen[0].id === 'b' && !!filtered.seen[0].ui
+        && filtered.seen[0].ui.canUp === false && filtered.seen[0].ui.canDown === false,
+        JSON.stringify(filtered.seen.map((s) => ({ id: s.id, up: s.ui && s.ui.canUp, dn: s.ui && s.ui.canDown }))))
+      // ⑦d 拖动落点：dragover 命中的那一行显示落点，**被拖的那一行自己身上不显示**
+      //    （自己身上画落点线会让用户以为要插到自己里面）。
+      const dragged = uiOf('', FOUR, { id: 'b', overId: 'd', pos: 'after' })
+      // 注意 join 的形态：over 是 null（join 成空串）而 dragging 是布尔（join 成 'false'）。
+      // 两处都写成空串会得到一个永远失败的断言，且失败信息看起来像功能坏了。
+      const overLine = dragged.seen.map((s) => (s.ui ? s.ui.over : '<无>')).join(',')
+      const dragLine = dragged.seen.map((s) => (s.ui ? s.ui.dragging : '<无>')).join(',')
+      // 另加一条**自反**用例：overId 与 id 相同（正常流程下 onDragOver 会挡掉，
+      // 但渲染侧的 `drag.id !== id` 判据必须独立成立）。没有这条时，「自己身上也画落点」
+      // 的变异与正确实现输出完全相同 —— 实测该变异会漏网，因为常规用例里 overId ≠ id。
+      const self = uiOf('', FOUR, { id: 'b', overId: 'b', pos: 'before' })
+      ok('★★ listBox 排序：落点只画在被悬停的那一行，被拖的行自身不画',
+        overLine === ',,,after' && dragLine === 'false,true,false,false'
+        && self.seen.every((s) => s.ui && s.ui.over === null),
+        JSON.stringify({ over: overLine, dragging: dragLine, selfOver: self.seen.map((s) => (s.ui ? s.ui.over : '<无>')) }))
+      // ⑦e 无 sort 参数时 render 收到 null（快捷工具那处不传）—— 调用方据此不渲染排序控件
+      const noSort = (function () {
+        const got = []
+        box({ items: FOUR, filter: '', onFilter: () => {}, match: (x) => x.id, render: (x, ui) => { got.push(ui); return { type: 'row', props: {}, kids: [] } }, empty: null })
+        return got
+      })()
+      ok('★ listBox：未传 sort 时 render 收到 null（快捷工具列表不该出现排序控件）',
+        noSort.length === 4 && noSort.every((u) => u === null), JSON.stringify(noSort))
+      // ⑦f 条目缺 id 时该行拿不到 sortUi（而不是拿到一个 id 为 undefined 的上下文 ——
+      //    那会让 onMove(undefined, …) 发到宿主，宿主回「未找到 id=undefined」）
+      const noId = uiOf('', [{ text: 'x' }, { id: 'b', text: 'y' }], null)
+      ok('★ listBox 排序：条目缺 id 时该行不提供排序上下文',
+        noId.seen[0].ui === null && noId.seen[1].ui !== null,
+        JSON.stringify(noId.seen.map((s) => s.ui === null)))
+      // ⑦g ★★ 行的基础样式必须**无条件**给出：sortRowProps 只在拖动/落点两个分支里设
+      // style 时，正常态的行会丢掉整个 rowStyle（没有 flex、没有内边距、没有分隔线），
+      // 多个条目挤成一团。这个 bug 不报错、不影响任何行为断言，只有渲染出来才看得见。
+      // 判据：拿真实源码里的 sortRowProps 与 rowStyle 实跑一遍，检查三种状态下 style 都在。
+      // rowStyle 必须从**源码里求值**出来，不能在这里写一份桩：写桩的话「有人把 rowStyle
+      // 的 flex 删了」这种变异完全测不出来（桩永远是对的，被测代码照抄桩的结论）。
+      const srp = (function () {
+        const i = cli.indexOf('const sortRowProps = (ui) => {')
+        const ir = cli.indexOf('const rowStyle = {')
+        if (i < 0 || ir < 0) return null
+        const jr = cli.indexOf('};', ir)
+        if (jr < 0) return null
+        let realRowStyle = null
+        try { realRowStyle = new Function('return (' + cli.slice(cli.indexOf('{', ir), jr + 1) + ')')() } catch (e) { return null }
+        if (!realRowStyle || typeof realRowStyle !== 'object') return null
+        let d = 0
+        for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+          if (cli[k] === '{') d++
+          else if (cli[k] === '}') { d--; if (d === 0) { const body = cli.slice(i, k + 1); try { return new Function('rowStyle', 'MODE_COLORS', body + '\nreturn { srp: sortRowProps, rs: rowStyle };')(realRowStyle, { ask: '#e65100' }) } catch (e) { return null } } }
+        }
+        return null
+      })()
+      ok('★★ sortRowProps：三种状态（正常 / 拖动中 / 有落点）都必须带 rowStyle 基础样式', (function () {
+        if (!srp || typeof srp.srp !== 'function') return false
+        const rs = srp.rs
+        // rowStyle 本身必须真的是「一行」的样式：flex + 内边距 + 分隔线。
+        // 这三样缺任何一个，行内元素就会挤成一团或上下粘在一起（渲染才看得见，不报错）。
+        if (rs.display !== 'flex' || !rs.padding || !rs.borderBottom) return false
+        const normal = srp.srp({ dragging: false, over: null, dragProps: { draggable: true } })
+        const dragging = srp.srp({ dragging: true, over: null, dragProps: { draggable: true } })
+        const over = srp.srp({ dragging: false, over: 'before', dragProps: { draggable: true } })
+        // 无 ui 时返回空对象（调用方照样 spread → 该行不支持拖动）
+        const none = srp.srp(null)
+        return normal.style && normal.style.display === 'flex' && normal.style.padding === rs.padding
+          && dragging.style && dragging.style.display === 'flex' && dragging.style.opacity === 0.45
+          && over.style && over.style.display === 'flex' && typeof over.style.boxShadow === 'string'
+          && Object.keys(none).length === 0
+      })())
     }
   }
   // ★★ 三处长列表必须**都**走 listBox（快捷工具 / 例外 / 规则）。
@@ -4396,12 +5043,89 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       const i = cli.indexOf(pair[0])
       if (i < 0) return false
       const back = cli.slice(Math.max(0, i - 200), i)
-      const fwd = cli.slice(i, i + 700)
+      // 窗口 1000：例外那处调用点在 items 与 render 之间还有 sort/注释（排序能力），
+      // 700 会把 render 落到窗口外，断言失败的方向会指向「没走 listBox」而不是「窗口太小」。
+      const fwd = cli.slice(i, i + 1000)
       return back.includes('listBox(') && fwd.includes(pair[1])
     })
   })())
-  // 声明与**用法**都要守：只断言 state 声明的话，把用法改成共用一份（`excFilter.global`）
-  // 仍然通过 —— 而「6 个分类共用一份过滤词」正是这条要防的（在 A 分类输的词会让 B 分类
+  // ★★ 排序能力只给「顺序即优先级」的两处列表（规则 / 例外），**不给快捷工具**。
+  //
+  // 为什么单独守：给快捷工具也传 sort 不会有任何报错、界面照样多出 ↑↓ 按钮，但那个列表
+  // 是按工具名查表的（quickAction），顺序与判定毫无关系 —— 用户拖动后会以为自己改变了
+  // 优先级，实际什么都没发生。这属于「看起来能用、实际是假的」那类问题。
+  // 判据按调用点定位：`sort:` 必须出现在规则与例外的 listBox 调用里，且不出现在快捷工具那个里。
+  ok('★★ 排序能力只给规则与例外两处列表（快捷工具顺序与判定无关，不得给）', (function () {
+    const callOf = (itemsKey) => {
+      const i = cli.indexOf(itemsKey)
+      if (i < 0) return null
+      // listBox( 在 items 之前，故向前找到调用起点、向后取到该调用的右括号范围（足够长的窗口）
+      const back = cli.lastIndexOf('listBox(', i)
+      if (back < 0) return null
+      return cli.slice(back, i + 700)
+    }
+    const quick = callOf('items: quickTools')
+    const exc = callOf('items: excList')
+    const rule = callOf('items: customList || []')
+    if (!quick || !exc || !rule) return false
+    // 规则与例外都必须传 sort，且 kind 与列表一致
+    if (!/sort: sortOf\('exception', c\)/.test(exc)) return false
+    if (!/sort: sortOf\('rule', null\)/.test(rule)) return false
+    // 快捷工具不得出现 sort
+    if (/\bsort:/.test(quick)) return false
+    // render 必须接收第二个参数（否则调用方拿不到排序上下文，按钮根本渲染不出来）
+    if (!cli.includes('render: (r, ui) => React.createElement')) return false
+    if (!cli.includes('const ruleRow = (r, ui) =>')) return false
+    return true
+  })())
+  // ★★ 排序状态的持有者必须是**组件**（useState），不能放进 listBox 内部：
+  // 例外那处 listBox 调用位于「展开/折叠」的条件分支里，在里面调 useState 会让 hook 数量
+  // 随折叠状态变化，React 直接抛「Rendered more hooks than during the previous render」。
+  // 这条断言守的是那个结构性约束（listBox 里不得出现 useState/useRef/useEffect）。
+  ok('★★ 排序状态由组件持有，listBox 内部不得调 hook（它在条件分支里被调用）', (function () {
+    const i = cli.indexOf('const listBox = (o) => {')
+    const j = cli.indexOf('\n\t\t\t};', i)
+    if (i < 0 || j < 0) return false
+    const body = cli.slice(i, j + 6)
+    if (/React\.use(State|Ref|Effect|Memo|Callback)\s*\(/.test(body)) return false
+    // 状态必须真的声明在组件里，且两个列表共用同一份（避免漏写一处清理逻辑）
+    if (!cli.includes('const [sortDrag, setSortDrag] = React.useState(null);')) return false
+    if (!cli.includes('const sortOf = (kind, category) => ({')) return false
+    // 拖动结束必须清态（否则落点指示永远留在屏幕上）：onDragEnd 与 onMove 两处都要清
+    if (!cli.includes('onDragEnd: () => sort.onDrag(null)')) return false
+    if (!cli.includes('setSortDrag(null);')) return false
+    return true
+  })())
+  // ★ 排序走**独立路由**（/permgate/reorder），且被列进 WRITE_METHODS。
+  // 前者守「面板真的有地方能改顺序」，后者守「写盘失败不会被当成成功」
+  // （排序是权限顺序，假成功会让用户按一个并未落盘的顺序理解权限）。
+  ok('★ 排序路由：客户端注册 + 宿主路由存在 + 走 persist + 列入 WRITE_METHODS', (function () {
+    if (!cli.includes("'permgate:reorder': ['POST', '/permgate/reorder'],")) return false
+    if (!cli.includes("'permgate:reorder',")) return false
+    if (!src.includes("pathname === '/permgate/reorder' && method === 'POST'")) return false
+    // 路由必须 await persist：不写盘的排序等于只在内存里改了一下，重启即回退
+    const i = src.indexOf("pathname === '/permgate/reorder'")
+    if (i < 0) return false
+    if (!/await persist\(exec\)/.test(src.slice(i, i + 400))) return false
+    // 面板必须真的调过它（否则路由是死代码，用户没有入口）
+    if (!cli.includes("invoke('permgate:reorder'")) return false
+    return true
+  })())
+  // ★★ ↑↓ 与拖动必须归约到**同一个** onMove（anchor + position），不得各写一套下标运算。
+  // 两套实现的典型失效：按钮的顺序对、拖动的顺序差一位 —— 只在某一条路径上出现，
+  // 而两条路径都是「用户改权限顺序」，谁对谁错无从判断。
+  ok('★★ ↑↓ 与拖动归约到同一个 onMove 原语（anchor + position，无第二套下标运算）', (function () {
+    if (!cli.includes("onUp: () => sort.onMove(id, prev.id, 'before')")) return false
+    if (!cli.includes("onDown: () => sort.onMove(id, next.id, 'after')")) return false
+    if (!cli.includes('sort.onMove(drag.id, id, drag.pos)')) return false
+    // 拖动落点按行的**中线**分上下半（通用手感）；写死一边会让「拖到上半」也插到后面
+    if (!cli.includes("(e.clientY - r.top) < r.height / 2 ? 'before' : 'after'")) return false
+    // dragover 必须 preventDefault，否则浏览器不派发 drop（拖动看起来完全没反应）
+    if (!/onDragOver: \(e\) => \{[\s\S]{0,400}?e\.preventDefault\(\)/.test(cli)) return false
+    // Firefox 下不写 dataTransfer 则后续 dragover/drop 根本不派发
+    if (!cli.includes("e.dataTransfer.setData('text/plain', String(id))")) return false
+    return true
+  })())
   // 看起来空了一块，用户以为例外丢了）。实测过：只断言声明时该变异漏网。
   ok('★ 三处列表的过滤词状态都按层/分类分开（换层或换分类不串用）', (function () {
     if (!cli.includes("const [quickFilter, setQuickFilter] = React.useState('');")) return false

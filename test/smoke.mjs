@@ -530,7 +530,7 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
   const residual = join(ws2, '.dsh', '.permgate.json')
   writeFileSync(residual, JSON.stringify({
     global: { fallbackMode: 'allow', directory: { mode: 'allow' } },
-    projects: { [ws2]: { fallbackMode: 'ask' }, 'C:/other-project': { fallbackMode: 'allow' } },
+    projects: { [ws2]: { fallbackMode: 'ask' }, 'B:/other-project': { fallbackMode: 'allow' } },
   }, null, 2), 'utf8')
 
   const status = host2.registered.get('perm_status')
@@ -1860,8 +1860,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   // ★ D-6 核心回归：command 大分类 = allow 时，破坏性命令仍不返回 next()
   // （现有实现在此场景下会放行 —— 这正是 §1.2b 的缺陷）
   await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'command', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
-  const DESTRUCTIVE = ['Remove-Item -Recurse -Force C:\\x', 'taskkill /f /im x.exe',
-    'icacls C:\\x /grant everyone:F', 'rm -rf ~/.dsh']
+  const DESTRUCTIVE = ['Remove-Item -Recurse -Force B:\\x', 'taskkill /f /im x.exe',
+    'icacls B:\\x /grant everyone:F', 'rm -rf ~/.dsh']
   const leakedD = []
   for (const c of DESTRUCTIVE) { const r = await probe(c); if (r.nexted) leakedD.push(c) }
   ok('★★ group20: command=allow 时破坏性命令仍不静默放行（D-6 核心修复，§1.2b）',
@@ -2207,9 +2207,369 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
   await Promise.race([p4, new Promise((r) => setTimeout(r, 300))])
   ok('★★ group21: 用户手动把规则调到前面后立即生效（顺序 = 优先级）', nexted4 === true)
 
+  // ★★ 排序路由（/permgate/reorder）：上面那条用的是「手写配置文件模拟拖动后的顺序」，
+  // 它证明的是**读侧**尊重顺序，而不是**写侧**能把顺序改对。这里补写侧：调路由 → 看落盘 →
+  // 看真实判定链是否随之改变。三件事缺一不可，否则「路由返回 200 但没写盘」照样通过。
+  {
+    const h5 = setRules([
+      { id: 'rA', action: 'deny', tool: 'pwsh' },
+      { id: 'rB', action: 'allow', tool: 'pwsh', args: 'git status' },
+      { id: 'rC', action: 'deny', tool: 'pwsh', args: 'rm -rf' },
+    ])
+    const readList = async () => {
+      const st = await callRoute(h5.routes, 'GET', '/permgate/status')
+      return ((st.data && st.data.custom && st.data.custom.global) || []).map((r) => r.id)
+    }
+    ok('group21: 排序前置条件 —— 初始顺序为 [rA, rB, rC]', JSON.stringify(await readList()) === JSON.stringify(['rA', 'rB', 'rC']), JSON.stringify(await readList()))
+
+    // ① 前移：把末位的 rC 放到首位之前（跨多条）
+    const mv1 = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rC', anchor: 'rA', position: 'before', lang: 'zh' })
+    ok('★ group21: reorder 前移（跨多条）返回成功', !!(mv1.data && mv1.data.reordered), JSON.stringify(mv1.data && (mv1.data.error || mv1.data)))
+    ok('★★ group21: reorder 前移落位正确（[rA,rB,rC] → rC 提到 rA 之前）',
+      JSON.stringify(await readList()) === JSON.stringify(['rC', 'rA', 'rB']), JSON.stringify(await readList()))
+
+    // ② 后移：把 rC 放到 rA 之后（anchor 原本排在它后面 → 下标要减一，差一位的经典坑）
+    const mv2 = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rC', anchor: 'rA', position: 'after', lang: 'zh' })
+    ok('★ group21: reorder 后移返回成功', !!(mv2.data && mv2.data.reordered), JSON.stringify(mv2.data && mv2.data.error))
+    ok('★★★ group21: reorder 后移落位正确（anchor 在 id 之后时下标减一，不得差一位）',
+      JSON.stringify(await readList()) === JSON.stringify(['rA', 'rC', 'rB']), JSON.stringify(await readList()))
+
+    // ③ 写侧真的改变了**判定结果**：现在 rC 排在 rB 之前，故 rm -rf 命中 deny 而不是被 allow 放行
+    const pre5 = h5.hooks.get('tools/pre-execute')
+    const run5 = async (cmd) => {
+      let nexted = false
+      const p = pre5(makeExec(ws, 'pwsh', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
+      p.catch(() => {})
+      const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      return { nexted, verdict: out && out.kind }
+    }
+    const afterMove = await run5('rm -rf /')
+    ok('★★ group21: 排序后的顺序在真实判定链上生效（rC 的 deny 不再被 rB 的宽泛 allow 遮蔽）',
+      afterMove.nexted === false && afterMove.verdict === 'deny', JSON.stringify(afterMove))
+
+    // ④ 非法参数一律回错误，且**不改动顺序**（静默「就近修正」会让用户以为拖动生效了）
+    const bad = await Promise.all([
+      callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rA', anchor: 'rA', position: 'before', lang: 'zh' }),
+      callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'nope', anchor: 'rA', position: 'before', lang: 'zh' }),
+      callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rA', anchor: 'nope', position: 'before', lang: 'zh' }),
+      callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rA', anchor: 'rB', lang: 'zh' }),
+      callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'bogus', id: 'rA', anchor: 'rB', position: 'before', lang: 'zh' }),
+    ])
+    ok('★ group21: reorder 非法参数（自反 / id 不存在 / anchor 不存在 / 缺 position / kind 非法）一律回错误',
+      bad.every((r) => r.data && r.data.error), JSON.stringify(bad.map((r) => r.data && r.data.error)))
+    ok('★★ group21: 非法 reorder 不改动顺序（拒绝而不是就近修正）',
+      JSON.stringify(await readList()) === JSON.stringify(['rA', 'rC', 'rB']), JSON.stringify(await readList()))
+
+    // ⑤ **相邻互换双向**与**中间项移到两端**：这两类是「差一位」最容易漏的形态
+    //    （`at = hit > from ? hit - 1 : hit` 的两个分支各只覆盖一半）。
+    //    上面的 ① 只覆盖「anchor 在 id 之后的前移」、② 只覆盖「anchor 在 id 之后的后移」，
+    //    即 `hit > from` 分支；`hit < from` 分支（把某条往**后**挪到它后面那条之后）
+    //    与相邻互换在旧断言里完全没覆盖 —— 实测把 `hit - 1` 改成 `hit` 后上面全部仍通过。
+    {
+      // 当前 ['rA','rC','rB']：相邻互换（rA 与 rC 换位）双向各来一次
+      const sw1 = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rC', anchor: 'rA', position: 'before', lang: 'zh' })
+      ok('★★★ group21: 相邻互换（上移）落位正确', !!(sw1.data && sw1.data.reordered)
+        && JSON.stringify(await readList()) === JSON.stringify(['rC', 'rA', 'rB']), JSON.stringify(await readList()))
+      const sw2 = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rC', anchor: 'rA', position: 'after', lang: 'zh' })
+      ok('★★★ group21: 相邻互换（下移，hit < from 分支）落位正确', !!(sw2.data && sw2.data.reordered)
+        && JSON.stringify(await readList()) === JSON.stringify(['rA', 'rC', 'rB']), JSON.stringify(await readList()))
+      // 中间项移到两端：先把顺序调成 [rA, rC, rB] 之外的形态不必要，直接用三项验证两端
+      const toEnd = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rA', anchor: 'rB', position: 'after', lang: 'zh' })
+      ok('★★★ group21: 首项移到末项之后（hit > from 的边界）落位正确', !!(toEnd.data && toEnd.data.reordered)
+        && JSON.stringify(await readList()) === JSON.stringify(['rC', 'rB', 'rA']), JSON.stringify(await readList()))
+      const toFront = await callRoute(h5.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'rule', id: 'rA', anchor: 'rC', position: 'before', lang: 'zh' })
+      ok('★★★ group21: 末项移到首项之前（hit < from 的边界）落位正确', !!(toFront.data && toFront.data.reordered)
+        && JSON.stringify(await readList()) === JSON.stringify(['rA', 'rC', 'rB']), JSON.stringify(await readList()))
+    }
+  }
+
+  // ★★ 例外列表的排序（同一原语，kind='exception'）：例外的顺序同样是「首条命中即生效」。
+  // 用独立 host + 独立配置文件，避免污染上面的规则组。
+  {
+    const wsE = mkdtempSync(join(tmpdir(), 'pg-exc-ws-'))
+    const homeE = mkdtempSync(join(tmpdir(), 'pg-exc-home-'))
+    mkdirSync(join(homeE, 'dsh-permgate'), { recursive: true })
+    const setExcs = (exceptions) => {
+      writeFileSync(join(homeE, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: { fallbackMode: 'ask', command: { mode: 'ask', exceptions: exceptions } }, projects: {},
+      }, null, 2), 'utf8')
+      return createHost({ workspaceRoot: wsE, dshHome: homeE })
+    }
+    // 例外模式的选择有个坑：`rm *` 这类**同时命中段 label**（`rm`）的宽泛模式，在
+    // shell-parse 的 resolveException 里会走「label 目标」那一轮，而那一轮是
+    // **deny > ask > allow** 优先（见 shell-parse.js 的注释：allow 命中不能立即收工，
+    // 否则外层 allow 会短路内层 deny）。于是「顺序」在那条路径上不起作用 ——
+    // 用它做排序测试会得到一个恒定的结果，断言失败的方向会指向 reorder 而不是模式选得不对。
+    // 这里刻意选**只匹配段原文**（不匹配 label `rm`）的模式，让顺序成为唯一变量。
+    const h6 = setExcs([
+      { id: 'e1', action: 'deny', match: 'rm -rf *' },
+      { id: 'e2', action: 'allow', match: 'git *' },
+      { id: 'e3', action: 'allow', match: 'rm -rf /tmp/*' },
+    ])
+    const readExcs = async () => {
+      const st = await callRoute(h6.routes, 'GET', '/permgate/status')
+      const c = st.data && st.data.categories && st.data.categories.global && st.data.categories.global.command
+      return ((c && c.exceptions) || []).map((r) => r.id)
+    }
+    ok('group21: 例外排序前置条件 —— 初始顺序为 [e1, e2, e3]',
+      JSON.stringify(await readExcs()) === JSON.stringify(['e1', 'e2', 'e3']), JSON.stringify(await readExcs()))
+    const mvE = await callRoute(h6.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'exception', category: 'command', id: 'e3', anchor: 'e1', position: 'before', lang: 'zh' })
+    ok('★ group21: 例外 reorder 返回成功', !!(mvE.data && mvE.data.reordered), JSON.stringify(mvE.data && (mvE.data.error || mvE.data)))
+    ok('★★ group21: 例外 reorder 落位正确（e3 提到 e1 之前）',
+      JSON.stringify(await readExcs()) === JSON.stringify(['e3', 'e1', 'e2']), JSON.stringify(await readExcs()))
+    // 判定链随之改变：e3 是 `rm -rf /tmp/*`=allow，提到 `rm -rf *`=deny 之前后该命令被放行
+    const pre6 = h6.hooks.get('tools/pre-execute')
+    const run6 = async (cmd) => {
+      let nexted = false
+      const p = pre6(makeExec(wsE, 'pwsh', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
+      p.catch(() => {})
+      const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      return { nexted, verdict: out && out.kind }
+    }
+    const e3First = await run6('rm -rf /tmp/x')
+    ok('★★ group21: 例外排序后的顺序在真实判定链上生效（具体 allow 提到宽泛 deny 之前即放行）',
+      e3First.nexted === true, JSON.stringify(e3First))
+    // 对照：同一个 host 下 e1 仍压着别的 rm（证明上面不是「例外整体失效」）
+    const e1Still = await run6('rm -rf /opt')
+    ok('group21(对照): 未被移动的宽泛 deny 例外仍生效（证明上一条不是例外整体失效）',
+      e1Still.nexted === false && e1Still.verdict === 'deny', JSON.stringify(e1Still))
+    // 例外排序必须校验分类：EXC_CATS 之外的分类一律拒绝（否则会往 doomloop 这类无例外列表上写）
+    const badCat = await callRoute(h6.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'exception', category: 'doomloop', id: 'e1', anchor: 'e2', position: 'before', lang: 'zh' })
+    ok('★ group21: 例外 reorder 拒绝不支持例外的分类（doomloop）', !!(badCat.data && badCat.data.error), JSON.stringify(badCat.data))
+    try { rmSync(wsE, { recursive: true, force: true }); rmSync(homeE, { recursive: true, force: true }) } catch (e) {}
+  }
+
   try {
     rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
   } catch (e) {}
+}
+
+// ─────────────────────────────────────────────────────────────
+group('23. 爆炸半径与破坏性候选：盘根删除的警告与候选范围')
+{
+  // 本组钉住两件事：
+  //   ① 弹窗给出的一键候选对破坏性命令**不给通配**。原行为一律给 `rmdir *`，
+  //      实测它同时匹配「整个盘」与「一个构建目录」—— 点一次「允许并记住」
+  //      = 从此所有 rmdir 永久静默放行；而且这条 allow 例外会**压过 destructive=deny**
+  //      （例外 > 子设置），即一次点击永久关掉用户设的闸。
+  //   ② 判定链不区分「整个盘」与「一个目录」，两者动作与候选完全相同 ——
+  //      故额外下发 blast 分档，让审批人有信息可依。
+  // 盘符用 B:（本机不存在该盘），示例不会被误当成真实目标。
+  const wsB = mkdtempSync(join(tmpdir(), 'pg-blast-ws-'))
+  const homeB = mkdtempSync(join(tmpdir(), 'pg-blast-home-'))
+  mkdirSync(join(homeB, 'dsh-permgate'), { recursive: true })
+  const bootB = (cfg) => {
+    writeFileSync(join(homeB, 'dsh-permgate', 'config.json'), JSON.stringify(cfg, null, 2), 'utf8')
+    return createHost({ workspaceRoot: wsB, dshHome: homeB })
+  }
+  // 审批**挂住**：这样条目留在 pending 池里，能查到它的候选与 blast。
+  // 让 approval 直接返回 'denied' 的话条目立刻被 cleanup 摘掉，查到的永远是空。
+  // （这里曾有第二个 host 工厂 bootHeld，与 bootB 只差 connection 覆盖；下面的测试体
+  //  改成内联 createHost 后它再没被调用，已删 —— 留着的死 helper 会让读的人以为有两条路径。）
+  const AUTH = { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080', cookie: 'dsh-auth-x=1' }
+  const pendOf = async (h) => {
+    const r = await callRoute(h.routes, 'GET', '/permgate/pending', undefined, AUTH)
+    return Array.isArray(r.data) ? r.data : []
+  }
+
+  // ── 洞 2：blast 随 pending 下发，且分档正确 ──────────────────────────────
+  {
+    // 用 createHost 的 approval 桩：它返回 'denied' 会让条目立刻结案 —— 故改用
+    // 一个**永不 resolve** 的 approval，借 ctx 覆盖。createHost 不接受 approval 覆盖，
+    // 于是这里直接构造：先建 host 再把 ctx.approval.request 换掉（apply 已读入闭包，
+    // 但 askUser 是每次调用时现取 ctx.approval.request，故替换生效）。
+    const h = createHost({ workspaceRoot: wsB, dshHome: homeB, connection: { requestRejection: ({ headers }) => ((headers || {}).cookie ? undefined : 401) } })
+    h.ctx.approval.request = () => new Promise(() => {})
+    writeFileSync(join(homeB, 'dsh-permgate', 'config.json'), JSON.stringify({ global: { fallbackMode: 'ask' }, projects: {} }, null, 2), 'utf8')
+    const pre = h.hooks.get('tools/pre-execute')
+    const fire = (cmd) => { const p = pre(makeExec(wsB, 'pwsh', { command: cmd }), async () => ({ kind: 'allow' })); p.catch(() => {}); return p }
+    fire('rmdir /s /q B:\\')
+    await new Promise((r) => setTimeout(r, 200))
+    const items = await pendOf(h)
+    const it = items[0] || null
+    ok('★★ group23: 盘根删除的审批带 blast=drive-root（审批人能看到「这是整个盘」）',
+      !!it && !!it.blast && it.blast.level === 'drive-root', JSON.stringify(it && it.blast))
+    ok('★ group23: blast 带上算出来的目标路径（用于界面显示与 title）',
+      !!it && !!it.blast && typeof it.blast.path === 'string' && it.blast.path.length > 0, JSON.stringify(it && it.blast))
+    // ★★ 洞 1：候选不得是通配
+    const cands = (it && it.candidates) || []
+    ok('★★ group23: 破坏性命令的候选不含通配（洞 1：一次点击不得放行所有同类操作）',
+      cands.length > 0 && cands.every((c) => !/[*?]/.test(String(c.value))),
+      JSON.stringify(cands.map((c) => c.value)))
+    ok('★ group23: 破坏性候选的值就是这条命令本身（精确到此命令）',
+      cands.some((c) => String(c.value).indexOf('rmdir') === 0), JSON.stringify(cands.map((c) => c.value)))
+    ok('★ group23: 破坏性候选带 hint 说明「只放行这一条」（用户点之前就知道范围）',
+      cands.some((c) => !!c.hint), JSON.stringify(cands.map((c) => c.hint)))
+    // 对照：非破坏性命令仍给通配候选（不能把整个候选机制收紧掉）
+    fire('git status')
+    await new Promise((r) => setTimeout(r, 200))
+    const items2 = await pendOf(h)
+    const gitIt = items2.find((x) => String(x.tool) === 'pwsh' && JSON.stringify(x.args || '').indexOf('git status') !== -1)
+    const gitCands = (gitIt && gitIt.candidates) || []
+    ok('★ group23(对照): 非破坏性命令仍给通配候选（git status → git status *）',
+      gitCands.some((c) => c.value === 'git status *'), JSON.stringify(gitCands.map((c) => c.value)))
+    ok('★ group23(对照): 非破坏性命令不带 blast 警告（不制造噪音）',
+      !!gitIt && !gitIt.blast, JSON.stringify(gitIt && gitIt.blast))
+
+    // ★★ group23 追加：**find 族的候选不得是通配**。
+    //
+    // 这是「洞 1」在另一个命令族上的形态，也是本次修复的核心：候选侧的破坏性判据若用
+    // segmentLabel 的主 label（`find`），而判定侧用 segmentLabels（会为 `-delete`/`-exec`
+    // 合成 `rm`），两者结论相反 —— `find . -delete` 在判定侧是 destructive，
+    // 候选侧却按非破坏性给出 `find *`。实测写入该例外后 `find . -delete` 在
+    // destructive=deny 下由 **deny 变 allow**，与洞 1 完全同构。
+    // 用 `find . -delete`（判定侧 code=destructive）做用例，断言候选必须精确到命令本身。
+    fire('find . -delete')
+    await new Promise((r) => setTimeout(r, 200))
+    const items3 = await pendOf(h)
+    const findIt = items3.find((x) => JSON.stringify(x.args || '').indexOf('find . -delete') !== -1)
+    const findCands = (findIt && findIt.candidates) || []
+    ok('★★ group23: find 族的破坏性命令也不给通配候选（find . -delete → 精确候选，不得是 find *）',
+      findCands.length > 0 && findCands.every((c) => !/[*?]/.test(String(c.value))),
+      JSON.stringify(findCands.map((c) => c.value)))
+
+    // ★★ group23 追加 2：**命令自带 glob 元字符的破坏性命令不给候选**。
+    //
+    // 候选值是**匹配模式**（matchCommand 把 `*`/`?` 当通配符），故「整段原文」只在原文
+    // 不含元字符时才等于「精确到此命令」。实测候选 `rm -rf *` 同时命中 `rm -rf /`、
+    // `rm -rf /etc`、`rm -rf C:/Windows` —— 用户点一次「允许并记住」就写下一条能放行
+    // 删盘根的 allow 例外（并压过 destructive=deny），与洞 1 完全同构。
+    // 这类形态**不给候选**（想少弹窗就自己在设置页写例外，那是显式表态）。
+    for (const risky of ['rm -rf *', 'rm -rf ?', 'del /f /s /q *']) {
+      fire(risky)
+      await new Promise((r) => setTimeout(r, 200))
+      const itemsR = await pendOf(h)
+      const itR = itemsR.find((x) => JSON.stringify(x.args || '').indexOf(risky) !== -1)
+      const cR = (itR && itR.candidates) || []
+      ok('★★ group23: 自带通配的破坏性命令不给候选（' + risky + '，避免写入比点击目标更宽的例外）',
+        !!itR && cR.every((c) => !/[*?]/.test(String(c.value))),
+        JSON.stringify(cR.map((c) => c.value)))
+    }
+    // 对照：自带通配但**非破坏性**的命令不受影响（`git log --grep=x` 之类仍可记住）
+    fire('ls -la')
+    await new Promise((r) => setTimeout(r, 200))
+    const itemsL = await pendOf(h)
+    const lsIt = itemsL.find((x) => JSON.stringify(x.args || '').indexOf('ls -la') !== -1)
+    ok('★ group23(对照): 非破坏性命令仍给通配候选（ls -la → ls *）',
+      !!lsIt && ((lsIt.candidates || []).some((c) => c.value === 'ls *')),
+      JSON.stringify((lsIt && lsIt.candidates || []).map((c) => c.value)))
+
+    // ★★ group23 追加 3：**能携带破坏性载荷的非破坏性段**（`find . -name x`）不得给出
+    // `find *` 这种通配候选 —— 它实测匹配 `find / -delete`，用户为「找一下文件」点一次
+    // 就放行了删盘根（在 destructive=deny 下由 deny 变 allow）。
+    // 修复后写入的是**整段原文** `find . -name x`（matchCommand 对无通配模式做词边界前缀
+    // 匹配，已覆盖 `find . -name x -print`，无需再加 ` *`）。
+    fire('find . -name x')
+    await new Promise((r) => setTimeout(r, 200))
+    const itemsF = await pendOf(h)
+    const fIt = itemsF.find((x) => JSON.stringify(x.args || '').indexOf('find . -name x') !== -1)
+    const fCands = (fIt && fIt.candidates) || []
+    ok('★★ group23: find 族的非破坏性段不给裸通配候选（不得是 find *，应为整段原文）',
+      !!fIt && fCands.length > 0 && fCands.every((c) => c.value !== 'find *')
+      && fCands.some((c) => c.value === 'find . -name x'),
+      JSON.stringify(fCands.map((c) => c.value)))
+    // ★★ 按钮显示的值必须与写入的值同源：载荷族段若显示裸 label「find」而写入整条命令，
+    //    用户点的是「find」、实际授权的是那条完整命令 —— 文案与行为不符。
+    //    破坏性段早已如此（显示整段原文），载荷族段必须一致。
+    ok('★★ group23: 载荷族候选的显示值就是写入值（不得显示裸 label 而写入整条命令）',
+      !!fIt && fCands.some((c) => c.value === 'find . -name x' && String(c.label) === 'find . -name x'),
+      JSON.stringify(fCands.map((c) => ({ label: c.label, value: c.value }))))
+    // ★★ 载荷族**自带通配**时不给候选：`find . -name *` 写下的模式会比所点命令更宽
+    //    （`*` 在模式里是通配符，会匹配到别的 find 调用），与破坏性段同一处置。
+    fire('find . -name *')
+    await new Promise((r) => setTimeout(r, 200))
+    const itemsFG = await pendOf(h)
+    const fgIt = itemsFG.find((x) => JSON.stringify(x.args || '').indexOf('find . -name *') !== -1)
+    ok('★★ group23: 载荷族自带通配时不给任何候选（写下的模式会比点击目标更宽）',
+      !!fgIt && ((fgIt.candidates || []).length === 0),
+      JSON.stringify((fgIt && fgIt.candidates || []).map((c) => c.value)))
+    try { rmSync(homeB, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── 洞 2 后半：例外列表的标注（statusView.exceptionBlast）────────────────
+  {
+    mkdirSync(join(homeB, 'dsh-permgate'), { recursive: true })
+    const h = bootB({
+      global: {
+        fallbackMode: 'ask',
+        command: {
+          mode: 'ask',
+          exceptions: [
+            { id: 'e1', action: 'allow', match: 'rmdir /s /q B:\\' },
+            { id: 'e2', action: 'allow', match: 'git status *' },
+            // e3 是**有爆炸半径的 deny 例外**：它若不慎被标注，断言立刻变红，
+            // 从而证明「只标 allow」这道过滤真的在跑（而不是碰巧没有可标注的条目）。
+            { id: 'e3', action: 'deny', match: 'rm -rf C:\\Windows' },
+            { id: 'e4', action: 'allow', match: 'rmdir /s /q B:\\demo-app\\build' },
+            // ★★ e6 是**宽泛通配的 allow 例外**（`rm -rf *`）：它的目标归约后是 `.`
+            //    （旧实现判 inside → 返回 null → 面板零标注），但它实测能放行
+            //    `rm -rf /`、`rm -rf /etc`、`rm -rf C:/Windows`。面板的例外列表是
+            //    「唯一能让人事后发现『我什么时候放行了删盘根』的地方」，此处必须标出。
+            { id: 'e6', action: 'allow', match: 'rm -rf *' },
+          ],
+        },
+        read: { mode: 'allow', exceptions: [{ id: 'e5', action: 'allow', path: 'C:\\Windows\\System32\\*' }] },
+      },
+      projects: {},
+    })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    // 标注按**层**下发（{ global, project }）：全局块与项目块的例外 id 空间不共享，
+    // 平表会让后写入的一层覆盖另一层（无害例外被标成「整个盘」／危险那条丢警告）。
+    // 本组的例外全在 global 层。
+    const ebAll = (st.data && st.data.exceptionBlast) || {}
+    const eb = ebAll.global || {}
+    ok('★★ group23: 例外列表标注 —— 指向盘根的 allow 例外被标为 drive-root',
+      !!eb.e1 && eb.e1.level === 'drive-root', JSON.stringify(eb.e1))
+    ok('★ group23: 例外列表标注 —— 工作区外的 allow 例外被标为 outside',
+      !!eb.e4 && eb.e4.level === 'outside', JSON.stringify(eb.e4))
+    ok('★ group23: 例外列表标注 —— 指向系统目录的路径例外被标为 system',
+      !!eb.e5 && eb.e5.level === 'system', JSON.stringify(eb.e5))
+    // ★★ 两条**不该出现**的：非破坏性命令（`git status *` 不删任何东西）与 deny 例外
+    //    （deny 指向盘根是保护、不是风险）。多标它们就是噪音，噪音会让真警告被忽略。
+    //    判据必须同时查「不该有的没有」与「该有的有」：只查前者时，把整个 exceptionBlast
+    //    改成恒空对象也能通过（实测该变异会漏网）。
+    ok('★★ group23: 非破坏性例外与 deny 例外都**不**标注（只标「allow 且破坏性」）',
+      !eb.e2 && !eb.e3 && !!eb.e1 && !!eb.e4 && !!eb.e5,
+      JSON.stringify({ e1: eb.e1, e2: eb.e2, e3: eb.e3, e4: eb.e4, e5: eb.e5 }))
+    // ★★ 宽泛通配的 allow 例外必须被标为 broad：它是「面板上看起来无害、实际能放行删盘根」
+    //    的那一类，正是面板标注最该覆盖的形态（旧实现返回 null → 零标注）。
+    ok('★★ group23: 宽泛通配例外被标为 broad（rm -rf * 能放行 rm -rf /，不得静默）',
+      !!eb.e6 && eb.e6.level === 'broad', JSON.stringify(eb.e6))
+    // ★★ 派生值不得落盘：exceptionBlast 是读侧现算的视图，写进配置会让旧结论永久固化
+    //    （与 doomloopSetting / normalizeCategory 同一条纪律）。
+    //    同时查「响应里有该键」与「磁盘上没有该键」：只查磁盘会把「整块不下发」判成通过。
+    const cfgRaw = readFileSync(join(homeB, 'dsh-permgate', 'config.json'), 'utf8')
+    ok('★★ group23: exceptionBlast 只读下发、不落盘（响应里有它、配置文件里没有它）',
+      st.data && st.data.exceptionBlast && Object.keys(eb).length > 0
+      && cfgRaw.indexOf('exceptionBlast') === -1,
+      JSON.stringify({ keys: Object.keys(eb), inFile: cfgRaw.indexOf('exceptionBlast') !== -1 }))
+    // ★★ 跨层 id 相同不得串台：全局与项目块的 id 空间不共享，平表会让后写入的一层
+    //    覆盖另一层 —— 无害的例外被标成「目标是一整个盘」，或危险那条丢掉警告。
+    //    面板按 tab 分别渲染，故两层必须各拿各的结论。
+    //    注：add-exception 路由自行为新例外生成 id（不接受调用方指定），故这里不构造
+    //    「同 id」而是直接验分层本身：项目层新增条目后，全局层的键必须**原样还在**，
+    //    且两层是不同的对象（退化成平表时全局键会与项目键混在同一个集合里）。
+    {
+      const st2 = await callRoute(h.routes, 'POST', '/permgate/add-exception', {
+        category: 'command', action: 'allow', match: 'rmdir /s /q B:\\', target: 'project',
+      })
+      ok('★ group23(前置): 项目层写入一条盘根例外', !!(st2 && st2.data && st2.data.added),
+        JSON.stringify(st2 && st2.data && st2.data.error))
+      const newId = st2 && st2.data && st2.data.added ? st2.data.added.id : null
+      const st3 = await callRoute(h.routes, 'GET', '/permgate/status')
+      const eb2 = (st3.data && st3.data.exceptionBlast) || {}
+      const g2 = eb2.global || {}
+      const p2 = eb2.project || {}
+      ok('★★ group23: 例外标注按层隔离（项目层新增不覆盖全局层，两层各拿各的结论）',
+        !!newId && !!g2.e1 && g2.e1.level === 'drive-root'
+        && !!p2[newId] && p2[newId].level === 'drive-root'
+        // 平表退化检测：全局层里不得出现项目层的键
+        && !Object.prototype.hasOwnProperty.call(g2, newId)
+        && eb2.global !== eb2.project,
+        JSON.stringify({ global: Object.keys(g2), project: Object.keys(p2), newId: newId }))
+    }
+    try { rmSync(wsB, { recursive: true, force: true }); rmSync(homeB, { recursive: true, force: true }) } catch (e) {}
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

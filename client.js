@@ -49,6 +49,34 @@ window.__ModuleLoader__.load({
 		// 原先靠内联 style 兜底，去掉后禁用按钮看起来仍可点。
 		const RADIO_DISABLED_CSS = '.pg-radio:disabled { opacity: 0.5; cursor: not-allowed; }';
 
+		// 列表排序（规则 / 例外）的样式：↑↓ 按钮比普通按钮窄一圈，两行列表里一行要放
+		// 动作徽标 + 内容 + 备注 + 两个箭头 + 删除，按钮按默认 4px/10px 内边距会把内容挤到换行。
+		// 拖动中的行给 grab/grabbing 光标：这是「这行能拖」唯一的视觉暗示（HTML5 拖放不会
+		// 自己画任何东西），没有它用户根本不会去试。
+		const PG_SORT_CSS = '.pg-btn-move { padding: 1px 5px; font-size: 12px; line-height: 1.4; } .pg-row-drag { cursor: grab; } .pg-row-drag:active { cursor: grabbing; }';
+
+		// 爆炸半径警告条（审批弹窗）。配色由内联 style 给（按档位不同），这里只定形状：
+		// 左边一条粗色边 + 浅底，视觉权重高于普通说明、低于按钮 —— 它是「看这里」而不是「点这里」。
+		// 不做成可关闭：它只在真的危险时出现（盘根/系统目录/家目录/工作区外），
+		// 能关掉就等于允许用户把唯一的安全提示永久藏起来。
+		const PG_BLAST_CSS = '.pg-blast { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; font-weight: 600; line-height: 1.45; padding: 6px 8px; margin-bottom: 8px; border: 1px solid; border-left-width: 3px; border-radius: 6px; background: rgba(198,40,40,0.07); word-break: break-word; } .pg-blast-icon { flex: none; }';
+
+		// 爆炸半径的档位 → 图标 / 配色 / 文案键。**模块级单点**：审批弹窗的警告条与设置面板的
+		// 例外列表标注共用同一份 —— 各写一份的话，两处的配色与措辞迟早分叉，而用户看到的
+		// 是「同一个东西在两个地方长得不一样」。
+		// 配色分两级：盘根与系统目录是「删了就没了」用错误红，家目录与工作区外是「不该动」用警告橙。
+		// 全用红色等于没有分级，而这两档的后果确实差一个量级。
+		const BLAST_LEVELS = {
+			'drive-root': { icon: '⛔', color: '#c62828', key: 'app.blast.driveRoot' },
+			// broad：例外的目标是不限定的顶层通配（`rm -rf *`）—— 它匹配得到盘根，
+			// 但匹配范围由用户写的模式决定，说不清是哪一个具体路径。与 drive-root 同级配色：
+			// 一条 `rm -rf *`=allow 实测能放行 `rm -rf /`，后果不比删盘根轻。
+			broad: { icon: '⛔', color: '#c62828', key: 'app.blast.broad' },
+			system: { icon: '⛔', color: '#c62828', key: 'app.blast.system' },
+			home: { icon: '⚠', color: '#e65100', key: 'app.blast.home' },
+			outside: { icon: '⚠', color: '#e65100', key: 'app.blast.outside' },
+		};
+
 		const DIFF_CSS = '.pg-link { display: inline-flex; align-items: center; gap: 4px; background: var(--dsw-alias-bg-layer-1, #f0f2f5); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.45)); border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12px; font-weight: 500; margin-bottom: 6px; } .pg-link:hover { border-color: #1f6feb; color: #1f6feb; }';
 
 		// dsh-file-review 风格 unified diff + 右侧对比抽屉（浅/深色主题 token 跟随）
@@ -305,6 +333,8 @@ window.__ModuleLoader__.load({
 			'permgate:remove-exception': ['POST', '/permgate/remove-exception'],
 			'permgate:add-rule': ['POST', '/permgate/add-rule'],
 			'permgate:remove-rule': ['POST', '/permgate/remove-rule'],
+			// 排序：规则与例外共用（kind 区分），顺序即优先级。
+			'permgate:reorder': ['POST', '/permgate/reorder'],
 			'permgate:reload': ['POST', '/permgate/reload'],
 			'permgate:open-config': ['POST', '/permgate/open-config'],
 			// permgate:open-file 通道已移除：打开文件改走客户端 ctx.sidebarRight，不再回宿主跑 cmd /c start
@@ -1234,6 +1264,23 @@ window.__ModuleLoader__.load({
 		// 分类清单默认值：以宿主下发为准（见 applyStatusLists），避免双端各存一份而漂移
 		let CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'];
 		let EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo'];
+		// 例外的爆炸半径（宿主下发 { global: { [例外id]: {level,path} }, project: {...} }，
+		// 只含 allow 例外）。
+		//
+		// **按层分开**而不是一张平表：全局块与项目块的例外 id 空间不共享（手写/存量配置可相同），
+		// 平表会让后写入的一层覆盖另一层 —— 无害的例外被标成「目标是一整个盘」，或危险那条
+		// 丢掉警告。列表按 tab 渲染，故取值时必须带上当前 tab 对应的层。
+		//
+		// 与 CATS/EXC_CATS 同口径放在模块级：它是**只读派生视图**，不是用户配置，
+		// 故不进 React state —— 每份 status 都是完整替换，没有需要局部更新的场景。
+		// 默认空对象（不是 null）：渲染处直接下标取值，null 会让每次渲染都要判空。
+		let EXCEPTION_BLAST = {};
+		// 取某层某条例外的爆炸半径。层名非法或缺失时返回 undefined（渲染处据此不标注）。
+		function exceptionBlastOf(layer, id) {
+			const t = layer === 'project' ? 'project' : 'global';
+			const m = EXCEPTION_BLAST && EXCEPTION_BLAST[t];
+			return m && id ? m[id] : undefined;
+		}
 		function applyStatusLists(s) {
 			if (s && Array.isArray(s.cats) && s.cats.length) CATS = s.cats;
 			if (s && Array.isArray(s.excCats) && s.excCats.length) EXC_CATS = s.excCats;
@@ -1241,6 +1288,9 @@ window.__ModuleLoader__.load({
 			if (s && Array.isArray(s.allModes) && s.allModes.length) ALL_MODES = s.allModes;
 			if (s && Array.isArray(s.quickPreset) && s.quickPreset.length) QUICK_PRESET = s.quickPreset;
 			if (s && s.quickDefaults && typeof s.quickDefaults === 'object') QUICK_DEFAULTS = s.quickDefaults;
+			// 爆炸半径：**每次 status 都整体替换**（含清空）。不能写成「只在有值时赋值」——
+			// 用户删掉那条例外后，旧标注会留在界面上，指向一个已经不存在的 id（看似还在生效）。
+			EXCEPTION_BLAST = (s && s.exceptionBlast && typeof s.exceptionBlast === 'object') ? s.exceptionBlast : {};
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
@@ -1317,6 +1367,16 @@ window.__ModuleLoader__.load({
 				'app.request': '{tool} 请求执行',
 				'app.intent': '意图说明',
 				'app.args': '参数',
+				// ── 爆炸半径警告（审批弹窗）─────────────────────────────────────
+				// 文案必须说清「多大范围」而不是只喊危险：审批人要判断的是「这是不是我要的」，
+				// 只写「危险！」他无从判断，只能一律拒绝（那会让这个功能变成噪音）。
+				// {p} 是宿主算出的目标路径。
+				'app.blast.driveRoot': '目标是一整个盘（{p}）—— 该盘上的全部内容都会被永久删除，不进回收站',
+				// broad 的 {p} 是 `.`（目标不限定），故文案不写具体路径：说清「这条规则不限目标」即可。
+				'app.blast.broad': '这条规则不限删除目标（{p}）—— 它同样放行删除盘根与系统目录',
+				'app.blast.system': '目标是系统目录（{p}）—— 删除后系统或软件可能无法启动',
+				'app.blast.home': '目标是你的用户目录（{p}）—— 其中的配置与文档都会丢失',
+				'app.blast.outside': '目标在工作区之外（{p}）—— 不在本项目范围内',
 				'app.cand.head': '添加项目规则（当前项目）',
 				'app.cand.hint': '点亮条目后点「允许 / 拒绝」即写入当前项目例外。',
 				'app.allow': '允许',
@@ -1458,6 +1518,11 @@ window.__ModuleLoader__.load({
 				'panel.listFilterPh': '过滤…',
 				'panel.listNoMatch': '没有匹配的条目',
 				'panel.listMatchCount': '{n} / {m}',
+				// ── 列表排序（规则 / 例外）────────────────────────────────────────
+				// 只给按钮写 title，不给列表加说明文字：排序的语义（「上面的先生效」）在
+				// 这两处列表的标题行已经交代过，再写一段说明就是重复。
+				'panel.moveUp': '上移（更先生效）',
+				'panel.moveDown': '下移（更晚生效）',
 				'panel.subDestructive': '破坏性命令',
 				// 一行说清作用即可，不列具体名单：这里曾展开「段首命令命中内置名单时按此动作
 				// （更细的判定，优先于上方默认动作）」——括号里那句与当时下方那行「当前生效」
@@ -1485,6 +1550,9 @@ window.__ModuleLoader__.load({
 				'panel.loopDenyWarn': '⚠ 动作是「拒绝」：命中时直接中断 AI、不弹窗，你不会有确认机会。判据是「连续 N 次逐字节相同」的调用，误判概率极低但并非零。',
 				'panel.excTooBroad': '匹配范围过宽',
 				'panel.excTooBroadHint': '这条例外匹配任意单个命令段，等于不再审查任何命令。建议改成具体命令（如 git status *）。',
+				// 与上面那条是**两个不同的失效模式**：过宽说的是「覆盖了太多命令」，
+				// 这条说的是「例外本身很具体，但指向的目标删了就没」。悬停 title 给出完整路径与后果。
+				'panel.excBlast': '目标范围过大',
 				'quick.web_search': '网页搜索',
 				'quick.skill': '加载技能',
 				'quick.grep': '内容检索',
@@ -1545,6 +1613,12 @@ window.__ModuleLoader__.load({
 				'app.request': '{tool} requests to run',
 				'app.intent': 'Intent',
 				'app.args': 'Arguments',
+				// ── blast-radius warnings (approval popup) ──
+				'app.blast.driveRoot': 'Target is an entire drive ({p}) — everything on it will be permanently deleted, not sent to the Recycle Bin',
+				'app.blast.broad': 'This rule does not limit the deletion target ({p}) — it also allows deleting a drive root or a system directory',
+				'app.blast.system': 'Target is a system directory ({p}) — deleting it may leave the system or installed software unable to start',
+				'app.blast.home': 'Target is your user directory ({p}) — configuration and documents in it will be lost',
+				'app.blast.outside': 'Target is outside the workspace ({p}) — not part of this project',
 				'app.cand.head': 'Add project rule (current project)',
 				'app.cand.hint': 'Toggle items then click Allow / Deny to write them into the current project exceptions.',
 				'app.allow': 'Allow',
@@ -1679,6 +1753,9 @@ window.__ModuleLoader__.load({
 				'panel.listFilterPh': 'Filter…',
 				'panel.listNoMatch': 'No matching entries',
 				'panel.listMatchCount': '{n} / {m}',
+				// ── list ordering (rules / exceptions) ──
+				'panel.moveUp': 'Move up (takes effect earlier)',
+				'panel.moveDown': 'Move down (takes effect later)',
 				'panel.subDestructive': 'Destructive commands',
 				'panel.subDestructiveHint': ': except for exceptions, risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow this action',
 				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
@@ -1696,6 +1773,7 @@ window.__ModuleLoader__.load({
 				'panel.loopDenyWarn': '⚠ The action is "deny": a hit aborts the AI immediately without a dialog, so you get no chance to confirm. The criterion is N byte-identical consecutive calls, so false positives are very unlikely but not impossible.',
 				'panel.excTooBroad': 'Very broad',
 				'panel.excTooBroadHint': 'This exception matches any single command segment — effectively no command review at all. Prefer a concrete command such as git status *.',
+				'panel.excBlast': 'Target too broad',
 				'quick.web_search': 'web search',
 				'quick.skill': 'load skill',
 				'quick.grep': 'content search',
@@ -2199,6 +2277,32 @@ window.__ModuleLoader__.load({
 			// 会话身份优先用宿主注入的「当前 GUI 会话 id」（props.sessionId，OverlayRoot 从 useSessions 取），
 			// 回退才是 entry 自带的 exec.session.id —— 后者不是 DSH 侧边栏认的身份，会导致 workspaceFileScope 解析失败
 			const openSidebarFor = (p, file) => openInSidebar(file, (props && props.sessionId) || (p && p.sessionId), p && p.projRoot);
+			// 爆炸半径警告条：把「这一下会删掉多大范围」显式写出来。
+			//
+			// 为什么要单独一条而不是并进 reason：reason 是判定链的产物（「为什么问这一次」），
+			// 而爆炸半径与判定无关 —— 两个目标的动作可能完全相同，区别只在**范围**。
+			// `rmdir /s /q B:\` 与 `rmdir /s /q <构建目录>` 的 reason 一模一样，
+			// 审批人没有任何信息能把它们区分开，只能靠肉眼读命令串。
+			//
+			// 分级配色：盘根/系统目录用错误红（删了就没了），家目录/工作区外用警告橙。
+			// 不用同一个颜色：全是红的等于没有分级，而这两档的后果确实差一个量级。
+			//
+			// BLAST_LEVELS 定义在**模块级**（不在这里）：设置面板的例外列表也要用同一份配色与文案
+			// —— 定义在组件内的话面板取不到，只能各写一份，两边迟早漂移。
+			const blastBanner = (b) => {
+				if (!b || !b.level) return null;
+				const meta = BLAST_LEVELS[b.level];
+				if (!meta) return null;
+				return React.createElement('div', {
+					className: 'pg-blast',
+					style: { borderColor: meta.color, color: meta.color },
+					// 完整路径放 title：条内文字要保持一眼能读完，长路径会把它撑成两行
+					title: b.path || '',
+				},
+					React.createElement('span', { className: 'pg-blast-icon' }, meta.icon),
+					React.createElement('span', null, T(meta.key).replace('{p}', b.path || '')),
+				);
+			};
 			const argsBox = (p) => React.createElement('div', { className: 'pg-args' },
 				React.createElement('span', { className: 'pg-args-tag' }, T('app.args')),
 				(p.argLines && p.argLines.length)
@@ -2229,6 +2333,14 @@ window.__ModuleLoader__.load({
 						}, T('app.fromSession') + label);
 					})(),
 					React.createElement('div', { className: 'pg-modal-req' }, React.createElement('b', null, p.tool), ' ', T('app.request').replace('{tool}', '')),
+					// 爆炸半径警告（只有破坏性命令的目标落在盘根/系统目录/家目录/工作区外时才有）。
+					// 位置刻意排在**参数框之前**：审批人是自上而下读的，警告必须在看到命令原文之前
+					// 就进入视野 —— 排在后面等于让人先读完命令、形成判断，再看到警告，那时已经晚了。
+					//
+					// 它回答的是判定链**没有**回答的那个问题：「这一下有多重」。
+					// `rmdir /s /q B:\` 与 `rmdir /s /q <某构建目录>` 在判定链上完全一样
+					// （都只是 ask），审批人只能靠肉眼从命令串里看出 B:\ 不对。
+					blastBanner(p.blast),
 					p.reason ? React.createElement('div', { className: 'pg-modal-body' }, p.reason) : null,
 					p.intent ? React.createElement('div', { className: 'pg-intent' },
 						React.createElement('span', { className: 'pg-intent-tag' }, T('app.intent')),
@@ -2899,6 +3011,16 @@ window.__ModuleLoader__.load({
 			const [quickFilter, setQuickFilter] = React.useState('');
 			const [excFilter, setExcFilter] = React.useState({});
 			const [ruleFilter, setRuleFilter] = React.useState({ global: '', project: '' });
+			// 拖动排序的当前状态：{ id, overId, pos } 或 null（没在拖）。
+			// **只存这一份、两个列表共用**：同一时刻只可能拖着一行，而规则与例外的 id 前缀
+			// 不同（r… / e…），跨列表相撞的概率可忽略；即便真撞上，效果也只是另一列表里
+			// 恰好同 id 的那行跟着半透明一下，不会写错盘（落盘的 id 来自被拖的那一行）。
+			// 分开存两份的代价更大：得在两处各写一遍 onDrag 的取值逻辑，且拖动结束的清理
+			// 要写两遍 —— 漏一处就是「落点指示永远留在屏幕上」。
+			//
+			// 状态放在组件里而不是 listBox 内部，原因见 listBox 的参数说明（例外列表在条件
+			// 分支里，hook 数量不能随折叠状态变化）。
+			const [sortDrag, setSortDrag] = React.useState(null);
 			// 当前正在编辑（尚未保存）的拒绝原因格：{ kind: 'cat'|'quick'|'fb', tab, key }。
 			// applyStatus 每次都会用服务端值整表重建上面三份 reason state，而 applyStatus 不只由
 			// 面板自身的 invoke 回调触发，还由 SSE 的 status/refresh 事件触发——宿主在 init()、
@@ -3098,6 +3220,7 @@ window.__ModuleLoader__.load({
 				'permgate:set-doomloop',
 				'permgate:add-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
+				'permgate:reorder',
 			];
 			const invoke = (method, args, done) => {
 				setBusy(true);
@@ -3345,6 +3468,22 @@ window.__ModuleLoader__.load({
 			const setFormKey = (key) => (e) => setForm(Object.assign({}, form, { [key]: e.target.value }));
 			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });
 			const removeRule = (id) => invoke('permgate:remove-rule', { target: tab, id });
+			// 排序单点：面板只报「把 id 放到 anchor 之前/之后」，怎么落位由宿主决定
+			// （reorderEntries 是唯一实现）。↑↓ 与拖动都走这里 —— 两条入口共用一个原语，
+			// 才不会出现「按钮的顺序对、拖动的顺序差一位」这类只在某一条路径上出现的偏差。
+			//
+			// 不做本地乐观重排：顺序就是优先级，界面先动、写盘失败时用户已经按新顺序
+			// 理解了一遍权限 —— 那种「看起来生效了」比卡一下糟得多。请求返回后由 status 收敛。
+			const moveEntry = (kind, category) => (id, anchor, position) => {
+				setSortDrag(null);
+				invoke('permgate:reorder', { target: tab, kind, category, id, anchor, position });
+			};
+			// 排序状态的三件套（两个列表共用一份 state，见 sortDrag 的声明处）
+			const sortOf = (kind, category) => ({
+				drag: sortDrag,
+				onDrag: setSortDrag,
+				onMove: moveEntry(kind, category),
+			});
 			const reload = () => invoke('permgate:reload', {});
 			const openConfig = () => invoke('permgate:open-config', {}, () => setMsg(T('panel.openConfigDone')));
 
@@ -3374,6 +3513,22 @@ window.__ModuleLoader__.load({
 			//
 			// 曾有第 7 个参数 hint（渲染在过滤框右侧的说明行），三处调用点一个都没传，
 			// 属只写不读的死参数 —— 三处列表的说明行都在各自的卡片标题下，位置比这里更合适。
+			//
+			// 参数（续）：
+			//   sort —— 可选，排序能力。**只有「顺序即优先级」的列表才传**（规则 / 例外）：
+			//           判定链是「首条命中即返回」，数组顺序就是优先级。
+			//           快捷工具不传 —— 它按名字查表，顺序与判定无关，给排序按钮反而是误导。
+			//           形状 { drag, onDrag, onMove }：
+			//             drag   —— 当前拖动状态 { id, overId, pos } 或 null；
+			//             onDrag —— 更新该状态（null = 拖动结束）；
+			//             onMove —— (id, anchorId, position) => void，position 为 'before' | 'after'。
+			//           拖动状态**由调用方持有**，不能存在 listBox 内部：listBox 是普通函数，
+			//           而三处调用中有一处（例外）位于「展开/折叠」的条件分支里 —— 在里面调
+			//           useState 会让 hook 数量随折叠状态变化，React 直接抛
+			//           「Rendered more hooks than during the previous render」。
+			//           listBox 只负责**算**（谁还能上移/下移、落点画在哪一行），按钮与事件
+			//           由调用方插进自己的行里 —— 行内布局归调用方，容器不替它决定。
+			//           故 render 多收一个参数：render(item, sortUi)。sortUi 为 null = 本列表无排序。
 			const listBox = (o) => {
 				const all = Array.isArray(o.items) ? o.items : [];
 				const q = String(o.filter || '').trim().toLowerCase();
@@ -3381,6 +3536,65 @@ window.__ModuleLoader__.load({
 				// 不做 glob / 正则：那是给「按模式筛」的场景用的，而这里用户只想快速缩范围；
 				// 引入正则还会让 `*`、`(` 这类字符变成语法，用户输进去反而匹配不到东西。
 				const shown = q ? all.filter((it) => String(o.match ? o.match(it) : '').toLowerCase().indexOf(q) !== -1) : all;
+				// 排序：只在调用方传了 sort 时启用（见上方参数说明）。
+				//
+				// **↑↓ 与拖动都以「可见序列」（shown）为准**，不是底层数组：过滤态下用户看不见
+				// 被滤掉的行，若按底层相邻项移动，按一次 ↑ 可能视觉上毫无变化（交换了一个看不见的
+				// 条目）—— 那看起来就是按钮坏了。按可见序列移动则每次都必定跨过一条看得见的行。
+				// 代价：被滤掉的行会被「跳过」，即它们的相对位置不变、但与被移动项的距离变了。
+				// 这是有意的 —— 用户对看不见的东西无法有意图。
+				const sort = o.sort || null;
+				const drag = sort && sort.drag ? sort.drag : null;
+				const sortUiOf = (it, i) => {
+					if (!sort || !it || it.id === undefined || it.id === null) return null;
+					const id = it.id;
+					const prev = i > 0 ? shown[i - 1] : null;
+					const next = i < shown.length - 1 ? shown[i + 1] : null;
+					return {
+						// 本行是否正被拖动（画半透明，让用户看清「东西被拿起来了」）
+						dragging: !!(drag && drag.id === id),
+						// 落点：'before' / 'after' / null。只画在**别人**身上（自己身上没有落点）
+						over: (drag && drag.id !== id && drag.overId === id) ? drag.pos : null,
+						canUp: !!(prev && prev.id !== undefined),
+						canDown: !!(next && next.id !== undefined),
+						// 上移 = 放到上一个可见条目之前；下移 = 放到下一个可见条目之后。
+						// 两个方向都归约到同一个原语（anchor + position），宿主侧只有一份实现。
+						onUp: () => sort.onMove(id, prev.id, 'before'),
+						onDown: () => sort.onMove(id, next.id, 'after'),
+						// HTML5 拖放（不用 Pointer Events 手算坐标）：列表项是等高的普通块，
+						// 浏览器自带「按住移动 → 目标元素持续派发 dragover」这套机制，比自己
+						// 追踪指针位置再命中测试简单得多，也不会与滚动区抢指针事件。
+						// 代价是触屏不支持 —— 那由 ↑↓ 按钮兜住（两者都归约到同一个 onMove）。
+						dragProps: {
+							draggable: true,
+							onDragStart: (e) => {
+								// 必须写 dataTransfer：Firefox 下不写则后续 dragover/drop 根本不派发。
+								// 内容本身不参与判定（判定用的是 state 里的 drag.id），只为让拖动成立。
+								try { e.dataTransfer.setData('text/plain', String(id)) } catch (err) {}
+								try { e.dataTransfer.effectAllowed = 'move' } catch (err) {}
+								sort.onDrag({ id: id, overId: null, pos: null });
+							},
+							onDragOver: (e) => {
+								if (!drag || !drag.id || drag.id === id) return;
+								// 不 preventDefault 就等于「这里不接受放置」，浏览器不会派发 drop
+								try { e.preventDefault() } catch (err) {}
+								try { e.dataTransfer.dropEffect = 'move' } catch (err) {}
+								const r = e.currentTarget.getBoundingClientRect();
+								// 落点按行的**中线**分上下半：这是拖动排序的通用手感（拖到上半 = 插到它前面）
+								const pos = (e.clientY - r.top) < r.height / 2 ? 'before' : 'after';
+								// 去重：dragover 每秒派发几十次，每次都 setState 会把面板整体重渲染
+								if (drag.overId !== id || drag.pos !== pos) sort.onDrag({ id: drag.id, overId: id, pos: pos });
+							},
+							onDrop: (e) => {
+								try { e.preventDefault() } catch (err) {}
+								if (drag && drag.id && drag.overId === id && drag.pos) sort.onMove(drag.id, id, drag.pos);
+								sort.onDrag(null);
+							},
+							// 拖到列表外松手 / 按 Esc 取消：清掉拖动态，否则落点指示会一直留着
+							onDragEnd: () => sort.onDrag(null),
+						},
+					};
+				};
 				// 过滤框的显示判据：条目够多（>3，两三条还要先过滤是负担）**或**当前有过滤词。
 				//
 				// 两个条件缺一不可，且都不能换成「过滤后的数量」：
@@ -3410,7 +3624,56 @@ window.__ModuleLoader__.load({
 							? React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.listNoMatch'))
 							// 滚动区：maxHeight + overflowY:auto。用 maxHeight 而非 height ——
 							// 条目少时容器按内容收缩，不出现一块空白（那样看起来像加载失败）。
-							: React.createElement('div', { style: { maxHeight: LIST_SCROLL_MAX_H, overflowY: 'auto', overflowX: 'hidden' } }, shown.map(o.render))),
+							// 显式传下标（而不是 `shown.map(o.render)`）：render 的第二个参数是
+							// 排序上下文，靠 map 的隐式下标传参虽然等价，但读代码的人看不出
+							// 「render 还能收第二个参数」，改动时容易把它当无用参数删掉。
+							: React.createElement('div', { style: { maxHeight: LIST_SCROLL_MAX_H, overflowY: 'auto', overflowX: 'hidden' } }, shown.map((it, i) => o.render(it, sortUiOf(it, i))))),
+				);
+			};
+
+			// 排序行的两个共用件（规则 / 例外两处列表都用，避免各写一份而手感分叉）。
+			//
+			// 为什么是**两个**函数而不是一个包装组件：落点指示要画在行自己身上（那行的
+			// 上/下边缘），而 ↑↓ 按钮要排在行的按钮区里（与「删除」并排）。前者是行根节点的
+			// props，后者是行内部的子节点，位置不同、没法由一个组件同时提供。
+			//
+			// 行根节点的排序 props：拖动手柄 + 落点指示 + 拖动中半透明。
+			// 没有 sortUi（无排序能力 / 该项没有 id）时返回**空对象**，调用方照样 spread —— 
+			// 于是「这行不支持拖动」表现为 draggable 缺席，而不是一个 draggable=false 的行。
+			//
+			// **style 必须无条件给出**（先铺 rowStyle 再叠加排序态）：只在拖动/落点两个分支里
+			// 设 style 的话，正常态的规则行与例外行会**丢掉整个 rowStyle** —— 行退化成没有
+			// flex 布局、没有内边距、没有分隔线的裸块，多个条目的文字会挤成一团。
+			// 这个 bug 不报错、不影响任何行为断言（只有渲染出来才看得见），故在注释里点明。
+			const sortRowProps = (ui) => {
+				if (!ui) return {};
+				const st = Object.assign({}, ui.dragProps);
+				st.className = 'pg-row-drag';
+				st.style = rowStyle;
+				if (ui.dragging) st.style = Object.assign({}, rowStyle, { opacity: 0.45 });
+				else if (ui.over) {
+					// 落点线画在行的哪条边：'before' = 上边、'after' = 下边。
+					// 用 boxShadow 的 inset 而不是 border —— 加 border 会把行撑高 2px，
+					// 拖动经过时整列会跟着抖（相邻行的位置在拖动过程中反复变化）。
+					st.style = Object.assign({}, rowStyle, { boxShadow: 'inset 0 ' + (ui.over === 'before' ? '2px' : '-2px') + ' 0 0 ' + MODE_COLORS.ask });
+				}
+				return st;
+			};
+			// ↑↓ 按钮。触屏没有 HTML5 拖放，这两个按钮是**唯一**的排序入口，故不能只当辅助。
+			// 首/末行分别禁用对应方向（而不是隐藏）：隐藏会让同一位置的按钮在相邻行之间跳，
+			// 用户点到一半会点错行；禁用则位置恒定，且「到顶了」这件事一眼可见。
+			const moveButtons = (ui) => {
+				if (!ui) return null;
+				const mk = (dir, can, fn, label) => React.createElement('button', {
+					className: 'pg-btn pg-btn-move',
+					disabled: busy || !can,
+					title: label,
+					'aria-label': label,
+					onClick: fn,
+				}, dir);
+				return React.createElement('span', { style: { display: 'inline-flex', gap: 2 } },
+					mk('↑', ui.canUp, ui.onUp, T('panel.moveUp')),
+					mk('↓', ui.canDown, ui.onDown, T('panel.moveDown')),
 				);
 			};
 
@@ -3676,7 +3939,10 @@ window.__ModuleLoader__.load({
 									// 匹配字段与用户看到的行一致：匹配内容（path/match）+ 拒绝原因 + 备注。
 									// 只搜 path/match 的话，「按原因找那条例外」就做不到。
 									match: (r) => [r.path, r.match, r.reason, r.note].filter(Boolean).join(' '),
-									render: (r) => React.createElement('div', { key: r.id, style: rowStyle },
+									// 例外同样是「首条命中即生效」（resolveCategory / matchSegmentException
+									// 都只取首个匹配），故顺序即优先级，给排序能力。
+									sort: sortOf('exception', c),
+									render: (r, ui) => React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui)),
 										badge(r.action),
 										React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
 										// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
@@ -3702,7 +3968,27 @@ window.__ModuleLoader__.load({
 									c === 'command' && /^[*\s]+$/.test(String(r.match || '')) && String(r.match || '').indexOf('*') !== -1
 										? React.createElement('span', { style: { fontSize: 11, color: '#bf8700', marginLeft: 6, whiteSpace: 'nowrap' }, title: T('panel.excTooBroadHint') }, '⚠ ' + T('panel.excTooBroad'))
 										: null,
+									// 爆炸半径标注（宿主下发 exceptionBlast，只对 **allow** 例外且目标落在
+									// 盘根/系统目录/家目录/工作区外时才有）。
+									//
+									// 与上面那条「匹配范围过宽」是**两个不同的失效模式**，必须分开显示：
+									//   · 过宽  —— 一条例外覆盖了太多**命令**（`*` 匹配任意段）；
+									//   · 爆炸半径 —— 一条例外本身很具体，但它指向的目标删了就没（`rmdir /s /q B:\`）。
+									// 后者正是最难自己发现的形态：例外写得很精确，精确地指向了整个盘。
+									//
+									// 为什么列表里也要标：这是唯一能让人**事后**发现「我什么时候放行了删盘根」的地方
+									// （弹窗是一次性的，列表是长期可见的）。落盘值本身不存这个结论（读侧现算）。
+									(() => {
+										const b = exceptionBlastOf(tab, r.id);
+										const meta = b && BLAST_LEVELS[b.level];
+										if (!meta) return null;
+										return React.createElement('span', {
+											style: { fontSize: 11, color: meta.color, marginLeft: 6, whiteSpace: 'nowrap' },
+											title: T(meta.key).replace('{p}', b.path || ''),
+										}, meta.icon + ' ' + T('panel.excBlast'));
+									})(),
 									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
+										moveButtons(ui),
 										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
 										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
 									),
@@ -3773,16 +4059,17 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			const ruleRow = (r) => {
+			const ruleRow = (r, ui) => {
 				const matchers = [];
 				if (r.tool) matchers.push('tool=' + r.tool);
 				if (r.path) matchers.push('path=' + r.path);
 				if (r.args) matchers.push('args="' + r.args + '"');
-				return React.createElement('div', { key: r.id, style: rowStyle },
+				return React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui)),
 					badge(r.action),
 					React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, matchers.join('  ') || T('panel.all')),
 					r.reason ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, '(' + r.reason + ')') : null,
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
+						moveButtons(ui),
 						React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'rule:' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('rule:' + r.id, () => removeRule(r.id)) }, confirm === 'rule:' + r.id ? T('panel.confirmDel') : T('panel.del')),
 						confirm === 'rule:' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
 					),
@@ -3918,6 +4205,9 @@ window.__ModuleLoader__.load({
 							onFilter: (v) => setRuleFilter(Object.assign({}, ruleFilter, { [tab]: v })),
 							// 四个字段都可搜：用户可能按原因找规则（「那条不许删的规则」）。
 							match: (r) => [r.tool, r.path, r.args, r.reason].filter(Boolean).join(' '),
+							// 规则**最需要**排序：新规则 push 到尾部，而 decide() 首条命中即返回 ——
+							// 被前面某条遮蔽的新规则会静默不生效，用户必须能把它提到前面。
+							sort: sortOf('rule', null),
 							render: ruleRow,
 							empty: React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noRules')),
 						}),
@@ -3974,7 +4264,7 @@ window.__ModuleLoader__.load({
 				const tag = document.createElement('style');
 				tag.dataset.plugin = 'dsh-permgate';
 				tag.dataset.pluginCss = 'dsh-permgate';
-				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS;
+				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS + PG_SORT_CSS + PG_BLAST_CSS;
 				document.head.appendChild(tag);
 				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
 			}
