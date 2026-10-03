@@ -3,7 +3,7 @@
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { assessCommand, matchCommand, codeLabel, decomposeCommand, segmentLabel, nestedInlineProgram, isDestructiveSegment, canCarryDestructivePayload, isPayloadCarrierLabel, blastRadiusOf, blastRadiusOfCommandPattern, BLAST_ORDER, SHELL_OF_TOOL, DESTRUCTIVE_LABELS } from './shell-parse.js'
+import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, segmentLabel, nestedInlineProgram, isDestructiveSegment, canCarryDestructivePayload, isPayloadCarrierLabel, blastRadiusOf, blastRadiusOfCommandPattern, BLAST_ORDER, SHELL_OF_TOOL, DESTRUCTIVE_LABELS, TIERS, GROUP_MEMBERS } from './shell-parse.js'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
@@ -14,6 +14,29 @@ const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 // 严格度序：allow < ask < deny（越大越严）。做法 A 的「取更严者」合并与面板的
 // warnSubMismatch 判据同源 —— 两处都表达「谁更严」，不该各写一份比较逻辑。
 const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
+// 档位名 → 存储键 的**映射单点**：`inside` 档由老键 `action` 承载（**老键义不变**，§7.1），
+// 其余七档各有一个同名键。读取侧（destructiveTiers）与写入侧（setCommandSub）都走它。
+//
+// 为什么必须收敛成单点：这条映射散落时，任何一处写错都是 **fail-open**。
+//   · 归一化侧（normalizeSubSetting）的 tierOk 判据**显式排除 inside**（它只认 r[t]，
+//     不认 r.action），故那里写错键会让整条 `destructive` 被判为非法而**整块丢弃**、
+//     回落 command mode —— 用户以为设了「拒绝」，命令却被**静默放行**；
+//   · 读取侧与写入侧漂移，则「面板显示的值」与「裁决实际用的值」分叉。
+// 两者都是本文件反复警告的「面板说谎 / 静默失效」那一类，且都不会报错，故只能靠单点防。
+//
+// ⚠️ `normalizeSubSetting` 内**仍有一处必须内联**的同义映射（见该处注释）：那个函数会被
+// test/regressions.mjs 抽取进 `new Function` 独立求值，注入的自由变量只有
+// MODES / ALL_MODES / TIERS / normalizeText —— 引用本函数会 ReferenceError 并让
+// 「子设置键集封闭」那条断言变红。故**改这里的键名映射时必须同步改那一处**，反之亦然。
+const keyOfTier = (tier) => (tier === 'inside' ? 'action' : tier)
+// 「无项目块」探针 root：statusView 的 `globalEffectiveProbe` 用它求**全局层单独**的生效值。
+//
+// 取一个**不可能成为项目键**的值：`projectBlock` 按 norm+小写比对 `config.projects` 的键，
+// 而任何真实路径都不可能含 NUL，故不存在与之相等的项目 —— 于是
+// `destructiveTiers(GLOBAL_PROBE_ROOT)` 恒等于「全局层单独解析」的结果。
+// 不用 `'__no_such_root__'` 这类普通字符串：用户真有一个叫它的项目键时探针会取到那个项目，
+// 面板全局 tab 又会显示成项目的值 —— 正是本探针要消除的那类面板说谎。
+const GLOBAL_PROBE_ROOT = '\u0000__no_project__'
 const MAX_DECISIONS = 30
 // 候选值（例外模式）的字符上限：超限的候选**不产出**。
 //
@@ -880,7 +903,7 @@ export default {
       // 落盘，种下的值就成了一条「用户表态」。项目层种的是 inherit，读取侧看到「本层有表态」
       // 便穿透全局 —— 用户在面板把「本项目命令」设为拒绝时，破坏性命令反而按全局 ask 弹窗
       // （实测过：面板写 → rm 待批；同意图手写配置 → deny）。默认值统一由读取侧
-      // commandSubSetting 按本层 mode 推导，落盘只承载用户显式写下的值。
+      // destructiveTiers 按本层 mode 推导，落盘只承载用户显式写下的值。
       return cat
     }
 
@@ -891,9 +914,52 @@ export default {
     // （弹窗待批，一次误点即放行），且该分类配的 deny reason 也不再下发。
     // 反向必须保持不动：大分类 allow 时子设置默认仍是 ask（D-6 的核心修复，
     // 若跟着 mode 变成 allow 就等于把破坏性命令静默放行，正是本次要修的那个洞）。
-    function destructiveDefaultOf(mode, inheritDefault) {
-      if (mode === 'deny') return 'deny'
-      return inheritDefault ? 'inherit' : 'ask'
+    //
+    // ── 八档版（本计划）：只有 `inside` 跟随大分类 ────────────────────────────────
+    //
+    // | mode  | inside | 其余七档 |
+    // |-------|--------|----------|
+    // | allow | allow  | ask      |
+    // | ask   | ask    | ask      |
+    // | deny  | deny   | deny     |
+    //
+    // 第一列就是本计划要的效果：大分类 allow 时 `rm test.txt` / `rm -rf ./build`
+    // **不弹窗**（区内无害操作不再每次打扰），而其余七档不松于 ask —— D-6 的核心
+    // （大分类 allow 时大范围破坏仍要问）原样保住，保护范围只是从「所有 rm」
+    // 收窄到「会出工作区的操作 + 进程/电源/提权/注册表」。
+    //
+    // **这不是单纯放松**：`sudo ls` 现在由 `destructive=allow` 静默放行，改后受 `priv` 档管
+    // （默认 ask）。即总体是**双向调整**。
+    //
+    // ── 为什么其余七档 = `strictest(ask, inside)` 而不是各自「跟随 mode」────────────
+    // 这一条规则同时解决「新装用户的大分类推导」与「存量配置的迁移」：
+    //
+    //   存量 `destructive: {action: X}`（X 即 inside 档）：
+    //     X = deny  → inside=deny，  七档 = strictest(ask, deny)  = **deny** ✅ 全拒保住
+    //     X = ask   → inside=ask，   七档 = ask                            ✅
+    //     X = allow → inside=allow， 七档 = **ask**（收紧）                ⚠️ 唯一变化，方向是收紧
+    //     X = inherit（项目层）→ 穿透全局，同左                              ✅
+    //
+    // **关键**：若让七档各自「跟随 mode」，则存量 `destructive:{action:'deny'}` + mode=allow
+    // 的用户会看到 `rm -rf /` 由 deny 变 ask —— **把用户显式写下的「全拒」放松了**。
+    // 这是本规则存在的唯一理由。第三行是唯一「违背」存量显式值的地方，方向是收紧，
+    // 且面板会显示 ask，用户看得见也能改。
+    function destructiveTierDefaults(mode, inheritDefault) {
+      // `inside` **就是本层 mode 本身**（三种取值一一对应）—— 这一行是本计划的核心收益：
+      // mode=allow 时 `rm -rf ./build` 不再弹窗。
+      //
+      // mode 取不到（本层没配 command 块 / 值是 'inherit'）时才是 `inherit`（项目层）
+      // 或 `ask`（全局层的兜底 —— 全局 mode 经 MODES 校验，正常加载后不会是 undefined，
+      // 这里的 ask 只是协议异常时的保守回落，不是决策链的一环）。
+      const inside = MODES.indexOf(mode) !== -1 ? mode : (inheritDefault ? 'inherit' : 'ask')
+      // 七档缺省 = strictest(ask, inside)。`inside` 是 inherit（项目层未表态）时，
+      // 本层没有可比的对象 —— 七档同样取 inherit，让整层一起穿透全局，
+      // 否则会出现「inside 穿透全局、wide 却在本层表了态」的错配。
+      const rest = inside === 'inherit' ? 'inherit'
+        : (MODE_STRICTNESS[inside] > MODE_STRICTNESS.ask ? inside : 'ask')
+      const out = {}
+      for (const t of TIERS) out[t] = t === 'inside' ? inside : rest
+      return out
     }
 
     // 文本类字段（拒绝原因 / 备注）的统一口径：trim + 截断 200，空串视为未填。
@@ -922,16 +988,79 @@ export default {
 
     // command 分类子设置「破坏性命令」的归一化：动作值走 MODES/ALL_MODES（与 mode 同口径），
     // reason 只在 deny 时保留（allow 不弹窗、ask 有自己的备注，存了也读不到）。
-    // 名单固定，不开放用户增删 —— 故**只认 action 与 reason 两个键**，其余一律丢弃，
+    // 名单固定，不开放用户增删 —— 故**只认八个档位键与 reasons**，其余一律丢弃，
     // 老配置里手写的 labels/未知键不会被悄悄带进内存（否则「名单固定」只是界面上的约定）。
     //
     // 缺键或值非法时返回 **null**（不是补一个默认动作）：推导交给读取侧
-    // （commandSubSetting），落盘只承载用户显式表态 —— 理由见 normalizeCategory 的注释。
+    // （destructiveTiers），落盘只承载用户显式表态 —— 理由见 normalizeCategory 的注释。
+    //
+    // ── 存储形状（§7.1）────────────────────────────────────────────────────────
+    //   { "action": "allow",              ← 老键义不变 = inside 档
+    //     "outside": "ask", "wide": "deny", …,   ← 七个新档位键
+    //     "reasons": { "wide": "删系统目录", "priv": "别提权" } }
+    //
+    // `action` 键义不变是**向后兼容的关键**：老配置原样可读，且旧客户端（不传 tier）
+    // 写的就是它。新档位键与 `reasons` 都是**追加**，不改变任何既有键的含义。
     function normalizeSubSetting(raw, inheritDefault) {
       const r = raw && typeof raw === 'object' ? raw : {}
-      if ((inheritDefault ? ALL_MODES : MODES).indexOf(r.action) === -1) return null
-      const out = { action: r.action }
-      if (out.action === 'deny') { const t = normalizeText(r.reason); if (t) out.reason = t }
+      const allowed = inheritDefault ? ALL_MODES : MODES
+      const actionOk = allowed.indexOf(r.action) !== -1
+      // ── 合法性判据：`action` 合法 **或** 至少有一个合法档位键 ──────────────────────
+      // 「只写一档」是面板的**主用法**：档位下拉框只写 `sub[tier]`、根本不碰 `action`，
+      // 故它必须与「写了 action」同样合法。曾经的判据只看 `action`，后果（两轨独立实测）：
+      //   ① 面板写下的 `{"wide":"deny"}` 在下次加载时被整条丢弃（return null）
+      //      → normalizeCategory 不设 cat.destructive → 用户的逐档设置**静默失效**、
+      //      回落默认值（`rm -rf C:/Windows` 由 deny 变 ask）；
+      //   ② 此后任意一次无关写盘（例如改 read 分类）会把内存配置整体序列化回磁盘，
+      //      磁盘上那条 `{"wide":"deny"}` 被**永久抹掉**（destructive 变 undefined）。
+      // 项目层同样复现。故「只写一档」必须是**合法**形态，而不是被丢弃的形态。
+      const tierOk = TIERS.some((t) => t !== 'inside' && allowed.indexOf(r[t]) !== -1)
+      if (!actionOk && !tierOk) return null
+      const out = {}
+      // `action` 缺失/非法 → **不补值**（不是补一个推导值）：缺键 = 本层未对 inside 表态，
+      // 由读取侧 destructiveTiers 按本层 mode 推导。补一个推导值会经 persist 落盘成
+      // 「用户表态」，此后用户放松大分类时它还会粘住旧值（见 normalizeCategory 的注释）。
+      if (actionOk) out.action = r.action
+      // 七个新档位键：值域与 action 同口径（项目层额外接受 inherit）。
+      // **不补推导值**：缺键就留空，由读取侧 destructiveTiers 按 §6.2 的规则补 ——
+      // 补在这里会经 persist 落盘成显式键，那就把「推导值」变成了「用户表态」。
+      for (const t of TIERS) {
+        if (t === 'inside') continue          // inside 由 action 承载，不重复存
+        if ((inheritDefault ? ALL_MODES : MODES).indexOf(r[t]) === -1) continue
+        out[t] = r[t]
+      }
+      // per-tier 拒绝理由：只在**该档显式配成 deny** 时保留（与 action 侧同口径：
+      // allow 不弹窗、ask 有自己的备注）。只认档位名做键，其余丢弃。
+      const rawReasons = r.reasons && typeof r.reasons === 'object' ? r.reasons : null
+      const reasons = {}
+      for (const t of TIERS) {
+        // ⚠️ 这一处是 `keyOfTier`（模块级映射单点）的**唯一强制内联副本**，不能改成
+        // `out[keyOfTier(t)]`：本函数会被 test/regressions.mjs 抽取进 `new Function`
+        // 独立求值（「子设置键集封闭」那条断言），注入的自由变量只有
+        // MODES / ALL_MODES / TIERS / normalizeText —— 引用模块级符号会 ReferenceError，
+        // 使该断言变红（已实测）。故**改 keyOfTier 的映射时必须同步改这一行**。
+        // 语义等价：keyOfTier('inside') === 'action'，其余档 t → t。
+        const explicit = t === 'inside' ? out.action : out[t]
+        if (explicit !== 'deny') continue
+        const txt = normalizeText(rawReasons ? rawReasons[t] : null)
+        if (txt) reasons[t] = txt
+      }
+      // ── 存量 `reason` 字符串：**原样保留，不在这里搬家** ────────────────────────
+      // 老配置是 `{ "action": "deny", "reason": "rm 危险" }`，语义是「整个破坏性类别」，
+      // 按 §6.2 的迁移规则（`action` 即 inside 档）它对应 `reasons.inside`。
+      //
+      // 但**读取侧兼容不等于写盘时搬家**（§7.1）：这里若把它搬进 `reasons`，
+      // 一次纯加载就会改写用户配置文件的字节 —— 而「加载后字节不变」是既有纪律
+      // （normalizeCategory 的注释与测试 44 都守着它）。搬家的代价还不止于此：
+      // 用户看到自己的 `reason` 键在面板上消失、变成 `reasons.inside`，会以为是插件擅自改配置。
+      //
+      // 故：**这里原样保留 `reason`**，由读取侧 `destructiveTiers` 把它当作
+      // `reasons.inside` 的兜底（`reasons.inside` 优先，它才是用户在新面板上填的那个）。
+      if (out.action === 'deny') {
+        const legacy = normalizeText(r.reason)
+        if (legacy) out.reason = legacy
+      }
+      if (Object.keys(reasons).length) out.reasons = reasons
       return out
     }
 
@@ -964,7 +1093,7 @@ export default {
       }
       // 子设置：**只保留用户显式写下的值**，缺键/非法值一律留空（不落 action）。
       //
-      // 为什么不在这里补推导值（曾经的写法是 `normalizeSubSetting(c.destructive, …, destructiveDefaultOf(mode))`）：
+      // 为什么不在这里补推导值（曾经的写法是 `normalizeSubSetting(c.destructive, …, destructiveTierDefaults(mode))`）：
       // normalizeCategory 的结果会被 persist 整体序列化落盘，于是**推导值会变成显式键**，
       // 而显式键在下次加载时会被当成「用户表过态」原样保留。两个后果都已实测复现：
       //   ① 面板把项目层 command 设为 deny 时，setCategoryMode 用 freshCategory 建块拿到
@@ -972,7 +1101,7 @@ export default {
       //      而同意图手写配置文件（无该键）却能正确推导出 deny —— 同一意图两种结果；
       //   ② 存量 deny 配置加载后推导出 deny，任意一次**无关写盘**把它固化；此后用户把
       //      command 放松为 allow，子设置仍是 deny —— 放松不生效且重启后粘住。
-      // 现在推导完全交给读取侧（commandSubSetting 的 fallback），落盘只承载用户表态，
+      // 现在推导完全交给读取侧（destructiveTiers 的 ③ 分支），落盘只承载用户表态，
       // 幂等性恢复：destructive 的取值不再取决于「中间有没有发生过一次写盘」。
       if (key === 'command') {
         const sub = normalizeSubSetting(c.destructive, inheritDefault)
@@ -1081,9 +1210,9 @@ export default {
       // （升级后读图先询问，由用户决定是否放宽），locked 仍保持 deny，避免比旧行为更松。
       for (const c of CATS) cfg.global[c].mode = c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask') : (map[oldMode] || 'allow')
       // 注意：这里**不**为 command 物化 destructive 子设置。
-      // 曾经写过 `cfg.global.command.destructive = { action: destructiveDefaultOf(mode, false) }`，
+      // 曾经写过 `cfg.global.command.destructive = { action: destructiveTierDefaults(mode, false) }`，
       // 那是为了解决「老 locked 配置升级后 mode=deny 但子设置默认 ask」—— 但同一个问题现在由
-      // 读取侧（commandSubSetting 按本层 mode 推导）统一解决，而物化会带来新问题：
+      // 读取侧（destructiveTiers 按本层 mode 推导）统一解决，而物化会带来新问题：
       // 推导值一旦落盘就成了「用户表态」，此后用户把 command 放松为 allow 时，
       // 子设置仍保留 deny —— 放松不生效且重启后粘住（实测复现过）。
       cfg.global.fallbackMode = map[oldMode]
@@ -1635,7 +1764,7 @@ export default {
         // `destructive: {action:'inherit'}`，一旦落盘就成了显式键 —— 读取侧看到「本层有表态」
         // 便穿透到全局，于是用户在面板上把「本项目命令」设为拒绝时，破坏性命令却按全局 ask
         // 走弹窗（实测：面板写 → rm 待批；同意图手写配置 → deny，两种结果）。
-        // 删掉它，让读取侧（commandSubSetting）按本层 mode 推导 —— 那才是正确的默认来源。
+        // 删掉它，让读取侧（destructiveTiers）按本层 mode 推导 —— 那才是正确的默认来源。
         if (cat === 'command') delete block[cat].destructive
       }
       block[cat].mode = mode
@@ -1648,7 +1777,7 @@ export default {
       // 现在的语义是纯读取侧决定的，无顺序依赖：
       //   · 用户显式设过子设置 → 一律尊重（判定链上子设置优先于大分类）；
       //   · 老配置（连 destructive 键都没有）→ 由 normalizeCategory 按本层 mode 补默认值
-      //     （mode=deny 时补 deny，见 destructiveDefaultOf），升级不会把显式拒绝放松。
+      //     （mode=deny 时补 deny，见 destructiveTierDefaults），升级不会把显式拒绝放松。
       // 面板上「当前生效」一行会把实际取值与来源显示出来，用户能看到大分类 deny 下
       // 破坏性命令仍按子设置走，需要一并收紧就去改子设置。
       if (mode !== 'deny') { delete block[cat].reason; return true }
@@ -1813,53 +1942,180 @@ export default {
       return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }
     }
 
-    // 子设置视图的统一构造：**reason 为空时不建这个键**，而不是建成 undefined。
+    // ── 「reason 为空时不建键」这条纪律的去处 ──────────────────────────────────────
+    // 这里曾有一个 `subView(action, rawReason, source)` 帮助函数，专门保证
+    // 「reason 为空时不建这个键」。它现在**不需要了**：读取侧从「返回一个动作 + 一个理由」
+    // 改成返回**八档表**（destructiveTiers），而理由收在 `reasons` 子对象里、
+    // 只在 `if (txt) reasons[t] = txt` 处赋值 —— 空理由根本不产生键，
+    // 不再有「键存在但值为 undefined」这条路径。
     //
-    // 为什么必须不建键：DSH 0.2.0 起，工具返回值要过一道 lossless-JSON 校验
-    // （dsh-tools 的 snapshotToolValue → dsh-util-values 的 walkJsonValue），
+    // 纪律本身仍然有效，且**必须**有效：DSH 0.2.0 起工具返回值要过一道 lossless-JSON
+    // 校验（dsh-tools 的 snapshotToolValue → dsh-util-values 的 walkJsonValue），
     // 规则比 JSON 本身严 —— **属性值为 undefined 会让整个返回值判失败**。
     // 旧版只走 JSON.stringify（静默丢弃 undefined），所以这个坑一直没暴露，
     // 直到 DSH 升级后 perm_status 直接报：
     //   tool "perm_status" returned invalid output: value is not lossless JSON
-    // 与 normalizeException 的写法同口径（那边 `if (t) e.reason = t`，无值不建键）。
-    const subView = (action, rawReason, source) => {
-      const reason = normalizeText(rawReason)
-      return reason ? { action, reason, source } : { action, source }
+    // 测试用 losslessViolation 复算这条规则（smoke.mjs），任何新增的字段都要过它。
+
+    // 存量裸 `reason` 字符串的**读取单点**（§7.1：老配置语义 = 「整个破坏性类别」）。
+    //
+    // 两个消费方（面板下发的 `explicitReasonsOf` 与裁决下发的 `destructiveTiers` ③）
+    // **共用它** —— 「读哪个键、怎么归一」只有一份。各写一份必然漂移，而漂移的后果是
+    // **面板显示的理由与实际裁决带着的理由不一致**（本文件反复警告的那一类）。
+    //
+    // 它们对「这句理由管哪几档」的答案**不同**，那是两个不同的提问，各自在调用处
+    // 写明依据：面板回答「用户在哪一档上写下了理由」，裁决回答「AI 该收到哪句话」。
+    function legacyReasonOf(sub) {
+      return (sub && typeof sub === 'object') ? normalizeText(sub.reason) : undefined
+    }
+
+    // 某一层**显式**的 per-tier 理由视图（`null` = 该层没设过任何理由）。
+    //
+    // 为什么不能直接把 `destructive.reasons` 下发：存量配置只有裸 `reason` 字符串
+    // （老配置：`{ action: 'deny', reason: 'rm 危险' }`，语义 = 整个破坏性类别）。
+    // 按 §6.2 的迁移规则它属于 **inside 档**，而「读取侧兼容」意味着**下发视图里也要能看见**
+    // —— 否则面板上 inside 那一档的理由框是空的，用户会以为自己没设过，
+    // 而实际裁决正带着那句理由拒绝（面板说谎，正是本文件反复警告的那一类）。
+    //
+    // **只读派生、不写盘**：这里只是把两个来源合成一个视图，磁盘上的 `reason` 键原样不动
+    // （搬家的代价见 normalizeSubSetting 的注释）。
+    function explicitReasonsOf(sub) {
+      if (!sub || typeof sub !== 'object') return null
+      const raw = (sub.reasons && typeof sub.reasons === 'object') ? sub.reasons : null
+      const out = {}
+      for (const t of TIERS) {
+        const txt = normalizeText(raw ? raw[t] : null)
+        if (txt) out[t] = txt
+      }
+      // inside 档的兜底：`reasons.inside` 优先（那才是用户在新面板上填的），
+      // 没有时才回落到存量裸 `reason`（读取单点 legacyReasonOf）。其余档**不给**这个兜底 ——
+      // 本视图回答的是「用户**在哪一档上**写下了理由」，而 §6.2 的迁移规则说 `action`
+      // 即 inside 档，故它归 inside。摊给七档会让面板显示用户没设过的理由（面板说谎）。
+      // ⚠️ 裁决下发（`destructiveTiers` ③）对同一句裸 `reason` **给每一档**，
+      //    理由与两者的分工见那里的注释 —— 两个视图口径不同是**有意**的，不是分叉。
+      if (!out.inside) {
+        const legacy = legacyReasonOf(sub)
+        if (legacy) out.inside = legacy
+      }
+      return Object.keys(out).length ? out : null
     }
 
     // command 分类的子设置读取：与 resolveCategory 同口径（项目显式 → 全局 → 默认），
-    // 项目层 inherit 穿透全局。单一读取点：assessCommand 的 destructive 钩子与 statusView
+    // 项目层 inherit 穿透全局。**单一读取点**：assessCommand 的 destructive 钩子与 statusView
     // 的下发都走它，避免「面板显示一个值、实际裁决按另一个值」的双份真相。
     //
     // **推导在这里做，不在 normalizeCategory 里做**：那边补的值会被 persist 落盘成显式键，
     // 于是「推导值」与「用户表态」在磁盘上不可区分（详见 normalizeCategory 的注释与两处实测）。
-    // 现在的优先级：
+    // 现在的优先级（**逐档独立**，不是整块取用）：
     //   ① 项目层显式非 inherit → 用它
     //   ② 全局层显式非 inherit → 用它
-    //   ③ 都没显式值 → 按**本层实际生效的 command mode** 推导（destructiveDefaultOf）：
-    //      本层 mode=deny 时给 deny（用户显式收紧大分类，不该被子设置默认值放开 ——
-    //      面板设「本项目命令=拒绝」走的就是这条路径，它用 freshCategory 建块，拿到的是
-    //      inherit 而非 deny，修复前会穿透到全局 ask 把用户的拒绝旁路）；
-    //      mode=allow/ask 时给 ask（D-6：破坏性命令不被大分类 allow 静默放行）。
-    function commandSubSetting(root) {
+    //   ③ 都没显式值 → 按**本层实际生效的 command mode** 推导（destructiveTierDefaults）
+    //
+    // ── 为什么必须**逐档**而不是整块 ─────────────────────────────────────────────
+    // 用户在项目层只把 `wide` 设成 deny、其余档没表态时，那七档应当继续穿透全局，
+    // 而不是一起变成「本层的推导默认值」。整块取用会让「只改一档」变成「改八档」，
+    // 而面板上显示的值与实际裁决分叉（面板显示全局的 ask、裁决走本层推导的 ask ——
+    // 恰好相等时看不出，一旦全局改了就分叉）。
+    //
+    // 返回的是**八档的动作表**（供 shell-parse 的 `strictestTierAction` 取最严），
+    // 外加 `reasons`（per-tier 拒绝理由）与 `source`（每档各自的来源，供面板标注）。
+    //
+    // ── 两遍解析：先定 `inside`，再用它定其余七档（§6.2 的关键）────────────────────
+    // 七档的缺省值不是「按 mode 推导」，而是 **`strictest(ask, inside 的生效值)`** ——
+    // 两者的差别正是 §6.2 存在的理由：
+    //
+    //   存量 `destructive: {action:'deny'}` + mode=allow（老配置只写过 action 一个键）
+    //     · 按 mode 推导 → 七档 = strictest(ask, allow) = **ask**
+    //       ⇒ `rm -rf /` 由 deny 变 ask，**把用户显式写下的「全拒」放松了** ❌
+    //     · 按 inside 生效值推导 → inside 显式 deny → 七档 = strictest(ask, deny) = **deny** ✅
+    //
+    // 故必须**先算出 inside 的生效值**（显式优先、其次按 mode 推导），再拿它当七档的基准。
+    // 一遍解析做不到这件事：遍历到 `wide` 时还不知道 `inside` 最终是谁。
+    function destructiveTiers(root) {
       const proj = projectBlock(root)
-      const pSub = proj && proj.command && proj.command.destructive
-      const pv = pSub && pSub.action
-      if (pv && pv !== 'inherit') return subView(pv, pSub.reason, 'project')
-      const gSub = config.global.command && config.global.command.destructive
-      const gv = gSub && gSub.action
-      if (gv && gv !== 'inherit') return subView(gv, gSub.reason, 'global')
-      // ③ 推导：取本层（项目优先，否则全局）的 command mode 决定默认动作
+      const pSub = (proj && proj.command && proj.command.destructive) || null
+      const gSub = (config.global.command && config.global.command.destructive) || null
       const pMode = proj && proj.command && proj.command.mode
-      const useProject = pMode && pMode !== 'inherit'
+      const useProject = !!(pMode && pMode !== 'inherit')
       const mode = useProject ? pMode : (config.global.command && config.global.command.mode)
-      const derived = destructiveDefaultOf(mode, false)
-      // derived 只可能是 deny / ask（inheritDefault=false），都是能直接用的动作
-      // 推导分支没有用户理由可给，故传 null —— subView 会因此不建 reason 键
-      return subView(derived, null, useProject ? 'project-default' : 'default')
+      const derived = destructiveTierDefaults(mode, false)
+      const out = {}
+      const reasons = {}
+      const source = {}
+      // 档位键：inside 由 `action` 承载（老键义不变），其余七档各有一个同名键。
+      // 映射单点 = 模块级 keyOfTier（收敛前这里另写了一份同样的三元表达式）。
+      const keyOf = keyOfTier
+      // 取某档的显式配置来源（项目优先 → 全局），没有则 null
+      const explicitOf = (t) => {
+        const k = keyOf(t)
+        const pv = pSub ? pSub[k] : undefined
+        if (pv && pv !== 'inherit') return { v: pv, from: pSub, src: 'project' }
+        const gv = gSub ? gSub[k] : undefined
+        if (gv && gv !== 'inherit') return { v: gv, from: gSub, src: 'global' }
+        return null
+      }
+      // ① inside：显式 → 按 mode 推导
+      const eInside = explicitOf('inside')
+      out.inside = eInside ? eInside.v : derived.inside
+      source.inside = eInside ? eInside.src : (useProject ? 'project-default' : 'default')
+      // ② 其余七档：显式 → **strictest(ask, inside 的生效值)**
+      //    项目层未表态时由 `useProject` / `mode`（见上）直接取全局 mode，故 `out.inside`
+      //    恒为**具体动作**（`{ask,allow,deny}`），不可能是 `inherit`：
+      //      · `derived` 来自 `destructiveTierDefaults(mode, false)`，`inheritDefault=false`
+      //        时 `inside` 只会落 `MODES` 里的值或保守回落 `ask`（见该函数）；
+      //      · `explicitOf` 的两条 return 都带 `!== 'inherit'` 守卫。
+      //    **穿透由 `useProject` / `mode` 承担，不经 `out.inside`** —— 故这里没有
+      //    「inside 是 inherit」的分支。⚠️ 不要把这个分支改回来（或据此「修活」它）：
+      //    它恒不可达（V8 coverage count=0，对照同形函数 `destructiveTierDefaults` 的
+      //    同名分支 count=272），而一旦七档真被写成 `'inherit'`，`strictestTierAction`
+      //    会**跳过**这些档 → 组档静默落大分类（fail-open）。
+      const restDefault = MODE_STRICTNESS[out.inside] > MODE_STRICTNESS.ask ? out.inside : 'ask'
+      for (const t of TIERS) {
+        if (t === 'inside') continue
+        const e = explicitOf(t)
+        out[t] = e ? e.v : restDefault
+        source[t] = e ? e.src : (useProject ? 'project-default' : 'default')
+      }
+      // ③ per-tier 理由：`reasons[t]` 优先；**每一档**都额外回落存量裸 `reason` 字符串。
+      //    只在**该档最终是 deny** 时取 —— 与 normalizeSubSetting 的存储侧口径同源。
+      //
+      // ── 为什么裸 `reason` 要摊给**每一档**（而不是像面板视图那样只给 inside）──────
+      // 存量配置只有 `{action:'deny', reason:'rm 危险'}` 一个动作 + 一句理由，语义是
+      // **「整个破坏性类别」**。§6.2 的迁移规则把七档一起推成 deny（保住用户的「全拒」），
+      // 而这句理由说的是那**整类**拒绝 —— 于是每一档都该带上它。
+      //
+      // 不摊的后果（实测，端到端）：存量「全拒 + 理由」升级后，`rm -rf C:/Windows`(wide)、
+      // `kill 1234`(proc)、`sudo ls`(priv) 全部 deny 但 **reason=null** —— 用户写过的拒绝理由
+      // 静默消失，AI 收到的拒绝指令是空的。而面板上那句理由仍显示在 inside 档
+      // （explicitReasonsOf 的口径），于是「看得见理由、AI 收不到理由」= 面板说谎。
+      //
+      // ⚠️ 两个视图**口径不同是有意的**，不要「统一」掉任何一个：
+      //   · `explicitReasonsOf`（面板）回答「用户在哪一档上写下了理由」→ 归 inside
+      //     （§6.2 的迁移规则说 `action` 即 inside 档，摊给七档会让面板显示用户没设过的理由）；
+      //   · 本处（裁决）回答「AI 该收到哪句话」→ 每档都给（同一份存量配置因调用方形状
+      //     不同而给出不同拒绝文案，正是本处要消除的那个分叉）。
+      //   两句判据的**读取**共用 `legacyReasonOf` 单点；只有「归哪几档」各自决定。
+      //
+      // 归属层：跟着该档的显式值走；该档没有显式值时，跟着决定 `inside` 生效值的那一层
+      // （§6.2：老配置的 `action` 即 inside 档，理由与它同行）。**复用 explicitOf 的同一套
+      // 层级优先级**，不另造一套「谁压谁」—— 否则面板与裁决会在这里分叉。
+      // 链式回落（`||`）而不是二选一：本层显式改了动作却没写理由时，仍能拿到另一层
+      // 那句类别级理由 —— 面板此刻也正显示着它（explicitReasonsOf 的 inside 兜底）。
+      const insideLayer = eInside ? eInside.from : null
+      for (const t of TIERS) {
+        if (out[t] !== 'deny') continue
+        const e = explicitOf(t)
+        const from = e ? e.from : null
+        const r = (from && from.reasons && typeof from.reasons === 'object') ? from.reasons[t] : null
+        const txt = normalizeText(r) || legacyReasonOf(from) || legacyReasonOf(insideLayer)
+        if (txt) reasons[t] = txt
+      }
+      out.source = source
+      if (Object.keys(reasons).length) out.reasons = reasons
+      return out
     }
 
-    // doomloop 阈值的读取单点（与 commandSubSetting 同构）：项目显式 → 全局显式 → 默认。
+    // doomloop 阈值的读取单点（与 destructiveTiers 同构）：项目显式 → 全局显式 → 默认。
     // **推导在这里做，不在 normalizeCategory/freshCategory 里做** —— 那边的产物会经 persist
     // 落盘成显式键，于是「推导值」与「用户表态」在磁盘上不可区分：日后把默认阈值从 6 调成 8 时，
     // 存量配置里那条固化的 6 会永久压过新默认（面板显示 8、实际按 6 裁决），
@@ -1884,19 +2140,74 @@ export default {
     // 子设置写入单点（设置页路由专用）。reason 语义与 setCategoryMode 完全一致：
     // 未提供（undefined）保留原值；空串/纯空白显式清除；有内容覆盖。
     // 全局层不接受 inherit（与 setCategoryMode 同口径：inherit 是项目层专属的「穿透」语义）。
-    function setCommandSub(root, targetKey, action, reason) {
+    //
+    // ── `tier` 参数（本计划新增）──────────────────────────────────────────────────
+    // **缺省 = `inside`**，于是旧客户端（不传 tier）写的就是老语义的 `action`，行为完全不变。
+    // 新客户端传 `tier` 时写该档：`inside` 落到既有的 `action` 键（**老键义不变**），
+    // 其余七档落到同名键（`wide` → `destructive.wide`）。
+    //
+    // 拒绝理由按档存进 `reasons[tier]`（§7.1）。**某档从 deny 切走时删掉该档理由** ——
+    // 与既有行为一致（`setCommandSub` 现在在 `action !== 'deny'` 时删 `reason`）。
+    // 已知代价（有意接受）：从拒绝改成询问再改回拒绝，理由已丢，需要重填。
+    // 保持这个行为是为了与既有口径一致，且避免配置里积累「看不见的旧理由」。
+    function setCommandSub(root, targetKey, action, reason, tier) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(action) === -1) return false
+      // 未知档位一律拒绝（不静默落 inside）：路由收到非法 tier 时应当报错，
+      // 而不是把用户改 A 档的意图写成 B 档的动作。
+      const t = tier === undefined || tier === null || tier === '' ? 'inside' : String(tier)
+      if (TIERS.indexOf(t) === -1) return false
+      // 档位键走**映射单点** keyOfTier（inside → 老键 `action`，其余同名）。
+      // 收敛前这里是第三份手写的三元表达式，与读取侧各写一份 —— 漂移即 fail-open。
+      const key = keyOfTier(t)
       const block = targetKey === 'global' ? config.global : ensureProject(root)
       if (!block.command) block.command = freshCategory('command', targetKey !== 'global')
-      if (action === 'inherit') { block.command.destructive = { action: 'inherit' }; return true }
+      // 八档**一律逐档**写入（**含 inside**）：`tier` 参数说的就是「只改这一档」，
+      // 故只写 `sub[key] = action`，绝不碰兄弟档位键与 `reasons`。
+      //
+      // 依据是**读取侧的形状**：`destructiveTiers` 的 `explicitOf` 是**逐档独立**的
+      // （`keyOf('inside') === 'action'`，其余档是各自同名键），它把 `'inherit'` 视为
+      // 「本层未表态」并**逐档**穿透全局。实测 `{action:'inherit', wide:'deny'}` 得到
+      // `inside` = 全局值、`wide` = `deny`(source=project) —— 即读取侧完全支持「半层 inherit」，
+      // 写入侧没有理由把整层清掉。
+      //
+      // inside 档曾经是唯一例外：写 `action='inherit'` 时**整块重建** `{ action: 'inherit' }`，
+      // 理由是「半层 inherit 半层表态自相矛盾」。但那个理由与读取侧的实际语义不符，且整块重建
+      // 会删掉本层其余档位键与 `reasons`。后果（端到端实测）：项目层先设 `wide=deny`
+      // （`rm -rf C:/Windows` = deny，理由「删系统目录」），用户只把 **inside** 改成「继承全局」，
+      // 磁盘被重建为 `{"action":"inherit"}` → `wide` 由 **deny 变 ask**、`reasons.wide` 整块丢失。
+      // 即「只动一档却静默**放松**了另一档的显式拒绝」，与「改 wide 却动了 inside」是同一个
+      // 缺陷的两个方向。面板在项目层每一档都提供「继承全局」选项（client.js:4406 传 ALL_MODES），
+      // 故这是常规可达路径，不是边角。
       if (!block.command.destructive) block.command.destructive = {}
-      block.command.destructive.action = action
-      if (action !== 'deny') { delete block.command.destructive.reason; return true }
+      const sub = block.command.destructive
+      sub[key] = action
+      if (action !== 'deny') {
+        // 切离 deny：删掉**该档**的理由。`inside` 档额外清存量裸 `reason`
+        // （它按 §6.2 的迁移规则属于 inside 档）。
+        if (sub.reasons && typeof sub.reasons === 'object') {
+          delete sub.reasons[t]
+          if (!Object.keys(sub.reasons).length) delete sub.reasons
+        }
+        if (t === 'inside') delete sub.reason
+        return true
+      }
+      // reason === undefined = 保留原值（与 setCategoryMode 同口径）
       if (reason === undefined) return true
-      const t = normalizeText(reason)
-      if (t) block.command.destructive.reason = t
-      else delete block.command.destructive.reason
+      const txt = normalizeText(reason)
+      if (txt) {
+        if (!sub.reasons) sub.reasons = {}
+        sub.reasons[t] = txt
+        // inside 档同步写裸 `reason`：老客户端（只读 `reason`）仍能看到理由，
+        // 且老配置的形态保持一致。其余档不写 —— 那个键的语义是「整个破坏性类别」。
+        if (t === 'inside') sub.reason = txt
+      } else {
+        if (sub.reasons && typeof sub.reasons === 'object') {
+          delete sub.reasons[t]
+          if (!Object.keys(sub.reasons).length) delete sub.reasons
+        }
+        if (t === 'inside') delete sub.reason
+      }
       return true
     }
 
@@ -3194,14 +3505,50 @@ export default {
       try { return args && typeof args === 'object' && typeof args.command === 'string' ? args.command : '' } catch (e) { return '' }
     }
 
-    function isOutside(p, rootKey) {
+    // ── 路径归一的**唯一一份**实现（§5.5）─────────────────────────────────────────
+    // isOutside 与 isWorkspaceRoot **必须共用这一份**：两处各手抄一份必然漂移，而漂移的后果是
+    // **fail-open** —— 同一路径既不算「外」（isOutside 返 false）又不算「根」（钩子返 false）时
+    // 落 inside 档，`rm -rf .` 一族静默放行。设计文档把「口径漂移」列为风险项并要求共用归一逻辑
+    // （.plan/blast-tier-plan.md:1800）。这与 blastRadiusOf 里「判据必须直接问 isSystemDir，
+    // 不能手抄一份平台分派」是同一类纪律。
+    //
+    // 盘根 'G:'（norm 剥掉尾斜杠）补回根斜杠：pathResolve('G:') 会落到 cwd 而非盘根；
+    // UNC 根 pathResolve 输出带尾部分隔符，前缀判断需按「rr 已以分隔符结尾」分支处理。
+    // 根侧归一化的记忆（norm + fixRoot + toLowerCase 三件套）。root 变化时整体失效：
+    // 键就是 norm 后的根字符串，换根即重算，不存在读到陈旧结论的路径。
+    let rootMemo = null
+    const fixRoot = (v) => {
+      // 根侧短路：热路径上（shell-parse.js 的逐词元循环对每个判为 inside 的目标各调一次钩子）
+      // fixRoot 的一半调用都是**同一个根**，而它是整段循环的不变量。非根的调用不写入记忆，
+      // 故不会与目标侧互相驱逐（1 条记忆就够，也不会无界增长）。
+      if (rootMemo && v === rootMemo.norm) return rootMemo.fixed
+      return pathResolve(/^[a-zA-Z]:$/.test(v) ? v + '/' : v)
+    }
+    function rootMemoOf(rootKey) {
       const r = norm(rootKey)
-      if (!r) return false
+      if (!r) return null
+      if (!rootMemo || rootMemo.norm !== r) {
+        const fixed = pathResolve(/^[a-zA-Z]:$/.test(r) ? r + '/' : r)
+        rootMemo = { norm: r, fixed, lower: fixed.toLowerCase() }
+      }
+      return rootMemo
+    }
+    // 目标侧归一（相对路径先拼根）—— 返回**未折叠**的绝对形态，fixRoot 由调用方施加
+    // （isOutside 要对两侧各折叠一次并做分隔符边界比较，isWorkspaceRoot 只比较相等）。
+    // 空/不可读的目标返回 null，由调用方按各自的方向处置。
+    function absOf(p, rootNorm) {
       const s = norm(p)
-      const abs = (s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)) ? s : r + '/' + s
-      // 盘根 'G:'（norm 剥掉尾斜杠）补回根斜杠：pathResolve('G:') 会落到 cwd 而非盘根；
-      // UNC 根 pathResolve 输出带尾部分隔符，前缀判断需按「rr 已以分隔符结尾」分支处理
-      const fixRoot = (v) => pathResolve(/^[a-zA-Z]:$/.test(v) ? v + '/' : v)
+      if (!s) return null
+      return (s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)) ? s : rootNorm + '/' + s
+    }
+
+    function isOutside(p, rootKey) {
+      const rm = rootMemoOf(rootKey)
+      // 空根判「非工作区外」（fail-open）：这正是 rootOf 的兜底不可为空的原因
+      if (!rm) return false
+      const r = rm.norm
+      const abs = absOf(p, r)
+      if (abs === null) return false
       const ra = fixRoot(abs)
       const rr = fixRoot(r)
       const lowerRa = ra.toLowerCase()
@@ -3211,6 +3558,37 @@ export default {
       const rrEndSep = lowerRr.endsWith('/') || lowerRr.endsWith('\\')
       if (rrEndSep) return lowerRa.indexOf(lowerRr) !== 0
       return lowerRa.indexOf(lowerRr + '/') !== 0 && lowerRa.indexOf(lowerRr + '\\') !== 0
+    }
+
+    // 「这个目标就是工作区根本身吗」—— 给解析器的 `isWorkspaceRoot` 钩子用（§5.5）。
+    //
+    // 为什么解析器判不了、必须由宿主给：`blastRadiusOf` 把 `rm -rf .` / `rm -rf *` 的目标
+    // 经 globRootOf 归约为 `.`，再问 isOutsideWorkspace —— 而 `.` 显然是「区内」，
+    // 于是段级 blast 为 null，大分类 allow 时**删掉整个项目不弹窗**（一族五种写法实测全落 inside）。
+    // 解析器不知道工作区根在哪，这个事实只有宿主有。
+    //
+    // **必须与 isOutside 同口径**（相对路径先拼根、再 pathResolve 归一）：
+    // 两者若在边界上打架，同一路径可能既不算「外」（isOutside 返 false）又不算「根」
+    // （本函数返 false），落进 inside 静默 —— 那正是要堵的洞，只是换了个地方出现。
+    // 归一逻辑**真的只有一份**：本函数与 isOutside 都调 absOf / fixRoot（§5.5）。
+    // 曾经这里是手抄的第二份副本，且两处已经结构性分叉（本函数多一句 `if (!s) return false`、
+    // 尾部比较也不同）—— 那正是文档列为风险项的「口径漂移」。
+    //
+    // 钩子收到的是 **globRootOf 的结果**（解析器传的是 `blast.path`），故 `*`、`./*`、
+    // `.\*` 与绝对路径写法都能命中，而 `..`、`./build`、`src/tmp` 不会误判。
+    //
+    // 性能：解析器在 `blastRadiusOfSegment` 的**逐词元循环**里对每个判为 inside 的目标各调一次
+    // （调用点就在该函数的循环体内；此处**不写行号** —— 跨文件行号会随 shell-parse.js
+    // 的增删漂移，函数名才是稳定锚点），而根侧取值在整段循环里是不变量 —— 故根侧计算走
+    // rootMemoOf 的记忆化（约 1 µs/次 → 0），本函数内只留 `norm(p)` 与一次 pathResolve 比较。
+    // 实测 `rm -rf` + N 个区内路径：N=30000（546 KB）时 68.6 → 39.5 ms（回到 N=10000 的量级）。
+    // 命令文本由 AI 生成、参数个数无上界，这条热路径不该随参数个数线性付常量开销。
+    function isWorkspaceRoot(p, rootKey) {
+      const rm = rootMemoOf(rootKey)
+      if (!rm) return false
+      const abs = absOf(p, rm.norm)
+      if (abs === null) return false
+      return fixRoot(abs).toLowerCase() === rm.lower
     }
 
     function callKey(name, args) {
@@ -3443,16 +3821,45 @@ export default {
           if (content) push(t('内容', 'Content'), content.length > 140 ? content.slice(0, 140) + '…（共 ' + content.length + ' 字符）' : content)
         } else if (COMMAND_TOOLS[name]) {
           const segs = (d && Array.isArray(d.segments)) ? d.segments : null
+          // ── 档位标签（§7.2b）────────────────────────────────────────────────────
+          // `codeLabel(s.code)` 只回答「为什么被标出来」（破坏性命令 / 无法解析 / 重定向到
+          // 工作区外），而弹窗的段级标注**只有这一个来源** —— 于是这些命令在弹窗上
+          // 显示**完全一样**（实测）：
+          //     sudo ls / sudo rm -rf /etc / kill 1234 / shutdown /s / taskkill /im x.exe
+          //     reg delete HKLM\Software\X /f / set-executionpolicy unrestricted
+          //     diskpart / rm -rf ./build        → 全部「破坏性命令」
+          // **这不是可选优化，是接线的一部分**：本计划把八档拆开供用户分别配置，
+          // 但若弹窗上全写「破坏性命令」，用户看到 `kill 1234` 弹窗时**不知道该去调哪个开关**
+          // —— 面板上八个下拉框，弹窗上零个线索指向它们。
+          //
+          // `sudo rm -rf /etc` 显示**两个**标签，正好回答那个困惑：
+          // 「我把大范围设成允许了，为什么还问？」→ 因为提权档也在管。
+          //
+          // `tiers` 是**集合**而不是「胜者」单值，因为一个段可以同时命中多档
+          // （`sudo rm -rf /etc` = wide + priv，两档都在生效）—— 填单值必然漏掉另一个。
+          //
+          // 显示形状：`破坏性命令[大范围][提权]` —— 档位标签接在 code 标签之后，
+          // 两者语义不同故都保留（code 说「为什么标出来」，tiers 说「哪一档在管它」）。
+          const noteOf = (sg) => {
+            const tag = codeLabel(sg.code)
+            const tags = (sg.tiers || []).map((x) => tierLabel(x)).filter(Boolean).map((x) => L(x, lang)).join('')
+            return (tag ? L(tag, lang) : '') + tags
+          }
           if (segs && segs.length > 1) {
             for (let i = 0; i < segs.length; i++) {
               const s = segs[i]
-              const tag = codeLabel(s.code)
               // 段号 + 引出该段的操作符：`段 2 &&` 一眼看出这是 `&&` 后面的那一段
               const label = t('段', 'Seg') + ' ' + (i + 1) + (i === 0 ? '' : ' ' + s.op)
-              push(label, s.text, tag ? { note: L(tag, lang) } : undefined)
+              const nt = noteOf(s)
+              push(label, s.text, nt ? { note: nt } : undefined)
             }
           } else {
-            push(t('命令', 'Command'), args.command || '')
+            // ── 单段命令也要带档位标签 ────────────────────────────────────────────
+            // 这里的条件是 `segs.length > 1`（**不改**）：改成 `>= 1` 会让单段命令的
+            // label 从「命令」变成「段 1」，措辞反而变差。故只给这一行加 note。
+            // 修之前 `sudo ls` **连「破坏性命令」都不显示**（实测）。
+            const nt = segs && segs.length === 1 ? noteOf(segs[0]) : ''
+            push(t('命令', 'Command'), args.command || '', nt ? { note: nt } : undefined)
           }
           if (typeof args.description === 'string' && args.description) push(t('说明', 'Description'), args.description)
         } else if (name === 'web_search' || name === 'web_fetch') {
@@ -3837,15 +4244,21 @@ export default {
         // 方言不能代替它 —— Linux 上 pwsh 工具用的是 POSIX 路径。
         platform: shellPlatform(),
         matchException: matchSegmentException,
-        destructive: () => commandSubSetting(root),
+        // destructive 钩子返回**八档表**（§7.2 的契约变更）：合并逻辑留在解析器
+        // （tierSetOf + strictestTierAction），宿主只回答「每一档用户配的是什么」。
+        // 这样档位语义只有一份定义 —— 宿主改配置不会与解析器分叉。
+        destructive: () => destructiveTiers(root),
         category: () => resolveCategory('command', null, null, root),
         isOutsideWorkspace: (p) => isOutside(p, root),
+        // 工作区根判据（§5.5）：解析器判不了「这是工作区根」（它不知道根在哪），
+        // 故由宿主注入。必须与 isOutside 同口径，见该函数的注释。
+        isWorkspaceRoot: (p) => isWorkspaceRoot(p, root),
       })
       // inherit：两层都没给出动作 → 落兜底策略（与分类 mode 的 inherit 同口径）。
       // 不在这里直接问 fallbackSetting 是为了让「为什么走到兜底」这件事由 decide() 统一处理。
       //
       // 可达性说明（不要误以为这条分支在日常生效）：当前宿主下它**恒不成立** ——
-      //   · commandSubSetting 显式不返回 inherit（两层都未配置时回落内置默认 ask）；
+      //   · destructiveTiers 对每一档都给出具体动作（两层都未配置时回落内置默认 ask）；
       //   · resolveCategory 对 command 分类只会返回具体 mode（项目层 inherit 已在读取时穿透全局，
       //     全局层经 MODES 校验，永远落不出 inherit）。
       // 保留它是因为 assessCommand 的契约允许返回 inherit，且宿主的默认值策略不该由解析器假定；
@@ -3913,8 +4326,13 @@ export default {
       const parts = []
       for (const s of segs.slice(0, SEG_SUMMARY_MAX_PARTS)) {
         const tag = codeLabel(s.code)
+        // 档位标签同样进决策日志（§8.2 的 23d）：决策记录是事后追溯「为什么问这一次」的
+        // 唯一入口，而只记 code 时八档的摘要**完全一样**（全是「破坏性命令」）——
+        // 与弹窗那条是同一个问题，只是看到的时机不同（弹窗在当下，日志在事后）。
+        const tiers = (s.tiers || []).map((x) => tierLabel(x)).filter(Boolean).map((x) => L(x, lang)).join('')
         const t = s.text.length > 80 ? s.text.slice(0, 80) + '…' : s.text
-        parts.push(t + (tag ? '（' + L(tag, lang) + '）' : ''))
+        const note = (tag ? L(tag, lang) : '') + tiers
+        parts.push(t + (note ? '（' + note + '）' : ''))
       }
       // 省略提示必须给出**还有几段**：只写「…」会让审批人以为已经看全了。
       // 注意它必须在**硬截断之后**再拼：曾经先 push 提示、再对整串按 300 字符截断，
@@ -4411,6 +4829,69 @@ export default {
       return { removed: true, count, remaining, exception: target }
     }
 
+    // 例外修改单点（/permgate/set-exception 路由专用）：**就地改，不挪位置**。
+    //
+    // ── 为什么必须就地改，而不是「删掉再加一条」──────────────────────────────────
+    // 列表顺序**就是优先级**（resolveCategory / matchSegmentException 都取首个匹配），
+    // 而 addProjectException 把新条目**追加到末尾**。于是「删了重加」会把这条例外
+    // 从它原来的优先级位置挪到最后 —— 用户只是想把 `git status *` 改成 `git diff *`，
+    // 却顺带把它的优先级降到最低。若它原本遮蔽着后面某条 allow，这一改就会
+    // **静默放松权限**（原来被遮蔽的 allow 现在生效了）。就地改没有这个问题。
+    //
+    // ── 改 `match`/`path` 的连带影响（有意接受，不额外处理）────────────────────
+    // 改模式后，这条例外指向的东西变了，可能不再遮蔽后面的条目、或反过来被遮蔽 ——
+    // 那由 statusView 的 exceptionShadow 重新算并标注，不需要在这里做补偿。
+    // 同值反向的重复条目也不清理：删除单点（removeExceptionEntries）已经确立了
+    // 「严格按 id 操作，不动同值的其它行」这条纪律，这里保持一致。
+    function setExceptionEntry(block, catKey, id, patch) {
+      if (EXC_CATS.indexOf(catKey) === -1) return { ok: false, reason: '该分类不支持例外' }
+      const c = block && block[catKey]
+      if (!c || !Array.isArray(c.exceptions)) return { ok: false, reason: '例外列表不存在' }
+      const idx = c.exceptions.findIndex((r) => r.id === id)
+      // id 找不到时**报错而不是追加**：静默追加会让一次「改错了 id」的请求变成
+      // 凭空多出一条例外 —— 权限被放宽，而用户以为自己只是改了个字。
+      if (idx === -1) return { ok: false, reason: '未找到 id=' + id }
+      const cur = c.exceptions[idx]
+      const key = catKey === 'command' ? 'match' : 'path'
+      const next = Object.assign({}, cur)
+      // 动作：只有显式给了才改（undefined = 保留原值），值域与 mode 同口径
+      if (patch.action !== undefined) {
+        if (MODES.indexOf(patch.action) === -1) return { ok: false, reason: '非法动作' }
+        next.action = patch.action
+      }
+      // 模式：空串视为非法（一条匹配不到任何东西的例外没有意义，且它仍会占一个优先级位）
+      if (patch.value !== undefined) {
+        const v = typeof patch.value === 'string' ? patch.value.trim() : ''
+        if (!v) return { ok: false, reason: '匹配内容不能为空' }
+        // 长度上限与候选写入路径（`CAND_VALUE_MAX_CHARS`）**对齐** —— 二者是同一条例外的
+        // 同一个字段，上限必须一致，否则两条写入路径会给出互相矛盾的可写范围：
+        // 「允许并记住」能写 2000 字符，而升级后想改这一个字却卡在 500，
+        // 存量 500–2000 的例外**永久无法通过面板保存**（beginExEdit 会把原值预填进输入框，
+        // 用户一个字不改、直接点保存也收到「匹配内容过长」，且他并不知道这是新增限制）
+        // —— 与 §7.5.2「就地可改」的意图直接冲突。方向虽是拒绝（fail-closed），
+        // 但后果是「改不了」而非「被绕过」，属可用性缺陷。
+        //
+        // ⚠️ 这里写**字面量**、不引用 `CAND_VALUE_MAX_CHARS`：本函数会被
+        // test/regressions.mjs 抠出放进 `new Function` 独立求值，注入名单里没有该常量，
+        // 引用会让「可独立求值」那条断言以 ReferenceError 变红。**两边数值的同源性
+        // 由该套件的断言锁定**（改了常量而不改这里，套件即红），故不是「抄一份没人管」。
+        if (v.length > 2000) return { ok: false, reason: '匹配内容过长' }
+        next[key] = v
+      }
+      // reason / note 的语义与 setCategoryMode 完全一致：
+      // 未提供（undefined）保留原值；空串/纯空白显式清除；有内容覆盖。
+      // 归一化交给 normalizeException 统一做（trim + 截断 200 + 按动作各归其位），
+      // 这里不自己写一遍 —— 两处各写一遍必然漂移。
+      if (patch.reason !== undefined) next.reason = patch.reason
+      if (patch.note !== undefined) next.note = patch.note
+      const normalized = normalizeException(next, catKey)
+      if (!normalized) return { ok: false, reason: '非法的例外参数' }
+      // **就地替换**（保 id、保下标）：splice 而不是 push，顺序即优先级。
+      // 重新归一化会丢掉不在白名单里的字段，这正是想要的（与 add 同口径）。
+      c.exceptions[idx] = normalized
+      return { ok: true, exception: normalized, index: idx }
+    }
+
     // 列表排序单点（/permgate/reorder 路由专用）。管两个「顺序即优先级」的列表：
     //   规则（block.custom）—— decide() 首条命中即返回，数组顺序就是优先级；
     //   例外（block[cat].exceptions）—— resolveCategory / matchSegmentException 同样是首个匹配生效。
@@ -4879,23 +5360,81 @@ export default {
         stats,
         recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: L(d.reason, l) })),
         cats: CATS,
-        // command 分类的子设置「破坏性命令」：下发当前生效值与来源（global / project / default），
+        // command 分类的子设置「破坏性命令」：下发**八档**的生效值、各层显式配置与推导默认值。
         // 与 quickTools/quickDefaults 同口径 —— 面板显示的就是裁决实际用的那个值。
         // labels 一并下发供设置页**只读展示**（名单固定，不开放用户增删，D-12）。
+        // groups 下发组 → 成员表。**字段保留**：§7.3 把它列为下发契约，删掉是设计冲突。
+        // ⚠️ 但面板的分组**不由它驱动** —— 客户端用自己的 `SUB_TIER_META` 的 `g` 字段分组
+        //   （radius / group 两组，见 client.js 的 subTierList 与两处渲染点），
+        //   `commandSub.groups` 在 client.js 中出现 **0 次**；生产侧目前只有本处赋值
+        //   与 test/smoke.mjs 的一条存在性断言。故它是**供外部消费的协议契约**，
+        //   不在渲染链上：改它不会改变面板分组（要改分组得动客户端的 SUB_TIER_META）。
+        // 分组本身要表达的判据差异不变：半径档（del/disk/perm + priv 的半径面）与
+        //   组档（proc/power/priv/reg）判据不同，用户需要知道「这一档是按目标范围判的，
+        //   还是按命令名判的」（§7.4）。
         //
-        // global/project 是该层的**显式配置**（null = 用户没设过），而 defaultAction 是该层的
-        // **推导默认值**（按本层 command mode 算，见 destructiveDefaultOf）—— 两者必须分开下发：
-        // 客户端要「未配置时显示推导值」，但推导逻辑在宿主（读取侧单一来源），不能在客户端
-        // 再写一份（写死 `|| 'ask'` 时，global command=deny 的用户会看到面板显示「询问」、
-        // 甚至弹出「破坏性命令会按询问处理」的提示，而实际裁决是拒绝 —— 面板说谎）。
+        // global/project 是该层的**显式配置**（null = 用户没设过）。
+        //
+        // ── *Default（推导默认值）：**保留字段，但当前无生产消费方**────────────────────
+        // §7.3 把 globalDefault/projectDefault 列为下发契约，故**保留、不删、也不改回字符串**
+        // （字段名与语义已随八档一起从「单值」变成「八档表」，改回字符串会让名实不符）。
+        // 但必须说清现状，免得下一个人以为它仍是面板的取值来源：
+        //   · 客户端**已改读 `effective[tier]`**（回填逻辑见 client.js:3429-3466）——
+        //     工作树里对这两个键的引用已归零（client.js:3431 仅剩一句注释提及）；
+        //   · 于是本字段目前**无生产消费方**，只剩 test/smoke.mjs 的一条存在性断言。
+        //
+        // ⚠️ **看似权威、实际与裁决分叉** —— 这正是不能拿它当取值来源的理由：
+        // 本字段由 `destructiveTierDefaults(本层 mode)` 算出（**按 mode 推导**），
+        // 而裁决与 `effective` 走的是 `destructiveTiers` 的**两遍解析**（先定 inside 的
+        // **生效值**，再用 `strictest(ask, inside)` 定其余七档，§6.2）。两者是**两套规则**，
+        // 在存量配置上会**逐档分叉**：
+        //   存量 `destructive: {action:'deny'}` + command mode=allow
+        //     · 本字段（按 mode）    → inside=allow、其余七档=ask
+        //     · 实际裁决（两遍解析） → inside=deny（显式）、其余七档=strictest(ask,deny)=deny
+        //   ⇒ **8/8 档全部分叉**（实测）。面板若按本字段渲染，会说「允许 1 · 询问 7」
+        //     而裁决八档全拒 —— 面板说谎，正是本文件反复警告的那一类。
+        // 谁要恢复消费这两个键，必须先解决这条分叉；否则请继续读 `effective`。
+        // 它们仍保留的价值：表达「本层 mode 单独推导会得到什么」，供外部消费/调试对比两套规则。
         commandSub: {
           key: 'destructive',
-          effective: commandSubSetting(root),
+          tiers: TIERS,
+          // effective：每档的**生效值**（含推导），面板直接显示；附 source 标注该档来自哪一层
+          effective: destructiveTiers(root),
+          // globalEffectiveProbe：**全局层单独**的生效值（无项目块时的 destructiveTiers）。
+          //
+          // ── 为什么必须单独下发（面板 tab 的分派依据）──────────────────────────────
+          // `effective` 是按**当前项目**算的（explicitOf 项目优先），而面板有**两个** tab。
+          // 全局 tab 拿它回填，就会把「项目层显式配置的值」显示成全局层的值 ——
+          //   实测：全局层从未配置、当前项目只设了 `wide:'deny'` 时，全局 tab 的 wide
+          //   显示成「拒绝」（全局层真实值是 ask/未表态）。用户切到全局 tab 看到「拒绝」，
+          //   会以为全局已受保护；删掉项目配置或换个项目后保护**静默消失**。
+          //   更严重的是**写错层**：该行既然显示 deny 就会渲染出「编辑原因」按钮，用户补一句
+          //   理由，commitSubReason 便以 target:'global' + action:'deny' 提交 ——
+          //   在全局层**凭空写入 wide=deny**，影响所有项目。
+          // 与 doomloop 阈值行（client.js 的 `defN` 按 tab 分派）是同一类坑、同一条纪律：
+          // **全局 tab 不能用按当前项目算的生效值**。
+          //
+          // ── 为什么不能回落到 globalDefault（已实测否决）────────────────────────
+          // globalDefault 是 `destructiveTierDefaults(本层 mode)`（**按 mode 推导**），
+          // 与裁决走的 destructiveTiers 两遍解析是**两套规则**，存量配置上会逐档分叉：
+          // 存量 `{action:'deny'}` + mode=allow 时它给出 inside=deny、其余七档=ask，
+          // 而全局层单独生效值是**八档全 deny** —— 用它回填等于把「面板说谎」原样
+          // 复制到另一族形态上（方向还相反：显示 ask、实际 deny），正是上面那段
+          // 分叉警示警告的情形。故必须由宿主用**同一个** destructiveTiers 求值下发。
+          globalEffectiveProbe: destructiveTiers(GLOBAL_PROBE_ROOT),
+          // global/project：每档的**显式配置**（null = 该层没设过），用于不协调提示
           global: (config.global.command && config.global.command.destructive) || null,
           project: (proj && proj.command && proj.command.destructive) || null,
-          globalDefault: destructiveDefaultOf(config.global.command && config.global.command.mode, false),
-          projectDefault: destructiveDefaultOf(proj && proj.command && proj.command.mode, true),
+          // 每档的**推导默认值**（按本层 mode 算，**不是**裁决用的规则 —— 见上）。
+          // ⚠️ 面板**已不再**读这两个键（改读 effective）；保留原因与分叉警示见上方注释。
+          globalDefault: destructiveTierDefaults(config.global.command && config.global.command.mode, false),
+          projectDefault: destructiveTierDefaults(proj && proj.command && proj.command.mode, true),
+          // per-tier 拒绝理由（§7.1）：{ wide: "删系统目录", priv: "别提权" }
+          // 老配置的 `reason` 字符串在读取侧归入 reasons.inside（**不写盘**）
+          globalReasons: explicitReasonsOf(config.global.command && config.global.command.destructive),
+          projectReasons: explicitReasonsOf(proj && proj.command && proj.command.destructive),
           labels: [...DESTRUCTIVE_LABELS].sort(),
+          groups: GROUP_MEMBERS,
         },
         // doomloop 的阈值下发（与 commandSub 同口径）：effective 是**实际生效值 + 来源**，
         // global/project 是该层的**显式配置**（null = 用户没设过），defaultThreshold 是内置默认。
@@ -4934,7 +5473,18 @@ export default {
           // 并显示错误路径（实测：传 DSH home 时 `rm -rf ~` 显示 `C:/Users/me/.dsh`，
           // 而 `rm -rf C:/Users/me` 落到 system 档）。
           // platform 同样必需：它决定查哪一套系统目录名单、`/x` 是不是 cmd 开关。
-          const opts = { home: homeFromEnv(), userHome: userHomeDir(), platform: shellPlatform(), isOutsideWorkspace: (p) => isOutside(p, root) }
+          //
+          // isWorkspaceRoot 与 isOutside **必须同源同口径**（§5.5）：解析器判不了「这是工作区根」，
+          // 缺这一钩子的 opts 会把 `rm -rf .` / `rm -rf ./*` / `Remove-Item -Recurse -Force .` /
+          // `rmdir /s /q .` 的目标（globRootOf 归约为 `.`）判成 inside → 面板对「放行了删整个
+          // 项目根」的 allow 例外**零标注**（实测本处返回 null），而弹窗里同一命令标注为
+          // workspace-root —— 同一命令两处口径分叉。本块自陈是「唯一能让人**事后**发现
+          // 『我什么时候放行了删盘根』的地方」，故这一档不能缺。
+          //
+          // 这份 opts 与 commandDecision 里 assessCommand 那份**必须成对增删**：宿主内同一个
+          // 判档 opts 写了两遍，新增钩子只接一处会让另一处静默失效（本文件曾如此）。
+          // test/regressions.mjs 有「两处 opts 键集合一致」的断言钉住这一点。
+          const opts = { home: homeFromEnv(), userHome: userHomeDir(), platform: shellPlatform(), isOutsideWorkspace: (p) => isOutside(p, root), isWorkspaceRoot: (p) => isWorkspaceRoot(p, root) }
           // 命令例外的 match 是**整条命令模式**，必须先按段分解再判档 ——
           // 直接把 `rmdir /s /q B:\` 喂给 blastRadiusOf 会把它当成一个路径，
           // 实测得到 {level:'outside', path:'rmdir /s /q B:'}（整个命令串被当路径、盘根信息丢失）。
@@ -5510,7 +6060,12 @@ export default {
           await init(exec)
           // target 与其它设置路由同口径归一（缺失/非法一律 global），理由见 set-category 处注释
           const target = normTarget(a)
-          if (!setCommandSub(rootOf(exec), target, a.action, a.reason)) return json(res, { error: '非法的 target/action 组合' })
+          // tier 缺省 = inside（**向后兼容**：旧客户端不传 tier，写的就是老语义的 `action`）。
+          // 非法 tier 由 setCommandSub 返回 false → 这里回错误，不静默落到某个档 ——
+          // 静默落档会让「用户改 A 档的理由，把 B 档的动作改成了 deny」。
+          if (!setCommandSub(rootOf(exec), target, a.action, a.reason, a.tier)) {
+            return json(res, { error: '非法的 target/action/tier 组合' })
+          }
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -5549,6 +6104,25 @@ export default {
           if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)
           return json(res, { added: written, status: statusView(exec) })
+        }
+        if (pathname === '/permgate/set-exception' && method === 'POST') {
+          await init(exec)
+          const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
+          // patch 只带上「请求里真的出现过的字段」：`reason: ''` 是显式清除，
+          // 而字段缺席是保留原值 —— 两者语义不同，不能在这里用 `|| undefined` 折叠掉。
+          const patch = {}
+          if (a.action !== undefined) patch.action = a.action
+          if (a.value !== undefined) patch.value = a.value
+          if (a.reason !== undefined) patch.reason = a.reason
+          if (a.note !== undefined) patch.note = a.note
+          const r = setExceptionEntry(block, a.category, a.id, patch)
+          // 失败一律回 `{ error }`（与其它写盘路由同形），**不用** `{ ok:false, reason }`：
+          // 客户端对写盘端点已有一条统一的错误链（error → saveError → applyStatus），
+          // 多造一种失败形状就得在客户端多写一条分支，而那条分支恰好会绕过
+          // 「写盘失败要 applyStatus 回填」的既有纪律。
+          if (!r.ok) return json(res, { error: r.reason })
+          await persist(exec)
+          return json(res, { ok: true, exception: r.exception, index: r.index, status: statusView(exec) })
         }
         if (pathname === '/permgate/remove-exception' && method === 'POST') {
           await init(exec)

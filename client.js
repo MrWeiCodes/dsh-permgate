@@ -61,6 +61,104 @@ window.__ModuleLoader__.load({
 		// 能关掉就等于允许用户把唯一的安全提示永久藏起来。
 		const PG_BLAST_CSS = '.pg-blast { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; font-weight: 600; line-height: 1.45; padding: 6px 8px; margin-bottom: 8px; border: 1px solid; border-left-width: 3px; border-radius: 6px; background: rgba(198,40,40,0.07); word-break: break-word; } .pg-blast-icon { flex: none; }';
 
+		// 「破坏性命令」八档列表的样式。**必须走 CSS 类**，不能继续用内联 style：
+		// 行需要 hover 高亮、分组头要画真分隔线，这两件事内联 style 都做不到
+		// （内联表达不了 :hover / ::after）。
+		//
+		// ── 折叠态为什么是「动作计数」而不是一句摘要 ──────────────────────────────
+		// 上一版折叠时只给一句 `其余档位均为「询问」`，被挤在标题行里截断成
+		// `其余档位均为「继承全`（面板宽度有限，标题 + 摘要 + 按钮三者抢一行）。
+		//
+		// 中途试过「一排色点」表示八档各自的动作，**渲染出来否掉了**：8 个 9px 圆点
+		// 连成一串橙色的毛毛虫，既不说明颜色含义、又与每行左侧的状态点重复计数
+		// （实测折叠态共 9 个点，看起来像串里有 9 档）。
+		//
+		// 现在折叠态给**按动作分组的计数**：`拒绝 2 · 询问 4`。它精确、无颜色依赖、
+		// 不依赖逐档识别，回答的正是折叠态该回答的那个问题 ——「有没有哪档被设成了
+		// 意外的值」。要看具体是哪一档就展开，展开后逐行有状态点。
+		const PG_TIER_CSS = [
+			// 标题行：只有标题（摘要挪进下方那个展开链接里 —— 见 .pg-tier-link）。
+			'.pg-tier-head { margin-bottom: 2px; }',
+			'.pg-tier-title { font-size: 12px; font-weight: 600; }',
+			// 说明行：独立一行，不再与标题挤在一起（上一版它是拼在标题后面的）。
+			'.pg-tier-hint { font-size: 11px; color: rgba(128,128,128,0.9); margin-bottom: 2px; }',
+			// 展开/折叠入口：**与上方例外列表同一套交互**（左对齐蓝字链接，▸/▾ 前缀）。
+			//
+			// 曾经是标题行右侧的一个按钮，两个问题：
+			//   ① 它在行的最右端，与左侧内容隔着整行空白 —— 用户的视线扫过标题、
+			//      说明、档位行之后根本注意不到那里还有个可点的东西（实测反馈）；
+			//   ② 同一个面板里例外列表用左对齐蓝字链接，这里用右侧按钮，
+			//      两套交互并存，用户得学两遍。
+			// 折叠/展开的语义在两处完全相同，长得就该一样。
+			//
+			// 摘要（`询问 3 · 拒绝 3 · 继承全局 1`）**放进这个链接里**而不是留在标题行：
+			// 与例外列表的 `▸ 例外列表（18 条）` 同构，且展开后摘要自然消失
+			// （那时八行都看得见，摘要就是多余的 —— 例外列表同样在展开后不再显示条数）。
+			'.pg-tier-link { display: inline-block; font-size: 12px; color: #1f6feb; cursor: pointer; user-select: none; padding: 2px 0; }',
+			'.pg-tier-link:hover { text-decoration: underline; }',
+			// 分组头：不用 `── 按命令类别 ──` 那串 ASCII 线 —— 它在任何字体下都与真分隔线
+			// 对不齐（全角/半角混排），且占满一行只传达一个分组名。改成小号字 + ::after 画的线。
+			'.pg-tier-group { display: flex; align-items: center; gap: 6px; margin: 7px 0 2px; font-size: 11px; color: rgba(128,128,128,0.9); }',
+			'.pg-tier-group::after { content: ""; flex: 1; height: 1px; background: rgba(128,128,128,0.28); }',
+			// 八行的容器：左侧一条细竖线把它们圈成一个整体（它们是一组设置，不是八条独立的）。
+			//
+			// **右侧不留内边距**（`padding: … 0`）—— 这是对齐的关键：容器右边缘与上方
+			// 分类标题行等宽，行内又无右内边距，于是档位下拉框的右边缘与分类下拉框
+			// 严格齐平。上一版给行加了 6px 右内边距，实测右边缘差 6px（773 vs 767），
+			// 在截图上表现为「档位的下拉框比分类的短一截」。
+			'.pg-tier-box { margin: 1px 0 0 2px; padding-left: 8px; border-left: 2px solid rgba(128,128,128,0.25); }',
+			// 单行：三列网格 = 状态点 / 标签 / 控件。第三列 auto，配合上面的「无右内边距」
+			// 使八个下拉框右边缘落在同一条线上（即使某档多出一个拒绝原因框，
+			// 它也只是把第三列向左撑开，右边缘不动）。
+			// minmax(0, 1fr) 而不是 1fr：后者的最小尺寸是 auto，长标签会把列撑开而不是省略。
+			'.pg-tier { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 3px 0; border-radius: 5px; }',
+			'.pg-tier:hover { background: rgba(128,128,128,0.1); }',
+			// 状态点：颜色 = 该档当前动作（沿用 MODE_COLORS 那套语义）。它替代了「每行旁边
+			// 再写一遍当前值」—— 八档里哪一档是拒绝，扫一眼左边的点就知道。
+			'.pg-tier-dot { width: 8px; height: 8px; border-radius: 50%; justify-self: center; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18); }',
+			// 标签：单行截断 + title 悬浮看完整判据（短标签让人扫得快，完整解释不丢）。
+			'.pg-tier-label { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+		].join(' ');
+
+		// 例外行的样式：与上面「破坏性命令」的档位行**同一套视觉**（状态点 / 内容 / 右侧控件）。
+		//
+		// 统一的意义不只是好看：两处表达的是同一个概念（一个动作 + 它作用的对象），
+		// 却一个用彩色文字徽标、一个用彩色圆点 —— 同一个东西在相邻两处长得不一样。
+		// 现在两处都是「点 + 内容 + 动作下拉框」，且**动作都能直接改**。
+		//
+		// ── 为什么这里不用 grid（与 .pg-tier 不同）──────────────────────────────
+		// 例外行由 sortRowProps 给出**内联** style（rowStyle：flex + wrap + 拖动落点样式），
+		// 而内联样式优先级高于类，故 `.pg-exc { display: grid }` 会被它压掉 ——
+		// 写了也不生效（实测：类名合并对了、grid 仍不生效）。
+		// 改成与 flex 基座配合：右侧控件用 margin-left:auto 顶到右边。
+		// 视觉结果与档位行的 grid 一致（各行的控件**右边缘**对齐），且拖动的
+		// 落点线/半透明等既有样式全部保留。
+		const PG_EXC_CSS = [
+			// 内容区：允许收缩，否则长模式会把右侧控件挤出容器（flex 项默认 min-width:auto）。
+			// **允许换行**（wrap）：内容区里有「模式 + 原因/备注」两样，窄屏下让它们各占一行
+			// 比把模式截断好 —— 截断的 glob 是读不出含义的（实测反馈「例外过长就看不到了」）。
+			'.pg-exc-main { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; }',
+			// 模式：**不伸展**（`flex: 0 1 auto`），于是紧跟其后的原因/备注就贴在它右边 ——
+			// 与快捷工具行「工具名 + 说明紧挨着」同一个排法（`quickRow` 里那对 span）。
+			//
+			// 曾经写 `flex: 1 1 auto`：模式会**吃掉整行剩余宽度**，把原因推到最右边，
+			// 中间留一大片空白（实测反馈「多出一大片空间」）。伸展在这里没有任何好处 ——
+			// 模式不需要占满，它只需要完整显示。
+			//
+			// `min-width: 180px` 保留：拿不到这个宽度时它会连同原因一起换到下一行，
+			// 这是「长例外要看得见」的保证（宁可多占一行，也不能把
+			// `git rev-parse HEAD` 显示成 `git rev-p...`）。
+			// word-break: break-all 让超长无空格的 glob（路径）也能断行而不是撑破容器。
+			'.pg-exc-pat { font-family: ui-monospace, Consolas, monospace; font-size: 12px; flex: 0 1 auto; min-width: 180px; word-break: break-all; }',
+			// 控件区：margin-left:auto 把它顶到行尾（等价于 grid 的 auto 第三列）
+			'.pg-exc-ctl { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: 0 0 auto; }',
+			'.pg-exc-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18); }',
+			// 编辑态（只改模式）：输入框吃掉剩余宽度。
+			'.pg-exc-edit { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }',
+			'.pg-exc-edit > input:first-child { flex: 1 1 auto; min-width: 90px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }',
+		].join(' ');
+
+
 		// 爆炸半径的档位 → 图标 / 配色 / 文案键。**模块级单点**：审批弹窗的警告条与设置面板的
 		// 例外列表标注共用同一份 —— 各写一份的话，两处的配色与措辞迟早分叉，而用户看到的
 		// 是「同一个东西在两个地方长得不一样」。
@@ -73,6 +171,15 @@ window.__ModuleLoader__.load({
 			// 一条 `rm -rf *`=allow 实测能放行 `rm -rf /`，后果不比删盘根轻。
 			broad: { icon: '⛔', color: '#c62828', key: 'app.blast.broad' },
 			system: { icon: '⛔', color: '#c62828', key: 'app.blast.system' },
+			// workspace-root：目标就是**本项目根目录**（`rm -rf .` / `rm -rf *`）。
+			// 用错误红而不是警告橙：删掉的是整个项目，与「系统目录」同量级的不可逆损失。
+			// 它与 drive-root 必须分开显示 —— 用户看到「目标是一整个盘」会以为命令写错了，
+			// 而实际是 `rm -rf .` 在当前目录跑偏；两者后果差一个量级，文案不能混。
+			'workspace-root': { icon: '⛔', color: '#c62828', key: 'app.blast.workspaceRoot' },
+			// unknown：目标**读不出**（`rm -rf $TARGET`、`diskpart` 裸跑、`set-executionpolicy`）。
+			// 用错误红：读不出后果的操作与「已知是盘根」在决策上是同一类 —— 都不能默认放行。
+			// 它排在这里而不是「按最轻处理」，正是 fail-closed 的体现。
+			unknown: { icon: '⛔', color: '#c62828', key: 'app.blast.unknown' },
 			home: { icon: '⚠', color: '#e65100', key: 'app.blast.home' },
 			outside: { icon: '⚠', color: '#e65100', key: 'app.blast.outside' },
 		};
@@ -330,6 +437,9 @@ window.__ModuleLoader__.load({
 			'permgate:set-doomloop': ['POST', '/permgate/set-doomloop'],
 			'permgate:set-quick': ['POST', '/permgate/set-quick'],
 			'permgate:add-exception': ['POST', '/permgate/add-exception'],
+			// 就地修改一条例外（保 id、保下标）。**不是** add/remove 的组合：
+			// 那个组合会把这条例外挪到数组末尾，而顺序即优先级（见宿主 setExceptionEntry）。
+			'permgate:set-exception': ['POST', '/permgate/set-exception'],
 			'permgate:remove-exception': ['POST', '/permgate/remove-exception'],
 			'permgate:add-rule': ['POST', '/permgate/add-rule'],
 			'permgate:remove-rule': ['POST', '/permgate/remove-rule'],
@@ -1397,6 +1507,11 @@ window.__ModuleLoader__.load({
 				// broad 的 {p} 是 `.`（目标不限定），故文案不写具体路径：说清「这条规则不限目标」即可。
 				'app.blast.broad': '这条规则不限删除目标（{p}）—— 它同样放行删除盘根与系统目录',
 				'app.blast.system': '目标是系统目录（{p}）—— 删除后系统或软件可能无法启动',
+				// workspace-root 的 {p} 是工作区根（通常是 `.`）。文案必须说清「删的是整个项目」
+				// 而不是「删了一个目录」—— 后者听上去像日常操作，而它不可逆且影响全部代码。
+				'app.blast.workspaceRoot': '目标是**本项目根目录**（{p}）—— 整个项目的文件都会被删除，不进回收站',
+				// unknown 的 {p} 通常为空（目标读不出，没有具体路径可显示），故文案不依赖它。
+				'app.blast.unknown': '无法判定这条命令的目标范围（{p}）—— 命令里含变量或读不懂的构造，实际影响可能超出工作区',
 				'app.blast.home': '目标是你的用户目录（{p}）—— 其中的配置与文档都会丢失',
 				'app.blast.outside': '目标在工作区之外（{p}）—— 不在本项目范围内',
 				'app.cand.head': '添加项目规则（当前项目）',
@@ -1552,13 +1667,71 @@ window.__ModuleLoader__.load({
 				// 也不列名单内容：它只读、不可编辑，逐条列出占四行却给不出可操作信息；
 				// 这里只举几个典型例子让人一眼认出「这类命令」，权威定义在 shell-parse.js
 				// 的 DESTRUCTIVE_LABELS（删除/磁盘/进程电源/提权/权限属主/注册表六类）。
-				'panel.subDestructiveHint': '：除例外外，删除文件、格式化磁盘、关机重启、提权等危险操作按此动作',
+				// 说明行**独立成行**，故文案不再以「：」开头（上一版它是拼在标题后面的后缀）。
+				// 也不再说「按此动作」—— 八档各有各的动作，那句话现在不成立了。
+				'panel.subDestructiveHint': '删除文件、格式化磁盘、关机重启、提权等危险操作，按各自档位的动作处理（例外优先）',
 				// 免责说明：内置名单靠命令名与参数形态识别，不可能穷尽所有写法
 				// （脚本文件、编码混淆、间接调用都读不出来）。不写这句的话，用户会把
 				// 「没弹窗」当成「这条命令被检查过且安全」，而实际可能是根本没识别出来。
 				// 措辞只陈述能力边界，不解释原理 —— 用户要的是「别把没拦住当成拦住了」。
 				'panel.subDestructiveNote': '注：基于命令文本识别，不能保证覆盖所有破坏性命令。',
-				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置是「{sub}」—— 判定链上子设置优先，破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把子设置也改成「{cat}」或「跟随全局」。',
+				// ── 破坏性命令的八档（§7.4 默认折叠）──────────────────────────────
+				// 标签必须**说清它管什么**，而不是照抄内部标识符：用户要判断的是
+				// 「我这条命令会不会被它拦」，看不懂名字就只能一律设成允许（那等于关掉保护）。
+				//
+				// ── 为什么标签短、判据长（两套文案）────────────────────────────────
+				// 上一版把完整判据当标签用（`目标是盘根/系统/用户目录`、
+				// `目标无法判定（含变量或读不懂）`），结果是八行参差不齐：
+				// 有的占满一行、有的只占四个字，右侧下拉框被推得左一列右一列。
+				// 现在行内只放**名词短语**（`工作区内` / `盘根与系统目录`），
+				// 完整判据（怎么算、举例、边界）挪到 title 悬浮 ——
+				// 扫的时候快，想深究时一个字都不少。
+				//
+				// 前四档按**目标范围**判（判据是路径），后四档按**命令类别**判
+				// （这些命令没有路径目标 —— 伤害对象是进程/电源/注册表）。
+				// 分组标题就是为这个区别存在的。
+				'panel.tierInside': '工作区内',
+				'panel.tierOutside': '工作区外',
+				'panel.tierWide': '盘根与系统目录',
+				'panel.tierUnknown': '目标无法判定',
+				'panel.tierProc': '结束进程',
+				'panel.tierPower': '关机 / 重启',
+				'panel.tierPriv': '提权',
+				'panel.tierReg': '注册表 / WMI',
+				// 悬浮全文：行内标签被截断或过于简短时，这里给出完整判据。
+				'panel.tierInsideHint': '目标路径在工作区内（含相对路径解析后的结果）',
+				'panel.tierOutsideHint': '目标路径在工作区外，但不在盘根/系统/用户目录之下',
+				'panel.tierWideHint': '目标是盘根、系统目录或用户目录 —— 删了不可逆',
+				'panel.tierUnknownHint': '目标读不出来：含变量、命令替换，或参数形态无法解析',
+				'panel.tierProcHint': '结束进程（kill / taskkill / pkill 等）—— 没有路径目标',
+				'panel.tierPowerHint': '关机、重启、休眠（shutdown / reboot 等）—— 没有路径目标',
+				'panel.tierPrivHint': '提权（sudo / su / runas / doas 等）—— 没有路径目标',
+				'panel.tierRegHint': '注册表 / WMI（reg / wmic 等）—— 没有路径目标',
+				// 分组标题（画在 ::after 分隔线左侧）。只给下四档加、上四档不加：
+				// 上四档是本列表的主体，给它们也加一个标题只会多占一行；
+				// 分隔线画在**判据切换处**才有信息量。
+				'panel.tierGroupName': '按命令类别',
+				// 展开/折叠链接的文案。与例外列表的 `▸ 例外列表（18 条）` 同构：
+				// 折叠态 = 「展开 + 摘要」，展开态 = 「收起」（不带摘要 —— 那时八行都看得见）。
+				'panel.tierExpand': '展开',
+				'panel.tierExpandAll': '展开（{s}）',
+				'panel.tierCollapse': '收起',
+				// 说明行**独立成行**，故文案不再以「：」开头（上一版它是拼在标题后面的后缀）。
+				// 也不再说「按此动作」—— 八档各有各的动作，那句话现在不成立了。
+				// 折叠摘要：**由实际生效值生成**（不能写死「均为询问」，否则面板说谎）。
+				// 形状是「按动作分组的计数」：`拒绝 2 · 询问 5` / `均为「询问」`。
+				// 它回答的是折叠态该回答的问题 ——「有没有哪档被设成了意外的值」。
+				//
+				// 文案不再说「其余档位」：那个「其余」是旧设计里「inside 留在外面、
+				// 只有其余七档被折叠」的残留措辞。现在八档全收起、计数也覆盖八档，
+				// 「其余」既无所指，又会让用户去找「那个没被算进去的档」。
+				'panel.tierRestAll': '均为「{v}」',
+				'panel.tierRestMixed': '{list}',
+				// 计数摘要里的一项：`拒绝 2`（动作 + 该动作的档数）
+				'panel.tierCount': '{v} {n}',
+				// 单档状态点的悬浮文案：「档位名：动作」
+				'panel.tierDotTitle': '{t}：{v}',
+				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置里「{tier}」这一档是「{sub}」—— 判定链上子设置优先，命中该档的破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把该档也改成「{cat}」或「跟随全局」。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
 				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
 				// 那是实现细节，用户改不了也用不上），也不写 Markdown 语法 —— 这里是纯文本，
@@ -1622,6 +1795,13 @@ window.__ModuleLoader__.load({
 				'panel.excReasonPh': '选填：会告知 AI 为什么被拒',
 				'panel.excNote': '备注',
 				'panel.excNotePh': '选填：命中时显示在弹窗上，勿写敏感信息',
+				// 例外行编辑态：模式输入框的悬浮说明 + 两个失败提示。
+				// `excEditPat` 要说清「这里改的是匹配什么」，而不是只写「模式」两个字。
+				'panel.excEditPat': '这一条例外匹配的命令段 / 路径',
+				// 行内那个「改匹配」按钮：与原因格的「编辑」区分（同一行两个可编辑对象，
+				// 都叫「编辑」时用户不知道点哪个改哪个）。
+				'panel.excEditPatBtn': '改匹配',
+				'panel.excEmpty': '匹配内容不能为空',
 				'panel.denyReason': '拒绝原因',
 				'panel.denyReasonPh': '选填：拒绝时告知 AI 原因',
 				'panel.denyReasonHint': '填写后按回车或点「保存」生效',
@@ -1650,6 +1830,8 @@ window.__ModuleLoader__.load({
 				'app.blast.driveRoot': 'Target is an entire drive ({p}) — everything on it will be permanently deleted, not sent to the Recycle Bin',
 				'app.blast.broad': 'This rule does not limit the deletion target ({p}) — it also allows deleting a drive root or a system directory',
 				'app.blast.system': 'Target is a system directory ({p}) — deleting it may leave the system or installed software unable to start',
+				'app.blast.workspaceRoot': 'Target is **this project root** ({p}) — every file in the project will be deleted, not sent to the Recycle Bin',
+				'app.blast.unknown': 'Cannot determine what this command targets ({p}) — it contains variables or constructs that cannot be read, so the real impact may reach outside the workspace',
 				'app.blast.home': 'Target is your user directory ({p}) — configuration and documents in it will be lost',
 				'app.blast.outside': 'Target is outside the workspace ({p}) — not part of this project',
 				'app.cand.head': 'Add project rule (current project)',
@@ -1790,9 +1972,34 @@ window.__ModuleLoader__.load({
 				'panel.moveUp': 'Move up (takes effect earlier)',
 				'panel.moveDown': 'Move down (takes effect later)',
 				'panel.subDestructive': 'Destructive commands',
-				'panel.subDestructiveHint': ': except for exceptions, risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow this action',
+				'panel.subDestructiveHint': 'risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow their own tier action (exceptions first)',
 				'panel.subDestructiveNote': 'Note: detection is text-based and cannot cover every destructive command.',
-				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands follow "{sub}" (not "{cat}"). To make the category action apply, set the sub-setting to "{cat}" or "inherit".',
+				// ── the eight tiers of "Destructive commands" (collapsed by default) ──
+				'panel.tierInside': 'Inside workspace',
+				'panel.tierOutside': 'Outside workspace',
+				'panel.tierWide': 'Drive root / system',
+				'panel.tierUnknown': 'Target unknown',
+				'panel.tierProc': 'Kill process',
+				'panel.tierPower': 'Shutdown / restart',
+				'panel.tierPriv': 'Privilege',
+				'panel.tierReg': 'Registry / WMI',
+				'panel.tierInsideHint': 'Target path is inside the workspace (after resolving relative paths)',
+				'panel.tierOutsideHint': 'Target path is outside the workspace, but not under a drive root / system / user directory',
+				'panel.tierWideHint': 'Target is a drive root, system directory or user directory — deletion is irreversible',
+				'panel.tierUnknownHint': 'Target cannot be read: variables, command substitution, or an unparsable argument shape',
+				'panel.tierProcHint': 'Kill a process (kill / taskkill / pkill etc.) — no path target',
+				'panel.tierPowerHint': 'Shutdown, restart, hibernate (shutdown / reboot etc.) — no path target',
+				'panel.tierPrivHint': 'Privilege escalation (sudo / su / runas / doas etc.) — no path target',
+				'panel.tierRegHint': 'Registry / WMI (reg / wmic etc.) — no path target',
+				'panel.tierGroupName': 'by command category',
+				'panel.tierExpand': 'Expand',
+				'panel.tierExpandAll': 'Expand ({s})',
+				'panel.tierCollapse': 'Collapse',
+				'panel.tierRestAll': 'all "{v}"',
+				'panel.tierRestMixed': '{list}',
+				'panel.tierCount': '{v} {n}',
+				'panel.tierDotTitle': '{t}: {v}',
+				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "{tier}" tier of the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands matching that tier follow "{sub}" (not "{cat}"). To make the category action apply, set that tier to "{cat}" or "inherit".',
 				// ── doom loop threshold ────────────────────────────────────────────
 				'panel.loopThreshold': 'Trigger threshold',
 				'panel.loopThresholdHint': ': how many identical calls in a row before it triggers. Leave empty to use the default.',
@@ -1850,6 +2057,9 @@ window.__ModuleLoader__.load({
 				'panel.excReasonPh': 'optional: tells the AI why it was denied',
 				'panel.excNote': 'Note',
 				'panel.excNotePh': 'optional: shown in the dialog; no secrets',
+				'panel.excEditPat': 'the command segment / path this exception matches',
+				'panel.excEditPatBtn': 'Match',
+				'panel.excEmpty': 'match text cannot be empty',
 				'panel.denyReason': 'Deny reason',
 				'panel.denyReasonPh': 'optional: tells the AI why',
 				'panel.denyReasonHint': 'press Enter or click Save to apply',
@@ -2965,12 +3175,25 @@ window.__ModuleLoader__.load({
 			const [quickReason, setQuickReason] = React.useState({});
 			// 分类默认值与兜底的拒绝原因输入框：{ [tab]: { [cat]: '' } } / { [tab]: '' }
 			const [catReasons, setCatReasons] = React.useState({ global: {}, project: {} });
-			// command 分类的子设置「破坏性命令」：{ global: 'ask'|'allow'|'deny'|'inherit', project: ... }。
-			// 与 cats 平行但独立：它跟着分类行走（选中的动作必须立即回显），而 reason 与
-			// 分类默认值同口径只读展示 —— 复用 reasonInput 那套「只读 + 编辑/保存」交互。
-			const [subDestructive, setSubDestructive] = React.useState({ global: null, project: null });
-			// 子设置的拒绝原因草稿：{ global: '', project: '' }（结构与 fbReason 同形）
-			const [subReasons, setSubReasons] = React.useState({ global: '', project: '' });
+			// command 分类的子设置「破坏性命令」：**每层八档**。
+			// 形状 { global: { inside: 'allow', wide: 'ask', … }, project: {…} }。
+			//
+			// 为什么必须逐档而不是一个值：宿主把八档拆开供用户分别配置
+			// （`rm -rf ./build` 与 `rm -rf /` 除了都叫 rm 之外没有任何共同点），
+			// 面板上就是一个档一个下拉框。用一个值存八档会让「改 A 档」连带改掉 B 档。
+			const [subDestructive, setSubDestructive] = React.useState({ global: {}, project: {} });
+			// 子设置的拒绝原因草稿：**每层每档一个**（`{ global: { wide: '' }, project: {} }`）。
+			// per-tier reason（§7.1）：「删系统目录」与「别提权」是给 AI 的两种不同指令，
+			// 合成一句会让 AI 收到无关信息。
+			const [subReasons, setSubReasons] = React.useState({ global: {}, project: {} });
+			// 「破坏性命令」八档的展开态（§7.4 默认折叠）。
+			//
+			// 折叠时**八档全收起**（不是只收起七档）：八个档在判定链上是**平级**的，
+			// 单留一档会让它看起来像「主设置 + 七个附属」，而它其实只是八分之一。
+			// 折叠态的信息由展开链接文字里的摘要承载（`> 展开（询问 3 · 拒绝 3）`），
+			// 要看具体哪一档就展开 —— 与例外列表的取舍完全一致（详见 commandSubRow）。
+			// 折叠状态**不持久化**（组件内 state）：它是临时视图状态，不是配置。
+			const [subExpanded, setSubExpanded] = React.useState(false);
 			// 循环检测（doomloop）的阈值输入框：{ global: '', project: '' }，值为**字符串**
 			// （输入框的中间态，如用户清空准备重打）。空串表示「本层未配置」，
 			// 由宿主下发的 defaultThreshold 在界面上以 placeholder 呈现 —— 不预填数字，
@@ -3000,7 +3223,13 @@ window.__ModuleLoader__.load({
 			// 正在编辑中的拒绝原因格（'kind:tab:key'）：非编辑态一律只读展示，避免「看起来能打字、
 			// 但不知道什么时候生效」——只读值 + 明确的「编辑 / 保存」按钮才是可预期的交互。
 			const [reasonEditing, setReasonEditing] = React.useState(null);
-			// 焦点描述 → 稳定字符串键，用于比对「这一格是否在编辑 / 是否刚保存」
+			// 焦点描述 → 稳定字符串键，用于比对「这一格是否在编辑 / 是否刚保存」。
+			//
+			// ── `sub` 的 key 必须带档位（§7.2d）──────────────────────────────────────
+			// 曾经恒为 `'command'`。八档之后那样会让八档共用一个编辑态：
+			// 「编辑 A 档的理由时 B 档的框也进入编辑态」（编辑态是按 key 比对的）。
+			// 现在子设置的 focus.key 就是**档位名**（`inside` / `wide` / `priv`…），
+			// 于是 key 天然唯一；调用方负责把档位传进 focus.key（见 commandSubRow）。
 			const reasonKeyOf = (f) => (f ? f.kind + ':' + f.tab + ':' + (f.key === null || f.key === undefined ? '' : f.key) : '');
 			// 对勾的写入单点。刻意定义在 reasonKeyOf 之后：它体内要调 reasonKeyOf，
 			// 若写在前面就只能靠「箭头函数体延迟求值」侥幸不报 TDZ，属隐性顺序依赖。
@@ -3029,6 +3258,27 @@ window.__ModuleLoader__.load({
 			const exOf = (c) => exForm[c] || exDefault();
 			const setExField = (c, patch) => setExForm((prev) => Object.assign({}, prev, { [c]: Object.assign({}, prev[c] || exDefault(), patch) }));
 			// #endregion ex-form-state
+
+			// ── 例外行的就地编辑态 ──────────────────────────────────────────────
+			//
+			// `exEdit` 是**正在编辑的那一条的 id**（null = 没有），`exDraft` 是它的草稿。
+			// 一次只允许编辑一条：例外行的编辑态是「整行变成输入框」，同时开两条会让
+			// 列表里出现两行高矮不一的输入框，且「保存」按钮属于哪一行变得含糊。
+			//
+			// 草稿**只装模式**（`value`）：原因/备注走 reasonInput（与其余四处同一个组件），
+			// 由 exReason 那份草稿承载，不进这个编辑态（见 commitExReason 的说明）。
+			//
+			// **value 是 match/path 的统称**：命令分类存 `match`、其余分类存 `path`，
+			// 面板不该让用户知道这个区别（他在哪一栏里打字是一样的），故草稿与请求都用
+			// 中性名 `value`，由宿主按分类落到正确的键上（见 setExceptionEntry）。
+			const [exEdit, setExEdit] = React.useState(null);
+			const [exDraft, setExDraft] = React.useState({ value: '' });
+			// 例外行的原因/备注草稿：`{ [例外 id]: '文字' }`。
+			//
+			// 与 catReasons / subReasons / quickReason / fbReason 同一个角色（各格一份草稿），
+			// 键用例外 id 而不是「分类+id」：id 在一层内唯一，且 reasonInput 的 focus.key
+			// 就是它（见 reasonKeyOf）。
+			const [exReason, setExReason] = React.useState({});
 			const [newTool, setNewTool] = React.useState('');
 			const [newToolAction, setNewToolAction] = React.useState('allow');
 			// 新增快捷工具行的拒绝原因：与例外的新增行同构（选「拒绝」才出现输入框），
@@ -3138,7 +3388,11 @@ window.__ModuleLoader__.load({
 			// 编辑态若残留，切回来时同一格会莫名其妙还处于可输入状态）。
 			// 换层时也清掉规则过滤词（例外/快捷工具的过滤词另有处理：例外按分类存、与层无关，
 			// 快捷工具列表内容不分层，故两者都不需要在这里清）。
-			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); loopThDirty.current = { global: false, project: false }; setRuleFilter({ global: '', project: '' }); }, [tab]);
+			// 切层（全局 ↔ 项目）时清掉所有「属于某一层」的临时态：确认框、提示、
+			// 编辑态、未保存草稿标记、过滤词。例外行的编辑态（exEdit）也在此列 ——
+			// 它按 id 定位，而 id 只在它所属的那一层里有意义，切层后必须丢弃
+			// （否则切到项目层时会看到一个 id 相同、内容却是另一条例外的行处于编辑态）。
+			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); setExEdit(null); loopThDirty.current = { global: false, project: false }; setRuleFilter({ global: '', project: '' }); }, [tab]);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -3146,11 +3400,23 @@ window.__ModuleLoader__.load({
 				setStatus(s);
 				const cs = { global: {}, project: {} };
 				const crs = { global: {}, project: {} };
+				// 每层**全部**例外 id → 动作 的映射（跨分类）：只用于收敛例外行的编辑态
+				// （见下面 setExEdit 处的说明）。取全集而不是当前分类的，
+				// 是因为编辑态不知道自己属于哪个分类 —— 它只记一个 id。
+				// 存**动作**而不只是「存在」：stillEditable 要判的是「该格此刻是否仍渲染出
+				// 输入框」，而原因/备注格只在 deny/ask 时才渲染（allow 两格都没有）。
+				const excActs = { global: {}, project: {} };
 				for (const t of ['global', 'project']) {
 					const block = s.categories && s.categories[t] ? s.categories[t] : null;
 					for (const c of CATS) {
 						cs[t][c] = block && block[c] ? block[c].mode : (t === 'project' ? 'inherit' : 'ask');
 						crs[t][c] = (block && block[c] && block[c].reason) || '';
+					}
+					if (block) {
+						for (const c of EXC_CATS) {
+							const list = block[c] && Array.isArray(block[c].exceptions) ? block[c].exceptions : [];
+							for (const r of list) if (r && r.id) excActs[t][r.id] = r.action;
+						}
 					}
 				}
 				setCats(cs);
@@ -3160,23 +3426,85 @@ window.__ModuleLoader__.load({
 				// focusNow 在此快照：updater 由 React 在渲染阶段执行，届时 reasonFocus.current 可能已变。
 				// 注意它必须在**下面所有**用到草稿保护的 setState 之前声明（子设置那块也不例外）。
 				const focusNow = reasonFocus.current;
-				// 子设置「破坏性命令」：动作与 reason 都从 status.commandSub 取。
-				// global/project 是该层的**显式配置**（null = 用户没设过），缺席时用宿主下发的
-				// **该层推导默认值**（globalDefault/projectDefault）回填 —— 不能在客户端写死
-				// `|| 'ask'`：global command=deny 的用户会看到面板显示「询问」、甚至弹出
-				// 「破坏性命令会按询问处理」的提示，而实际裁决是拒绝（面板说谎）。
-				// 与 cats 同口径：不能拿 effective 回填，否则「未配置」会被显示成「已设为默认值」，
-				// 用户就分不清自己到底设过没有。
-				const subNext = {
-					global: (s.commandSub && s.commandSub.global && s.commandSub.global.action)
-						|| (s.commandSub && s.commandSub.globalDefault) || 'ask',
-					project: (s.commandSub && s.commandSub.project && s.commandSub.project.action)
-						|| (s.commandSub && s.commandSub.projectDefault) || 'inherit',
+				// 子设置「破坏性命令」：**逐档**回填八档的动作与 reason。
+				//
+				// ── 未配置的档取**宿主下发的生效值**，客户端不得重算推导 ─────────────────
+				// 显示值 = 本层**显式配置**（有则用它 —— 用户要看得见自己设过什么）→ 否则
+				// 宿主下发的生效值：宿主已把推导算完，其注释明确说「面板直接显示」。
+				// **取哪一份生效值按 tab 分派**（项目 → effective、全局 → globalEffectiveProbe），
+				// 理由见下方 effOf 处 —— 一句话：effective 是按**当前项目**算的。
+				//
+				// 客户端**不能**再按 globalDefault/projectDefault 算一遍 —— 那是**另一套规则**。
+				// 宿主七档缺省的基准是 inside 的**生效值**（`strictest(ask, inside)`，
+				// 见 index.js 的 destructiveTiers 两遍解析），而 *Default 是按**本层 mode** 算的。
+				// 存量 `destructive: {action:'deny'}` + command mode=allow 时：宿主 effective
+				// 八档全 deny，按 mode 算却得到 inside=deny、其余七档=ask（实测 **7/8 档分叉**）——
+				// 面板折叠摘要会说「拒绝 1 · 询问 7」、展开后七个下拉框也全是「询问」，
+				// 而实际裁决八档全拒（面板说谎，正是 statusView 那段注释警告的那一类）。
+				//
+				// 未配置的档显示的可能是**另一层**的值 —— 那正是「这一档现在归谁管」的答案，
+				// 归哪一层可由 `commandSub.effective.source[tier]` 读出（宿主已按档下发 source）。
+				// ⚠️ 但**显示值不能由 source 反推**：source 只说是哪一层，值本身仍要按 tab
+				// 取该层自己那份生效值 —— 否则就退回下面 effOf 处修掉的那个坑。
+				//
+				// 档位清单以**宿主下发**为准（`s.commandSub.tiers`），不在这里写死八个名字 ——
+				// 日后新增一档时客户端自动跟上，不会因为漏改这里而静默少渲染一个下拉框。
+				const SUB_TIERS = (s.commandSub && Array.isArray(s.commandSub.tiers) && s.commandSub.tiers.length)
+					? s.commandSub.tiers
+					: ['inside', 'outside', 'wide', 'unknown', 'proc', 'power', 'priv', 'reg'];
+				// 档位键：`inside` 由老键 `action` 承载（老键义不变），其余七档各有一个同名键。
+				// 两个来源的键形状不同（都由宿主决定，不在这里换算）：
+				//   · `effective` / `source` 按**档位名**给键（含 `inside`，见 destructiveTiers）
+				//   · 本层显式配置里，inside 的键是 `action`
+				const tierKeyOf = (t) => (t === 'inside' ? 'action' : t);
+				// 未配置档的取值来源**按 tab 分派** —— 与下方 doomloop 阈值行的 `defN`
+				// 是同一条纪律（那里写着「全局 tab 不能用 effective」）：
+				//   · 项目 tab → `effective`：它按**当前项目**算，项目层下面没有别的层，
+				//     这正是「本层未配置时实际会用的值」；
+				//   · 全局 tab → `globalEffectiveProbe`：全局层单独解析的生效值（宿主下发）。
+				//
+				// ── 全局 tab 为什么不能用 effective（修一条实打实的缺陷）──────────────────
+				// `effective` 是 `destructiveTiers(root)`，其 `explicitOf` **项目优先** ——
+				// 拿它回填全局 tab，就会把**项目层显式配置的值**显示成全局层的值。
+				// 实测（全局层从未配置、当前项目只设了 `wide:'deny'`）：全局 tab 的 wide
+				// 显示成「拒绝」，而全局层真实值是 ask/未表态。两条后果：
+				//   ① **面板说谎**：用户在项目 tab 设 wide=拒绝、切到全局 tab 看到 wide=拒绝，
+				//      会以为「全局已保护」；删掉项目配置或换个项目后保护**静默消失**。
+				//      折叠摘要 subCollapsedSummary（读 subDestructive[tab]）也按被污染的值
+				//      统计，于是全局 tab 会显示「拒绝 1 · 询问 7」。
+				//   ② **可写错层（更严重）**：该行既然显示 deny 就渲染出「编辑原因」按钮
+				//      （showReason = action === 'deny'），用户补一句理由时 `cur` 是空串，
+				//      commitSubReason 便以 target:'global' + action:'deny' 提交 ——
+				//      在全局层**凭空写入 wide=deny**、影响所有项目，而用户只是在一个
+				//      看起来「本来就是拒绝」的行上补了句理由。
+				//
+				// 探针值必须由宿主用**同一个** destructiveTiers 求（即 globalEffectiveProbe），
+				// **不能**回落 globalDefault：后者按本层 mode 推导，与裁决的两遍解析是两套规则，
+				// 存量 `{action:'deny'}` + mode=allow 时它给出 inside=deny、其余七档=ask，
+				// 而全局层单独生效值是**八档全 deny** —— 拿它回填等于把「面板说谎」换个形态
+				// 复制一遍（方向还相反：显示 ask、实际 deny）。见 index.js statusView 的注释。
+				const effOf = {
+					global: (s.commandSub && s.commandSub.globalEffectiveProbe) || null,
+					project: (s.commandSub && s.commandSub.effective) || null,
 				};
-				const subReasonNext = {
-					global: (s.commandSub && s.commandSub.global && s.commandSub.global.reason) || '',
-					project: (s.commandSub && s.commandSub.project && s.commandSub.project.reason) || '',
-				};
+				const subNext = { global: {}, project: {} };
+				const subReasonNext = { global: {}, project: {} };
+				for (const t of ['global', 'project']) {
+					const cs = (s.commandSub && s.commandSub[t]) || null;
+					// 老配置的 `reason` 字符串（语义 = 整个破坏性类别）由**宿主**在读取侧
+					// 归入 `reasons.inside`（explicitReasonsOf）—— 客户端不重做这件事：
+					// 归一逻辑只有一份，两处各写一遍必然漂移，而漂移的后果是面板显示的理由
+					// 与实际裁决带着的理由不一致。
+					const cReasons = (s.commandSub && s.commandSub[t === 'global' ? 'globalReasons' : 'projectReasons']) || null;
+					const eff = effOf[t];
+					for (const tier of SUB_TIERS) {
+						const k = tierKeyOf(tier);
+						// 末级只是**协议异常兜底**（宿主没下发本 tab 的来源、或该档缺席），
+						// 不是决策链的一环 —— 正常响应下 eff[tier] 恒有值。
+						subNext[t][tier] = (cs && cs[k]) || (eff && eff[tier]) || (t === 'project' ? 'inherit' : 'ask');
+						subReasonNext[t][tier] = (cReasons && cReasons[tier]) || '';
+					}
+				}
 				setSubDestructive(subNext);
 				// doomloop 阈值：只回填**本层显式配置**（null → 空串 = 未配置，界面显示 placeholder）。
 				// 不回填 effective/defaultThreshold —— 那会让「未配置」看起来像「已设为默认值」，
@@ -3197,8 +3525,14 @@ window.__ModuleLoader__.load({
 					return Object.assign({}, thNext, keep);
 				});
 				setSubReasons((prev) => {
-					if (focusNow && focusNow.kind === 'sub' && prev && subNext[focusNow.tab] === 'deny') {
-						return Object.assign({}, subReasonNext, { [focusNow.tab]: prev[focusNow.tab] });
+					// 聚焦中的那一格保留本地草稿（见 reasonFocus 注释），但仅限「该档此刻仍渲染出输入框」
+					// （即新数据里**该档**仍为 deny）。八档各自独立 —— 用整层的值判会让
+					// 「wide 是 deny、inside 是 ask」时 inside 的框也进入编辑态。
+					if (focusNow && focusNow.kind === 'sub' && prev && prev[focusNow.tab]
+						&& subNext[focusNow.tab] && subNext[focusNow.tab][focusNow.key] === 'deny') {
+						return Object.assign({}, subReasonNext, {
+							[focusNow.tab]: Object.assign({}, subReasonNext[focusNow.tab], { [focusNow.key]: prev[focusNow.tab][focusNow.key] }),
+						});
 					}
 					return subReasonNext;
 				});
@@ -3272,7 +3606,15 @@ window.__ModuleLoader__.load({
 					const t = fk.slice(i + 1, j);
 					const key = fk.slice(j + 1);
 					if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');
-					if (kind === 'sub') return subNext[t] === 'deny';
+					if (kind === 'sub') return !!(subNext[t] && subNext[t][key] === 'deny');
+					// 例外行：该条仍在（未被别处删掉）**且动作仍是 deny/ask** 时，原因/备注格
+					// 才继续可编辑。用 excActs 同时回答两件事：该条在不在、它的动作是什么。
+					//
+					// 为什么必须判动作（与另外三支同构）：原因格只在 deny 时渲染、备注格只在 ask 时，
+					// 而动作下拉框是**即时生效**的（setExAction），它的调用点不在 exitEditOf 的
+					// 覆盖范围内。只判存在性时，「把某条例外改成 allow 再改回 deny」会让编辑态
+					// 一直挂着 —— 格子回来时用户没点「编辑」却已处于输入态（autoFocus 抢焦点）。
+					if (kind === 'exc') return !!(excActs[t] && (excActs[t][key] === 'deny' || excActs[t][key] === 'ask'));
 					if (kind === 'quick') {
 						const sub = t === 'global' ? 'g' : 'p';
 						return !!(qs[key] && qs[key][sub] === 'deny');
@@ -3281,6 +3623,15 @@ window.__ModuleLoader__.load({
 				};
 				setReasonEditing((cur) => (stillEditable(cur) ? cur : null));
 				if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;
+				// 例外行的编辑态同样要收敛：它按 **id** 定位，而 id 在新 status 里可能已经不存在
+				// （别处删掉了、或 reload 换了配置）。不收敛的话编辑态会挂在空气上 ——
+				// 列表里没有任何一行处于编辑态，而 exEdit 仍非 null，用户点「编辑」另一条时
+				// 会先被这个陈旧值干扰。
+				//
+				// **草稿内容不在这里被覆盖**：编辑中的那一格保留用户已输入的值，
+				// 否则每次 SSE status 推送（宿主在 persist 成功、session/event 时都会广播）
+				// 都会把用户正在打的字冲掉 —— 那是 loopThDirty 那段注释记录的同一类坑。
+				setExEdit((cur) => (cur === null ? null : (excActs[tab] && excActs[tab][cur] ? cur : null)));
 			};
 
 			const refresh = () => {
@@ -3308,7 +3659,7 @@ window.__ModuleLoader__.load({
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
 				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
 				'permgate:set-doomloop',
-				'permgate:add-exception', 'permgate:remove-exception',
+				'permgate:add-exception', 'permgate:set-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 				'permgate:reorder',
 			];
@@ -3349,8 +3700,33 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				if (kind === 'sub') {
-					const cur = (status && status.commandSub && status.commandSub[tab] && status.commandSub[tab].reason) || '';
-					setSubReasons((prev) => Object.assign({}, prev, { [tab]: cur }));
+					// 逐档取值，**只读宿主下发的 globalReasons/projectReasons** ——
+					// 存量裸 `reason` 的归位（→ inside 档）由宿主 explicitReasonsOf 统一做，
+					// 客户端不重做：归一逻辑只有一份，两处各写一遍必然漂移。
+					const cr = (status && status.commandSub && status.commandSub[tab === 'global' ? 'globalReasons' : 'projectReasons']) || null;
+					const cur = (cr && cr[key]) || '';
+					setSubReasons((prev) => Object.assign({}, prev, { [tab]: Object.assign({}, prev[tab], { [key]: cur }) }));
+					return;
+				}
+				if (kind === 'exc') {
+					// 例外行的原因/备注。key 是例外 id；**取哪个字段由该条的动作决定**
+					// （deny → reason、ask → note）—— 与渲染处同规则，故不需要额外的字段参数：
+					// 同一时刻只有一个是可见的，那个就是正在编辑的那个。
+					//
+					// 按 id 在**本层全部分类**里找（例外 id 在一层内唯一，但不带分类信息）：
+					// 遍历分类比让调用方多传一个 category 更省事，也不会因为漏传而静默取空。
+					const blk = (status && status.categories && status.categories[tab]) || null;
+					let row = null;
+					if (blk) {
+						for (const k of Object.keys(blk)) {
+							const arr = blk[k] && Array.isArray(blk[k].exceptions) ? blk[k].exceptions : null;
+							if (!arr) continue;
+							const hit = arr.filter((x) => x.id === key)[0];
+							if (hit) { row = hit; break; }
+						}
+					}
+					const field = row && row.action === 'ask' ? 'note' : 'reason';
+					setExReason((prev) => Object.assign({}, prev, { [key]: (row && row[field]) || '' }));
 					return;
 				}
 				if (kind === 'quick') {
@@ -3381,10 +3757,18 @@ window.__ModuleLoader__.load({
 
 			// 该层子设置的**显式配置**动作（用户没设过则 undefined）。
 			// 与面板显示值（subDestructive，含推导默认值）区分：提示判据只能用显式值 ——
-			// 推导值永不比 mode 更松（destructiveDefaultOf 保证），拿它比较只会产生假警告。
-			const explicitSubOf = (t) => {
+			// 推导值永不比 mode 更松（destructiveTierDefaults 保证），拿它比较只会产生假警告。
+			//
+			// `tier` 省略时取 `inside`（老键 `action`）。**现在有真实的按档调用点**
+			// （warnSubMismatchTiers 逐档调用它）：八档之后「子设置的动作」不再是一个值 ——
+			// 只判 inside 会把另外七档的松紧漏判，而某一档被显式设得更松时，
+			// 命中该档的破坏性命令确实会被放行（正是这条提示存在的理由）。
+			// 键名映射与 applyStatus 的 tierKeyOf 同口径：inside 走老键 `action`，其余同名。
+			const explicitSubOf = (t, tier) => {
 				const e = status && status.commandSub && status.commandSub[t];
-				return (e && e.action) || undefined;
+				if (!e) return undefined;
+				const k = (tier || 'inside') === 'inside' ? 'action' : tier;
+				return e[k] || undefined;
 			};
 
 			// 分类默认值的动作切换：只改 mode。拒绝原因由下方 commitCatReason 走单数端点
@@ -3406,12 +3790,11 @@ window.__ModuleLoader__.load({
 				if (mode !== 'deny') exitEditOf('cat', c);
 				invoke('permgate:set-categories', { [tab]: { [c]: mode } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 				// 大分类刚变（mode 是新值）；子设置取**该层的显式配置**（未配置则传 undefined）。
-				// 不能传 subDestructive[tab] —— 它现在可能是宿主下发的**推导默认值**
-				// （见 applyStatus 的 globalDefault/projectDefault 回填），而推导值永不比 mode 更松
-				// （destructiveDefaultOf 保证），拿它去比较会产生**假警告**：
+				// 不能传 subDestructive[tab] —— 它是面板**显示值**（未配置的档取的是宿主下发的
+				// 生效值，见 applyStatus），而拿显示值去比较会产生**假警告**：
 				// 实测 global command 由 ask 改为 deny、用户从未设过子设置时，会弹出
 				// 「破坏性命令会按『询问』处理」—— 而读取侧按新 mode 推导出的实际动作是 deny。
-				if (c === 'command') warnSubMismatch(mode, explicitSubOf(tab));
+				if (c === 'command') warnSubMismatchTiers(mode);
 			};
 
 			// 大分类 mode 与子设置动作不协调时的提示（只提示，不改写 —— 理由见 changeCat）。
@@ -3426,38 +3809,81 @@ window.__ModuleLoader__.load({
 			// 那是 React state，setSubDestructive 之后同一函数体内读到的仍是**本次渲染的旧值**，
 			// 于是判据拿旧值比较 —— 实测（cat=ask）子设置由 deny 改 allow（该提示的放松方向）
 			// 反而不提示，由 allow 改 deny（不该提示）反而误报且文案与实际动作矛盾。
-			// changeCat 一侧传的就是新值（mode），两侧口径现在一致。
+			// changeSubDestructive 一侧传的就是新值（action），两侧口径现在一致。
 			const MODE_RANK = { allow: 0, ask: 1, deny: 2 };
-			const warnSubMismatch = (catMode, sub) => {
+			// `tierLabel` 是**已本地化**的档位名（由调用方给出）：文案必须点名是哪一档 ——
+			// 八档之后「子设置是「允许」」会被读成整个子设置都放行，而实际可能只有 `wide` 一档。
+			// 点名之后文案与判据同粒度（判的是哪一档，说的就是哪一档）。
+			const warnSubMismatch = (catMode, sub, tierLabel) => {
 				// inherit 表示「穿透到全局」，本层没有独立表态，无从比较 —— 不提示。
 				if (!sub || sub === 'inherit') return;
 				const rank = MODE_RANK[catMode];
 				if (rank === undefined || MODE_RANK[sub] === undefined) return;
 				if (MODE_RANK[sub] >= rank) return;
-				setNotice(T('panel.subMismatch').replace('{cat}', modeLabel(catMode)).replace('{sub}', modeLabel(sub)));
+				setNotice(T('panel.subMismatch')
+					.replace('{cat}', modeLabel(catMode))
+					.replace('{sub}', modeLabel(sub))
+					.replace('{tier}', tierLabel || ''));
+			};
+			// 档位名（本地化）：与 subTierRow 同一口径 —— 宿主新增档位而 SUB_TIER_META 里
+			// 没有对应文案时回落成档位名本身（不显示裸键名、也不显示 undefined）。
+			const subTierLabelOf = (tier) => {
+				const m = subTierList().filter((x) => x.t === tier)[0];
+				return m && m.label ? T(m.label) : tier;
+			};
+			// 改**大分类**时的判据：八档**逐档**各判一次（§7.4），不是只判 inside。
+			//
+			// 为什么不能只判 inside：八档之后「子设置的动作」不再是一个值 —— inside 只是八分之一，
+			// 而判定链上每一档都独立生效。用户显式把 `wide` 设成 allow 再改大分类为 deny 时，
+			// 只判 inside 会**一声不吭**，而命中 wide 档的破坏性命令确实被放行 ——
+			// 那正是这条提示存在的理由（§7.4：「折叠状态下也要提示：不协调是配置错误，
+			// 不该因为控件被收起就不告诉用户」）。
+			//
+			// 逐档比的是**该档的显式配置**（explicitSubOf(tab, tier)，未配置即 undefined 不提示）——
+			// 不能用面板显示值，那含宿主下发的推导默认值，会产生假警告（见 changeCat 的说明）。
+			// 多档同时不协调时提示文案相同，后判的那一档覆盖前者，结果一致。
+			const warnSubMismatchTiers = (catMode) => {
+				for (const m of subTierList()) warnSubMismatch(catMode, explicitSubOf(tab, m.t), subTierLabelOf(m.t));
 			};
 
-			// 子设置动作切换：只改 action（reason 由 reasonInput 那套编辑态单独提交）。
+			// 子设置动作切换：只改**该档**的 action（reason 由 reasonInput 那套编辑态单独提交）。
 			// inherit 是项目层专属的「穿透全局」语义，宿主对 global+inherit 会拒绝 —— 故
 			// 下拉选项按 tab 取 ALL_MODES / MODES，与分类默认值的选择器同口径。
-			const changeSubDestructive = (e) => {
+			//
+			// `tier` 由渲染处传入（八档各自一个下拉框）；`inside` 走老键 `action`（老键义不变）。
+			const changeSubDestructive = (tier) => (e) => {
 				const action = e.target.value;
-				setSubDestructive(Object.assign({}, subDestructive, { [tab]: action }));
-				// 与 changeCat 同：切离 deny 时作废该格的编辑态（控件会被卸载）
-				if (action !== 'deny') exitEditOf('sub', 'command');
-				invoke('permgate:set-command-sub', { target: tab, action }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+				setSubDestructive(Object.assign({}, subDestructive, {
+					[tab]: Object.assign({}, subDestructive[tab], { [tier]: action }),
+				}));
+				// 与 changeCat 同：切离 deny 时作废**该档**的编辑态（控件会被卸载）
+				if (action !== 'deny') exitEditOf('sub', tier);
+				invoke('permgate:set-command-sub', { target: tab, tier: tier, action }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 				// 反向也要提示：用户刚把子设置放松到大分类之下（同一个不协调，两个方向都会出现）。
 				// 传 action（本次新值），不读 state —— 见 warnSubMismatch 的说明。
-				warnSubMismatch(cats[tab] ? cats[tab].command : undefined, action);
+				// 档位名一并传：文案要点名是哪一档（八档之后「子设置是「允许」」会被误读成整层）。
+				warnSubMismatch(cats[tab] ? cats[tab].command : undefined, action, subTierLabelOf(tier));
 			};
 
 			// 子设置拒绝原因的保存单点。空串必须原样下发（宿主把空串定义为显式清除、
 			// undefined 定义为保留原值），与 commitCatReason 完全同口径。
+			//
+			// ── `tier` 必加（§7.2d，修一个既有缺陷）──────────────────────────────────
+			// 这里曾经硬编码 `action: 'deny'` 且**不带 tier**：
+			//     invoke('permgate:set-command-sub', { target: tab, action: 'deny', reason: v })
+			// 现在只有一档，所以看不出问题（能写 reason 就意味着当前是 deny）。
+			// 八档之后这个请求必须带 `tier`，否则它会写到**缺省档**（`inside`）——
+			// 即「用户改 `wide` 的理由，把 `inside` 的动作改成了 deny」。
+			//
+			// `action: 'deny'` **保留**：reason 只在 deny 的档上存在（存储侧口径），
+			// 所以提交 reason 时该档必然是 deny，带上它不会改错动作。
 			const commitSubReason = (focus) => {
-				const v = subReasons[tab];
-				const cur = (status && status.commandSub && status.commandSub[tab] && status.commandSub[tab].reason) || '';
+				const tier = (focus && focus.key) || 'inside';
+				const v = (subReasons[tab] || {})[tier];
+				const cr = (status && status.commandSub && status.commandSub[tab === 'global' ? 'globalReasons' : 'projectReasons']) || null;
+				const cur = (cr && cr[tier]) || '';
 				if ((v || '') === cur) return;
-				invoke('permgate:set-command-sub', { target: tab, action: 'deny', reason: v }, () => markReasonSaved(focus));
+				invoke('permgate:set-command-sub', { target: tab, tier: tier, action: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 
 			// 拒绝原因保存单点：只在当前动作是 deny 时才写（其它动作下控件根本不显示）。
@@ -3568,6 +3994,112 @@ window.__ModuleLoader__.load({
 				}).catch((e) => setMsg(String((e && e.message) || e))).then(() => setBusy(false));
 			};
 
+			// 进入某条例外的编辑态：把当前服务端值灌进草稿。
+			// 只允许同时编辑一条（见 exEdit 的说明）；已在编辑另一条时**先丢弃那条的草稿**
+			// —— 不提交、不弹确认（与 reasonInput 的 beginEdit 同语义：切格即还原，
+			// 「保存」是唯一的提交动作，没点过就不算数）。
+			//
+			// 编辑态**只管模式**（match / path）。原因与备注不在这里 ——
+			// 它们走 reasonInput（与分类默认值/档位/快捷工具/兜底同一个组件），
+			// 见 commitExReason 的说明。
+			const beginExEdit = (r) => {
+				setExDraft({ value: r.path || r.match || '' });
+				setExEdit(r.id);
+			};
+			const cancelExEdit = () => { setExEdit(null); };
+			// 例外**模式**的提交点（编辑态专用）。
+			//
+			// 与 removeException 同：用返回 promise 的 call 而不是 invoke，且必须自己判
+			// saveError —— 写盘失败时若当成成功，界面会显示新值而磁盘仍是旧值，
+			// 下次 reload 改动「消失」（那正是删除路径踩过的坑）。
+			const saveExEdit = (c, row) => {
+				const v = String(exDraft.value || '').trim();
+				// 空模式本地先拦：宿主也会拒，但那时错误信息要绕一圈才回到界面上，
+				// 而「匹配内容不能为空」是用户此刻就能自己修的问题。
+				if (!v) { setMsg(T('panel.excEmpty')); return; }
+				setBusy(true);
+				setMsg('');
+				call('permgate:set-exception', { target: tab, category: c, id: row.id, value: v }).then((r) => {
+					if (r && r.error) { setMsg(String(r.error)); return; }
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr) { setMsg(String(saveErr)); applyStatus(st); return; }
+					applyStatus(r && r.status ? r.status : r);
+					// **退出编辑态必须在确认写盘成功之后**：放在最前面时，写盘失败也照样
+					// 退出编辑态，用户输入的内容直接消失、只看到一句报错，得从头再打一遍。
+					// 这是本函数最容易写错的一处（regressions 里那条「写盘端点逐字自查」
+					// 就是专门守它的 —— 它要求 applyStatus 与 saveError 拦截的顺序不能颠倒）。
+					setExEdit(null);
+					setMsg(T('panel.saved'));
+				}).catch((e) => setMsg(String((e && e.message) || e))).then(() => setBusy(false));
+			};
+
+			// 例外**原因 / 备注**的提交点（reasonInput 的回调）。
+			//
+			// 走的是与分类默认值 / 档位 / 快捷工具 / 兜底**同一个** reasonInput 组件，
+			// 于是外观与交互（只读文字 + 编辑 / 保存 / 取消）与那四处逐字一致 ——
+			// 这是「风格统一」的结构性保证：不是照着别处手抄一份样式，而是同一个组件。
+			//
+			// ── 字段名由**调用方传入**，不在这里从 status 反查 ──────────────────────
+			// 渲染处已经知道 `act`（它正是决定渲染哪个槽位的东西），把它一并传进来最可靠。
+			// 曾经在这里扫 status 反查该条的动作：那要依赖「status 已刷新到最新动作」，
+			// 而改动作与改原因是两个独立请求 —— 前者刚提交、status 还没回来的窗口里，
+			// 反查会拿到**旧动作**，把备注写进 reason（实测复现：动作改成 ask 后，
+			// 备注仍被写进 reason 字段）。
+			//
+			// **只传改动的那一个字段**：宿主 `undefined` = 保留原值、空串 = 显式清除，
+			// 两个一起传会在另一个恰好为空时把它误清。
+			// 空串必须原样下发（不折叠成 undefined）：否则用户再也删不掉写错的原因。
+			const commitExReason = (focus) => {
+				const id = focus && focus.key;
+				if (!id) return;
+				const field = focus.field === 'note' ? 'note' : 'reason';
+				// 草稿**可能还没被播种**：`exReason` 只由 revertReason / onChange 写入，
+				// 而「面板首次打开 → 直接点编辑 → 保存」这条路径两者都没跑过。
+				// 此时缺省值必须是 `focus.cur`（渲染处 :4737 用的就是这个兜底），
+				// 不能用 `''` —— 那会把「没改过」当成「用户清空了」提交上去，
+				// 而宿主 normalizeException 对空串是 `if (t)` 不赋值，于是
+				// setExceptionEntry 就地替换后该例外的 reason 键被整条删除：
+				// 界面保存前一直显示服务端原文，用户看不出会丢（静默删除既有拒绝理由）。
+				// 判据用 `!== undefined` 而非 `||`：onChange 写入的 `''` 是**真实的清空意图**，
+				// 必须原样保留（见上方「空串必须原样下发」）。
+				const v = exReason[id] !== undefined ? exReason[id] : (focus.cur || '');
+				// 未改动就不发请求（reasonInput 的「保存」按钮在值没变时也会被点到）
+				if (v === (focus.cur || '')) return;
+				const payload = { target: tab, category: focus.category, id: id };
+				payload[field] = v;
+				setBusy(true);
+				setMsg('');
+				call('permgate:set-exception', payload).then((r) => {
+					if (r && r.error) { setMsg(String(r.error)); return; }
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr) { setMsg(String(saveErr)); applyStatus(st); return; }
+					applyStatus(r && r.status ? r.status : r);
+					markReasonSaved(focus);
+				}).catch((e) => setMsg(String((e && e.message) || e))).then(() => setBusy(false));
+			};
+
+			// 例外的**动作**单独改（下拉框即时生效，不走编辑态）——与档位行的动作下拉框同构。
+			// reason/note 不在这里提交：它们的可见性由动作决定（deny 才显示 reason、
+			// ask 才显示 note），此时那两格可能根本没渲染出来，读草稿会提交一份
+			// 用户没看过的文本。宿主侧 normalizeException 会按新动作丢弃不属于它的字段，
+			// 故这里只传 action 是安全的。
+			const setExAction = (c, row) => (e) => {
+				const action = e.target.value;
+				setBusy(true);
+				setMsg('');
+				call('permgate:set-exception', { target: tab, category: c, id: row.id, action: action }).then((r) => {
+					if (r && r.error) { setMsg(String(r.error)); return; }
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr) { setMsg(String(saveErr)); applyStatus(st); return; }
+					applyStatus(r && r.status ? r.status : r);
+					setMsg(T('panel.saved'));
+				}).catch((err) => setMsg(String((err && err.message) || err))).then(() => setBusy(false));
+			};
+
+
 			const setFormKey = (key) => (e) => setForm(Object.assign({}, form, { [key]: e.target.value }));
 			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });
 			const removeRule = (id) => invoke('permgate:remove-rule', { target: tab, id });
@@ -3590,7 +4122,18 @@ window.__ModuleLoader__.load({
 			const reload = () => invoke('permgate:reload', {});
 			const openConfig = () => invoke('permgate:open-config', {}, () => setMsg(T('panel.openConfigDone')));
 
-			const badge = (action) => React.createElement('span', { style: { color: MODE_COLORS[action] || '#888', fontWeight: 600, marginRight: 6 } }, modeLabel(action));
+			// 动作徽标（规则 / 最近决策**两处**共用）。
+			//
+			// **fontSize 必须显式给**：这里曾经只设 color 与 fontWeight，于是它继承了
+			// 浏览器默认的 16px，而同一行里所有兄弟节点都显式写着 12px ——
+			// 表现为「一行 12px 小字里孤零零一个特别大的『拒绝』」。
+			// 面板根节点没有设 fontSize（只有 fontFamily），所以没有可继承的小字号，
+			// 漏写就等于要 16px。两处调用点都受影响，不是某一处的局部问题。
+			//
+			// 例外行**不再是**调用点之一：它已改用状态点 `pg-exc-dot`（:4748 / :4782），
+			// 与档位行统一（§7.5.1「同一概念不该有两种编码」），动作文字由下拉框显示。
+			// 于是调用点从三处降为两处 —— 上面那句「都受影响」只覆盖这两处。
+			const badge = (action) => React.createElement('span', { style: { color: MODE_COLORS[action] || '#888', fontWeight: 600, marginRight: 6, fontSize: 12, whiteSpace: 'nowrap' } }, modeLabel(action));
 
 			const sel = (v, onChange, options, disabled) => React.createElement('select', { value: v, onChange, className: 'pg-field', style: { padding: '2px 6px' }, disabled: !!disabled },
 				options.map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
@@ -3759,10 +4302,20 @@ window.__ModuleLoader__.load({
 			// 设 style 的话，正常态的规则行与例外行会**丢掉整个 rowStyle** —— 行退化成没有
 			// flex 布局、没有内边距、没有分隔线的裸块，多个条目的文字会挤成一团。
 			// 这个 bug 不报错、不影响任何行为断言（只有渲染出来才看得见），故在注释里点明。
-			const sortRowProps = (ui) => {
-				if (!ui) return {};
+			// `extraClass` 会**追加**到 'pg-row-drag' 后面，而不是被它覆盖。
+			//
+			// 为什么需要这个参数：调用方常写成 `Object.assign({ className: 'x' }, sortRowProps(ui))`，
+			// 但 Object.assign 是**后者覆盖前者** —— sortRowProps 里那句
+			// `st.className = 'pg-row-drag'` 会把调用方给的类名整个抹掉，
+			// 于是 .pg-exc 那套网格布局根本没生效（实测：例外行渲染出的是
+			// pg-exc-dot/pg-exc-edit 这些子元素，但父节点没有 .pg-exc，
+			// 表现为「行还是老样子、只有内容换了」）。
+			// 调用方也可以把 className 写在 Object.assign 之后，但那要求每个调用点都记住
+			// 这个顺序陷阱；由本函数合并类名更稳。
+			const sortRowProps = (ui, extraClass) => {
+				if (!ui) return extraClass ? { className: extraClass } : {};
 				const st = Object.assign({}, ui.dragProps);
-				st.className = 'pg-row-drag';
+				st.className = extraClass ? 'pg-row-drag ' + extraClass : 'pg-row-drag';
 				st.style = rowStyle;
 				if (ui.dragging) st.style = Object.assign({}, rowStyle, { opacity: 0.45 });
 				else if (ui.over) {
@@ -3813,30 +4366,186 @@ window.__ModuleLoader__.load({
 			// 由本行在分类内的位置间接表达（排在例外之后 = 判定链上晚于例外）。
 			// 代价是「生效值到底取自全局还是本项目」在项目 tab 上不再直说 —— 那一点改由
 			// 下拉框自身的取值表达（显示 inherit = 本层未表态、穿透全局）。
-			const commandSubRow = () => {
-			 return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
-				React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
-					React.createElement('span', { style: { fontSize: 12, fontWeight: 600 } },
-						T('panel.subDestructive'),
-						React.createElement('span', { style: { fontWeight: 400, color: 'rgba(128,128,128,0.85)' } }, T('panel.subDestructiveHint')),
-					),
+			// 八档的**默认折叠**（§7.4）：用户明确偏好简洁，而八行下拉框会把面板撑长。
+			// 折叠态的信息由展开链接文字里的**动作计数摘要**承载（`拒绝 2 · 询问 5`，
+			// 见 subCollapsedSummary 与 PG_TIER_CSS 的说明）；展开才出现下拉框与逐档状态点。
+			// 折叠时八档全收起 —— 不留 inside 特例（理由见 commandSubRow 处）。
+			//
+			// 分两组展示（按目标范围 / 按命令类别）是因为**判据不同** —— 用户需要知道
+			// 「这一档是按目标范围判的，还是按命令名判的」。这决定了它什么时候会生效。
+			//
+			// `hint` 是**行内标签之外**的完整判据，渲染成 title 悬浮。分两套的理由：
+			// 行内标签要短（八行对齐、扫得快），而判据要完整（用户得知道「怎么算盘根」）。
+			// 只留短的会让人猜，只留长的会把行撑歪 —— 上一版正是后者。
+			const SUB_TIER_META = [
+				// 半径组：按目标范围判
+				{ t: 'inside', g: 'radius', label: 'panel.tierInside', hint: 'panel.tierInsideHint' },
+				{ t: 'outside', g: 'radius', label: 'panel.tierOutside', hint: 'panel.tierOutsideHint' },
+				{ t: 'wide', g: 'radius', label: 'panel.tierWide', hint: 'panel.tierWideHint' },
+				{ t: 'unknown', g: 'radius', label: 'panel.tierUnknown', hint: 'panel.tierUnknownHint' },
+				// 组档：按命令名判（半径判据对它们恒 null —— 伤害对象是进程/电源/注册表）
+				{ t: 'proc', g: 'group', label: 'panel.tierProc', hint: 'panel.tierProcHint' },
+				{ t: 'power', g: 'group', label: 'panel.tierPower', hint: 'panel.tierPowerHint' },
+				{ t: 'priv', g: 'group', label: 'panel.tierPriv', hint: 'panel.tierPrivHint' },
+				{ t: 'reg', g: 'group', label: 'panel.tierReg', hint: 'panel.tierRegHint' },
+			];
+			// 档位清单以宿主下发为准（`status.commandSub.tiers`），不写死八个名字：
+			// 日后新增一档时客户端自动跟上，不会因为漏改这里而静默少渲染一个下拉框。
+			// 宿主没下发时回落到 SUB_TIER_META 的顺序（协议异常兜底，不是决策链的一环）。
+			const subTierList = () => {
+				const fromHost = status && status.commandSub && Array.isArray(status.commandSub.tiers) ? status.commandSub.tiers : null;
+				if (!fromHost || !fromHost.length) return SUB_TIER_META;
+				// 宿主清单为准，但保留 SUB_TIER_META 里的分组与文案（它们只在客户端用）
+				const meta = {}
+				for (const m of SUB_TIER_META) meta[m.t] = m
+				return fromHost.map((t) => meta[t] || { t: t, g: 'group', label: null, hint: null })
+			};
+			// 该层某档当前的**动作**（含未配置时的推导默认值）。状态点与下拉框共用，
+			// 两处取值必须同源 —— 各算一次的话，点的颜色可能与下拉框里的字不一致。
+			const subActionOf = (tier) => (subDestructive[tab] || {})[tier] || (tab === 'project' ? 'inherit' : 'ask');
+			// 折叠摘要**由实际生效值生成**，不能写死「均为询问」（§7.4）。
+			//
+			// | 情形 | 摘要 |
+			// |---|---|
+			// | 八档全部相同 | `均为「拒绝」` / `均为「询问」` |
+			// | 有差异 | `拒绝 2 · 询问 5 · 穿透 1`（按动作分组计数） |
+			//
+			// **写死摘要等于让面板说谎** —— 与 statusView 那段注释记录的教训同构
+			// （曾经写死 `|| 'ask'`，导致 global command=deny 的用户看到面板显示「询问」
+			// 而实际裁决是拒绝）。
+			//
+			// 有差异时给**计数**而不是逐档罗列（`工作区外 询问 / 大范围 拒绝 / …`）：
+			// 罗列在八档各不相同时会超过一行（实测被截断），而折叠态要回答的只是
+			// 「有没有哪档被设成了意外的值」—— 计数就能回答（看到「拒绝 2」说明有两档在拒）。
+			// 具体是哪两档，展开看行左侧的状态点。
+			//
+			// ── 计数覆盖**全部八档**（含 inside）──────────────────────────────────
+			// 曾经排除 inside，理由是「它在折叠态本来就有一行可见可改，算进去会与那行
+			// 的下拉框重复表达同一件事」。**那个理由随折叠态改成「八档全收起」而失效了** ——
+			// 现在折叠态一行档位都看不见，摘要成了唯一的信息出口。
+			//
+			// 而且排除它会造成一个实打实的错位：摘要里的数字加起来是 7，
+			// 展开后却是 8 行 —— 用户会以为漏渲染了一档。摘要描述的就是「展开后你将看到
+			// 的那八行」，两边必须对得上。
+			const subCollapsedSummary = () => {
+				const tiers = subTierList()
+				const cur = subDestructive[tab] || {}
+				// 按出现顺序分组计数（顺序稳定 → 摘要不会因为对象键序变化而抖动）
+				const order = []
+				const count = {}
+				for (const m of tiers) {
+					const v = cur[m.t]
+					if (v === undefined) continue
+					if (count[v] === undefined) { count[v] = 0; order.push(v) }
+					count[v] += 1
+				}
+				if (order.length === 1) {
+					return T('panel.tierRestAll').replace('{v}', modeLabel(order[0]))
+				}
+				const parts = order.map((v) => T('panel.tierCount').replace('{v}', modeLabel(v)).replace('{n}', String(count[v])))
+				return T('panel.tierRestMixed').replace('{list}', parts.join(' · '))
+			};
+			// 单档一行：状态点 + 标签 + [理由框?] + 下拉框。八档共用，避免八份重复代码漂移。
+			//
+			// 布局走 `.pg-tier` 那个三列网格（不是 flex + space-between）：
+			// 网格保证八行的第三列右边缘落在同一条线上，于是八个下拉框**严格对齐**。
+			// 用 flex 时每行各自算宽度，标签长短不一会让下拉框左右参差（上一版的样子）。
+			//
+			// `dim`：按命令名判的四档（proc/power/priv/reg）标签降一档灰度 ——
+			// 它们的判据与上面四档不同（没有路径目标），分组标题之外再给一个弱提示。
+			const subTierRow = (m, dim) => {
+				const tier = m.t
+				const action = subActionOf(tier)
+				// 理由框的显示条件是**该档**为 deny（不是整层为 deny）。
+				// 实际不会同时出现 8 个框（只有 deny 的档才有），通常 1~3 个。
+				const showReason = action === 'deny'
+				const label = m.label ? T(m.label) : tier
+				// 悬浮给**完整判据**（行内标签是短的，判据是长的 —— 见 i18n 处的说明）。
+				const hint = m.hint ? T(m.hint) : label
+				return React.createElement('div', {
+					key: tier,
+					className: 'pg-tier',
+				},
+					// 状态点：颜色 = 该档当前动作。悬停给「档位名：动作」。
+					// 它是**展开态**识别「哪一档在拒」的主要手段（摘要只给计数）。
+					React.createElement('span', {
+						className: 'pg-tier-dot',
+						style: { background: MODE_COLORS[action] || '#888' },
+						title: T('panel.tierDotTitle').replace('{t}', label).replace('{v}', modeLabel(action)),
+					}),
+					React.createElement('span', {
+						className: 'pg-tier-label',
+						style: dim ? { color: 'rgba(128,128,128,0.95)' } : null,
+						title: hint,
+					}, label),
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-						// 子设置的拒绝原因：与分类默认值同口径，只在 deny 时显示
 						reasonInput(
-							subReasons[tab],
-							(e) => setSubReasons(Object.assign({}, subReasons, { [tab]: e.target.value })),
+							(subReasons[tab] || {})[tier],
+							(e) => setSubReasons(Object.assign({}, subReasons, {
+								[tab]: Object.assign({}, subReasons[tab], { [tier]: e.target.value }),
+							})),
 							commitSubReason,
-							subDestructive[tab] === 'deny',
-							{ kind: 'sub', tab: tab, key: 'command' },
-							() => revertReason('sub', 'command'),
+							showReason,
+							// key 就是**档位名** —— 八档各占一个编辑态，不会互相串（见 reasonKeyOf）
+							{ kind: 'sub', tab: tab, key: tier },
+							() => revertReason('sub', tier),
 						),
-						sel(subDestructive[tab] || (tab === 'project' ? 'inherit' : 'ask'), changeSubDestructive, tab === 'project' ? ALL_MODES : MODES, busy),
+						sel(action, changeSubDestructive(tier), tab === 'project' ? ALL_MODES : MODES, busy),
 					),
-				),
-				// 能力边界说明：独立一行、灰小字。不放进上面那个 span（与标题同行会被挤成
-				// 一长串，而它要传达的是「别高估这道闸」，值得单独一行让人读到）。
-				React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)' } }, T('panel.subDestructiveNote')),
-			 );
+				)
+			};
+			const commandSubRow = () => {
+				const tiers = subTierList()
+				const radius = tiers.filter((m) => m.g === 'radius')
+				const groups = tiers.filter((m) => m.g === 'group')
+				const summary = subCollapsedSummary();
+				return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
+					React.createElement('div', { className: 'pg-tier-head' },
+						React.createElement('span', { className: 'pg-tier-title' }, T('panel.subDestructive')),
+					),
+					// 说明行：**独立一行**。上一版它拼在标题后面，与摘要、按钮三方抢一行，
+					// 结果是标题的说明文字折行后与摘要串在一起（截图里那两行糊成一团）。
+					React.createElement('div', { className: 'pg-tier-hint' }, T('panel.subDestructiveHint')),
+					// 展开/折叠入口：**与上方例外列表同一套交互**（左对齐蓝字链接 + ▸/▾ 前缀）。
+					// 摘要放进链接文字里，与 `▸ 例外列表（18 条）` 同构 ——
+					// 展开后摘要自然消失（那时八行都看得见，摘要就是多余的，
+					// 例外列表同样在展开后不再显示条数）。
+					//
+					// 曾经是标题行最右端的一个按钮：隔着整行空白，用户的视线扫过标题、
+					// 说明、档位行之后根本注意不到（实测反馈「展开在右边也注意不到」）；
+					// 而且同一个面板里两套交互并存，用户得学两遍。
+					React.createElement('div', {
+						className: 'pg-tier-link',
+						onClick: () => { if (!busy) setSubExpanded(!subExpanded) },
+						title: subExpanded ? T('panel.tierCollapse') : T('panel.tierExpand'),
+					}, subExpanded
+						? '▾ ' + T('panel.tierCollapse')
+						: '> ' + T('panel.tierExpandAll').replace('{s}', summary)),
+					// **折叠时八档全收起**（不是只收起七档）。
+					//
+					// 曾经把「工作区内」单独留在外面，理由是「它是唯一跟随大分类的档、
+					// 也是最常调的」。实测反馈「为啥独留了一个工作区内的在那，很奇怪」——
+					// 那个理由站不住：八个档在判定链上是**平级**的，单留一个会让它看起来
+					// 像「主设置 + 七个附属」，而它其实只是八分之一；而且孤零零一行挂在
+					// 说明与脚注之间，更像漏渲染。
+					//
+					// 折叠态的信息由链接文字里的摘要承载（`▸ 展开（询问 3 · 拒绝 3）`），
+					// 要看具体哪一档就展开 —— 与例外列表的取舍完全一致。
+					subExpanded ? React.createElement('div', { className: 'pg-tier-box' },
+						radius.map((m) => subTierRow(m, false)),
+						// 分两组展示是因为**判据不同**：上四档按目标范围判，下四档按命令名判。
+						// 用户需要知道「这一档是按目标范围判的，还是按命令名判的」——
+						// 那决定了它什么时候会生效（`kill 1234` 没有路径目标，半径判据对它恒 null）。
+						//
+						// 只给下四档加分组标题、上四档不加：上四档是本列表的主体，
+						// 标题只会多占一行；分隔线画在**判据切换处**才有信息量。
+						React.createElement('div', { className: 'pg-tier-group' }, T('panel.tierGroupName')),
+						groups.map((m) => subTierRow(m, true)),
+					) : null,
+					// 能力边界说明：独立一行、灰小字。不放进上面那个 span（与标题同行会被挤成
+					// 一长串，而它要传达的是「别高估这道闸」，值得单独一行让人读到）。
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)', marginTop: 5 } }, T('panel.subDestructiveNote')),
+				);
 			};
 
 			// 循环检测（doomloop）阈值行 + 状态提示。
@@ -4071,80 +4780,176 @@ window.__ModuleLoader__.load({
 									// 例外同样是「首条命中即生效」（resolveCategory / matchSegmentException
 									// 都只取首个匹配），故顺序即优先级，给排序能力。
 									sort: sortOf('exception', c),
-									render: (r, ui) => React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui)),
-										badge(r.action),
-										React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, r.path || r.match || ''),
-										// reason 与 note 是两种东西：前者是拒绝时回给 AI 的理由，后者是给自己的备注
-										r.reason ? React.createElement('span', { style: { fontSize: 12, color: MODE_COLORS.deny, marginLeft: 6 } }, '「' + r.reason + '」') : null,
-										r.note ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', marginLeft: 6 } }, '(' + r.note + ')') : null,
-									// 「匹配任意单段」的判据：命令例外里这几乎等于「不再审查任何命令」。
-									// 不拦（那是用户的权利），但必须给出黄色提示，否则它看起来和普通例外没区别。
-									// 只对命令分类提示：路径侧的 `*` 在 glob 语义下范围受限（不跨分隔符），不属同一问题。
-									//
-									// 判据必须与**匹配器同构**，不能写 `=== '*'`：命令侧的 globMatch 里
-									// `*` 与 `?` 之外没有特殊含义，故 `**`、`***` 与裸 `*` 完全等价
-									// （都匹配任意段），字面量比较会让它们漏报。
-									// `**` 尤其容易被踩：本仓库路径侧注释与 placeholder 都把 `**` 当惯用写法
-									// （「`**` 会匹配整个子树」），用户照搬进命令例外极自然 —— 面板却不给警告。
-									//
-									// 同构判据：模式**只由 `*` 与空格组成**时匹配任意段。
-									//   · 纯 `*` 序列（`*` / `**` / `***`）→ 匹配任意段 ✓
-									//   · `* *` 也匹配任意段（实测：对含空格的段两个 `*` 各吞一半；
-									//     对无空格段由「尾随 ` *`」分支覆盖）→ 同样提示
-									//   · 含 `?` 的不算：`?` 要求恰好一个字符，`?*` / `??` 并不匹配任意段
-									//     （写成 `/^[*?]+$/` 会把它们误报，实测过）
-									//   · 含其他字符的不算（`a*` / `git *` 都限定了前缀）
-									c === 'command' && /^[*\s]+$/.test(String(r.match || '')) && String(r.match || '').indexOf('*') !== -1
-										? React.createElement('span', { style: { fontSize: 11, color: '#bf8700', marginLeft: 6, whiteSpace: 'nowrap' }, title: T('panel.excTooBroadHint') }, '⚠ ' + T('panel.excTooBroad'))
-										: null,
-									// 爆炸半径标注（宿主下发 exceptionBlast，只对 **allow** 例外且目标落在
-									// 盘根/系统目录/家目录/工作区外时才有）。
-									//
-									// 与上面那条「匹配范围过宽」是**两个不同的失效模式**，必须分开显示：
-									//   · 过宽  —— 一条例外覆盖了太多**命令**（`*` 匹配任意段）；
-									//   · 爆炸半径 —— 一条例外本身很具体，但它指向的目标删了就没（`rmdir /s /q B:\`）。
-									// 后者正是最难自己发现的形态：例外写得很精确，精确地指向了整个盘。
-									//
-									// 为什么列表里也要标：这是唯一能让人**事后**发现「我什么时候放行了删盘根」的地方
-									// （弹窗是一次性的，列表是长期可见的）。落盘值本身不存这个结论（读侧现算）。
-									(() => {
-										const b = exceptionBlastOf(tab, r.id);
-										const meta = b && BLAST_LEVELS[b.level];
-										if (!meta) return null;
-										return React.createElement('span', {
-											style: { fontSize: 11, color: meta.color, marginLeft: 6, whiteSpace: 'nowrap' },
-											title: T(meta.key).replace('{p}', b.path || ''),
-										}, meta.icon + ' ' + T('panel.excBlast'));
-									})(),
-									// 遮蔽标注（宿主下发 exceptionShadow）：这条例外被上方更早的一条反向例外
-									// 遮蔽，**当前不生效**。
-									//
-									// 与上面两条是**第三种**失效模式，必须分开显示：
-									//   · 过宽    —— 覆盖了太多命令；
-									//   · 爆炸半径 —— 本身很具体，但目标删了就没；
-									//   · 被遮蔽  —— 完全没生效（顺序问题，用户拖一下就能修）。
-									// 第三条最隐蔽：面板提示「已保存」、列表里也看得见那一行，用户会以为
-									// 决定已生效 —— 而实际裁决仍按上面那条走。
-									//
-									// 配色用**错误红**（不是警告橙）：前两条是「范围不理想」，这一条是
-									// 「你设的东西根本没起作用」，严重程度与它们不同级。
-									//
-									// 与上面 explosionBlast 同样用 IIFE：都要「先取值、无则返回 null」，
-									// 用三元表达式写会多一次取值或引入重复判空。
-									(() => {
-										const sh = exceptionShadowOf(tab, r.id);
-										if (!sh) return null;
-										return React.createElement('span', {
-											style: { fontSize: 11, color: MODE_COLORS.deny, marginLeft: 6, whiteSpace: 'nowrap', fontWeight: 600 },
-											title: T('panel.excShadowedHint').replace('{a}', sh.byAction || '').replace('{id}', sh.byId || ''),
-										}, '⛔ ' + T('panel.excShadowed'));
-									})(),
-									React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
-										moveButtons(ui),
-										React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
-										confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
-									),
-								),
+									render: (r, ui) => {
+										// 编辑态与只读态是**两套结构**，故在 render 内分叉，而不是在同一棵树上
+										// 靠条件切换子节点：两态的列数不同（只读是「点/内容/控件」，
+										// 编辑是「点/输入框/控件」），共用一棵树只会写出层层嵌套的三元。
+										const editing = exEdit === r.id;
+										const pat = r.path || r.match || '';
+										const act = r.action;
+										// 原因 / 备注：**与分类默认值、档位、快捷工具、兜底同一个组件**
+										// （reasonInput：只读文字 + 编辑 / 保存 / 取消）。
+										//
+										// 曾经这里是一个常驻的输入框。那样确实「点开就能打字」，但它与
+										// 其余四处的样式**不一致**（别处是文字 + 编辑按钮），而且输入框
+										// 会占掉固定宽度，把匹配模式挤到只剩几十像素 ——
+										// 实测反馈「风格不统一，且如果例外过长就看不到了」。
+										// 换成同一个组件后，样式由构造保证一致，宽度也回到文字量级。
+										//
+										// 按动作二选一：deny 显示「拒绝原因」、ask 显示「备注」、
+										// allow 都不显示（放行的调用不再弹窗，写了也读不到，宿主会丢弃）。
+										// 与下方「添加例外」那排输入框同规则。
+										//
+										// focus 里带 category / field / cur：
+										//   category —— 提交时要按分类定位；
+										//   field    —— 写进 reason 还是 note，由**渲染处的 act** 决定
+										//               （见 commitExReason：不在这里从 status 反查，
+										//                那会依赖「status 已刷新到最新动作」，
+										//                而改动作与改原因是两个独立请求）；
+										//   cur      —— 服务端当前值，「未改动不发请求」的比较基准。
+										const reasonSlot = (field) => reasonInput(
+											exReason[r.id] !== undefined ? exReason[r.id] : (r[field] || ''),
+											(e) => setExReason(Object.assign({}, exReason, { [r.id]: e.target.value })),
+											commitExReason,
+											true,
+											{ kind: 'exc', tab: tab, key: r.id, category: c, field: field, cur: r[field] || '' },
+											() => revertReason('exc', r.id),
+										);
+										// 编辑态：只改**模式**（原因/备注在上面那排，始终可见可改）。
+										if (editing) {
+											return React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui, 'pg-exc')),
+												React.createElement('span', {
+													className: 'pg-exc-dot',
+													style: { background: MODE_COLORS[act] || '#888' },
+													title: modeLabel(act),
+												}),
+												React.createElement('div', { className: 'pg-exc-edit' },
+													React.createElement('input', {
+														className: 'pg-field',
+														placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'),
+														title: T('panel.excEditPat'),
+														value: exDraft.value,
+														onChange: (e) => setExDraft(Object.assign({}, exDraft, { value: e.target.value })),
+														autoFocus: true,
+														disabled: busy,
+														// 回车 = 保存。与 reasonInput 同：排除输入法组合态，
+														// 否则中文用户按回车确认候选词会直接把拼音串写盘。
+														onKeyDown: (e) => {
+															if (e.nativeEvent && (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return;
+															if (e.key === 'Enter') { e.preventDefault(); saveExEdit(c, r); }
+															else if (e.key === 'Escape') { e.preventDefault(); cancelExEdit(); }
+														},
+													}),
+												),
+												React.createElement('div', { className: 'pg-exc-ctl' },
+													sel(act, setExAction(c, r), MODES, busy),
+													React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: () => saveExEdit(c, r) }, T('panel.reasonSave')),
+													React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: cancelExEdit }, T('panel.cancel')),
+												),
+											);
+										}
+										return React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui, 'pg-exc')),
+											// 状态点：与档位行同一个视觉元素，颜色 = 该例外的动作。
+											// 取代了原来的彩色文字徽标（「允许」/「拒绝」）—— 同一概念在相邻两处
+											// 用两种编码，是这次统一要消掉的东西。动作文字仍在下拉框里可见。
+											React.createElement('span', {
+												className: 'pg-exc-dot',
+												style: { background: MODE_COLORS[act] || '#888' },
+												title: modeLabel(act),
+											}),
+											React.createElement('div', { className: 'pg-exc-main' },
+												React.createElement('span', { className: 'pg-exc-pat', title: pat }, pat),
+											// 「匹配任意单段」的判据：命令例外里这几乎等于「不再审查任何命令」。
+											// 不拦（那是用户的权利），但必须给出黄色提示，否则它看起来和普通例外没区别。
+											// 只对命令分类提示：路径侧的 `*` 在 glob 语义下范围受限（不跨分隔符），不属同一问题。
+											//
+											// 判据必须与**匹配器同构**，不能写 `=== '*'`：命令侧的 globMatch 里
+											// `*` 与 `?` 之外没有特殊含义，故 `**`、`***` 与裸 `*` 完全等价
+											// （都匹配任意段），字面量比较会让它们漏报。
+											// `**` 尤其容易被踩：本仓库路径侧注释与 placeholder 都把 `**` 当惯用写法
+											// （「`**` 会匹配整个子树」），用户照搬进命令例外极自然 —— 面板却不给警告。
+											//
+											// 同构判据：模式**只由 `*` 与空格组成**时匹配任意段。
+											//   · 纯 `*` 序列（`*` / `**` / `***`）→ 匹配任意段 ✓
+											//   · `* *` 也匹配任意段（实测：对含空格的段两个 `*` 各吞一半；
+											//     对无空格段由「尾随 ` *`」分支覆盖）→ 同样提示
+											//   · 含 `?` 的不算：`?` 要求恰好一个字符，`?*` / `??` 并不匹配任意段
+											//     （写成 `/^[*?]+$/` 会把它们误报，实测过）
+											//   · 含其他字符的不算（`a*` / `git *` 都限定了前缀）
+											c === 'command' && /^[*\s]+$/.test(String(r.match || '')) && String(r.match || '').indexOf('*') !== -1
+												? React.createElement('span', { style: { fontSize: 11, color: '#bf8700', whiteSpace: 'nowrap' }, title: T('panel.excTooBroadHint') }, '⚠ ' + T('panel.excTooBroad'))
+												: null,
+											// 爆炸半径标注（宿主下发 exceptionBlast，只对 **allow** 例外且目标落在
+											// 盘根/系统目录/家目录/工作区外时才有）。
+											//
+											// 与上面那条「匹配范围过宽」是**两个不同的失效模式**，必须分开显示：
+											//   · 过宽  —— 一条例外覆盖了太多**命令**（`*` 匹配任意段）；
+											//   · 爆炸半径 —— 一条例外本身很具体，但它指向的目标删了就没（`rmdir /s /q B:\`）。
+											// 后者正是最难自己发现的形态：例外写得很精确，精确地指向了整个盘。
+											//
+											// 为什么列表里也要标：这是唯一能让人**事后**发现「我什么时候放行了删盘根」的地方
+											// （弹窗是一次性的，列表是长期可见的）。落盘值本身不存这个结论（读侧现算）。
+											(() => {
+												const b = exceptionBlastOf(tab, r.id);
+												const meta = b && BLAST_LEVELS[b.level];
+												if (!meta) return null;
+												return React.createElement('span', {
+													style: { fontSize: 11, color: meta.color, whiteSpace: 'nowrap' },
+													title: T(meta.key).replace('{p}', b.path || ''),
+												}, meta.icon + ' ' + T('panel.excBlast'));
+											})(),
+											// 遮蔽标注（宿主下发 exceptionShadow）：这条例外被上方更早的一条反向例外
+											// 遮蔽，**当前不生效**。
+											//
+											// 与上面两条是**第三种**失效模式，必须分开显示：
+											//   · 过宽    —— 覆盖了太多命令；
+											//   · 爆炸半径 —— 本身很具体，但目标删了就没；
+											//   · 被遮蔽  —— 完全没生效（顺序问题，用户拖一下就能修）。
+											// 第三条最隐蔽：面板提示「已保存」、列表里也看得见那一行，用户会以为
+											// 决定已生效 —— 而实际裁决仍按上面那条走。
+											//
+											// 配色用**错误红**（不是警告橙）：前两条是「范围不理想」，这一条是
+											// 「你设的东西根本没起作用」，严重程度与它们不同级。
+											//
+											// 与上面 explosionBlast 同样用 IIFE：都要「先取值、无则返回 null」，
+											// 用三元表达式写会多一次取值或引入重复判空。
+											(() => {
+												const sh = exceptionShadowOf(tab, r.id);
+												if (!sh) return null;
+												return React.createElement('span', {
+													style: { fontSize: 11, color: MODE_COLORS.deny, whiteSpace: 'nowrap', fontWeight: 600 },
+													title: T('panel.excShadowedHint').replace('{a}', sh.byAction || '').replace('{id}', sh.byId || ''),
+												}, '⛔ ' + T('panel.excShadowed'));
+											})(),
+											),
+											React.createElement('div', { className: 'pg-exc-ctl' },
+												// 动作下拉框：**即时生效**（与档位行的动作下拉框同构）。
+												// 这是「例外可以修改」最常用的一半 —— 多数时候用户只是想
+												// 把某条从「允许」改成「询问」，不该逼他走完整的编辑态。
+												sel(act, setExAction(c, r), MODES, busy),
+												// 原因 / 备注排在**下拉之后**，与快捷工具行（quickRow）同序：
+												// 那里是 `[工具名+说明] [动作▾] [原因] [删除]`，这里就是
+												// `[模式] [动作▾] [原因] [↑↓] [改匹配] [删除]`。
+												//
+												// 曾经排在下拉**之前**（紧跟模式）：那样换行时会把下拉挤到下一行，
+												// 而原因留在上一行 —— 与快捷工具「名字和下拉同行、原因另起一行」
+												// 的观感完全不同（实测反馈「？」）。
+												// quickRow 里那条注释讲的是同一件事的反面：原因插在下拉前面会把
+												// 下拉整体右推，只有选「拒绝」的行会漂，看起来就是位置漂移。
+												act === 'deny' ? reasonSlot('reason') : null,
+												act === 'ask' ? reasonSlot('note') : null,
+												moveButtons(ui),
+												// 编辑：进入整行编辑态（模式 / 原因 / 备注）
+												// 按钮文案**必须与原因格的「编辑」区分开**：同一行里现在有两个可编辑的
+												// 东西（匹配模式、原因/备注），两个都叫「编辑」时用户不知道点哪个改哪个。
+												// 原因格那个沿用 reasonInput 的通用「编辑」（与其余四处一致），
+												// 这个改叫「改匹配」——它只改模式。
+												React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: () => beginExEdit(r) }, T('panel.excEditPatBtn')),
+												React.createElement('button', { className: 'pg-btn pg-btn-danger' + (confirm === 'exc:' + c + ':' + r.id ? ' pg-btn-confirm' : ''), disabled: busy, onClick: () => confirmDelete('exc:' + c + ':' + r.id, () => removeException(c, r.id)) }, confirm === 'exc:' + c + ':' + r.id ? T('panel.confirmDel') : T('panel.del')),
+												confirm === 'exc:' + c + ':' + r.id ? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel')) : null,
+											),
+										);
+									},
 								}),
 							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
@@ -4418,7 +5223,7 @@ window.__ModuleLoader__.load({
 				const tag = document.createElement('style');
 				tag.dataset.plugin = 'dsh-permgate';
 				tag.dataset.pluginCss = 'dsh-permgate';
-				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS + PG_SORT_CSS + PG_BLAST_CSS;
+				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS + PG_SORT_CSS + PG_BLAST_CSS + PG_TIER_CSS + PG_EXC_CSS;
 				document.head.appendChild(tag);
 				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
 			}
