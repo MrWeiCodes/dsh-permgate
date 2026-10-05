@@ -1675,6 +1675,17 @@ window.__ModuleLoader__.load({
 				// 「没弹窗」当成「这条命令被检查过且安全」，而实际可能是根本没识别出来。
 				// 措辞只陈述能力边界，不解释原理 —— 用户要的是「别把没拦住当成拦住了」。
 				'panel.subDestructiveNote': '注：基于命令文本识别，不能保证覆盖所有破坏性命令。',
+				// ── 「其余情况」= 命令分类的**最后一道闸门** ──────────────────────
+				// 它就是这个分类的「默认动作」，但**只在 command 上**叫这个名字、也只在这里
+				// 被画到块底部：命令分类有三层（例外 → 破坏性命令 → 其余情况），
+				// 把默认动作留在标题行会让界面自上而下的次序与判定链完全颠倒。
+				//
+				// 名字必须与「例外」「破坏性命令」并列读得通 —— 三者是同一个分类下
+				// 依次兜底的三层，不是「分类 + 两个附加项」。
+				// 不叫「默认动作」：那个词在这个位置会被读成「分类的总开关」，
+				// 而它恰恰是**最后**才生效的一个（例外与破坏性命令都比它优先）。
+				// 其余五个分类仍叫默认动作（留在标题行）—— 见 catBlock 处的说明。
+				'panel.subRest': '其余情况',
 				// ── 破坏性命令的八档（§7.4 默认折叠）──────────────────────────────
 				// 标签必须**说清它管什么**，而不是照抄内部标识符：用户要判断的是
 				// 「我这条命令会不会被它拦」，看不懂名字就只能一律设成允许（那等于关掉保护）。
@@ -1731,7 +1742,14 @@ window.__ModuleLoader__.load({
 				'panel.tierCount': '{v} {n}',
 				// 单档状态点的悬浮文案：「档位名：动作」
 				'panel.tierDotTitle': '{t}：{v}',
-				'panel.subMismatch': '注意：「命令」默认动作是「{cat}」，但「破坏性命令」子设置里「{tier}」这一档是「{sub}」—— 判定链上子设置优先，命中该档的破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让大分类生效，请把该档也改成「{cat}」或「跟随全局」。',
+				// 「其余情况」而不是「默认动作」：那个控件在 command 块里就叫这个名字
+				// （见 panel.subRest 与 commandRestRow）。提示里说「默认动作」而面板上
+				// 找不到同名标签，用户读完提示不知道该去改哪个下拉框。
+				// 末句的选项名必须与面板上的**实际标签逐字一致**（`mode.inherit` = 「继承全局」，
+				// 经 sel → modeLabel → T('mode.inherit') 渲染）。写「跟随全局」时用户按提示去改
+				// 档位会发现下拉里没有这一项 —— 与本次把「默认动作」改成「其余情况」同一个理由：
+				// 提示里点名的控件必须是面板上找得到的那个名字。
+				'panel.subMismatch': '注意：「命令」的「其余情况」是「{cat}」，但「破坏性命令」里「{tier}」这一档是「{sub}」—— 判定链上破坏性命令优先，命中该档的破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让「其余情况」生效，请把该档也改成「{cat}」或「继承全局」。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
 				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
 				// 那是实现细节，用户改不了也用不上），也不写 Markdown 语法 —— 这里是纯文本，
@@ -1974,6 +1992,8 @@ window.__ModuleLoader__.load({
 				'panel.subDestructive': 'Destructive commands',
 				'panel.subDestructiveHint': 'risky operations such as deleting files, formatting disks, shutting down or escalating privileges follow their own tier action (exceptions first)',
 				'panel.subDestructiveNote': 'Note: detection is text-based and cannot cover every destructive command.',
+				// "everything else" — the last gate of the command category (see the zh comment).
+				'panel.subRest': 'Everything else',
 				// ── the eight tiers of "Destructive commands" (collapsed by default) ──
 				'panel.tierInside': 'Inside workspace',
 				'panel.tierOutside': 'Outside workspace',
@@ -1999,7 +2019,11 @@ window.__ModuleLoader__.load({
 				'panel.tierRestMixed': '{list}',
 				'panel.tierCount': '{v} {n}',
 				'panel.tierDotTitle': '{t}: {v}',
-				'panel.subMismatch': 'Note: the "command" default action is "{cat}", but the "{tier}" tier of the "destructive commands" sub-setting is "{sub}". The sub-setting takes precedence in the verdict chain, so destructive commands matching that tier follow "{sub}" (not "{cat}"). To make the category action apply, set that tier to "{cat}" or "inherit".',
+				// "Everything else" rather than "default action": that is the label on the panel
+				// (see panel.subRest and commandRestRow); naming a control the user cannot find.
+				// "Inherit global" (the label of `mode.inherit`) rather than "inherit": the option
+				// the sentence tells the user to pick must read exactly like the one in the dropdown.
+				'panel.subMismatch': 'Note: for "command", "Everything else" is "{cat}", but the "{tier}" tier under "Destructive commands" is "{sub}". Destructive commands take precedence in the verdict chain, so ones matching that tier follow "{sub}" (not "{cat}"). To make "Everything else" apply, set that tier to "{cat}" or "Inherit global".',
 				// ── doom loop threshold ────────────────────────────────────────────
 				'panel.loopThreshold': 'Trigger threshold',
 				'panel.loopThresholdHint': ': how many identical calls in a row before it triggers. Leave empty to use the default.',
@@ -4515,6 +4539,16 @@ window.__ModuleLoader__.load({
 					),
 				)
 			};
+			// 某分类在本 tab 的**显示值**：本层未配置时，项目层回落 `inherit`（它下面还有
+			// 全局层可穿透），全局层回落 `ask`（它下面没有别的层，`inherit` 在宿主侧非法）。
+			//
+			// 单一实现：catBlock 的标题行与 commandRestRow（「其余情况」）都调它。曾经两处
+			// 各写一份逐字相同的表达式，那让「同一概念两个修改点」—— 日后只调一处（例如改
+			// 回落语义）就会让 command 的默认动作在界面两处显示成两个值，且不报错、无断言拦。
+			const catModeOf = (c) => {
+				const layer = cats[tab];
+				return (layer && layer[c]) || (tab === 'project' ? 'inherit' : 'ask');
+			};
 			const commandSubRow = () => {
 				const tiers = subTierList()
 				const radius = tiers.filter((m) => m.g === 'radius')
@@ -4568,6 +4602,55 @@ window.__ModuleLoader__.load({
 					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.85)', marginTop: 5 } }, T('panel.subDestructiveNote')),
 				);
 			};
+
+			// command 分类的第三层，也是**最后一道闸门**：「其余情况」。
+			//
+			// 它承载的就是这个分类的**默认动作** —— 走 set-categories、同一份状态
+			// `cats[tab].command`、同一个 changeCat / commitCatReason。只是被画到了块底部、
+			// 换了个名字。**不新增任何落盘形状，宿主侧一个字不改。**
+			//
+			// ── 为什么独立成函数而不是内联进 catBlock ────────────────────────────
+			// 与 commandSubRow 对称：两者都是「只在 command 上渲染的一行」、都排在例外块
+			// 之后。放在一起也让 regressions 那条位置断言有个稳定锚点可切。
+			//
+			// ── 视觉沿用「破坏性命令」那一套（.pg-tier-title）────────────────────
+			// 小节名 12px/600，比分类名的 13px/600 低半级；外层同样是 borderTop 虚线。
+			// 于是三块之间的分隔与层级读法完全一致：分类名 > 小节名（破坏性命令 /
+			// 其余情况）> 说明字。
+			//
+			// **不给它加 hint 行**：破坏性命令有 hint 是因为「哪些命令算破坏性」必须说清；
+			// 「其余情况」四个字已经自解释（例外没命中、破坏性命令没命中 → 就剩它），
+			// 再加一句「以上都不匹配时」是废话。
+			//
+			// 也不弱化成灰小字：它是这个分类里最常改的控件，弱化后用户可能压根没发现
+			// 那里有个下拉框（面板上「展开在右边也注意不到」那类实测反馈就是这么来的）。
+			const commandRestRow = () => {
+				// 取值走 catModeOf 单一实现（与 catBlock 标题行**同一个函数**，不是抄一份
+				// 逐字相同的表达式）：两处若各自维护，日后只调一处（例如改 project 层
+				// 未配置时的回落语义）就会让同一个值在界面两处显示成两个样子。
+				const mode = catModeOf('command');
+				return React.createElement('div', { style: { borderTop: '1px dashed rgba(128,128,128,0.35)', marginTop: 6, paddingTop: 6 } },
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+						React.createElement('span', { className: 'pg-tier-title' }, T('panel.subRest')),
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+							// 与标题行那套**同一个组件、同一个 focus key**：拒绝原因仍按
+							// `{ kind: 'cat', tab, key: 'command' }` 定位 —— 移到块底部不改变它的
+							// 身份，否则同一格会出现两个编辑态，或点「编辑」找不到草稿。
+							reasonInput(
+								catReasons[tab] ? catReasons[tab].command : '',
+								(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { command: e.target.value }) })),
+								commitCatReason('command'),
+								mode === 'deny',
+								{ kind: 'cat', tab: tab, key: 'command' },
+								// 取消：把草稿还原成服务端当前值（不是清空 —— 用户可能只是改错了想放弃）
+								() => revertReason('cat', 'command'),
+							),
+							sel(mode, changeCat('command'), tab === 'project' ? ALL_MODES : MODES, busy),
+						),
+					),
+				);
+			};
+
 
 			// 循环检测（doomloop）阈值行 + 状态提示。
 			// 与「破坏性命令」子设置的区别：那个是**动作**（三态），这个是**数字**，故不复用 sel()。
@@ -4742,29 +4825,45 @@ window.__ModuleLoader__.load({
 			};
 
 			const catBlock = (c) => {
-				const mode = cats[tab] ? (cats[tab][c] || (tab === 'project' ? 'inherit' : 'ask')) : (tab === 'project' ? 'inherit' : 'ask');
+				const mode = catModeOf(c);
 				const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
 				const excList = block && block[c] && Array.isArray(block[c].exceptions) ? block[c].exceptions : [];
 				// 例外折叠：列表超过阈值默认收起（长列表不再撑爆面板），添加行始终可见
 				const excCollapsedState = excCollapsed[c] === undefined ? excList.length > EXC_COLLAPSE_THRESHOLD : excCollapsed[c];
 				const toggleExc = () => setExcCollapsed(Object.assign({}, excCollapsed, { [c]: !excCollapsedState }));
 				return React.createElement('div', { key: c, style: { border: '1px solid rgba(128,128,128,0.3)', borderRadius: 8, padding: 10, marginBottom: 10 } },
-					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
-						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, catLabel(c)),
-						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-							// 分类默认值为「拒绝」时才有拒绝原因：该分类被拒时它会回给 AI
-							reasonInput(
-								catReasons[tab] ? catReasons[tab][c] : '',
-								(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: e.target.value }) })),
-								commitCatReason(c),
-								mode === 'deny',
-								{ kind: 'cat', tab: tab, key: c },
-								// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
-								() => revertReason('cat', c),
+					// ── 标题行：分类名 +（**仅非 command**）该分类的默认动作 ─────────────
+					//
+					// command 是唯一把默认动作挪到块底部的分类，因为它是唯一有**三层**的
+					// 分类：例外 → 破坏性命令 → 其余情况。默认动作留在标题行时，界面自上而下
+					// 读到的次序（默认动作 → 例外 → 破坏性命令）与判定链**完全颠倒** ——
+					// 而中间那层还挂着 panel.subMismatch「判定链上子设置优先」的提示，
+					// 等于用文字承认了顺序是反的。
+					//
+					// 其余五个分类只有两层（例外 → 默认动作），标题行放「分类名 + 该分类的
+					// 默认值」是卡片布局的惯例，且整块被分类边框包着、例外列表紧贴其下，
+					// 不会被读成「管全局」。所以**不动它们** —— 面板里因此只有一处特殊布局，
+					// 而这个特殊性是真实的（只有 command 有三层），不是为了统一而统一。
+					//
+					// 反例：把 command 的默认动作改回这里。regressions 有一条断言钉住
+					// 「command 的默认动作下拉必须排在 commandSubRow() 之后」，即为此设。
+					c === 'command' ? React.createElement('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, catLabel(c))
+						: React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
+							React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, catLabel(c)),
+							React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+								// 分类默认值为「拒绝」时才有拒绝原因：该分类被拒时它会回给 AI
+								reasonInput(
+									catReasons[tab] ? catReasons[tab][c] : '',
+									(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: e.target.value }) })),
+									commitCatReason(c),
+									mode === 'deny',
+									{ kind: 'cat', tab: tab, key: c },
+									// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
+									() => revertReason('cat', c),
+								),
+								sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 							),
-							sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 						),
-					),
 					// 循环检测（doomloop）的阈值与状态提示。该分类**不挂例外**（EXC_CATS 不含它），
 					// 故不放进下面的 EXC_CATS 分支，否则这一行永远不会渲染。
 					c === 'doomloop' ? doomloopRow() : null,
@@ -5011,16 +5110,31 @@ window.__ModuleLoader__.load({
 						),
 						// command 分类的子设置「破坏性命令」排在**例外之后**，与判定链的
 						// 「例外 → 子设置」两段一致（例外优先于子设置，故例外画在上面）。
-						// 注意**不要**把这句话推广成「界面顺序 = 判定链顺序」：分类默认动作的
-						// 下拉框在分类标题行、位于这两者之上，而它在判定链里是**最后**才生效的
-						// （例外与子设置都比它更细、优先于它）。界面自上而下读到的次序与生效
-						// 次序在这一点上并不一致，这是布局取舍（默认动作是分类的总开关，必须
-						// 与分类名同行），不是可以靠调换位置修好的。
-						// 子设置比大分类知道得更多，故它**独立于上方默认动作**生效 —— 默认动作设成
+						// 子设置比大分类知道得更多，故它**独立于下方默认动作**生效 —— 默认动作设成
 						// 「允许」时，破坏性命令仍按这里的动作走（这是修复一个失效的原有意图，
 						// 不是新增一层）。
 						c === 'command' ? commandSubRow() : null,
 					) : null,
+					// 「其余情况」= 命令分类的**最后一道闸门**（判定链的第三段）。
+					//
+					// 它排在子设置之后，于是 command 块自上而下读一遍就是判定链本身
+					// （例外 → 破坏性命令 → 其余情况），用户不需要知道「优先级」这个词。
+					// 这是本次改动的**核心不变式**：regressions 有一条断言钉住
+					// 「command 的默认动作下拉必须出现在 commandSubRow() 之后」，
+					// 把它挪回标题行即失败。
+					//
+					// 只 command 有这一行：其余五个分类只有两层，默认动作留在标题行
+					// （理由见上方标题行处的说明）。
+					//
+					// **刻意排在 EXC_CATS 分支之外**（与 doomloopRow 同处，不是与
+					// commandSubRow 同处）：那一行回答的是「哪些分类挂例外列表」，而这里
+					// 画的是分类的**默认动作** —— 它与「有没有例外」无关。留在分支里会让
+					// command **唯一**的默认动作入口随宿主下发的 excCats 一起出现或消失
+					// （宿主当前恒含 command，故现在不可达；但那是宿主清单的巧合，不是
+					// 这里的约束 —— 与 doomloopRow 处「不放进 EXC_CATS 分支，否则这一行
+					// 永远不会渲染」是同一条纪律）。子设置 commandSubRow 依附例外体系，
+					// 故留在分支内。
+					c === 'command' ? commandRestRow() : null,
 				);
 			};
 

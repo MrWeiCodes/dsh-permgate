@@ -2529,6 +2529,48 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const iSub = cli.indexOf("c === 'command' ? commandSubRow() : null")
     return iAddExc > 0 && iSub > iAddExc
   })())
+  // ★ command 的默认动作**下沉到块底部**（「其余情况」），界面顺序 = 判定链顺序。
+  //
+  // ── 为什么需要这一条 ──────────────────────────────────────────────────────
+  // command 是唯一有**三层**的分类：例外 → 破坏性命令 → 其余情况（= 默认动作）。
+  // 默认动作留在标题行时，界面自上而下读到的次序（默认动作 → 例外 → 破坏性命令）
+  // 与判定链**完全颠倒**，而中间那层还挂着 panel.subMismatch「判定链上破坏性命令
+  // 优先」的提示 —— 等于用文字承认了顺序是反的。
+  //
+  // 反例（本条要拦的回归）：把 command 的 reasonInput + sel 改回标题行、
+  // 或把 `commandRestRow()` 挪到 `commandSubRow()` 之前 —— 两种都会让用户
+  // 按读到的顺序理解优先级，而实际生效顺序相反。
+  //
+  // 上面 2523 那条只钉「子设置在例外之后」，**覆盖不到**默认动作的位置：
+  // 默认动作当时在标题行（例外之前），那条断言照样绿。故必须单独一条。
+  ok('★ command 默认动作下沉为「其余情况」，且排在破坏性命令之后（界面顺序 = 判定链顺序）', (function () {
+    // ① 两行都真的渲染，且底部那行在子设置行**之后**
+    const iSub = cli.indexOf("c === 'command' ? commandSubRow() : null")
+    const iRest = cli.indexOf("c === 'command' ? commandRestRow() : null")
+    if (iSub < 0 || iRest < 0 || iRest < iSub) return false
+    // ② 函数体边界用**显式锚点**切，不用固定字符窗口：窗口会随注释增删越界到
+    //    doomloopRow 里 —— 那里一旦出现同名字样，断言就会对着无关代码失败。
+    //    切片失败时必须报错而不是退化成空串（空串会让下面几条 includes 全为真）。
+    const iFn = cli.indexOf('const commandRestRow = () => {')
+    const iEnd = cli.indexOf('// 循环检测（doomloop）阈值行', iFn)
+    const row = (iFn < 0 || iEnd <= iFn) ? '' : cli.slice(iFn, iEnd)
+    if (!row) return false
+    // ③ 它渲染出小节名，且**复用**分类默认动作那一整套状态与提交路径
+    //    （不是新开一份状态 —— 那会让同一个值出现两个来源、两处显示不一致）
+    if (!row.includes("T('panel.subRest')")) return false
+    if (!row.includes("sel(mode, changeCat('command')")) return false
+    if (!row.includes("commitCatReason('command')")) return false
+    if (!row.includes("revertReason('cat', 'command')")) return false
+    // focus key 必须与标题行那套**逐字相同**（`{ kind: 'cat', tab, key: 'command' }`）：
+    // 移到块底部不改变这一格的身份，否则同一格会出现两个编辑态。
+    if (!row.includes("{ kind: 'cat', tab: tab, key: 'command' }")) return false
+    // ④ 标题行**只对非 command** 画默认动作；command 的标题行退化成纯文字标题。
+    //    判据取那个只在 command 分支出现的纯文字标题（marginBottom: 4 那版）。
+    if (!cli.includes("c === 'command' ? React.createElement('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, catLabel(c))")) return false
+    // ⑤ 中英两个键都在（缺英文键时英文界面显示裸键名 panel.subRest）
+    if ((cli.match(/'panel\.subRest':/g) || []).length !== 2) return false
+    return true
+  })())
   // ★ 名单**不在界面上列出**（用户定）：它只读、不可编辑，逐条列出占四行却给不出可操作信息。
   // 判据分两层：
   //   ① 不再渲染名单 —— 既不能读 labels 字段、也不能出现 join 展开（只删文案是不够的，
@@ -6316,6 +6358,157 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     } catch (e) { sErr = e }
     ok('★★★ 多分类同时展开时，滚的是**本次添加的那个**分类（不是最后挂载的）',
       sErr === null && res && res.cat === 'directory' && res.scrolled.length === 1 && res.scrolled[0] === 0,
+      JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), ...(res || {}) }))
+  }
+  // 清理本次渲染留下的全局桩
+  try { delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
+  // ── 27g. command 块的**渲染顺序** = 判定链顺序（真实渲染复算，不是匹配源码）──
+  //
+  // 为什么必须渲染级：上面那条结构断言只能证明「源码里 commandRestRow() 排在
+  // commandSubRow() 之后」。它证明不了**渲染出来的树**里也是这个次序 ——
+  // 例如有人把 `commandRestRow()` 的返回值拼到标题行的 children 里、或把它包进
+  // 一个排在前面却被后置填充的数组，源码顺序与渲染顺序就会脱钩，而结构断言照样绿。
+  //
+  // 判据：真渲染面板 → 在 command 那个分类块内按**文档序**收集标记节点 →
+  // 断言 例外添加行 < 破坏性命令小节名 < 其余情况小节名。
+  // 三者都用**渲染出来的文本/placeholder** 认，不用源码字符串：
+  //   · 例外添加行   → button 的 kids 含 'panel.addExc'
+  //   · 破坏性命令   → span 的 kids 含 'panel.subDestructive'
+  //   · 其余情况     → span 的 kids 含 'panel.subRest'
+  // 反例（本条要拦的）：把 command 的默认动作改回标题行 —— 那时 'panel.subRest'
+  // 根本不出现在树里（标题行用的是分类名），断言直接失败。
+  {
+    let sErr = null
+    let res = null
+    try {
+      let loaded4 = null
+      new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded4 = m } } })
+      const st4 = new Map()
+      const eff4 = new Map()
+      let cur4 = 'root'
+      let stC4 = 0
+      let refC4 = 0
+      const stOf4 = (n) => { if (!st4.has(n)) st4.set(n, []); return st4.get(n) }
+      const refOf4 = (n) => { if (!eff4.has(n)) eff4.set(n, []); return eff4.get(n) }
+      const React4 = {
+        createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false) }),
+        memo: (c) => c, Fragment: 'Fragment',
+        Component: class { constructor(p) { this.props = p || {} } setState() {} render() { return null } },
+        useState: (init) => { const s = stOf4(cur4); const i = stC4++; if (!(i in s)) s[i] = typeof init === 'function' ? init() : init; return [s[i], (v) => { s[i] = typeof v === 'function' ? v(s[i]) : v }] },
+        useEffect: (fn) => { if (!eff4.has(cur4)) eff4.set(cur4, []); eff4.get(cur4).push(fn) },
+        useRef: (v) => { const s = refOf4(cur4); const i = refC4++; if (!(i in s)) s[i] = { current: v === undefined ? null : v }; return s[i] },
+        useMemo: (f) => f(), useCallback: (f) => f(),
+      }
+      const render4 = (fn, props) => { const p = cur4; cur4 = fn.name || 'anon'; stC4 = 0; refC4 = 0; eff4.set(cur4, []); try { return fn(props) } finally { cur4 = p } }
+      const runEff4 = () => { for (const [, list] of eff4) for (const fn of list) { try { fn() } catch (e) {} } }
+      const T4 = (k) => k
+      const walk4 = (n, acc) => {
+        if (!n || typeof n !== 'object') return acc
+        acc.push(n)
+        for (const k of n.kids || []) walk4(k, acc)
+        if (n.props && n.props.children) walk4(n.props.children, acc)
+        return acc
+      }
+      const fixture4 = {
+        configPath: 'C:/x/config.json', active: true, preset: 'custom-review', activeForSession: true, platformPreset: 'custom-review', projectKey: 'X:/ws',
+        sandbox: { global: 'danger-full-access', project: 'inherit', effective: 'danger-full-access', session: 'danger-full-access' },
+        categories: {
+          global: {
+            directory: { mode: 'ask', exceptions: [] },
+            command: { mode: 'deny', exceptions: [{ id: 'c1', action: 'allow', match: 'git status' }] },
+            read: { mode: 'allow', exceptions: [] }, image: { mode: 'ask', exceptions: [] },
+            edit: { mode: 'ask', exceptions: [] }, undo: { mode: 'allow', exceptions: [] },
+          },
+          project: null,
+        },
+        effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
+        custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
+        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
+        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
+        exceptionBlast: {},
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
+        doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
+        fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
+      }
+      const fetch4 = (url) => {
+        const u = String(url)
+        const payload = u.indexOf('/permgate/pending') !== -1 ? [] : (u.indexOf('/permgate/status') !== -1 ? fixture4 : {})
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload), text: () => Promise.resolve('') })
+      }
+      let Panel4 = null
+      const ctx4 = {
+        slots: {
+          inject: (n, fn) => { try { if (typeof fn === 'function') fn() } catch (e) {} },
+          register: (meta, comp) => { if (meta && meta.name === 'settings.section') Panel4 = comp; return () => {} },
+        },
+        locale: { register: () => {}, bind: () => T4 }, get: () => undefined,
+        effect: (fn) => { try { fn() } catch (e) {} return () => {} }, on: () => () => {},
+      }
+      const g4 = globalThis
+      g4.window = { addEventListener: () => {}, removeEventListener: () => {}, innerWidth: 1200, innerHeight: 800, location: { href: 'http://localhost/' }, fetch: fetch4 }
+      g4.fetch = fetch4
+      g4.EventSource = function () { this.close = () => {} }
+      g4.document = { querySelector: () => null, createElement: () => ({ dataset: {}, style: {}, appendChild: () => {}, remove: () => {} }), head: { appendChild: () => {} } }
+      loaded4.factory((n) => (n === 'react' ? React4 : {}))
+      const mod4 = loaded4.factory((n) => (n === 'react' ? React4 : {}))
+      mod4.apply(ctx4)
+      if (!Panel4) throw new Error('未注册面板组件')
+      render4(Panel4, { sessionId: 's1' }); runEff4()
+      // 面板加载 status 是异步的，给一拍让 setState 落地（与 27e 同法）
+      await new Promise((r) => setTimeout(r, 60))
+      const tree4 = render4(Panel4, { sessionId: 's1' })
+      const nodes4 = walk4(tree4, [])
+      const has = (n, lit) => (n.kids || []).indexOf(lit) !== -1
+      // ① 先定位 command 块的**边界**，之后一切都在块内找。
+      //    ⚠️ 必须**先**定边界再找标记：`nodes4.findIndex(...addExc)` 会命中
+      //    **directory** 的添加按钮（它是全树第一个），于是 order 变成
+      //    「directory 的添加行 < command 的小节名」，ascending 看着是 true，
+      //    实际比的是两个不同分类的节点 —— 实测踩到过（order [53,85,91]，
+      //    而 command 标题在 55，53 是 directory 的）。
+      //    标题节点**不限 type**：command 的标题行退化成了纯文字 div（非 command 是
+      //    「名字 + 下拉」的 flex div，名字在 span 里）—— 写死 span 会找不到它。
+      const idxCmdTitle = nodes4.findIndex((n) => has(n, 'cat.command'))
+      if (idxCmdTitle < 0) throw new Error('command 分类标题未渲染')
+      const idxNextTitle = nodes4.findIndex((n, i) => i > idxCmdTitle && has(n, 'cat.read'))
+      const inBlock = (i) => i > idxCmdTitle && (idxNextTitle < 0 || i < idxNextTitle)
+      // 文档序：walk4 是前序遍历，acc 的下标即文档序
+      const idxAddExc = nodes4.findIndex((n, i) => inBlock(i) && n.type === 'button' && has(n, 'panel.addExc'))
+      const idxSub = nodes4.findIndex((n, i) => inBlock(i) && has(n, 'panel.subDestructive'))
+      const idxRest = nodes4.findIndex((n, i) => inBlock(i) && has(n, 'panel.subRest'))
+      // ② 三者都必须真的渲染出来（缺任何一个 → 场景空转，直接判失败而不是静默通过）
+      if (idxAddExc < 0) throw new Error('例外添加按钮未渲染')
+      if (idxSub < 0) throw new Error('「破坏性命令」小节名未渲染')
+      if (idxRest < 0) throw new Error('「其余情况」小节名未渲染（默认动作没有下沉？）')
+      // ③ 标题行**不得**再挂默认动作下拉：command 的标题行除分类名外不能有任何控件。
+      //    这条与「源码里标题行走了 command 分支」互补 —— 前者证明源码分支在，
+      //    这里证明渲染出来**确实没有控件**（分支写对了但把下拉拼进别处也能骗过源码断言）。
+      //
+      //    ⚠️ 定位「标题行」不能靠 cat.command 命中的那个节点：真实回归形态是「把标题行
+      //    改回其余五个分类那套布局」——那时分类名在 span 里、下拉落在与它**同级**的内层
+      //    div，`cat.command` 命中的是那个 span，于是「只看直接子节点」的判据恒为 false，
+      //    本条断言照样绿（实测踩到过：注入该回归后 order/ascending 不变、titleHasSelect
+      //    仍为 false，整条断言通过）。只看命中节点、或只看它的直接父节点，都拦不住它。
+      //
+      //    故按**语义**定位：标题行 = 「子树含 cat.command、且子树不含 panel.addExc」的
+      //    最外层节点。前序扫描保证第一个命中者即最外层 —— 分类块 div 虽然也含
+      //    cat.command，但它同时含例外添加行（panel.addExc）故被排除，于是命中的正好是
+      //    标题行本身（无论它是纯文字 div 还是「名字 + 控件」的 flex 容器）。
+      const subtreeHas = (n, lit) => walk4(n, []).some((x) => (x.kids || []).indexOf(lit) !== -1)
+      const titleRowNode = nodes4.find((n) => subtreeHas(n, 'cat.command') && !subtreeHas(n, 'panel.addExc'))
+      if (!titleRowNode) throw new Error('command 标题行未定位到')
+      // 标题行子树里不得出现任何控件（select 是默认动作下拉，input 是拒绝原因格）
+      const titleCtl = walk4(titleRowNode, []).filter((n) => n.type === 'select' || n.type === 'input')
+      res = {
+        order: [idxAddExc, idxSub, idxRest],
+        // ④ 文档序必须严格递增：例外 → 破坏性命令 → 其余情况
+        ascending: idxAddExc < idxSub && idxSub < idxRest,
+        titleHasSelect: titleCtl.length > 0,
+        titleCtlTypes: titleCtl.map((n) => n.type),
+      }
+    } catch (e) { sErr = e }
+    ok('★★★ command 块渲染顺序 = 判定链顺序（例外 → 破坏性命令 → 其余情况）',
+      sErr === null && res && res.ascending && res.titleHasSelect === false,
       JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), ...(res || {}) }))
   }
   // 清理本次渲染留下的全局桩
