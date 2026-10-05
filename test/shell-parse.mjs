@@ -1777,8 +1777,9 @@ group('L. 爆炸半径（blast radius）：这一下会删掉多大范围')
     // **必须显式给出 mode=allow 的档位表**，不能用 `hooks()` 的默认 `destructive: 'ask'`：
     // 后者把八档**全**展开成 ask（旧契约的忠实翻译，见 tierTableOf），于是 inside 也是 ask ——
     // `rm -rf /tmp` 无论修复前后都判 ask，断言恒绿、是**空转**（变异测试实测确认）。
-    // 生产语义是 index.js 的 destructiveTierDefaults：inside = mode = allow，
-    // 其余七档 = strictest(ask, inside) = ask。这张表才是 `rm -rf /tmp` 静默放行的现场。
+    // 生产语义是 index.js 的 destructiveTiers：配置里没写 destructive 时八档全 ask。
+    // 而这张 mode=allow 表是「八档里只有 inside 放行」的档位表 —— 用户显式把 inside 档
+    // 设为 allow、其余七档留 ask 时的真实形态，也正是 `rm -rf /tmp` 静默放行的现场。
     const modeAllow = { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', proc: 'ask', power: 'ask', priv: 'ask', reg: 'ask' }
     const runModeAllow = (c) => {
       const h = hooks({ platform: 'win32' })
@@ -8132,9 +8133,8 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   // ── 60e：decisive 档无理由时，理由回落到**并列在最严档**的命中档（发现 6）─────────
   // 根因：`tierSetOf` 在 `unjudgeable` 时**恒并** `unknown`（发现 1 的修法），而
   // `TIER_ORDER` 里 `unknown` 排第 1、`outside` 排第 3 —— 并列时 `decisiveTierOf` 取
-  // **靠前者**，于是 decisive 档从 `outside` 变成 `unknown`。而 `unknown` 档在
-  // 「`inside=deny` → 七档由 `strictest(ask, inside)` 派生为 deny」这种自然加固配置下
-  // **用户从没为它写过理由**（它是派生的，不是显式配的）——
+  // **靠前者**，于是 decisive 档从 `outside` 变成 `unknown`。而 `unknown` 档常常
+  // **没有**用户写下的理由（用户为 `outside` 写过、没为它写过）——
   // 于是**动作仍是 deny、用户写的那句拒绝理由整句丢失**：
   //     rm -rf /etc          → deny，理由「删工作区外文件」✅
   //     rm -rf /etc $TARGET  → deny，理由 **null** ❌（tiers = ['unknown','outside']）
@@ -8158,8 +8158,8 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   //   ⑨ 对照（无副作用）：`unknown=allow` 时并列但不参与 deny，理由本来就来自 outside
   //      —— 必须与修复后同值（本修法只补回落，不改这种格的结论）。
   //
-  // ⚠️ 配置取**八档全 deny**（= 宿主 `destructiveTiers` 在 `inside=deny` 下的派生结果，
-  // 见 index.js ② 的 `strictest(ask, inside)`）—— 这正是复现现场的真实形态。
+  // ⚠️ 配置取**八档全 deny**（用户逐档显式设成 deny 的形态；`unknown` 档因此是
+  // **用户设过动作、但没为它写过理由**的那一档 —— 这正是复现现场的真实形态）。
   {
     const mkDs60e = (over) => Object.assign(
       { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', proc: 'deny', power: 'deny', priv: 'deny', reg: 'deny' }, over)
@@ -8858,16 +8858,16 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     //   `sudo su root kill 1234`        → labels `['sudo','su','kill']` tiers `['proc','priv']`
     //   `sudo FOO=1 su root kill 1234`  → labels `['sudo','su']`       tiers **`['priv']`**（组档整族丢失）
     //
-    // ⚠️ **不需要 `priv=allow`**：`index.js` 的 `destructiveTierDefaults` 真实派生默认
-    // （mode=allow、零逐档编辑）+ 一条常规 deny 例外下就已分叉 —— 例外 `kill *`=deny 时
-    // 本形态是 **ask**、对照是 **deny**。故断言必须含**派生默认 + deny 例外**这一格，
+    // ⚠️ **不需要 `priv=allow`**：真实档位缺省表（八档一律「项目显式 → 全局显式 → ask」，
+    // 见 index.js 的 destructiveTiers）+ 一条常规 deny 例外下就已分叉 —— 例外 `kill *`=deny 时
+    // 本形态是 **ask**、对照是 **deny**。故断言必须含**缺省档位表 + deny 例外**这一格，
     // 不能只断言 `priv=allow`（那会把触发面写窄）。
     {
-      // 三种真实派生默认（index.js destructiveTierDefaults）+ 反向配置
+      // 三种「八档同值」的档位表（真实可达：用户逐档显式设成这个样子）+ 反向配置
       const DERIVED60j3 = {}
       for (const mode of ['allow', 'ask', 'deny']) {
         const rest = mode === 'deny' ? 'deny' : 'ask'
-        DERIVED60j3['derived mode=' + mode] = { inside: mode, outside: rest, wide: rest, unknown: rest, proc: rest, power: rest, priv: rest, reg: rest }
+        DERIVED60j3['eight tiers = ' + mode] = { inside: mode, outside: rest, wide: rest, unknown: rest, proc: rest, power: rest, priv: rest, reg: rest }
       }
       DERIVED60j3['priv=allow'] = { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', proc: 'ask', power: 'ask', priv: 'allow', reg: 'ask' }
       DERIVED60j3['inside=deny 余 allow'] = { inside: 'deny', outside: 'allow', wide: 'allow', unknown: 'allow', proc: 'allow', power: 'allow', priv: 'allow', reg: 'allow' }
@@ -8951,8 +8951,8 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
             ['sudo FOO=1 su root reg delete HKLM\\X /f', 'sudo su root reg delete HKLM\\X /f'],
           ].map(([a, n]) => [a, (segOf(a, 'bash', 'win32') || {}).t, n, (segOf(n, 'bash', 'win32') || {}).t]),
           actKillDeny: [
-            run60j3('sudo FOO=1 su root kill 1234', DERIVED60j3['derived mode=allow'], 'win32', ['kill *']),
-            run60j3('sudo su root kill 1234', DERIVED60j3['derived mode=allow'], 'win32', ['kill *']),
+            run60j3('sudo FOO=1 su root kill 1234', DERIVED60j3['eight tiers = allow'], 'win32', ['kill *']),
+            run60j3('sudo su root kill 1234', DERIVED60j3['eight tiers = allow'], 'win32', ['kill *']),
           ] }))
     }
 
@@ -8981,7 +8981,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     //
     // 根因：`pushHeadLabels` 链推进循环里那一行 `LEAD_ASSIGN` 步若无 `i + 1 < w.length`
     // 守卫，跨过**最后一个**词元后循环因 `i >= w.length` 退出、链尾那次 `segmentLabelFrom`
-    // 落空 ⇒ `return first` ⇒ 第二个 label **整体丢掉**。实测（`derived allow` + 例外
+    // 落空 ⇒ `return first` ⇒ 第二个 label **整体丢掉**。实测（`eight tiers = allow` + 例外
     // `rm *`=deny）：`sudo A=/bin/rm` 无守卫是 **`ask`/`['priv']`**（PRE 是
     // `deny`/`['inside','priv']`）；再加 `priv=allow` 时更从 PRE 的 `deny` 变成 **`allow`**。
     // 面（本处**自测**，对拍 PRE 基线 `9D3800EF…`）：52,908 格语料（4,409 条 × 12 配置）
@@ -9002,13 +9002,15 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 那个假警告一起钉成契约；钉住「与对照同值」既挡住漂移，又让日后**有意**去掉该
     // 假警告时不必改这条断言（方向正确、且不会顺手截断真正要修的族）。
     {
-      // 配置表：三种真实派生默认（`index.js` 的 `destructiveTierDefaults`，与 60j3④ 同口径）
-      // + `priv=allow`（本族无守卫时的放宽面）+ 反向配置。**必须含「派生默认」那一格**：
-      // 本族的 `deny → ask` 在派生默认 + 一条常规 deny 例外下就成立，不需要 `priv=allow`。
+      // 配置表：三种「八档同值」的档位表（真实可达：用户逐档显式设成这个样子，
+      // 与 60j3④ 同口径）+ `priv=allow`（本族无守卫时的放宽面）+ 反向配置。
+      // **必须含「八档全 allow」那一格**：
+      // 本族的 `deny → ask` 在「八档全 allow 的档位表 + 一条常规 deny 例外」下就成立，
+      // 不需要 `priv=allow`。
       const D60j5 = {}
       for (const mode of ['allow', 'ask', 'deny']) {
         const rest = mode === 'deny' ? 'deny' : 'ask'
-        D60j5['derived mode=' + mode] = { inside: mode, outside: rest, wide: rest, unknown: rest, proc: rest, power: rest, priv: rest, reg: rest }
+        D60j5['eight tiers = ' + mode] = { inside: mode, outside: rest, wide: rest, unknown: rest, proc: rest, power: rest, priv: rest, reg: rest }
       }
       D60j5['priv=allow'] = { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', proc: 'ask', power: 'ask', priv: 'allow', reg: 'ask' }
       D60j5['inside=deny 余 allow'] = { inside: 'deny', outside: 'allow', wide: 'allow', unknown: 'allow', proc: 'allow', power: 'allow', priv: 'allow', reg: 'allow' }
@@ -9091,8 +9093,8 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
           sample: [['sudo A=/bin/rm', 'sudo rm'], ['su A=/bin/rm', 'su rm'], ['sudo timeout 5 A=/bin/rm', 'sudo timeout 5 rm']]
             .map(([a, n]) => [a, (segOf(a, 'bash', 'win32') || {}).t, n, (segOf(n, 'bash', 'win32') || {}).t]),
           derivedAllowRmDeny: [
-            res60j5('sudo A=/bin/rm', D60j5['derived mode=allow'], 'win32'),
-            res60j5('sudo rm', D60j5['derived mode=allow'], 'win32'),
+            res60j5('sudo A=/bin/rm', D60j5['eight tiers = allow'], 'win32'),
+            res60j5('sudo rm', D60j5['eight tiers = allow'], 'win32'),
           ] }))
     }
   }

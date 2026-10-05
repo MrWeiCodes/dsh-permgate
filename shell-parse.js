@@ -1211,8 +1211,9 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
     // 实测（win32，八档同动作、proc/power/reg=deny、priv=allow，修复前）：
     //     sudo su root kill 1234        → deny  labels=['sudo','su','kill'] tiers=['proc','priv']
     //     sudo FOO=1 su root kill 1234  → **allow** labels=['sudo','su']  tiers=['priv'] ← 组档整族丢失
-    // 且**不需要 `priv=allow`**：`index.js` 的 `destructiveTierDefaults` 真实派生默认
-    // （mode=allow、零逐档编辑）+ 一条常规 deny 例外下就已分叉 —— 例外 `kill *`=deny 时
+    // 且**不需要 `priv=allow`**：`index.js` 的真实档位缺省值
+    // （八档一律「项目显式 → 全局显式 → ask」，见 destructiveTiers）+ 一条常规 deny 例外下
+    // 就已分叉 —— 例外 `kill *`=deny 时
     // 本形态是 **ask**、对照是 **deny**；`diskpart*`=deny 同理 ⇒ 用户写的 deny 例外
     // 被「多写一个 `FOO=1`」降级。方向是 **fail-open**。
     //
@@ -6124,8 +6125,8 @@ export function assessCommand(source, shell, hooks) {
    * 根因：`tierSetOf` 对「读得出的目标 + 读不出的目标」同段共存会**并列**并入 `unknown`
    * （见那里的 ③），而 `TIER_ORDER` 里 `unknown` 排第 1、`outside` 排第 3 —— 并列时
    * `decisiveTierOf` 取**靠前者**，于是 decisive 档从 `outside` 变成 `unknown`。
-   * 而 `unknown` 档常常是**派生**成 deny 的（`inside=deny` 经 `strictest(ask, inside)`
-   * 派生，见 index.js 的 `destructiveTiers` ②），用户从没为它写过理由 ——
+   * 而 `unknown` 档常常**没有**用户写下的理由 —— 它可能是显式设成 deny 却没填理由的档，
+   * 也可能是命中「读不出的目标」才并进来的档，而用户只为 `outside` 那档写过理由 ——
    * 于是**动作仍是 deny、用户写的那句拒绝理由整句丢失**：
    *     rm -rf /etc          → deny，理由「删工作区外文件」✅
    *     rm -rf /etc $TARGET  → deny，理由 **null** ❌（tiers = ['unknown','outside']）

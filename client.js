@@ -3434,13 +3434,13 @@ window.__ModuleLoader__.load({
 				// **取哪一份生效值按 tab 分派**（项目 → effective、全局 → globalEffectiveProbe），
 				// 理由见下方 effOf 处 —— 一句话：effective 是按**当前项目**算的。
 				//
-				// 客户端**不能**再按 globalDefault/projectDefault 算一遍 —— 那是**另一套规则**。
-				// 宿主七档缺省的基准是 inside 的**生效值**（`strictest(ask, inside)`，
-				// 见 index.js 的 destructiveTiers 两遍解析），而 *Default 是按**本层 mode** 算的。
-				// 存量 `destructive: {action:'deny'}` + command mode=allow 时：宿主 effective
-				// 八档全 deny，按 mode 算却得到 inside=deny、其余七档=ask（实测 **7/8 档分叉**）——
-				// 面板折叠摘要会说「拒绝 1 · 询问 7」、展开后七个下拉框也全是「询问」，
-				// 而实际裁决八档全拒（面板说谎，正是 statusView 那段注释警告的那一类）。
+				// 客户端**不得**自己算一遍档位缺省值 —— 档位取值只有**一份**实现，在宿主的
+				// `destructiveTiers` 里（「项目显式 → 全局显式 → ask」），客户端无从复算：
+				// 它既看不到另一层的显式配置全貌，也无法保证与裁决同源。
+				// 这里曾经据此写过一段「*Default 是按**本层 mode** 算的、与宿主的两遍解析
+				// 是两套规则」的警示（引 `globalDefault` / `projectDefault`）—— 那两个字段
+				// 与「按本层 mode 推导」的规则**都已整体删除**（理由见 index.js statusView
+				// 的 *Default 段），故现在不存在「第二套规则」可供回落，也不存在分叉。
 				//
 				// 未配置的档显示的可能是**另一层**的值 —— 那正是「这一档现在归谁管」的答案，
 				// 归哪一层可由 `commandSub.effective.source[tier]` 读出（宿主已按档下发 source）。
@@ -3478,11 +3478,14 @@ window.__ModuleLoader__.load({
 				//      在全局层**凭空写入 wide=deny**、影响所有项目，而用户只是在一个
 				//      看起来「本来就是拒绝」的行上补了句理由。
 				//
-				// 探针值必须由宿主用**同一个** destructiveTiers 求（即 globalEffectiveProbe），
-				// **不能**回落 globalDefault：后者按本层 mode 推导，与裁决的两遍解析是两套规则，
-				// 存量 `{action:'deny'}` + mode=allow 时它给出 inside=deny、其余七档=ask，
-				// 而全局层单独生效值是**八档全 deny** —— 拿它回填等于把「面板说谎」换个形态
-				// 复制一遍（方向还相反：显示 ask、实际 deny）。见 index.js statusView 的注释。
+				// 探针值必须由宿主用**同一个** destructiveTiers 求（即 globalEffectiveProbe）——
+				// 这正是 `commandSub` 下发该字段的全部理由。这里曾经写过一个**看似可回落**的
+				// 替代品 `globalDefault`（按本层 mode 推导的档位缺省表）：它与裁决是两套规则，
+				// 存量 `{action:'deny'}` + mode=allow 时它给出 inside=allow、其余七档=ask，
+				// 而全局层单独生效值是 inside=deny、其余七档=ask —— 拿它回填等于把「面板说谎」
+				// 换个形态复制一遍（方向还相反：显示 allow、实际 deny）。
+				// ⚠️ 那个字段已随那套规则一起**删除**（理由见 index.js statusView 的 *Default 段），
+				// 故此处**没有**可回落的第二来源：探针缺失时只能按下面的兜底走。
 				const effOf = {
 					global: (s.commandSub && s.commandSub.globalEffectiveProbe) || null,
 					project: (s.commandSub && s.commandSub.effective) || null,
@@ -3499,9 +3502,27 @@ window.__ModuleLoader__.load({
 					const eff = effOf[t];
 					for (const tier of SUB_TIERS) {
 						const k = tierKeyOf(tier);
-						// 末级只是**协议异常兜底**（宿主没下发本 tab 的来源、或该档缺席），
-						// 不是决策链的一环 —— 正常响应下 eff[tier] 恒有值。
-						subNext[t][tier] = (cs && cs[k]) || (eff && eff[tier]) || (t === 'project' ? 'inherit' : 'ask');
+						// ── 本层未显式设置的档显示什么：两个 tab **有意不同** ──────────────
+						//
+						// 项目 tab → `inherit`（继承全局）。
+						// 全局 tab → 该档的**生效值**（宿主下发，未设置时是 ask）。
+						//
+						// 依据是判定链本身：`destructiveTiers` 的 `explicitOf` 是
+						// 「项目显式 → 全局显式 → ask」，项目层下面还有全局层可继承，全局层
+						// 下面没有了。故项目 tab 的「继承全局」是**字面属实**的陈述
+						// （显示它 = 裁决确实会去取全局那一档），而全局 tab 显示 inherit
+						// 则无处可继承 —— 那里必须显示一个具体动作。
+						//
+						// 这与面板其余各处（分类默认值、快捷工具、兜底）**完全同构**：
+						// 项目 tab 未表态即 `inherit`，全局 tab 未表态即具体默认值。
+						// 八档曾经是唯一的例外 —— 它们由宿主按本层 mode 推导后下发，于是
+						// 项目 tab 显示的是推导值而不是 `inherit`，而 `inside` 档又因为走
+						// 另一条取值路径显示 `inherit`，同一状态两种画法（实测反馈的错位）。
+						// 宿主改为八档一律「项目显式 → 全局显式 → ask」后，这里随之统一。
+						//
+						// ⚠️ 项目 tab 不再回落到 `eff`（生效值）：那会把「继承全局」显示成
+						// 全局的当前值，用户改全局时本 tab 跟着变，看起来像项目自己设过。
+						subNext[t][tier] = (cs && cs[k]) || (t === 'project' ? 'inherit' : ((eff && eff[tier]) || 'ask'));
 						subReasonNext[t][tier] = (cReasons && cReasons[tier]) || '';
 					}
 				}
@@ -3757,7 +3778,7 @@ window.__ModuleLoader__.load({
 
 			// 该层子设置的**显式配置**动作（用户没设过则 undefined）。
 			// 与面板显示值（subDestructive，含推导默认值）区分：提示判据只能用显式值 ——
-			// 推导值永不比 mode 更松（destructiveTierDefaults 保证），拿它比较只会产生假警告。
+			// 档位缺省值恒为 ask 或继承全局的同名档，拿它比较只会产生假警告。
 			//
 			// `tier` 省略时取 `inside`（老键 `action`）。**现在有真实的按档调用点**
 			// （warnSubMismatchTiers 逐档调用它）：八档之后「子设置的动作」不再是一个值 ——
@@ -4889,7 +4910,34 @@ window.__ModuleLoader__.load({
 											//
 											// 为什么列表里也要标：这是唯一能让人**事后**发现「我什么时候放行了删盘根」的地方
 											// （弹窗是一次性的，列表是长期可见的）。落盘值本身不存这个结论（读侧现算）。
+											//
+											// ── 只标**命令**例外（与上面 excTooBroad 同一个门）────────────────────
+											// 路径例外上这个标注不成立，两类原因：
+											//
+											// ① `outside` 档在路径侧是同义反复。「目录访问（工作区外）」这个分类
+											//    名已经写明了适用范围，而一条 directory 例外**只可能在工作区外被命中**
+											//    （全仓库唯一调用点 resolveCategory('directory', …) 在 outsideMatrix 里，
+											//    而 outsideMatrix 的 4 个调用点全在 `if (fp && isOutside(fp, root))` 内）
+											//    —— 于是「存在一条 directory 例外」⟺「它被标 outside」。
+											//    用户为了跨项目协作写的每一条路径例外，都必然收到一次「目标范围过大」，
+											//    而它本身毫无问题。实测：工作区 proj-a、例外指向同级 proj-b
+											//    → directory 与 read 两条例外都被标 outside。
+											//
+											// ② 标签与档位含义在路径侧对不上。`panel.excBlast` 是「目标范围过大」，
+											//    而 outside 档的 title 是「目标在工作区之外——不在本项目范围内」：
+											//    对命令例外这两句是一回事（模式能删到工作区外 = 管得宽），
+											//    对路径例外不是 —— 一条指向隔壁项目的具体目录的例外并没有「过大」，
+											//    它只是不在本项目里，而那正是用户写它的理由。
+											//
+											// 路径侧剩下的三档（drive-root / system / home）说的确实是「目标本身有多大」，
+											// 与「在不在工作区里」无关，但它们在**命令**例外上同样能表达
+											// （`rm -rf C:/*` 这种模式），故这一门收在分类上、不按档位分：
+											// 命令例外照旧八档全标，路径例外一律不标。
+											//
+											// 宿主侧一个字不改：exceptionBlast 照算、照下发，面板只是不画。
+											// 判定（blastRadiusOf）与下发形状都不受影响，将来若要在别处用这份数据仍然有。
 											(() => {
+												if (c !== 'command') return null;
 												const b = exceptionBlastOf(tab, r.id);
 												const meta = b && BLAST_LEVELS[b.level];
 												if (!meta) return null;

@@ -19,30 +19,56 @@ const ok = (name, cond, extra) => { if (!cond) fail.push(name + (extra ? ' — '
 const group = (t) => console.log('\n— ' + t)
 
 /**
- * 从 index.js 源码里取出 `destructiveTierDefaults` 并**实际求值**，用于不变量断言。
+ * 把 index.js 的**真实判定链** `destructiveTiers` 抽出来并**实际求值**。
  *
- * 为什么要求值而不是继续用正则钉函数体（§7.2c 的处理原则）：
- *   ① 正则锁的是**实现形状**，不是行为 —— 等价改写（换一种写法算出同样的表）会误报，
- *      而真正的行为回归（例如把七档从 `strictest(ask, inside)` 改成 `inside`）只要字面量
- *      没变就能溜过去。八档之后「形状」本身也变复杂了，正则更难写对。
- *   ② 不变量 A / B 是**可形式化**的（∀ tier × ∀ mode 的穷举），直接对函数穷举最有力。
+ * 为什么改成求值判定链、而不是继续求值那个推导函数：
+ *   这里原先抽的是 `destructiveTierDefaults`（「inside = 本层 mode、其余七档 =
+ *   strictest(ask, inside)」）。那套规则**已从生产代码删除**，八档缺省值现在只有一份实现
+ *   —— `destructiveTiers` 的「项目显式 → 全局显式 → ask」，也就是裁决真正用的那一份。
+ *   继续对已下线的函数求值，会让下面这一整族断言**对着一个没人调用的函数**变绿：
+ *   实测把生产实现换成「七档全 allow」的坏实现，那些断言照样通过（零鉴别力）。
+ *   故改为对判定链本身求值。
  *
- * 依赖注入：函数体只用到 `MODES` / `MODE_STRICTNESS` / `TIERS` 三个自由变量 ——
- * 前者是 index.js 的模块级常量（此处按源码里的定义重新声明，值由断言侧的期望决定，
- * 不从源码抠，避免「常量被改坏时测试跟着一起坏」），`TIERS` 从 shell-parse 的真实导出取
- * （它是唯一来源，抄一份就失去了「档位清单只有一份」的意义）。
+ * 依赖注入：函数体用到 `projectBlock` / `config` / `TIERS` / `keyOfTier` /
+ * `normalizeText` / `legacyReasonOf`（reasons 分支）。
+ *   · `keyOfTier` / `legacyReasonOf` **按源码原样抠出**（与下面 ★43 的 `tiersOf` 同源）：
+ *     这里曾经注入一份手抄的 `(tier) => (tier === 'inside' ? 'action' : tier)` stub ——
+ *     那是 `keyOfTier` 的**第二份口径**，而它正是 index.js:27-31 点名「必须同步改」的那类
+ *     副本。实测：按那里的要求把 `keyOfTier` 与 `normalizeSubSetting` 的内联副本同步改名
+ *     （inside → 'act'）后，stub 仍去查已下线的 `action` 键 —— 挂在本函数上的 A′/B′/42
+ *     一族断言**照旧全绿**（静默对已下线的键名求值），只有走源码抠取路线的 ★43 变红。
+ *     故这里不再抄口径：键名映射只有在生产实现里成立才算通过。
+ *   · `normalizeText` 仍注入（它是纯文本归一，且抽取窗口里没有它的定义）。
+ *
+ * ⚠️ `keyOfTier` 是 `const` 声明，**不得**再作为同名形参注入 ——
+ * 否则撞成 `SyntaxError: Identifier 'keyOfTier' has already been declared`（实测踩过）。
  *
  * 取不到函数（被改名 / 删掉）时返回 null，调用方的断言随即失败 —— 不会静默跳过。
  */
-function deriveTierDefaults(source) {
-  const m = source.match(/function destructiveTierDefaults\(mode, inheritDefault\) \{[\s\S]*?\n    \}/)
+function tierChainOf(source) {
+  const m = source.match(/function destructiveTiers\(root\) \{[\s\S]*?\n    \}/)
   if (!m) return null
-  try {
+  // keyOfTier 是**单行**箭头函数（无花括号），按行取（与 ★43 的 keyStmt 同一手法）。
+  const keyStmt = (source.match(/const keyOfTier = [^\n]*/) || [''])[0]
+  const legacyStmt = (source.match(/function legacyReasonOf\(sub\) \{[\s\S]*?\n    \}/) || [''])[0]
+  if (!keyStmt || !legacyStmt) return null
+  // 每次调用都重建 `config` 闭包：`destructiveTiers` 从闭包里读全局块，
+  // 复用同一个函数实例会让用例之间互相串味（实测踩过）。
+  // 返回 (globalCommand, project) → 八档动作表（含 source / reasons 两个附加键）。
+  const evaluate = (globalCommand, project) => {
     // eslint-disable-next-line no-new-func
-    return new Function('MODES', 'MODE_STRICTNESS', 'TIERS',
-      m[0] + '\n; return destructiveTierDefaults;')(
-      ['ask', 'allow', 'deny'], { allow: 0, ask: 1, deny: 2 }, sp.TIERS)
-  } catch (e) { return null }
+    const fn = new Function('projectBlock', 'config', 'TIERS', 'normalizeText',
+      [keyStmt, legacyStmt, m[0], 'return destructiveTiers;'].join('\n'))(
+      () => project || null,
+      { global: { command: globalCommand || {} } },
+      sp.TIERS,
+      (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)
+    )
+    return fn('X:/ws')
+  }
+  // 先自检一次（函数被改坏时返回 null，让调用方的断言变红而不是抛异常中断套件）
+  try { evaluate({}, null) } catch (e) { return null }
+  return evaluate
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2561,101 +2587,139 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   })())
   // ★ 子设置的「用户显式值」与「推导默认值」在落盘时必须可区分
   // normalizeCategory 只保留用户显式写的值（缺键留空），推导交给读取侧 destructiveTiers。
-  // 反例：写回 `cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, destructiveTierDefaults(...))`
+  // 反例：写回 `cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, <档位缺省值>)`
   // —— 推导值会被 persist 固化成显式键，导致「面板设项目 deny 被穿透到全局 ask」与
   // 「放松大分类后子设置粘住 deny」两处实测缺陷。
+  // （档位缺省值那个函数已整体删除，故这里同时钉「不得再给它传第三个实参」。）
   ok('★ normalizeCategory 只保留用户显式写的子设置（推导交给读取侧，不物化）',
     src.includes("const sub = normalizeSubSetting(c.destructive, inheritDefault)")
     && src.includes('if (sub) cat.destructive = sub')
-    && !src.includes('cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, destructiveTierDefaults'))
-  // ★ 读取侧按本层 mode 推导默认值（destructiveTiers 的 ③ 分支）
+    && !/normalizeSubSetting\(c\.destructive,\s*inheritDefault\s*,/.test(src))
+  // ★ 读取侧八档一律「项目显式 → 全局显式 → ask」（**唯一**一份档位取值规则）
   //
   // 原断言锁的是「函数体里出现 derived = destructiveDefaultOf(mode, false)」这一形状。
-  // 形状变了（单值 → 八档表 + **两遍解析**），故改为断言**行为**：
-  // mode=deny 时八档全 deny、mode=ask 时八档全 ask —— 后者才是这条断言原本要守的东西
-  // （推导确实按 mode 走），而它比「函数里有没有那一行」耐用得多。
+  // 后来形状变成「八档表 + 两遍解析（inside 由 mode 推导、七档 strictest(ask, inside)）」，
+  // 那套规则**已按用户要求整体删除**（依据 .plan/blast-tier-design.md：八档平级、
+  // 不考虑旧配置迁移兼容，并明确否定「子设置默认值不得宽于本层 mode」这条语义）。
   //
-  // 两遍解析是 §6.2 的必然要求（先定 inside、再用它定其余七档），故断言同时要求
-  // 「inside 先算」与「七档用 strictest(ask, inside)」这两个结构点 —— 它们是**行为**的
-  // 直接来源，去掉任何一个都会让存量 `destructive:deny` + mode=allow 的用户被放松。
-  ok('★ 读取侧按本层 mode 推导八档默认值（含项目层 deny）', (function () {
+  // 故本断言钉的是**新规则本身**，分两层：
+  //   · 结构层（下面这个 IIFE）：判定链里不得残留任何按 mode 推导档位的代码，
+  //     八档必须走**同一个** explicitOf 循环、末级兜底必须是 ask；
+  //   · 行为层（紧随其后）：对**真实判定链**穷举喂配置，逐格核对取值。
+  // 行为层才是主要判据 —— 结构层挡不住「换一种写法又按 mode 推导回去」。
+  ok('★ 读取侧八档同构继承（不再按本层 mode 推导档位默认值）', (function () {
     const body = src.slice(src.indexOf('function destructiveTiers(root) {'))
     if (!body) return false
     const cut = body.indexOf('\n    }')
     const fn = cut > 0 ? body.slice(0, cut) : body.slice(0, 4000)
-    return fn.includes('const derived = destructiveTierDefaults(mode, false)')
-      && /const pMode = proj && proj\.command && proj\.command\.mode/.test(fn)
-      // ① inside 先算（显式 → 推导）
-      && fn.includes("out.inside = eInside ? eInside.v : derived.inside")
-      // ② 七档基准 = strictest(ask, inside 的**生效值**)，不是 mode
-      //
-      // ── 为什么是**机制锁**而不是文本锁（本轮修复）────────────────────────────────
-      // 这里曾经钉的是 `out.inside === 'inherit' ? 'inherit'` 这段**文本**。那个分支
-      // **恒不可达**（三重独立验证：① 结构性 —— `destructiveTierDefaults(mode, false)`
-      // 的 `inheritDefault=false` 让 `derived.inside ∈ {ask,allow,deny}`，且 `explicitOf`
-      // 两条 return 都带 `!== 'inherit'` 守卫；② V8 coverage —— 该分支 count=**0**，
-      // 而同形函数 `destructiveTierDefaults` 的同名分支 count=**272**（可达），对照证明
-      // 这个口径能检出可达分支；③ 插桩 —— 进入三元 690 次、`inside==='inherit'` **0** 次）。
-      // 文本锁于是把**死代码**钉成了必需结构、**会拒绝正确的清理**（实测：只删
-      // `index.js` 的该分支 → 本条 FAIL(1)）。更糟的是它**暗示** `out.inside` 可为
-      // `inherit` —— 维护者若据此把该支「修活」，七档会被写成 `'inherit'`，
-      // `strictestTierAction` 会**跳过**这些档 → 组档静默落大分类（fail-open）。
-      // 改钉**机制**：七档基准必须由 `MODE_STRICTNESS[out.inside]` 与 `.ask` 比较得出
-      // （即「不是 mode、也不是 inherit」这件事在**行为来源**上成立）。行为侧另有
-      // 下面的不变量 A/B 对生产函数穷举，两者合起来比一段文本耐用得多。
-      && /const restDefault = MODE_STRICTNESS\[out\.inside\]/.test(fn)
-      && /MODE_STRICTNESS\[out\.inside\] > MODE_STRICTNESS\.ask \? out\.inside : 'ask'/.test(fn)
+    // ① 旧的 mode 推导路径必须**彻底消失**（残留任一即说明没改干净）
+    if (fn.includes('const derived = destructiveTierDefaults(mode, false)')) return false
+    if (/const restDefault = MODE_STRICTNESS/.test(fn)) return false
+    if (/out\.inside = eInside \?/.test(fn)) return false
+    // ①b 连那个「按 mode 推导」的**函数本身**都不得再存在（它已整体删除）：
+    //     留着它就是「两份八档默认值规则并存」，两处必然分叉 —— 这正是本条要防的。
+    if (/function destructiveTierDefaults\s*\(/.test(src)) return false
+    // ② 八档走同一个循环，且末级兜底是 'ask'（不能是 inherit —— strictestTierAction 会跳过）
+    if (!/for \(const t of TIERS\) \{\s*\n\s*const e = explicitOf\(t\)\s*\n\s*out\[t\] = e \? e\.v : 'ask'/.test(fn)) return false
+    // ③ explicitOf 仍是「项目显式 → 全局显式」（继承语义的来源）
+    if (!/const pv = pSub \? pSub\[k\] : undefined/.test(fn)) return false
+    if (!/const gv = gSub \? gSub\[k\] : undefined/.test(fn)) return false
+    // ④ 不得再有 inside 特例（`if (t === 'inside') continue` 之类）
+    if (/t === 'inside'\) continue/.test(fn)) return false
+    return true
   })()
-  // 行为侧：直接对推导函数本身穷举（八档 × 三 mode），不依赖 src 文本
+  // 行为侧：对**真实判定链**穷举（八档 × 三 mode 的「只有 mode、没有 destructive 键」形态）
+  //
+  // ⚠️ 期望值已按新规则改写：`command.mode` **不再影响**档位取值 —— 无论 mode 是
+  // allow / ask / deny，只要没有显式档位配置，八档一律落末级兜底 `ask`。
+  // 这是「八档与『执行命令』是两个独立设置项、八档更细优先级更高」的直接后果，
+  // 也是设计文档 §58 明确接受的那处变化（旧规则下 mode=deny 会把八档一起推成 deny）。
+  // 反向必须钉住：**不得**再出现「mode=allow → inside=allow」（那正是被删掉的旧行为）。
   && (function () {
-    const fn = deriveTierDefaults(src)
-    if (!fn) return false
+    const chain = tierChainOf(src)
+    if (!chain) return false
     const all = (o, v) => Object.keys(o).filter((k) => k !== 'source' && k !== 'reasons').every((k) => o[k] === v)
-    return all(fn('deny', false), 'deny') && all(fn('ask', false), 'ask')
+    // 三种 mode 下都必须是八档全 ask；mode=allow 那一格同时排除了「inside 跟随 mode」的旧实现
+    return ['allow', 'ask', 'deny'].every((mode) => all(chain({ mode: mode }, null), 'ask'))
+      && !all(chain({ mode: 'allow' }, null), 'allow')
   })())
   // ★ 建块时不得为 command 物化 destructive（freshCategory(cat,true) 给的是 inherit，
   // 落盘后会变成「本层有表态」而穿透到全局 —— 这正是面板设项目 deny 被旁路的根因）
   ok('★ setCategoryMode 建块时不为 command 物化 destructive',
     /if \(!block\[cat\]\) \{[\s\S]{0,500}?if \(cat === 'command'\) delete block\[cat\]\.destructive/.test(src))
-  // ★★ 子设置默认值的两条不变量（§7.2c 的形式化重写）
+  // ★★ 不变量 A′：档位缺省值与 `command.mode` **完全无关**（八档 × 三 mode = 24 格穷举）
   //
-  // 原断言锁 `destructiveDefaultOf` 的函数体字面量（`if (mode === 'deny') return 'deny'`）。
-  // 那条正则**表达不了**新实现（八档表），但更重要的是：它守的其实是一条**可形式化的
-  // 不变量**，比钉函数体耐用得多。故改为直接对推导函数穷举断言：
+  // ⚠️ 本条**取代**了原先的「不变量 A：子设置默认值不宽于本层 mode」。
+  // 旧 A 编码的正是 .plan/blast-tier-design.md 明确否定的那条语义，而新规则下
+  // mode=deny 且无显式档位配置 ⇒ 八档全 ask，`strictness(ask)=1 < strictness(deny)=2`
+  // —— **旧 A 在生产规则上已不成立**。它当时仍绿，只因求值的是那个已下线的推导函数；
+  // 维护者若照旧 A 的意图去「修正」生产实现，就会**直接把本次改动回退**（具体危害）。
+  // 故这里删除旧 A 并以它的**否定式**替换，而不是把它放宽成恒真。
   //
-  //   不变量 A：∀ tier，strictness(该 tier 的默认值) >= strictness(本层 mode)
-  //             （strictness：allow=0 < ask=1 < deny=2）
-  //             —— 子设置默认值**不得比本层分类 mode 更宽松**，否则用户显式收紧的 deny
-  //                被默认值悄悄放开。
-  //   不变量 B：mode=allow 时，除 inside 外的七档默认值不得为 allow
-  //             —— 「七档全部跟随 mode」的实现**不违反 A**（等于 mode，不更宽），
-  //                但它会让 mode=allow 时七档全变 allow（工作区外删除静默，违反 D-6 意图）。
-  //                A 与 B 合起来才完整表达原意图：**inside 跟随大分类，其余七档不松于 ask**。
-  //
-  // 反向验证（§7.2c 要求）：把实现改成「七档恒 ask」→ A 在 mode=deny 时红灯；
-  // 改成「七档跟随 mode」→ B 在 mode=allow 时红灯。两种错误实现都被拦住。
-  ok('★★ 不变量 A：子设置默认值不宽于本层 mode（八档 × 三 mode = 24 组穷举）', (function () {
-    const fn = deriveTierDefaults(src)
-    if (!fn) return false
-    const rank = { allow: 0, ask: 1, deny: 2 }
+  // 反向验证（实测）：把实现换回「inside = 本层 mode、七档 = strictest(ask, inside)」，
+  // 本条在 allow（inside=allow）与 deny（八档全 deny）两格同时红灯。
+  ok('★★ 不变量 A′：档位缺省值与 command.mode 完全无关（八档 × 三 mode = 24 格穷举）', (function () {
+    const chain = tierChainOf(src)
+    if (!chain) return false
     const bad = []
     for (const mode of ['allow', 'ask', 'deny']) {
-      const d = fn(mode, false)
-      for (const t of Object.keys(d)) {
-        if (t === 'source' || t === 'reasons') continue
-        const rv = rank[d[t]]
-        const rm = rank[mode]
-        if (rv === undefined || rm === undefined) { bad.push(mode + '/' + t + '=' + d[t]); continue }
-        if (rv < rm) bad.push(mode + '/' + t + '=' + d[t] + ' < ' + mode)
+      const d = chain({ mode: mode }, null)
+      for (const t of SP_TIERS) {
+        if (d[t] !== 'ask') bad.push(mode + '/' + t + '=' + d[t] + ' want ask')
       }
     }
     return bad.length === 0
   })())
-  ok('★★ 不变量 B：mode=allow 时除 inside 外七档默认值不得为 allow（防「七档跟随 mode」）', (function () {
-    const fn = deriveTierDefaults(src)
-    if (!fn) return false
-    const d = fn('allow', false)
-    const bad = Object.keys(d).filter((t) => t !== 'inside' && t !== 'source' && t !== 'reasons' && d[t] === 'allow')
+  // ★★ 不变量 B′：**缺省值**永不为 allow（D-6 的存活半边；八档平级，inside 也不例外）
+  //
+  // 旧不变量 B 是「mode=allow 时**除 inside 外**七档默认值不得为 allow」。新规则下八档平级，
+  // 「除 inside 外」这个限定已无意义（inside 同样不得因 mode=allow 而被放行）—— 故去掉限定。
+  // 为避免本条被 A′ 完全包含（A′ 只喂「无 destructive 键」这一格），输入族扩到 ★43 的全部
+  // 存量形状，并**逐格跳过用户显式表过态的档**（显式值归 ★43 ⑤ 管）：
+  // 检查的是「没有显式表态的那些档」在 6 种形状下都不得落 allow。
+  //
+  // 这是 D-6 的核心（大分类 allow 时破坏性命令不得静默放行），也是本次改动的红线 ——
+  // 判定方向只能收紧、不能放宽。反向验证：把末级兜底改成 'allow' → 本条红灯。
+  ok('★★ 不变量 B′：未表态档的缺省值永不为 allow（6 种存量形状 × 八档；D-6 红线）', (function () {
+    const chain = tierChainOf(src)
+    if (!chain) return false
+    // 「该档有没有被显式表过态」必须按**生产的键名映射**判（`keyOfTier`，源码原样抠出），
+    // 不得在这里手抄一份 `t === 'inside' ? 'action' : t` —— 那是映射的第二个口径，
+    // 抄错（或生产改名后不同步）会让本判据去查一个已下线的键，于是**该档被误判成
+    // 「未表态」而本应跳过的那一格重新参与比较**（或反之），断言静默失去鉴别力。
+    // ⚠️ 抠取是**正则匹配**，故抠不到 / 抠到一半时 `new Function` 会在**构造期**抛
+    // `SyntaxError`，那时整轮套件**当场崩掉**（不是本条断言变红）—— 而 `npm test` 是
+    // `regressions.mjs && shell-parse.mjs && smoke.mjs` 的 `&&` 链，崩溃会连带阻断后两个套件，
+    // 且崩在 ok() 之前、**连 FAIL 清单都没有**。实测：把 `keyOfTier` 的声明折成两行
+    // （纯格式改动、语义不变）→ `SyntaxError: Unexpected token 'return'`，其后 217 条顶层
+    // ok() 一条都不执行。故这里做一次自检，把「抽取失败」降级为**断言报红**（`keyFn=null`
+    // → 下面每条 `keyFn(t)` 当场抛，故显式先判空返回 false，让清单里留下本条的 FAIL）。
+    // 与 `tierChainOf`（本文件 line 70）同款手法，两份抽取器口径一致。
+    const keyFn = (function () {
+      try {
+        return new Function('TIERS',
+          [(src.match(/const keyOfTier = [^\n]*/) || [''])[0], 'return keyOfTier;'].join('\n'))(SP_TIERS)
+      } catch (e) { return null }
+    })()
+    if (!keyFn) return false
+    const shapes = [
+      ['无 destructive 键', { mode: 'allow' }],
+      ['action=ask', { mode: 'allow', destructive: { action: 'ask' } }],
+      ['action=allow', { mode: 'allow', destructive: { action: 'allow' } }],
+      ['action=deny', { mode: 'allow', destructive: { action: 'deny' } }],
+      ['仅 wide=deny', { mode: 'allow', destructive: { wide: 'deny' } }],
+      ['仅 wide=allow', { mode: 'allow', destructive: { wide: 'allow' } }],
+    ]
+    const bad = []
+    for (const [label, gc] of shapes) {
+      const d = chain(gc, null)
+      const sub = gc.destructive || {}
+      for (const t of SP_TIERS) {
+        // 用户显式表过态的档不归本条管（它本来就该是那个值，包括 allow）
+        if (sub[keyFn(t)] !== undefined) continue
+        if (d[t] === 'allow') bad.push(label + '/' + t + '=' + d[t])
+      }
+    }
     return bad.length === 0
   })())
   // ★ 写入侧**不得**联动改写子设置：值上无法区分「默认 ask」与「用户显式设的 ask」，
@@ -2689,15 +2753,15 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && /const warnSubMismatchTiers = \(catMode\) => \{[\s\S]{0,300}?for \(const m of subTierList\(\)\) warnSubMismatch\(catMode, explicitSubOf\(tab, m\.t\), subTierLabelOf\(m\.t\)\);/.test(cli)
     && /warnSubMismatch\(cats\[tab\] \? cats\[tab\]\.command : undefined, action, subTierLabelOf\(tier\)\);/.test(cli))
   // ★ 提示判据只能用**显式值**，不能用面板显示值（含宿主下发的推导默认值）。
-  // 推导值永不比 mode 更松（destructiveTierDefaults 保证），拿它比较会产生**假警告**：
+  // 档位缺省值恒为 ask 或继承全局的同名档，拿它比较会产生**假警告**：
   // 实测 global command 由 ask 改为 deny、用户从未设过子设置时，会弹出
-  // 「破坏性命令会按『询问』处理」—— 而实际读取侧按新 mode 推导出的是 deny。
+  // 「破坏性命令会按『询问』处理」—— 而实际读取侧给出的是 ask（档位与大分类无关）。
   // 反例：把 changeCat 那侧改回 `subDestructive[tab]`，本条即失败。
   //
   // 求值方式（本次同步）：**不再用正则锁 `(t, tier) => …e[k] || undefined` 这个两参形状**，
   // 也不锁 `warnSubMismatch` 的形参个数。改为把 `explicitSubOf` / `warnSubMismatch` / `MODE_RANK`
   // 从源码里取出、**真实求值**，再喂入各类 status 断言行为 —— 原意（只读显式配置、
-  // 不读含推导值的面板 state）钉在行为上：若有人改读 `effective`/`globalDefault` 这类**推导值**，
+  // 不读含推导值的面板 state）钉在行为上：若有人改读 `effective` 这类**推导值**，
   // 下面第 6 组夹具（显式块为 null、推导值更松）会立刻产生假警告 → 本条变红。
   //
   // 八档之后 `explicitSubOf(t, tier)` 多了一个 `tier` 形参（省略 = inside，老键 `action`）：
@@ -2744,12 +2808,15 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
         + '\nreturn { explicitSubOf: explicitSubOf, warnSubMismatch: warnSubMismatch };')(
         status, (m) => notices.push(m), (k) => k, (m) => String(m))
       // 夹具：显式配置（status.commandSub[t]，即宿主下发的 global/project 块）与**推导值**
-      // （effective / globalDefault）分开给 —— 后者更松，正是「拿显示值比较就会假警告」的场景。
+      // （`effective`）分开给 —— 后者更松，正是「拿显示值比较就会假警告」的场景。
+      // ⚠️ 曾经还塞过 `globalDefault: derived`：那个字段（按本层 mode 推导的档位缺省表）
+      // 已随「两份八档默认值规则」一起从宿主下发里**删除**，故夹具不再声明它 ——
+      // 保留一个不存在的字段会让下一个人以为它仍是契约的一部分。
+      // 判据不受影响：`effective` 仍在，且它才是面板与客户端真正会读到的推导值。
       const mkStatus = (explicit, derived) => ({
         commandSub: {
           global: explicit,
           effective: derived,
-          globalDefault: derived,
         },
       })
       const run = (explicit, derived, catMode) => {
@@ -5641,21 +5708,32 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         categories: {
           global: {
             command: { mode: 'ask', exceptions: [{ id: 'e1', action: 'deny', match: 'rm *', reason: 'r' }, { id: 'e2', action: 'allow', match: 'git *', note: 'n' }] },
-            read: { mode: 'allow', exceptions: [{ id: 'e3', action: 'ask', path: 'D:/x/*' }] },
+            // e4 是**路径侧的 allow 例外**，专门给下面「爆炸半径标注只画命令例外」那条断言用：
+            // 宿主会给它下发 exceptionBlast（见下面的 fixture），而面板不该画出来。
+            // 只有 e3（ask）时这条断言是空转的 —— 宿主对 ask 例外本来就不标注，
+            // 于是把渲染处的分类门整个删掉，标注数照样是 1，测试不会变红（实测该变异漏网）。
+            read: { mode: 'allow', exceptions: [{ id: 'e3', action: 'ask', path: 'D:/x/*' }, { id: 'e4', action: 'allow', path: 'D:/y/*' }] },
           },
           project: null,
         },
         // 爆炸半径**按层**下发：只标 e2（allow），e1 是 deny 故不标 —— 面板应只给 e2 画标注。
         // 与宿主 statusView 的形状一致（{ global: { [例外id]: {level,path} }, project: {...} }）。
         // 分层是必需的：全局块与项目块的例外 id 空间不共享，平表会让一层覆盖另一层。
-        exceptionBlast: { global: { e2: { level: 'drive-root', path: 'B:' } }, project: {} },
+        //
+        // e4 是**路径侧**的 allow 例外、且宿主**确实**给它下发了标注 —— 面板必须**不画**。
+        // 这是「标注只给命令例外」那条门的判据：fixture 里必须存在一个「宿主标了、面板不该画」
+        // 的条目，否则那道门删掉也不会有任何断言变红（只有 e3（ask）时就是这种空转）。
+        exceptionBlast: { global: { e2: { level: 'drive-root', path: 'B:' }, e4: { level: 'outside', path: 'D:/y' } }, project: {} },
         effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
         custom: { global: [{ id: 'r1', action: 'deny', tool: 'pwsh' }, { id: 'r2', action: 'allow', tool: 'git', args: 'status' }], project: [] },
         counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
         cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
         excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
-        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
+        // 推导的档位缺省表）已随「两份八档默认值规则」一起从宿主下发里**删除**。
+        // 保留它们会让下一个人以为客户端仍可能读到 —— 而客户端已改读 `effective`。
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
         doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
         fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
       }
@@ -5733,8 +5811,13 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     const hasCls = (n, cls) => !!(n.props && typeof n.props.className === 'string'
       && n.props.className.split(/\s+/).indexOf(cls) !== -1)
     const dragRows = nodes.filter((n) => hasCls(n, 'pg-row-drag'))
+    // 计数随 fixture 走，别照抄：可拖动行 = 例外条数 + 规则条数，
+    // 按钮数 = 行数 × 2（每行一对 ↑↓）。
+    //   例外：command 的 e1/e2 + read 的 e3/e4 = 4；规则：custom 的 r1/r2 = 2 → 6 行 / 12 按钮。
+    // 曾经是 5 / 10（read 只有 e3 一条）—— 给 read 补了 e4（路径侧 allow，供下面的标注断言用）
+    // 之后这两个数**必然**各 +1 / +2，不是回归。
     ok('★★ 面板渲染出排序控件：↑↓ 按钮与可拖动行都到位',
-      rErr2 === null && moveBtns.length === 10 && dragRows.length === 5,
+      rErr2 === null && moveBtns.length === 12 && dragRows.length === 6,
       JSON.stringify({ err: rErr2 && rErr2.message, move: moveBtns.length, rows: dragRows.length }))
     // 正常态的行必须带 rowStyle 的 flex（只在排序态给 style 会让行退化成裸块）
     const noFlex = dragRows.filter((n) => !n.props.style || n.props.style.display !== 'flex').length
@@ -5787,10 +5870,27 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     // ── 爆炸半径的**两处渲染**（弹窗警告条 / 面板例外列表标注）────────────────
     // 这两处此前只有源码匹配，而「写了但渲染不出来」「位置排在命令之后」都测不到。
     // 下面按渲染结果复算。
-    // ① 例外列表标注：statusFixture 里给 e2 标了 drive-root，e1（deny）没标
+    // ① 例外列表标注：statusFixture 里给 e2（command）标了 drive-root，e1（deny）没标，
+    //    e4（路径侧 allow）宿主也标了 —— 但面板**只该画命令例外那一个**。
     const blastMarks = nodes.filter((n) => n.type === 'span' && typeof (n.kids || [])[0] === 'string' && n.kids[0].indexOf('panel.excBlast') !== -1)
     ok('★★ 面板例外列表渲染出爆炸半径标注（宿主下发了 exceptionBlast）',
       blastMarks.length === 1, JSON.stringify(blastMarks.map((n) => n.kids[0])))
+    // ★★ 反向：**路径例外一律不标**（宿主下发了也不画）。
+    // 判据必须同时查「该有的有」与「不该有的没有」：只查前者时把分类门删掉也不会变红
+    // （e4 会被多画一个，而 blastMarks.length 变成 2 —— 故上面那条其实也能抓到；
+    //  但下面这条把**原因**钉死：漏的是路径侧，不是「数量算错了」）。
+    // 为什么路径侧不该标：`outside` 档对路径例外是同义反复 —— directory 例外只在
+    // outsideMatrix 里被命中（4 个调用点全在 `if (fp && isOutside(fp, root))` 内），
+    // 故「存在一条 directory 例外」⟺「它被标 outside」；而「目录访问（工作区外）」
+    // 这个分类名已经把适用范围写在标题上了，行内再标一次是同一个信息编码两遍。
+    // 另：`panel.excBlast` 的文案是「目标范围过大」，而 outside 档的含义是
+    // 「不在本项目范围内」—— 对一条指向隔壁项目的具体目录的例外，前者不成立。
+    // 判据用 title 的**文案键**分辨是哪一档：本渲染桩的 T() 返回键本身（Tstub = (k) => k），
+    // 故 title 就是 'app.blast.driveRoot' / 'app.blast.outside'，不带替换后的路径。
+    // 于是这里必须比键，不能比路径（比 'B:' 永远不命中 —— 实测该写法把正确的实现判成失败）。
+    ok('★★ 爆炸半径标注只画在**命令**例外上（路径例外宿主下发了也不画）',
+      blastMarks.length === 1 && blastMarks[0].props.title === 'app.blast.driveRoot',
+      JSON.stringify({ n: blastMarks.length, titles: blastMarks.map((n) => n.props.title) }))
     // 标注必须带完整路径与后果说明（title），否则用户只知道「范围过大」而不知道指哪里
     ok('★ 例外标注带 title（完整路径 + 后果），且用警告色区分档位',
       blastMarks.length === 1 && !!blastMarks[0].props.title && !!blastMarks[0].props.style && !!blastMarks[0].props.style.color,
@@ -5976,7 +6076,10 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         exceptionBlast: {},
-        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
+        // 推导的档位缺省表）已随「两份八档默认值规则」一起从宿主下发里**删除**。
+        // 保留它们会让下一个人以为客户端仍可能读到 —— 而客户端已改读 `effective`。
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
         doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
         fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
       }
@@ -6142,7 +6245,10 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         exceptionBlast: {},
-        commandSub: { effective: { action: 'ask' }, global: null, project: null, globalDefault: 'ask', projectDefault: 'ask', labels: [] },
+        // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
+        // 推导的档位缺省表）已随「两份八档默认值规则」一起从宿主下发里**删除**。
+        // 保留它们会让下一个人以为客户端仍可能读到 —— 而客户端已改读 `effective`。
+        commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
         doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
         fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
       }
@@ -6878,78 +6984,197 @@ group('23. 路由信任栅栏：两层结构 + 迁移一次性（防回退）')
 }
 
 // ─────────────────────────────────────────────────────────────
-group('24. 破坏性命令八档：默认值、迁移、per-tier reason（计划 blast-tier-plan.md）')
+group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
 {
-  // ⑧-1 不变量 A / B 已在 3b 组穷举（那里紧邻被重写的原断言，便于对照）。
+  // ⑧-1 不变量 A′ / B′ 已在 3b 组穷举（那里紧邻被重写的原断言，便于对照）。
   // 本组覆盖**其余**新增不变量：默认值表、存量迁移、per-tier reason、不落盘。
 
-  // ★ 56/42：默认值表 3×8（§6.1 的表，逐格断言）
-  // 这张表是本计划的核心收益所在：mode=allow 时只有 inside 跟随放行，
-  // 其余七档不松于 ask —— D-6 的意图（大范围破坏仍要问）原样保住，
-  // 保护范围只是从「所有 rm」收窄到「会出工作区的操作 + 进程/电源/提权/注册表」。
-  const fnDef = deriveTierDefaults(src)
-  ok('★ 56 默认值表可求值（destructiveTierDefaults 存在且能被调起）', !!fnDef)
-  if (fnDef) {
+  // ★ 56/42：缺省值表 3×8（逐格断言，对**真实判定链**求值）
+  //
+  // ⚠️ 期望值已按新规则改写（旧规则删除）：
+  //   旧：mode=allow → inside=allow、其余七档 ask；mode=deny → 八档全 deny。
+  //   新：`command.mode` 与档位缺省值**无关** —— 八档一律「项目显式 → 全局显式 → ask」，
+  //       故三种 mode 下都是**八档全 ask**（没有显式档位配置时）。
+  // 这张表仍是本计划的核心收益所在，只是「收益」换了形态：旧规则靠 mode 推导出
+  // 「inside 跟随放行」，新规则要求用户**显式**把 inside 档设为 allow 才放行
+  // （面板上就是「工作区内」那一档的下拉框），而缺省恒为 ask = fail-closed 方向。
+  // 「缺省不得为 allow」这条红线由 ★42 与不变量 B′ 共同钉住。
+  const chainDef = tierChainOf(src)
+  ok('★ 56 缺省值表可求值（真实判定链 destructiveTiers 存在且能被调起）', !!chainDef)
+  if (chainDef) {
     const EXPECT = {
       //          inside  outside wide   unknown proc   power  priv   reg
-      allow: ['allow', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask'],
+      allow: ['ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask'],
       ask: ['ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask'],
-      deny: ['deny', 'deny', 'deny', 'deny', 'deny', 'deny', 'deny', 'deny'],
+      deny: ['ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask', 'ask'],
     }
     const bad = []
     for (const mode of ['allow', 'ask', 'deny']) {
-      const d = fnDef(mode, false)
+      const d = chainDef({ mode: mode }, null)
       sp.TIERS.forEach((t, i) => { if (d[t] !== EXPECT[mode][i]) bad.push(mode + '/' + t + '=' + d[t] + ' want ' + EXPECT[mode][i]) })
     }
-    ok('★★ 42 默认值表 3×8 逐格正确（allow 时只有 inside 跟随，其余七档不松于 ask）',
+    ok('★★ 42 缺省值表 3×8 逐格正确（mode 与档位缺省无关；八档一律 ask）',
       bad.length === 0, JSON.stringify(bad))
-    // 项目层的 inherit 列：`inheritDefault=true` 且 mode 取不到（= 本层没表态）时
-    // 八档全 inherit（整层一起穿透全局），否则会出现「inside 穿透全局、
-    // wide 却在本层表了态」的错配。
-    // 注意 `mode` 传 `undefined`（不是 'ask'）—— 那才是「本层没有 command.mode」的真实形态。
-    const dp = fnDef(undefined, true)
-    ok('★ 42b 项目层推导：本层未表态（mode 取不到）时八档全 inherit（整层一起穿透全局）',
-      sp.TIERS.every((t) => dp[t] === 'inherit'), JSON.stringify(dp))
-    // 对照：全局层 mode 取不到时（协议异常）八档全 ask（保守回落，不是决策链的一环）
-    const dg = fnDef(undefined, false)
-    ok('★ 42c 全局层 mode 取不到时八档全 ask（协议异常的保守回落）',
-      sp.TIERS.every((t) => dg[t] === 'ask'), JSON.stringify(dg))
+    // 项目层：本层**未表态**的档继承全局的**同名档**（不是整层 inherit）。
+    // 这是新规则的核心 —— 面板上「项目未设置 = 继承全局」必须字面属实。
+    // 反例（实测变红）：把 explicitOf 的全局回落删掉 → wide 变 ask 而不是 deny。
+    const dp = chainDef({ mode: 'ask', destructive: { wide: 'deny' } },
+      { command: { mode: 'inherit', destructive: { action: 'inherit' } } })
+    ok('★ 42b 项目层未表态的档继承全局同名档（全局 wide=deny → 项目 wide 也是 deny）',
+      dp.wide === 'deny' && dp.inside === 'ask',
+      sp.TIERS.map((t) => t + '=' + dp[t]).join(' '))
+    // 对照：全局层没有 destructive 键时（协议异常 / 新装形态）八档全 ask。
+    // 这与「项目层未表态」是**两种**形态：前者无可继承对象，后者要去全局取。
+    const dg = chainDef({ mode: 'ask' }, null)
+    ok('★ 42c 全局层无 destructive 键时八档全 ask（末级兜底，不得是 inherit）',
+      sp.TIERS.every((t) => dg[t] === 'ask'), sp.TIERS.map((t) => t + '=' + dg[t]).join(' '))
   }
 
+  // ★★ 60f：per-tier 理由（`reasons[tier]`）**与裸 `reason` 共用同一套跨层次序** ──────────
+  //
+  // 缺陷原状：③ 对 per-tier 理由只读**该档动作的来源层**（`explicitOf(t).from.reasons[t]`），
+  // 跨层回落只补给了裸 `reason`。而 per-tier 理由的跨层形态**比裸 `reason` 更常见** ——
+  // 面板档位下拉框只提交 `{target, tier, action}`、不带 reason（client.js 的
+  // changeSubDestructive），只有点「编辑原因」时才带（commitSubReason）。故
+  //   全局 `{wide:'deny', reasons:{wide:'…'}}` + 项目 `{wide:'deny'}`
+  // 里 wide 的动作来源是**项目**、理由却在**全局**：只按 `from` 取得到 undefined。
+  // 裁决仍 deny（不是 fail-open），丢的是 AI 该收到的那句话 ——
+  // 而面板上那句理由照旧显示在 wide 档，「面板看得见理由、AI 收不到理由」那一族。
+  //
+  // 为什么在这里（而不是只靠 smoke）：本处直接喂**原始块**、绕开 normalizeSubSetting 的
+  // 「只在**该层该档显式 deny** 时才保留 reasons[t]」这条收敛，故能覆盖**两个方向**；
+  // smoke 只能构造出方向①（方向②在写盘侧不可达，理由见那里的注释）。
+  // 两条判据合起来才是「两种理由形态共用一份次序」的完整证据。
+  //
+  // 次序判据（缺一即为改错方向）：
+  //   ① 本层（该档动作的来源层）优先 → 两层都写时取**动作来源层**那句（两个方向各一格）；
+  //   ② 跨层回落 → 另一层写了也要拿到（两个方向各一格）；
+  //   ③ 两层都没写 → **不凭空造理由**（该档根本没有 reasons 键，不是「给了句别的」）；
+  //   ④ per-tier 理由优先于类别级裸 `reason`（更具体的那句先给），反之才回落裸 reason
+  //      —— 这是**同一层内部**的次序，不要与下面 ⑦ 的跨形态次序混为一谈；
+  //   ⑤⑥ 本层 per-tier 优先（含动作来源为全局的另一半）；
+  //   ⑦ **本层裸 `reason` 与「本层 per-tier 理由」同级优先于另一层**（本轮修复的正是这一格）；
+  // ⑧ ⑦ 的**代价格**（有意取舍，见该处注释）—— 本层裸 `reason` 压过另一层 per-tier。
+  // ⑨ `legacyReasonOf(from)` 必须保留（`from` 为全局层时它是唯一能取到全局那句的项）。
+  // `bad60f` 只是给失败时带出**逐格诊断**（哪一格、期望什么、实际什么），不是判据本身。
+  let bad60f = null
+  ok('★★ 60f per-tier 理由与裸 reason 共用同一套跨层次序（本层 → 项目 → 全局；不凭空造理由）', (function () {
+    if (!chainDef) return false
+    const bad = []
+    bad60f = bad
+    const R = (d, t) => (d.reasons ? d.reasons[t] : undefined)
+    const sub = (o) => ({ command: { mode: 'inherit', destructive: o } })
+    // ① 本层优先：两层都写了 wide 的理由 → 取**该档动作来源层**（项目）那句，不取全局那句
+    const d1 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reasons: { wide: 'G_WIDE' } } },
+      sub({ wide: 'deny', reasons: { wide: 'P_WIDE' } }))
+    if (d1.wide !== 'deny') bad.push('①动作=' + d1.wide)
+    if (R(d1, 'wide') !== 'P_WIDE') bad.push('①本层优先失效: ' + JSON.stringify(R(d1, 'wide')))
+    // ② 跨层回落（方向①：动作在项目、理由在全局）
+    const d2 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reasons: { wide: 'G_WIDE' } } },
+      sub({ wide: 'deny' }))
+    if (d2.wide !== 'deny') bad.push('②动作=' + d2.wide)
+    if (R(d2, 'wide') !== 'G_WIDE') bad.push('②跨层回落失效: ' + JSON.stringify(R(d2, 'wide')))
+    // ③ 跨层回落（方向②：动作在全局、理由在项目）—— 写盘侧不可达，但读取侧次序必须成立
+    const d3 = chainDef({ mode: 'ask', destructive: { wide: 'deny' } },
+      sub({ action: 'deny', reasons: { wide: 'P_WIDE' } }))
+    if (d3.wide !== 'deny') bad.push('③动作=' + d3.wide)
+    if (R(d3, 'wide') !== 'P_WIDE') bad.push('③跨层回落失效: ' + JSON.stringify(R(d3, 'wide')))
+    // ④ 防空转：两层都没写理由 → 该档**不得有**理由键（不是「有句别的」）
+    const d4 = chainDef({ mode: 'ask', destructive: { wide: 'deny' } }, sub({ wide: 'deny' }))
+    if (d4.wide !== 'deny') bad.push('④动作=' + d4.wide)
+    if (R(d4, 'wide') !== undefined) bad.push('④凭空造理由: ' + JSON.stringify(R(d4, 'wide')))
+    // ⑤ 反向对照：per-tier 理由**不得**压过裸 `reason` 的既有语义 —— 该档有 per-tier 时
+    //    取 per-tier（更具体的那句），没有时才回落到类别级的裸 reason。两处次序都要成立。
+    const d5 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reason: 'G_BARE', reasons: { wide: 'G_WIDE' } } }, null)
+    if (R(d5, 'wide') !== 'G_WIDE') bad.push('⑤per-tier 未压过裸reason: ' + JSON.stringify(R(d5, 'wide')))
+    const d6 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reason: 'G_BARE' } }, null)
+    if (R(d6, 'wide') !== 'G_BARE') bad.push('⑤裸reason回落失效: ' + JSON.stringify(R(d6, 'wide')))
+    // ⑥ 「本层优先」的**另一方向**：该档动作来自**全局**（项目那档是 inherit）而两层都写了
+    //    reasons.wide 时，必须取**动作来源层**（全局）那句 —— 这一格才真正钉住
+    //    「先读动作来源层、再跨层回落」这条次序：把跨层项提到前面（等价于「另一层优先」）
+    //    时它当场变红。①只覆盖了动作在项目的那一半。
+    const d7 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reasons: { wide: 'G_WIDE' } } },
+      sub({ action: 'inherit', wide: 'inherit', reasons: { wide: 'P_WIDE' } }))
+    if (d7.wide !== 'deny') bad.push('⑥动作=' + d7.wide + '(应为全局 deny)')
+    if (R(d7, 'wide') !== 'G_WIDE') bad.push('⑥动作来源层未优先: ' + JSON.stringify(R(d7, 'wide')))
+    // ⑦ ★★ 本层**裸 `reason`** 必须与「本层 per-tier 理由」**同级**优先于另一层 ────────────
+    //
+    // 缺陷原状（本轮修复）：③ 的 `||` 链曾把 per-tier 的两项跨层回落**插在本层裸 `reason`
+    // 之前**（`本层 per-tier → 项目 per-tier → 全局 per-tier → 本层裸 → …`），于是「本层有理由」
+    // 时仍可能取**另一层**的 per-tier 理由 —— 与本条 ① 的注释自称的次序（本层 → 项目 → 全局）
+    // **自相矛盾**，且相对更早版本是行为回归。上面 ①⑥ 只覆盖了「per-tier 对本层 per-tier」，
+    // **测不到**「本层裸 reason 对另一层 per-tier」这一族 —— 缺的正是这一格，故单独钉住。
+    //
+    // F1 格（面板下拉框 inside 档「编辑原因」写盘的真实形状：`setCommandSub` 对 inside 档
+    // 同时写 `reasons.inside` 与裸 `reason`；项目层那条是老配置只写过裸 `reason`）：
+    //   全局 `{action:'deny', reason:'G2', reasons:{inside:'G2'}}` + 项目 `{action:'deny', reason:'P'}`
+    // inside 档动作来源 = **项目**，项目层确实写着理由 `P` → 必须带回 `P`。
+    // 旧次序取到 `rt(gSub,'inside')` = `G2` —— 而面板项目 tab 那一行
+    // （`explicitReasonsOf(pSub)`）显示的是 `P`，即「面板显示 P、AI 收到 G2」那族分叉。
+    // 反向验证（实测）：把次序改回 `normalizeText(r) || rt(pSub,t) || rt(gSub,t) || legacyReasonOf(from) || …`
+    // → 本格得到 'G2'，本条红灯。
+    const d8 = chainDef({ mode: 'ask', destructive: { action: 'deny', reason: 'G2', reasons: { inside: 'G2' } } },
+      sub({ action: 'deny', reason: 'P' }))
+    if (d8.inside !== 'deny') bad.push('⑦动作=' + d8.inside)
+    if (R(d8, 'inside') !== 'P') bad.push('⑦本层裸reason未压过另一层per-tier: ' + JSON.stringify(R(d8, 'inside')))
+    // ⑧ ⚠️ **有意取舍的反向格**（按本条次序做的取舍，不是疏漏；钉住防「顺手改回去」）─────────
+    //   全局 `{wide:'deny', reasons:{wide:'RW'}}` + 项目 `{wide:'deny', reason:'B'}`
+    // wide 档动作来源 = **项目**。旧次序给 `RW`（全局那份 per-tier），新次序给 `B`
+    // （项目层那句**裸** `reason`）—— 即「本层**裸** reason 压过另一层 per-tier」。
+    // 代价：AI 收到的是项目层 inside 档那句 `B`，而面板 wide 行看不见 `B`
+    // （`B` 归 inside 档、`RW` 显示在全局 tab）= 用「另一处的面板分叉」换掉了 ⑦ 那处。
+    // 取舍依据是**次序自洽**（「本层优先」对两种理由形态一视同仁），两处都恒为 deny（非 fail-open）。
+    // 断言写成 `B` 就是把这个取舍**固定下来**：谁若把次序改回「per-tier 全排在裸 reason 之前」，
+    // 本格当场变红并指向这里 —— 那时必须**同时**说明 ⑦ 那处分叉为何可接受，不得只改一格。
+    const d9 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reasons: { wide: 'RW' } } },
+      sub({ wide: 'deny', reason: 'B' }))
+    if (d9.wide !== 'deny') bad.push('⑧动作=' + d9.wide)
+    if (R(d9, 'wide') !== 'B') bad.push('⑧本层裸reason优先（有意取舍格）: ' + JSON.stringify(R(d9, 'wide')))
+    // ⑨ ⚠️ `legacyReasonOf(from)` **不是冗余项，不得删** ───────────────────────────────
+    // 它排在 `legacyReasonOf(pSub)` **之前**，而 `from` 可以是**全局**层 —— 此时若没有它，
+    // 项目层那句**别的**类别级理由会抢先。这一格专门钉住它（删掉即红灯）：
+    //   全局 `{wide:'deny', reason:'GB'}` + 项目 `{action:'deny', reason:'PB'}`
+    // wide 档动作来源 = **全局**，全局写着 `GB` → 必须得 `GB`（不是项目层那句 `PB`）。
+    // 实测（反例）：把 `legacyReasonOf(from)` 从链里删掉 → 本格退化为 `PB`，本条红灯。
+    // 之所以单独列：它是「删了也全绿」的那类项（其余用例的语料恰好缺这一格），
+    // 故必须**显式**有一条只靠它才能过的断言，否则日后会被当成等价冗余删掉。
+    const d10 = chainDef({ mode: 'ask', destructive: { wide: 'deny', reason: 'GB' } },
+      sub({ action: 'deny', reason: 'PB' }))
+    if (d10.wide !== 'deny') bad.push('⑨动作=' + d10.wide)
+    if (R(d10, 'wide') !== 'GB') bad.push('⑨本层(全局)裸reason未优先于另一层裸reason: ' + JSON.stringify(R(d10, 'wide')))
+    return bad.length === 0
+  })(), JSON.stringify(bad60f))
+
   // ★ 43/58：迁移 —— 存量 `destructive: {action: X}` 的四条（X 即 inside 档）
-  // 判据是 §6.2 那条规则：七档缺省 = strictest(ask, inside)。
-  // **关键**：存量 `deny` + mode=allow 的用户必须仍是全 deny —— 若让七档各自
-  // 「跟随 mode」，`rm -rf /` 会由 deny 变 ask，把用户显式写下的「全拒」放松。
+  // 判据是「八档一律：项目显式 → 全局显式 → ask」——**不是** mode 推导。
+  //
+  // ⚠️ 这里曾有另一条判据（§6.2②「七档缺省 = strictest(ask, inside)」，理由是
+  // 「存量 deny + mode=allow 必须仍是全 deny」）。那套规则**已按用户要求删除**
+  // （依据 .plan/blast-tier-design.md：八档平级、不考虑旧配置迁移兼容）。
+  // 删除的直接后果：存量「全拒」配置升级后，只有 inside 档保住 deny，其余七档由
+  // deny 变 ask（弹窗询问）。**方向是 fail-closed**（ask 一定拦得住，不存在静默放行），
+  // 且弹窗本身带破坏性标注 —— 用户明确接受（见设计文档 §56-60）。
   //
   // ── 本条为什么重写（旧版**恒真**，净鉴别力 = 0）──────────────────────────────
-  // 旧版把这条规则**第三次手抄**成局部 lambda（另两份在 index.js 的
-  // `destructiveTierDefaults` 与 `destructiveTiers` 里，即那两个 `rest` / `restDefault`
-  // 三元表达式；此处不写行号 —— 跨文件行号随实现漂移，函数名才是稳定锚点），
-  // 而四个比较的**左右两侧全部来自那个 lambda**：
-  //     const rest = (X) => (X === 'deny' ? 'deny' : 'ask')
-  //     rest('deny') === 'deny' && rest('ask') === 'ask' && ...
-  // 它复算的是它自己，对生产实现零鉴别力 —— 实测把生产函数换成「七档全 allow」的
-  // 坏实现，整条表达式照样 true。同段 `st` 的形参 X 还被完全忽略（恒以 'allow' 调
-  // fnDef），`!!st('allow')` 只等价于「fnDef != null」，而那一半已被上面的
-  // 「★ 56 默认值表可求值」覆盖。于是它挂着 ★★ 却守不住 §6.2② 点名的
-  // 「本规则存在的唯一理由」：存量 `{action:'deny'}` + mode=allow 必须**七档全 deny**。
+  // 旧版把这条规则**第三次手抄**成局部 lambda，而四个比较的**左右两侧全部来自那个
+  // lambda**（`rest('deny') === 'deny' && ...`）—— 它复算的是它自己，对生产实现零鉴别力。
+  // 实测把生产函数换成「七档全 allow」的坏实现，整条表达式照样 true。
   //
-  // 改为**注入生产实现**：把 `keyOfTier` + `destructiveTierDefaults` + `destructiveTiers`
+  // 改为**注入生产实现**：把 `keyOfTier` + `destructiveTiers` + `legacyReasonOf`
   // 三段源码原样抠出、在一个 `new Function` 里真实求值，断言全部落在
   // **生产函数的返回值**上 ——「抄一份口径」这条路被移除，规则只有在生产实现里成立才算通过。
   //
+  // ⚠️ `destructiveTierDefaults`（第三个实现）已随旧规则整体删除，**不再注入**：
+  // 它是「两份八档默认值规则并存」的那一份，本次一并清掉。
+  //
   // 注入的自由变量（按各段源码的实际引用列出，缺一个就是 ReferenceError）：
-  //   · projectBlock —— 返回 null（本组只走全局层；项目层由 42b/58 覆盖）
-  //   · config       —— `{ global: { command: { mode:'allow', destructive:{action:X} } } }`
-  //   · MODE_STRICTNESS / MODES —— `destructiveTierDefaults` 第一行就引用 MODES；
-  //     两者的值按本文件既有的「不从源码抠」纪律写死（常量被改坏时测试不跟着坏）
+  //   · projectBlock —— 默认返回 null（只走全局层）；项目层用例显式传
+  //   · config       —— `{ global: { command: globalCommand } }`
   //   · TIERS —— 取 shell-parse 的真实导出（档位清单只有一份）
-  //   · normalizeText —— `destructiveTiers` ③ 分支用（X=deny 时会被调到）
-  //   · legacyReasonOf —— 同上，③ 分支回落存量裸 `reason` 用的读取单点
-  //     （它只包一层 normalizeText，故与 normalizeText 一起注入；**不抄一份口径**：
-  //      源码原样抠出，改坏了下面「存量 reason 摊到每一档」那条断言就红）
-  // 反例（实测变红）：把 ② 分支的缺省基准改成 'allow'（七档跟随 mode 的变体），
-  // 下面第 ① 条立刻失败 —— 这正是旧版放过去的那种坏实现。
+  //   · keyOfTier —— 档位名 → 存储键的映射单点（源码原样抠出）
+  //   · normalizeText / legacyReasonOf —— `destructiveTiers` 的 reasons 分支用
+  //     （源码原样抠出，不抄口径：改坏了「存量 reason 摊到每一档」那条断言就红）
+  // 反例（实测变红）：把末级兜底改成 'allow'，下面第 ④ 条立刻失败。
   {
     // 从 marker 处切出一条完整语句（跳过注释与字符串字面量里的花括号）。
     const cutStmt = (source, marker) => {
@@ -6977,25 +7202,43 @@ group('24. 破坏性命令八档：默认值、迁移、per-tier reason（计划
     }
     // keyOfTier 是**单行**箭头函数（无花括号），cutStmt 的花括号配平不适用 —— 按行取。
     const keyStmt = (src.match(/const keyOfTier = [^\n]*/) || [''])[0]
-    const defStmt = cutStmt(src, 'function destructiveTierDefaults(mode, inheritDefault) {')
     const tiersStmt = cutStmt(src, 'function destructiveTiers(root) {')
     const legacyStmt = cutStmt(src, 'function legacyReasonOf(sub) {')
-    ok('★★ 43 存量迁移规则可对生产实现求值（keyOfTier / destructiveTierDefaults / destructiveTiers / legacyReasonOf 四段齐备）',
-      !!(keyStmt && defStmt && tiersStmt && legacyStmt),
-      JSON.stringify({ key: !!keyStmt, def: !!defStmt, tiers: !!tiersStmt, legacy: !!legacyStmt }))
-    if (keyStmt && defStmt && tiersStmt && legacyStmt) {
+    ok('★★ 43 存量迁移规则可对生产实现求值（keyOfTier / destructiveTiers / legacyReasonOf 三段齐备）',
+      !!(keyStmt && tiersStmt && legacyStmt),
+      JSON.stringify({ key: !!keyStmt, tiers: !!tiersStmt, legacy: !!legacyStmt }))
+    if (keyStmt && tiersStmt && legacyStmt) {
       // globalCommand：global.command 的内容；project：项目块（默认无 → 只走全局层）
-      const tiersOf = (globalCommand, project) => new Function(
-        'projectBlock', 'config', 'MODE_STRICTNESS', 'TIERS', 'MODES', 'normalizeText',
-        [keyStmt, defStmt, legacyStmt, tiersStmt, 'return { destructiveTiers: destructiveTiers };'].join('\n')
-      )(
-        () => project || null,
-        { global: { command: globalCommand } },
-        { allow: 0, ask: 1, deny: 2 },
-        SP_TIERS,
-        ['ask', 'allow', 'deny'],
-        (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)
-      ).destructiveTiers('X:/ws')
+      // ⚠️ `keyOfTier` **不作为参数注入**：`keyStmt` 本身就是它的 `const` 声明，
+      // 再注入一个同名形参会撞成 `SyntaxError: Identifier 'keyOfTier' has already been declared`
+      // （实测踩过）。`legacyReasonOf` 是函数声明，与形参同名只会覆盖绑定、不报错，
+      // 但同样没必要注入 —— 两者都由源码原样提供，才是「不抄一份口径」。
+      // ⚠️ 与 `keyFn`（本文件 B′ 那处）同款自检，理由同：三段源码是**正则/花括号配平**抠出来的，
+      // 生产实现里任何一行改动（例如给 `destructiveTiers` 加一句引用模块级常量的语句）都可能让
+      // 注入的自由变量缺一个 → 调用时 `ReferenceError`，整轮套件**当场崩掉**（连 FAIL 清单都没有，
+      // 且 `&&` 链会阻断后两个套件）。实测：给 `destructiveTiers` 加一行 `void MODES.length`
+      // （语义完全不变的合法改动）→ `ReferenceError: MODES is not defined`，其后 26 条顶层 ok() 不执行。
+      // 这里把「求值失败」降级为 `tiersOf = null`，由下面的断言报红（有清单、不崩、后续断言继续跑）。
+      // 不要把它误当成「抽取不到就跳过」——`tiersOf=null` 会让 ①-⑦ 全部失败，红得比崩溃更明确。
+      let tiersOf = null
+      try {
+        tiersOf = (globalCommand, project) => new Function(
+          'projectBlock', 'config', 'TIERS', 'normalizeText',
+          [keyStmt, legacyStmt, tiersStmt, 'return { destructiveTiers: destructiveTiers };'].join('\n')
+        )(
+          () => project || null,
+          { global: { command: globalCommand } },
+          SP_TIERS,
+          (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)
+        ).destructiveTiers('X:/ws')
+        // 先自检一次：`new Function` 构造期只报语法错，引用未注入的标识符要**调用时**才炸
+        tiersOf({ mode: 'allow' }, null)
+      } catch (e) { tiersOf = null }
+      ok('★ 43 存量迁移规则可对生产实现求值（三段源码注入成功且首次调用无 ReferenceError）',
+        !!tiersOf)
+      // 抽取/求值失败时**退化为空表**（不是跳过）：下面 ①-⑦ 逐条报红、有 FAIL 清单、不崩、
+      // 后续断言继续跑。空表 `{}` 让每条判据都拿 `undefined` 去比，必然失败 —— 正是想要的结果。
+      if (!tiersOf) tiersOf = () => ({})
       // 存量形态：mode=allow + `destructive:{action:X}`（老配置只写过 action 一个键）
       const legacy = (X) => {
         const c = { mode: 'allow' }
@@ -7004,50 +7247,105 @@ group('24. 破坏性命令八档：默认值、迁移、per-tier reason（计划
       }
       const show = (d) => SP_TIERS.map((t) => t + '=' + d[t]).join(' ')
       const rest = (d) => SP_TIERS.filter((t) => t !== 'inside').every((t) => d[t] === 'ask')
-      // ① ★★ 本规则存在的唯一理由（§6.2②）：存量「全拒」不得被放松
+      // ── 期望值已按新规则改写（旧 §6.2② 规则删除）────────────────────────────────
+      // 旧规则：七档缺省 = strictest(ask, inside 生效值)，故 `{action:'deny'}` 会摊成
+      // **八档全 deny**（保住存量「全拒」）。
+      // 新规则（用户指定，忽略旧配置迁移兼容）：八档一律「项目显式 → 全局显式 → ask」，
+      // 于是 `{action:'deny'}` 只让 **inside 一档** 变 deny，其余七档落 ask。
+      //
+      // ⚠️ 这是一处**有意的行为变化**，不是回归：存量「全拒」配置升级后，`rm -rf C:/Windows`
+      // 会由 deny 变 ask（弹窗询问，弹窗里带完整的破坏性标注）。用户明确接受，
+      // 理由：弹窗本身就是发现入口，看到后会去设置里逐档调。
+      // 故下面 ① 的断言从「八档全 deny」改为「**只有 inside 是 deny**」——
+      // 方向必须钉住，否则「七档也变 deny」的旧实现会静默复活。
+      // ① 存量 `action:'deny'` 只影响 inside 档（其余七档不再被摊派）
       const dDeny = legacy('deny')
-      ok('★★ 43 存量 deny + mode=allow → 八档全 deny（§6.2②：本规则存在的唯一理由）',
-        SP_TIERS.every((t) => dDeny[t] === 'deny'), show(dDeny))
-      // ② 存量 allow → inside=allow，其余七档 ask（唯一变化，方向是收紧）
+      ok('★★ 43 存量 action=deny + mode=allow → 仅 inside=deny，其余七档 ask（八档同构继承，不再按 mode 摊派）',
+        dDeny.inside === 'deny' && rest(dDeny), show(dDeny))
+      // ② 存量 allow → inside=allow，其余七档 ask
       const dAllow = legacy('allow')
-      ok('★★ 43 存量 allow + mode=allow → inside=allow、其余七档 ask（唯一变化，方向是收紧）',
+      ok('★★ 43 存量 allow + mode=allow → inside=allow、其余七档 ask',
         dAllow.inside === 'allow' && rest(dAllow), show(dAllow))
       // ③ 存量 ask → 八档全 ask
       const dAsk = legacy('ask')
       ok('★ 43 存量 ask + mode=allow → 八档全 ask', SP_TIERS.every((t) => dAsk[t] === 'ask'), show(dAsk))
-      // ④ 无 destructive 键 + mode=allow → 与 ② 同列（新装用户的推导路径）
+      // ④ 无 destructive 键 + mode=allow → **八档全 ask**（新规则下不再由 mode 推出 inside=allow）
+      //
+      // ⚠️ 与旧版相反：旧规则说 inside=allow（按 mode 推导），新规则说 ask
+      // （全局没有 destructive 键 → 八档都落末级兜底）。
+      // 这条正是「忽略旧配置迁移兼容」的直接后果，必须显式钉住 ——
+      // 它同时证明了「末级兜底是 ask 而不是 inherit」（inherit 会让
+      // `strictestTierAction` 跳过该档 → 静默落大分类，fail-open）。
       const dNone = legacy(undefined)
-      ok('★ 43 无 destructive 键 + mode=allow → inside=allow、其余七档 ask（新装推导路径）',
-        dNone.inside === 'allow' && rest(dNone), show(dNone))
-      // ⑤ 逐档显式值必须优先于 ② 的缺省 —— 防「② 无条件覆盖所有档」的坏实现
+      ok('★★ 43 无 destructive 键 + mode=allow → 八档全 ask（末级兜底，不得是 inherit）',
+        SP_TIERS.every((t) => dNone[t] === 'ask'), show(dNone))
+      // ⑤ 逐档显式值必须优先于缺省 —— 防「缺省无条件覆盖所有档」的坏实现
       const dMix = tiersOf({ mode: 'allow', destructive: { action: 'allow', wide: 'deny' } })
-      ok('★ 43 逐档显式值优先于 strictest 缺省（② 只在缺省时生效，不覆盖用户表态）',
+      ok('★ 43 逐档显式值优先于缺省（缺省只在未表态时生效，不覆盖用户表态）',
         dMix.inside === 'allow' && dMix.wide === 'deny' && dMix.reg === 'ask', show(dMix))
+      // ⑥ 新增：**项目层未表态的档继承全局同名档**（新规则的核心，旧版没有这条）
+      //    这是「面板显示继承全局」必须字面属实的判据：显示 inherit 就得真去取全局。
+      //    反例（实测变红）：把 explicitOf 的全局回落删掉 → wide 变 ask 而不是 deny。
+      const dInherit = tiersOf({ mode: 'ask', destructive: { wide: 'deny' } },
+        { command: { mode: 'inherit', destructive: { action: 'inherit' } } })
+      ok('★★ 43 项目层未表态的档继承全局**同名档**（wide: 全局 deny → 项目也是 deny）',
+        dInherit.wide === 'deny' && dInherit.inside === 'ask',
+        show(dInherit))
+      // ⑦ 新增：项目层显式值**覆盖**全局同名档（两个方向都要，否则「继承」会变成「全局压项目」）
+      //    注意 tiersOf 的形参序是 **(globalCommand, project)** —— 上面 ⑥ 与这里都按此序传。
+      const dOverride = tiersOf({ mode: 'ask', destructive: { wide: 'deny' } },
+        { command: { mode: 'inherit', destructive: { wide: 'allow' } } })
+      ok('★★ 43 项目层显式档覆盖全局同名档（wide: 项目 allow 压过全局 deny）',
+        dOverride.wide === 'allow', show(dOverride))
+      // ⑦b 反方向：项目 deny 压过全局 allow（防止「取更严」之类的错误实现顶掉显式值）
+      const dOverride2 = tiersOf({ mode: 'ask', destructive: { wide: 'allow' } },
+        { command: { mode: 'inherit', destructive: { wide: 'deny' } } })
+      ok('★★ 43 项目层显式档覆盖全局同名档（反方向：项目 deny 压过全局 allow）',
+        dOverride2.wide === 'deny', show(dOverride2))
     }
   }
 
   // ★ 58：migrateOld 路径（老 off/permissive/locked 格式，**没有** destructive 键）
   // 现有迁移用例（测试 43 那一类）只覆盖「有 destructive 键」的四条，**测不到这一类** ——
   // 而这一类正是「升级后行为悄悄变化」的高发区。
-  // 期望（§6.2③）：off/permissive → inside=allow、七档=ask；locked → 八档全 deny。
+  //
+  // ── 期望已按新规则改写（旧规则删除）────────────────────────────────────────────
+  // 旧期望（§6.2③）：off/permissive → inside=allow、七档=ask；locked → **八档全 deny**。
+  // 新规则：migrateOld **不物化** destructive（见 58c），故升级后 `global.command` 里
+  // 只有 `mode`、没有 `destructive` 键 ⇒ 判定链八档一律落末级兜底 **ask**，
+  // 与大分类 mode 无关。三种老格式**全是 ask**。
+  //
+  // ⚠️ 这是一处**有意的行为变化**，不是回归：老 `locked` 预设升级后，破坏性命令由
+  // 「直接拒绝」变「弹窗询问」。方向仍 fail-closed（ask 一定拦得住，不存在静默放行）。
+  // 用户明确接受（依据 .plan/blast-tier-design.md §54/§56-60：不考虑旧配置迁移兼容，
+  // 且文档明确否定「子设置默认值不得宽于本层 mode」）。
+  //
+  // ⚠️ 本条求值的是**真实判定链**（`tierChainOf` → `destructiveTiers`），不是某个
+  // 已下线的推导函数 —— 后者正是本分叉此前「两份测试都通过」的原因。
   {
+    // migrateOld 的映射：`{ off:'allow', permissive:'allow', locked:'deny' }` → 本层 mode
     const EXPECT_OLD = { off: 'allow', permissive: 'allow', locked: 'deny' }
     const bad = []
     for (const oldMode of ['off', 'permissive', 'locked']) {
-      // migrateOld 的映射：`{ off:'allow', permissive:'allow', locked:'deny' }` → 本层 mode
       const mapped = EXPECT_OLD[oldMode]
-      const d = fnDef ? fnDef(mapped, false) : null
+      // 迁移产物形态：只有 mode、没有 destructive 键（58c 保证不物化）
+      const d = chainDef ? chainDef({ mode: mapped }, null) : null
       if (!d) { bad.push(oldMode + '(不可求值)'); continue }
-      const wantInside = oldMode === 'locked' ? 'deny' : 'allow'
-      const wantRest = oldMode === 'locked' ? 'deny' : 'ask'
-      if (d.inside !== wantInside) bad.push(oldMode + '.inside=' + d.inside + ' want ' + wantInside)
+      // 八档**全部**是 ask（含 inside）——「与大分类 mode 无关」是这条的判据本体
       for (const t of sp.TIERS) {
-        if (t === 'inside') continue
-        if (d[t] !== wantRest) bad.push(oldMode + '.' + t + '=' + d[t] + ' want ' + wantRest)
+        if (d[t] !== 'ask') bad.push(oldMode + '(' + mapped + ').' + t + '=' + d[t] + ' want ask')
       }
     }
-    ok('★★ 58 migrateOld 路径：off/permissive → inside=allow、七档=ask；locked → 八档全 deny',
+    ok('★★ 58 migrateOld 路径：off/permissive/locked 三种老格式升级后八档全 ask（不再按 mode 推导为 deny）',
       bad.length === 0, JSON.stringify(bad))
+    // 防空转 + 反向：**必须**真的与 mode 无关 —— 上一条若被改成「恒 ask 的实现」也能通过，
+    // 故这里显式对照「同一份产物形态在三种 mode 下逐格同值」，并反查旧行为不会复活：
+    // 旧规则下 `locked`（mode=deny）会给出八档全 deny，这一格必须**不再**出现。
+    const perMode = ['allow', 'ask', 'deny'].map((m) => sp.TIERS.map((t) => (chainDef ? chainDef({ mode: m }, null)[t] : null)).join(','))
+    ok('★★ 58 老格式升级后的八档取值与 mode 完全无关（三种 mode 逐格同值，且不含旧规则的 deny 表）',
+      !!chainDef && perMode[0] === perMode[1] && perMode[1] === perMode[2]
+      && perMode[0] === sp.TIERS.map(() => 'ask').join(','),
+      JSON.stringify(perMode))
   }
   // ★ 58b：migrateOld 的项目层三分支（显式 off→allow、显式 locked→deny、未显式→inherit 穿透）
   // 结构断言：`explicitMode` 必须真的区分「显式配置过」与「缺省」——两者都走同一分支时
@@ -7568,33 +7866,44 @@ group('24. 破坏性命令八档：默认值、迁移、per-tier reason（计划
     const A3 = mk(hostOf(ASK_ALL, Object.assign({}, ASK_ALL, { wide: 'deny' }), null, { wide: 'deny' }))
     if (!A3 || A3.subNext.project.wide !== 'deny') return false
     // ── B 全局层**显式**配置必须正常显示（防空转对照：修复不得把全局 tab 变成恒 ask）──
-    //    全局显式 `wide:'deny'` → 两个 tab 都必须是 deny（显式值优先级最高）。
+    //    全局显式 `wide:'deny'` → 全局 tab 必须是 deny（显式值优先级最高）。
+    //
+    //    ⚠️ 项目 tab 的期望**已按新规则改写**：项目层未显式配置该档时显示 `inherit`
+    //    （继承全局），而不是旧规则下的「回填生效值 deny」。八档现在与面板其余各处
+    //    （分类默认值 / 快捷工具 / 兜底）同构 —— 项目 tab 未表态即 inherit。
     const B = mk(hostOf(Object.assign({}, ASK_ALL, { wide: 'deny' }), Object.assign({}, ASK_ALL, { wide: 'deny' }), { wide: 'deny' }, null, { wide: '全局不许删' }))
     if (!B) return false
     if (B.subNext.global.wide !== 'deny') return false
-    if (B.subNext.project.wide !== 'deny') return false
-    // ── C 存量形态：全局 `{action:'deny'}` + mode=allow（全局层单独生效值是**八档全 deny**）──
-    //    期望：全局 tab 八档全 deny。**这一条同时钉死「不得回落 globalDefault」**：
-    //    globalDefault 按本层 mode 推导 → inside=allow、其余七档=ask，用它回填会让
-    //    全局 tab 显示「允许 1 · 询问 7」而实际裁决八档全拒（面板说谎换个形态再来一遍）。
+    if (B.subNext.project.wide !== 'inherit') return false
+    // ── C 存量形态：全局 `{action:'deny'}`（全局层单独生效值 = inside=deny、其余七档 ask）──
+    //    期望：全局 tab 逐档等于宿主下发的 `globalEffectiveProbe`（八档同值），
+    //    而不是「按本层 mode 推导」的那张表 —— 后者会让 inside 显示成 allow、其余七档 ask
+    //    （「允许 1 · 询问 7」），与实际裁决不一致 = 面板说谎。
+    //    ⚠️ 那张「按 mode 推导」的表（`globalDefault` 字段）已随「两份八档默认值规则」
+    //    一起从宿主下发里**删除**，故客户端现在**没有**可回落的第二来源；
+    //    下面仍保留 `inside !== 'allow'` 这条反查，作为「不得按 mode 推导」的显式防线 ——
+    //    若有人日后重新引入一条按 mode 算档位的回落路径，这一格立刻红灯。
     const legacyProbe = all('deny')
     const C = mk(hostOf(legacyProbe, legacyProbe, { action: 'deny' }, null, null, null))
     if (!C) return false
     for (const t of TIERS_L) if (C.subNext.global[t] !== 'deny') return false
-    // 且 globalDefault 若被当成来源，`inside` 会是 allow —— 显式反查一次，失败信息可读
+    // 反查：按 mode 推导的表会把 inside 算成 allow —— 不得出现
     if (C.subNext.global.inside === 'allow') return false
-    // ── D 全局未配置 + 项目 `inside:'deny'`（七档被 strictest 推成 deny）─────
-    //    期望：全局 tab 仍是 ask（项目层把八档全推 deny 也不得污染全局 tab）
-    const projDeny = all('deny')
-    const D = mk(hostOf(ASK_ALL, projDeny, null, { action: 'deny' }))
+    // ── D 全局未配置 + 项目 `inside:'deny'` ─────────────────────────────────
+    //    期望：全局 tab 仍是 ask（项目层显式值不得污染全局 tab）
+    //    项目 tab：inside 是项目**显式**的 deny；其余七档项目未表态 → `inherit`
+    //    （新规则：不再被旧规则的 strictest 推成 deny）。
+    const D = mk(hostOf(ASK_ALL, all('deny'), null, { action: 'deny' }))
     if (!D) return false
     if (D.subNext.global.wide !== 'ask' || D.subNext.global.inside !== 'ask') return false
-    if (D.subNext.project.inside !== 'deny' || D.subNext.project.wide !== 'deny') return false
+    if (D.subNext.project.inside !== 'deny' || D.subNext.project.wide !== 'inherit') return false
     // ── E 逐档独立：全局显式 wide=deny、项目显式 reg=deny（两层各管各的）──────
+    //    项目 tab：reg 是项目显式 → deny；wide 项目未表态 → inherit（**不是**全局的 deny：
+    //    显示 inherit 才是「继承全局」的准确陈述，显示 deny 会让用户以为项目自己设过）。
     const E = mk(hostOf(Object.assign({}, ASK_ALL, { wide: 'deny' }), Object.assign({}, ASK_ALL, { wide: 'deny', reg: 'deny' }), { wide: 'deny' }, { reg: 'deny' }))
     if (!E) return false
     if (E.subNext.global.wide !== 'deny' || E.subNext.global.reg !== 'ask') return false
-    if (E.subNext.project.wide !== 'deny' || E.subNext.project.reg !== 'deny') return false
+    if (E.subNext.project.wide !== 'inherit' || E.subNext.project.reg !== 'deny') return false
     // ── F 协议异常兜底：宿主没下发 globalEffectiveProbe 时，全局 tab 回落到
     //    ask（全局层没有「继承」这一态），**不得**静默改读 effective 而拿到项目值。
     const F = mk({ tiers: TIERS_L, effective: Object.assign({}, ASK_ALL, { wide: 'deny' }), global: null, project: { wide: 'deny' } })

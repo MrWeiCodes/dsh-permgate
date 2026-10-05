@@ -2101,10 +2101,19 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   await Promise.race([p2, new Promise((r) => setTimeout(r, 300))])
   ok('★ group20: 老配置下工作区外的破坏性命令也不静默放行', nexted2 === false)
 
-  // ★★ group20b：显式收紧的 command=deny 不得被子设置默认值放松
-  // 背景：子设置优先于大分类（D-6，收紧方向的核心修复），但同一条规则在**放松方向**也生效时，
-  // 默认 ask 会把用户显式设的 deny 降级为弹窗（一次误点即放行），该分类配的 deny reason 也不再下发。
-  // 反例：destructiveDefaultOf 写回恒 'ask'，本组即失败。
+  // ★★ group20b：八档取值 = 项目显式 → 全局显式 → ask（**不再按大分类 mode 推导**）
+  //
+  // ── 期望已按用户指定的新规则改写 ───────────────────────────────────────────────
+  // 旧规则：`command=deny` + 无 destructive 键 → 八档按本层 mode 推导为 **deny**
+  //   （本条原名「显式收紧的 command=deny 不得被子设置默认值放松」，是 §6.2② 的核心断言）。
+  // 新规则（用户指定，忽略旧配置迁移兼容）：八档一律「项目显式 → 全局显式 → ask」。
+  //   → `command=deny` + 无 destructive 键 ⇒ 八档全 **ask**，破坏性命令**弹窗询问**。
+  //
+  // ⚠️ 这是**有意的行为变化**，不是回归：用户明确接受「大分类设拒绝时破坏性命令改为弹窗」，
+  // 理由：弹窗里带完整的破坏性标注（argLines[].note）与爆炸半径警告条，
+  // 用户看到后会去设置里逐档调 —— 弹窗本身就是发现入口。
+  // 方向仍是 fail-closed（ask 一定拦得住，不存在静默放行），故下面同时断言「没有 next」。
+  // 反例（实测变红）：把八档末级兜底改回按 mode 推导，本条即失败。
   const ws3 = mkdtempSync(join(tmpdir(), 'pg-seg3-ws-'))
   const home3 = mkdtempSync(join(tmpdir(), 'pg-seg3-home-'))
   mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
@@ -2114,17 +2123,18 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   const h3 = createHost({ workspaceRoot: ws3, dshHome: home3 })
   const st3 = await callRoute(h3.routes, 'GET', '/permgate/status')
   const cs3 = st3.data && st3.data.commandSub
-  ok('★★ group20b: 全局 command=deny + 无 destructive 键 → 子设置迁移为 deny（不放松）',
-    !!(cs3 && cs3.effective && cs3.effective.inside === 'deny' && cs3.effective.wide === 'deny'
-      && cs3.effective.proc === 'deny' && cs3.effective.priv === 'deny'), JSON.stringify(cs3 && cs3.effective))
-  // 运行时：破坏性命令必须直接 deny（而不是弹窗）
+  ok('★★ group20b: 全局 command=deny + 无 destructive 键 → 八档全 ask（八档同构继承，不再按 mode 推导）',
+    !!(cs3 && cs3.effective && cs3.effective.inside === 'ask' && cs3.effective.wide === 'ask'
+      && cs3.effective.proc === 'ask' && cs3.effective.priv === 'ask'), JSON.stringify(cs3 && cs3.effective))
+  // 运行时：破坏性命令必须**弹窗询问**（而不是直接 deny）—— 但**绝不能静默放行**
   let denyOut3 = null
+  let nexted3b = false
   const pre3 = h3.hooks.get('tools/pre-execute')
-  const p3 = pre3(makeExec(ws3, 'bash', { command: 'rm -rf x' }), async () => ({ kind: 'allow' }))
+  const p3 = pre3(makeExec(ws3, 'bash', { command: 'rm -rf x' }), async () => { nexted3b = true; return { kind: 'allow' } })
   p3.catch(() => {})
   denyOut3 = await Promise.race([p3, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-  ok('★★ group20b: command=deny 时破坏性命令直接拒绝（不得降级为弹窗）',
-    !!denyOut3 && denyOut3.kind === 'deny', JSON.stringify(denyOut3))
+  ok('★★ group20b: command=deny 时破坏性命令落 ask（弹窗；不得静默放行、也不得直接拒绝）',
+    nexted3b === false && !!denyOut3 && denyOut3.kind === 'timeout', JSON.stringify({ out: denyOut3, nexted: nexted3b }))
 
   // ★★ group20c：opaque 构造不得关掉破坏性子设置，也不得绕开显式 deny 例外
   // 反例：shell-parse 的 destructive 判定写回 `!unparsable && …`，本组即失败。
@@ -2197,19 +2207,23 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     && orderResults[0].destructive === orderResults[1].destructive && orderResults[0].plain === orderResults[1].plain,
     JSON.stringify(orderResults))
 
-  // ★★ group20e：老格式 migrateOld 路径的子设置必须跟着 mode 收紧
-  // 背景：migrateOld 走 freshConfig()（子设置默认值由读取侧按 mode 推导）；
-  // 不重新推导的后果是老 `locked` 预设（最严格的配置）升级后
-  // mode=deny 但子设置仍是 ask —— 破坏性命令由「拒绝」降级为「弹窗待批」。
+  // ★★ group20e：老格式 migrateOld 路径的八档取值
   //
-  // ⚠️ 八档体系下 `off` / `permissive` 的 **inside 档由 ask 变 allow**（§6.2③，
-  // 用户 2026-09-28 明确接受）—— 那正是本计划的目标（删工作区内文件不再弹窗）。
-  // 故这里的运行时探针用**工作区外**目标：它落 `outside` 档，永远不松于 ask。
-  // `effective.inside` 的期望值仍按老格式映射逐条断言（下面 wantInside）。
+  // ── 期望已按新规则改写（旧规则删除）────────────────────────────────────────────
+  // 旧：migrateOld 走 freshConfig()，八档由读取侧按本层 mode 推导 ——
+  //     `locked`（mode=deny）⇒ 八档全 deny，破坏性命令直接拒绝。
+  // 新（用户指定，忽略旧配置迁移兼容）：八档一律「项目显式 → 全局显式 → ask」，
+  //     migrateOld **不物化** destructive（见 58c），故三种老格式的八档**全是 ask**，
+  //     运行时落点一律是弹窗（timeout），与大分类 mode 无关。
+  //
+  // ⚠️ 行为变化（有意）：老 `locked` 预设升级后，破坏性命令由「直接拒绝」变「弹窗询问」。
+  //     方向仍 fail-closed（ask 一定拦得住，不存在静默放行），故下面同时断言 `nexted=false`。
+  // 判据保留「inside / outside 两档都查」：单查一档时「八档恒 ask」与「只有这两档 ask」
+  // 分不出来，而后者是漏改的典型形态。
   for (const [label, oldMode, wantInside, wantSub, wantVerdict] of [
-    ['group20e: locked → 子设置 deny', 'locked', 'deny', 'deny', 'deny'],
-    ['group20e: permissive → inside=allow、其余七档 ask', 'permissive', 'allow', 'ask', 'timeout'],
-    ['group20e: off → inside=allow、其余七档 ask', 'off', 'allow', 'ask', 'timeout'],
+    ['group20e: locked → 八档全 ask（不再按 mode 推导为 deny）', 'locked', 'ask', 'ask', 'timeout'],
+    ['group20e: permissive → 八档全 ask', 'permissive', 'ask', 'ask', 'timeout'],
+    ['group20e: off → 八档全 ask', 'off', 'ask', 'ask', 'timeout'],
   ]) {
     const wsM = mkdtempSync(join(tmpdir(), 'pg-old-ws-'))
     const homeM = mkdtempSync(join(tmpdir(), 'pg-old-home-'))
@@ -2222,14 +2236,13 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ok('★★ ' + label,
       !!(csM && csM.effective && csM.effective.inside === wantInside && csM.effective.outside === wantSub),
       JSON.stringify(csM && csM.effective))
-    // 运行时：破坏性命令的落点必须与子设置一致（locked 下必须是 deny，不能只是弹窗）。
-    // 目标取工作区外（`outside` 档），避开 off/permissive 那条有意的 inside 放松。
+    // 运行时：落点必须与八档一致，且**不得静默放行**（新规则下三种老格式都是弹窗）
     let nextedM = false
     const pM = hM.hooks.get('tools/pre-execute')(makeExec(wsM, 'bash', { command: 'rm -rf ~/.dsh' }), async () => { nextedM = true; return { kind: 'allow' } })
     pM.catch(() => {})
     const outM = await Promise.race([pM, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
     const gotM = nextedM ? 'allow' : ((outM && outM.kind) || 'timeout')
-    ok('★★ group20e: ' + oldMode + ' 老配置下工作区外破坏性命令落点 = ' + wantVerdict + '（不是弹窗）',
+    ok('★★ group20e: ' + oldMode + ' 老配置下工作区外破坏性命令落点 = ' + wantVerdict + '（弹窗，不得静默放行）',
       gotM === wantVerdict, 'got=' + gotM)
     try { rmSync(wsM, { recursive: true, force: true }); rmSync(homeM, { recursive: true, force: true }) } catch (e) {}
   }
@@ -2307,10 +2320,55 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       return nexted ? 'allow' : ((out && out.kind) || 'timeout')
     }
 
-    // ① 核心收益：mode=allow 时区内破坏性命令静默放行
-    ok('★★ group20g: mode=allow 时区内删除不再弹窗（rm test.txt / rm -rf ./build → allow）',
-      (await probeT('rm test.txt')) === 'allow' && (await probeT('rm -rf ./build')) === 'allow',
-      JSON.stringify({ f: await probeT('rm test.txt'), d: await probeT('rm -rf ./build') }))
+    // ① 新规则下 mode=allow 时区内破坏性命令**仍然弹窗**
+    //
+    // ── 期望已按新规则改写（旧规则删除）────────────────────────────────────────────
+    // 旧：八档按本层 mode 推导，inside = mode = allow ⇒ `rm test.txt` / `rm -rf ./build`
+    //     静默放行。那是旧计划的核心收益。
+    // 新（用户指定）：八档一律「项目显式 → 全局显式 → ask」，配置里没写 destructive
+    //     ⇒ 八档全 ask ⇒ 区内删除也弹窗。
+    // ⚠️ 这是**有意的行为变化**：新规则下「想放行区内删除」必须显式把 inside 档设为 allow
+    //     （面板上就是「工作区内」那一档的下拉框）。用户接受，理由：档位设置可见可改，
+    //     而默认全 ask 是 fail-closed 的方向。
+    // 判据同时查「没有 next」（防空转）：只查 === 'allow' 时，把实现改成恒 deny 也能通过。
+    const insideOut = { f: await probeT('rm test.txt'), d: await probeT('rm -rf ./build') }
+    ok('★★ group20g: mode=allow 且未显式设档时，区内删除**仍要问**（八档同构继承 → 全 ask）',
+      insideOut.f !== 'allow' && insideOut.d !== 'allow',
+      JSON.stringify(insideOut))
+    // ①b 显式把 inside 档设成 allow 后，区内删除才静默放行（新规则下这条路径必须真的通）
+    //
+    // **用独立宿主**：在 hT 上写 inside 会往配置里落一个显式的 `action:'ask'`（复原那一步
+    // 也照样落盘），于是后面 ④ 的 `source.inside === 'default'` 与 ⑤ 的
+    // `global.action === undefined` 全部失败 —— 实测踩过（残留把两条断言一起弄红）。
+    // 本组只关心「显式设置能否生效」，不需要污染 hT 的配置。
+    {
+      const wsI = mkdtempSync(join(tmpdir(), 'pg-inside-ws-'))
+      const homeI = mkdtempSync(join(tmpdir(), 'pg-inside-home-'))
+      mkdirSync(join(homeI, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(homeI, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [] } }, projects: {},
+      }, null, 2), 'utf8')
+      const hI = createHost({ workspaceRoot: wsI, dshHome: homeI })
+      const preI = hI.hooks.get('tools/pre-execute')
+      const probeI = async (c) => {
+        let nexted = false
+        const p = preI(makeExec(wsI, 'bash', { command: c }), async () => { nexted = true; return { kind: 'allow' } })
+        p.catch(() => {})
+        const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+        return nexted ? 'allow' : ((out && out.kind) || 'timeout')
+      }
+      const before = await probeI('rm test.txt')
+      await callRoute(hI.routes, 'POST', '/permgate/set-command-sub',
+        { target: 'global', tier: 'inside', action: 'allow', lang: 'zh', sessionId: 'sess-1' })
+      const after = { f: await probeI('rm test.txt'), d: await probeI('rm -rf ./build') }
+      ok('★★ group20g: 显式把 inside 档设为 allow 后，区内删除才静默放行（档位设置真的生效）',
+        before !== 'allow' && after.f === 'allow' && after.d === 'allow',
+        JSON.stringify({ before: before, after: after }))
+      // 且此时 wide 档仍是 ask（设 inside 不得连带放开其它档 —— 「逐档」的意义）
+      ok('★ group20g: 设 inside=allow 不得连带放开 wide 档（rm -rf C:/Windows 仍不是 allow）',
+        (await probeI('rm -rf C:/Windows')) !== 'allow')
+      try { rmSync(wsI, { recursive: true, force: true }); rmSync(homeI, { recursive: true, force: true }) } catch (e) {}
+    }
 
     // ② 红线：同一配置下这些**必须仍然要问**（D-6 的核心，保护范围收窄但没消失）
     //
@@ -2344,27 +2402,38 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       wsRoot.length === 0, JSON.stringify(wsRoot))
 
     // ④ §7.3：statusView 下发八档 + groups
+    //    ⚠️ 期望已按新规则改写：配置里没写 destructive ⇒ 八档全 ask（含 inside）。
+    //    旧规则下 inside 由 mode 推导为 allow。
+    //    `globalDefault` / `projectDefault` 两个字段**已删除**（连同「按本层 mode 推导
+    //    档位缺省值」那套规则）—— 它们是「两份八档默认值规则并存」的第二份，
+    //    与裁决用的 `effective` 会逐档分叉（同一响应里出现两个矛盾的 inside 默认值），
+    //    且经 perm_status 回给 AI。故这里从「断言字段存在」改为**断言字段已消失**，
+    //    防止有人把第二份真相加回来。
     const stT = await callRoute(hT.routes, 'GET', '/permgate/status')
     const csT = stT.data && stT.data.commandSub
-    ok('★ 48 statusView 下发八档：tiers / effective（八档 + source）/ globalDefault / groups',
+    ok('★ 48 statusView 下发八档：tiers / effective（八档 + source）/ groups；*Default 已删除',
       !!(csT && Array.isArray(csT.tiers) && csT.tiers.length === 8
-        && csT.effective && csT.effective.inside === 'allow' && csT.effective.wide === 'ask'
+        && csT.effective && csT.effective.inside === 'ask' && csT.effective.wide === 'ask'
         && csT.effective.source && csT.effective.source.inside === 'default'
-        && csT.globalDefault && csT.globalDefault.inside === 'allow'
+        && csT.globalDefault === undefined && csT.projectDefault === undefined
         && csT.groups && Array.isArray(csT.groups.del) && csT.groups.del.indexOf('rm') !== -1),
-      JSON.stringify(csT && { tiers: csT.tiers, eff: csT.effective, groups: csT.groups && Object.keys(csT.groups) }))
-    // ⑤ 八档可**独立**写入（写 wide 不得连带改 inside —— 这是「逐档」的意义所在）
+      JSON.stringify(csT && { tiers: csT.tiers, eff: csT.effective, groups: csT.groups && Object.keys(csT.groups),
+        globalDefault: csT.globalDefault, projectDefault: csT.projectDefault }))
+    // ⑤ 八档可**独立**写入（写 wide 不得连带改 inside）
+    //    ⚠️ 期望已改写：inside 不再是 allow 而是 ask（未显式配置 → 末级兜底 ask）。
+    //    判据的重点没变 —— 写 wide 时 inside **不得被连带改动**。
     await callRoute(hT.routes, 'POST', '/permgate/set-command-sub', { target: 'global', tier: 'wide', action: 'deny', reason: '不许删系统目录', lang: 'zh', sessionId: 'sess-1' })
     const stT2 = await callRoute(hT.routes, 'GET', '/permgate/status')
     const csT2 = stT2.data && stT2.data.commandSub
-    ok('★★ 48b 八档可独立写入：写 wide=deny 不改动 inside（仍是 allow）',
-      !!(csT2 && csT2.effective.inside === 'allow' && csT2.effective.wide === 'deny'
+    ok('★★ 48b 八档可独立写入：写 wide=deny 不改动 inside（仍是未表态的 ask）',
+      !!(csT2 && csT2.effective.inside === 'ask' && csT2.effective.wide === 'deny'
         && csT2.global && csT2.global.wide === 'deny' && csT2.global.action === undefined),
       JSON.stringify(csT2 && { inside: csT2.effective.inside, wide: csT2.effective.wide, g: csT2.global }))
-    // 且 wide=deny 立即生效：`rm -rf C:/Windows` 由 ask 变 deny，而 `rm test.txt` 仍是 allow
-    ok('★★ 48c wide=deny 生效且不误伤：rm -rf C:/Windows → deny；rm test.txt → 仍 allow',
-      (await probeT('rm -rf C:/Windows')) === 'deny' && (await probeT('rm test.txt')) === 'allow',
-      JSON.stringify({ win: await probeT('rm -rf C:/Windows'), txt: await probeT('rm test.txt') }))
+    // 且 wide=deny 立即生效：`rm -rf C:/Windows` 变 deny，而 `rm test.txt` 仍不是 deny
+    //    （新规则下未配置的 inside 档是 ask，故这里断言 `!== 'deny'` 而不是 `=== 'allow'`）
+    const wideOut = { win: await probeT('rm -rf C:/Windows'), txt: await probeT('rm test.txt') }
+    ok('★★ 48c wide=deny 生效且不误伤：rm -rf C:/Windows → deny；rm test.txt → 不是 deny',
+      wideOut.win === 'deny' && wideOut.txt !== 'deny', JSON.stringify(wideOut))
     // ⑥ 非法 tier 必须被拒绝（不静默落到某个档）
     const badTier = await callRoute(hT.routes, 'POST', '/permgate/set-command-sub', { target: 'global', tier: 'nope', action: 'deny', lang: 'zh', sessionId: 'sess-1' })
     ok('★ 48d 非法 tier 被拒绝（回错误，不静默落 inside）',
@@ -2381,9 +2450,11 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     //   ① 全局层从未配置 + 当前项目只设 wide=deny → probe.wide 必须是 **ask**（不是项目的 deny）；
     //      且同一响应里 effective.wide 仍是 deny（证明两者确实是**不同口径**、不是同值空转）；
     //   ② probe 必须与「全局层单独解析」一致：存量 `{action:'deny'}` + mode=allow 时
-    //      **八档全 deny**（与裁决一致）—— 这一条同时钉死「不得回落 globalDefault」：
-    //      后者按本层 mode 推导 → inside=allow、其余七档=ask，用它回填会让全局 tab 显示
-    //      「允许 1 · 询问 7」而实际裁决八档全拒（面板说谎换个形态再来一遍）；
+    //      **仅 inside=deny、其余七档 ask**（与裁决一致）—— 这一条同时钉死「不得按本层
+    //      mode 推导档位」：那样会得到 inside=allow、其余七档 ask，用它回填会让全局 tab
+    //      显示「允许 1 · 询问 7」而实际裁决 inside=deny（面板说谎换个形态再来一遍）。
+    //      ⚠️ 那个「按 mode 推导」的表（`globalDefault` 字段）**已删除**，故现在客户端
+    //      没有可回落的第二来源；本组的反查仍保留，防止有人把那条路径加回来。
     //   ③ 全局层**显式** wide=deny → probe.wide 必须是 deny（修复不得把全局 tab 变成恒 ask）。
     {
       // ① 独立宿主：全局层一个字都不写，项目层只写 wide=deny
@@ -2410,8 +2481,13 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
         JSON.stringify(csP2 && { probe: csP2.globalEffectiveProbe && csP2.globalEffectiveProbe.wide, eff: csP2.effective.wide }))
       try { rmSync(wsP, { recursive: true, force: true }); rmSync(homeP, { recursive: true, force: true }) } catch (e) {}
     }
-    // ② 存量形态：`{action:'deny'}` + mode=allow → probe 必须**八档全 deny**（与裁决一致），
-    //    且**不得**等于 globalDefault（那是按 mode 推导的另一套规则，inside=allow、其余 ask）
+    // ② `{action:'deny'}` + mode=allow → probe 里**只有 inside 档是 deny**，其余七档 ask
+    //
+    //    ⚠️ 期望已按新规则改写：旧规则把 `action` 摊成八档全 deny（§6.2②），
+    //    新规则下 `action` 只是 inside 那一档的键，其余七档各自继承/兜底。
+    //    本条不再需要「不得回落 globalDefault」那半句 —— 那个字段（以及它代表的
+    //    「按本层 mode 推导档位」规则）**已整体删除**，不存在第二来源可回落。
+    //    故这里钉**真正要守的东西**：probe 与真实裁决必须一致（下一条 48e-4）。
     {
       const wsQ = mkdtempSync(join(tmpdir(), 'pg-probe2-ws-'))
       const homeQ = mkdtempSync(join(tmpdir(), 'pg-probe2-home-'))
@@ -2421,21 +2497,30 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       }, null, 2), 'utf8')
       const hQ = createHost({ workspaceRoot: wsQ, dshHome: homeQ })
       const csQ = (await callRoute(hQ.routes, 'GET', '/permgate/status')).data.commandSub
-      const allDeny = csQ && csQ.globalEffectiveProbe && csQ.tiers.every((t) => csQ.globalEffectiveProbe[t] === 'deny')
-      ok('★★ 48e-3 存量 action=deny + mode=allow → globalEffectiveProbe 八档全 deny（与裁决一致，保住「全拒」）；且**不得**回落 globalDefault（它按 mode 推导会给出 inside=allow、其余七档=ask）',
-        !!(csQ && allDeny
-          && csQ.effective.inside === 'deny'
-          && csQ.globalDefault.inside === 'allow' && csQ.globalDefault.wide === 'ask'
-          && csQ.globalEffectiveProbe.inside !== csQ.globalDefault.inside),
-        JSON.stringify(csQ && { probe: csQ.globalEffectiveProbe, def: csQ.globalDefault, eff: csQ.effective }))
-      // 运行时对照：probe 说的「全拒」必须与真实裁决一致（面板与裁决同一份真相）
+      const onlyInsideDeny = csQ && csQ.globalEffectiveProbe
+        && csQ.globalEffectiveProbe.inside === 'deny'
+        && csQ.tiers.filter((t) => t !== 'inside').every((t) => csQ.globalEffectiveProbe[t] === 'ask')
+      ok('★★ 48e-3 存量 action=deny + mode=allow → probe 里仅 inside=deny、其余七档 ask（八档同构继承，不再摊派）',
+        !!(csQ && onlyInsideDeny && csQ.effective.inside === 'deny'),
+        JSON.stringify(csQ && { probe: csQ.globalEffectiveProbe, eff: csQ.effective }))
+      // 运行时对照：`rm -rf C:/Windows` 落 **wide** 档（不是 inside）→ 新规则下是 ask（弹窗），
+      // 而不是旧规则下被 `action:'deny'` 摊派出来的 deny。
+      // 这条同时证明「probe 与裁决同源」—— probe.wide 是 ask，裁决也是 ask。
       const preQ = hQ.hooks.get('tools/pre-execute')
       let nextedQ = false
       const pQ = preQ(makeExec(wsQ, 'bash', { command: 'rm -rf C:/Windows' }), async () => { nextedQ = true; return { kind: 'allow' } })
       pQ.catch(() => {})
       const outQ = await Promise.race([pQ, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-      ok('★★ 48e-4 上条 probe 的「全拒」与真实裁决一致：rm -rf C:/Windows → deny（probe 若按 globalDefault 算会说 ask，与裁决分叉）',
-        !nextedQ && outQ && outQ.kind === 'deny', JSON.stringify({ nexted: nextedQ, kind: outQ && outQ.kind }))
+      ok('★★ 48e-4 probe 的 wide=ask 与真实裁决一致：rm -rf C:/Windows 落 wide 档 → 弹窗（不得静默放行）',
+        !nextedQ && outQ && outQ.kind === 'timeout',
+        JSON.stringify({ nexted: nextedQ, kind: outQ && outQ.kind, probeWide: csQ && csQ.globalEffectiveProbe && csQ.globalEffectiveProbe.wide }))
+      // 48e-4b inside 档本身仍是 deny（配置真的生效，不是恒 ask 的摆设）
+      let nextedQ2 = false
+      const pQ2 = preQ(makeExec(wsQ, 'bash', { command: 'rm -rf ./build' }), async () => { nextedQ2 = true; return { kind: 'allow' } })
+      pQ2.catch(() => {})
+      const outQ2 = await Promise.race([pQ2, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      ok('★★ 48e-4b inside 档的 deny 仍然生效：rm -rf ./build（区内）→ deny',
+        !nextedQ2 && outQ2 && outQ2.kind === 'deny', JSON.stringify({ nexted: nextedQ2, kind: outQ2 && outQ2.kind }))
       try { rmSync(wsQ, { recursive: true, force: true }); rmSync(homeQ, { recursive: true, force: true }) } catch (e) {}
     }
     // ③ 全局层**显式**配置必须正常显示（防空转对照：probe 不得恒 ask）
@@ -2448,8 +2533,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     }
     // ── ★★ 60e：decisive 档无理由时理由必须回落到**并列在最严档**的命中档（发现 6）──────
     // 本组是本缺陷的**生产现场**：用户在新面板上逐档填理由（这里填 `outside`），而
-    // `unknown` 档是**派生**成 deny 的（`inside=deny` 经 `strictest(ask, inside)`，
-    // 见 destructiveTiers ②）—— 用户从没为它写过理由。
+    // `unknown` 档**没有**用户写下的理由（用户只为 `outside` 写过）—— 它是被
+    // `tierSetOf` 因「目标读不出」并进来的，或用户设了动作却没填理由。
     //
     // 而 `tierSetOf` 对「读得出的目标 + 读不出的目标」同段共存会并列并入 `unknown`
     // （发现 1 的修法），`TIER_ORDER` 里 `unknown` 排在 `outside` **之前** ——
@@ -2469,18 +2554,23 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       const ws6 = mkdtempSync(join(tmpdir(), 'pg-r60-ws-'))
       const home6 = mkdtempSync(join(tmpdir(), 'pg-r60-home-'))
       mkdirSync(join(home6, 'dsh-permgate'), { recursive: true })
-      // 用户显式配：inside=deny（→ 其余七档派生为 deny）、outside 档显式 deny 并写下一句拒绝理由。
-      // ⚠️ `outside: 'deny'` **必须显式写**：`normalizeSubSetting` 只在**该档显式配成 deny** 时
-      // 保留 `reasons[t]`（allow 不弹窗、ask 有自己的备注）—— 只写 `action:'deny'` 的话
-      // `reasons.outside` 在加载时就被丢弃，测的就不是「用户在面板上写下了理由」这个现场了。
-      // 而 `unknown` 档**故意不写**：它由 `inside=deny` 经 `strictest(ask, inside)` 派生为 deny，
-      // 用户从没为它写过理由 —— 这正是本缺陷的前提。
+      // 用户显式配：outside 与 unknown 两档都是 deny，但**只为 outside 写了理由**。
+      //
+      // ⚠️ 场景构造已按新规则改写：旧规则下 `unknown` 由 `inside=deny` 经
+      // `strictest(ask, inside)` **派生**为 deny（用户没表过态）；新规则下八档不再派生，
+      // 故这里把 `unknown: 'deny'` **显式写出来**，才复现出同一个现场 ——
+      // 「unknown 与 outside 并列在最严档，但只有 outside 有理由」。
+      // 被测的东西没变：`tierVerdict` 在 decisive 档取不到理由时，必须回落到并列档的那句。
+      // ⚠️ `outside` / `unknown` 的 deny **必须显式写**：`normalizeSubSetting` 只在
+      // **该档显式配成 deny** 时保留 `reasons[t]`（allow 不弹窗、ask 有自己的备注）——
+      // 只写 `action:'deny'` 的话 `reasons.outside` 在加载时就被丢弃，测的就不是
+      // 「用户在面板上写下了理由」这个现场了。
       writeFileSync(join(home6, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: {
           fallbackMode: 'ask',
           command: {
             mode: 'allow', exceptions: [],
-            destructive: { action: 'deny', outside: 'deny', reasons: { outside: '删工作区外文件' } },
+            destructive: { action: 'deny', outside: 'deny', unknown: 'deny', reasons: { outside: '删工作区外文件' } },
           },
         },
         projects: {},
@@ -2521,7 +2611,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
         // ③ 面板口径不变：那句理由仍显示在 outside 档；unknown 档没有理由（用户没为它写过）
         && !!(cs6 && cs6.globalReasons && cs6.globalReasons.outside === '删工作区外文件'
           && !cs6.globalReasons.unknown)
-        // ③b 八档确实全 deny（unknown 由 inside=deny 派生 —— 这正是「派生档没有理由」的前提）
+        // ③b 八档确实全 deny（unknown 与 outside 都显式 deny —— 这正是「派生档没有理由」的前提）
         && !!(cs6 && cs6.effective && cs6.effective.inside === 'deny' && cs6.effective.unknown === 'deny'
           && cs6.effective.outside === 'deny'),
         JSON.stringify({ bad60e, seen60e, base: [base60e.kind, base60e.reason.slice(0, 60)],
@@ -2536,7 +2626,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     await callRoute(hT.routes, 'POST', '/permgate/set-command-sub', { target: 'global', tier: 'wide', action: 'deny', reason: '改过的理由', lang: 'zh', sessionId: 'sess-1' })
     const after7 = (await callRoute(hT.routes, 'GET', '/permgate/status')).data.commandSub
     ok('★★ 59c 改 wide 的理由不改动 inside 的动作（§7.2d 缺陷回归）',
-      !!(after7.effective.inside === before7.effective.inside && after7.effective.inside === 'allow'
+      !!(after7.effective.inside === before7.effective.inside && after7.effective.inside === 'ask'
         && after7.globalReasons && after7.globalReasons.wide === '改过的理由'
         && !after7.globalReasons.inside),
       JSON.stringify({ before: before7.effective.inside, after: after7.effective.inside, reasons: after7.globalReasons }))
@@ -2593,7 +2683,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ok('★★ 59d-2 项目层 inside 档改 inherit 的这次写入必须真的落盘：本层 action 变 inherit、该档理由被清、生效值穿透回全局（写入不得被静默吞掉）',
       !!(pSubPost && pSubPost.project && pSubPost.project.action === 'inherit'
         && pSubPost.projectReasons && !pSubPost.projectReasons.inside
-        && pSubPost.effective.inside === 'allow'
+        && pSubPost.effective.inside === 'ask'
         && pSubPost.effective.source && pSubPost.effective.source.inside === 'default'),
       JSON.stringify(pSubPost && { proj: pSubPost.project, reasons: pSubPost.projectReasons, eff: pSubPost.effective }))
     // 上面那条读的是 statusView —— 也就是**内存里的 config**，整块没有一次读盘，故它守不住落盘：
@@ -2618,12 +2708,16 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
         && diskSubT.wide === 'deny'
         && diskSubT.reasons && diskSubT.reasons.wide === '删系统目录'),
       JSON.stringify({ key: diskKeyT, keys: Object.keys(diskCfgT.projects || {}), sub: diskSubT }))
-    // 同一件事的**运行时**一侧：inside 档写 inherit 就是穿透回全局（全局 mode=allow → 本层放行），
+    // 同一件事的**运行时**一侧：inside 档写 inherit 就是穿透回全局（全局该档是 ask → 本层弹窗），
     // 而 wide 的显式 deny 仍拦着。面板显示的值与实际裁决必须是同一个值 —— 分开断两处，
     // 免得「面板绿、裁决红」这种双份真相溜过去。
-    ok('★★ 59d-2 inside 档 inherit 后生效值穿透回全局（rm test.txt → allow），而本层 wide 的 deny 仍在拦（rm -rf C:/Windows → deny）',
-      (await probeT('rm test.txt')) === 'allow' && (await probeT('rm -rf C:/Windows')) === 'deny',
-      JSON.stringify({ txt: await probeT('rm test.txt'), win: await probeT('rm -rf C:/Windows') }))
+    //
+    // ⚠️ 期望已按新规则改写：旧规则下全局 mode=allow 让 inside 派生为 allow，
+    // 故 `rm test.txt` 是 allow；新规则下全局未显式设 inside 档 → ask，
+    // 故它是**弹窗**。判据改为「不是 allow」（= 继承真的发生了，且方向 fail-closed）。
+    const inheritOut = { txt: await probeT('rm test.txt'), win: await probeT('rm -rf C:/Windows') }
+    ok('★★ 59d-2 inside 档 inherit 后生效值穿透回全局（rm test.txt → 不是 allow，即弹窗），而本层 wide 的 deny 仍在拦（rm -rf C:/Windows → deny）',
+      inheritOut.txt !== 'allow' && inheritOut.win === 'deny', JSON.stringify(inheritOut))
 
     // ⑩ 存量 `reason` 字符串读进 inside 档，且**不搬家**（`reason` 键原样留在盘上）
     const legacyHome = mkdtempSync(join(tmpdir(), 'pg-legacy-home-'))
@@ -2638,8 +2732,10 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     const csL = stL.data && stL.data.commandSub
     ok('★★ 59b 存量 reason 字符串：读取侧归 inside 档（其余七档拿不到理由，与「用户没表过态」一致）',
       !!(csL && csL.effective.inside === 'deny'
-        && csL.effective.outside === 'deny'   // 七档 = strictest(ask, inside=deny) = deny（全拒保住）
-        && csL.effective.wide === 'deny'
+        // ⚠️ 期望已按新规则改写：旧规则下七档 = strictest(ask, inside=deny) = deny；
+        // 新规则下 `action:'deny'` 只是 inside 那一档，其余七档落 ask。
+        && csL.effective.outside === 'ask'
+        && csL.effective.wide === 'ask'
         && csL.globalReasons && csL.globalReasons.inside === 'rm 危险'
         && !csL.globalReasons.wide),
       JSON.stringify(csL && { eff: csL.effective, reasons: csL.globalReasons }))
@@ -2651,17 +2747,22 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ok('★★ 59b 纯加载不搬家：磁盘上仍是裸 reason 键，未被改写为 reasons.inside',
       !!(dsub && dsub.reason === 'rm 危险' && dsub.reasons === undefined),
       JSON.stringify(dsub))
-    // 老配置下 wide 档的默认值：inside=deny → 七档 = strictest(ask, deny) = deny（全拒保住）
-    ok('★★ 43b 存量 destructive=deny + mode=allow → 七档仍是 deny（不放松用户显式写下的全拒）',
-      !!(csL && csL.effective.wide === 'deny' && csL.effective.proc === 'deny' && csL.effective.priv === 'deny'),
+    // 老配置下 wide 档的取值：新规则下 `action:'deny'` 不再摊给七档 ⇒ wide/proc/priv 全是 ask
+    //
+    // ⚠️ 期望已按新规则改写：旧规则「七档 = strictest(ask, inside=deny) = deny（全拒保住）」。
+    // 新规则下只有 inside 是 deny，其余七档落 ask。这是「忽略旧配置迁移兼容」的直接后果。
+    ok('★★ 43b 存量 destructive=deny + mode=allow → 仅 inside=deny，七档为 ask（不再摊派全拒）',
+      !!(csL && csL.effective.inside === 'deny'
+        && csL.effective.wide === 'ask' && csL.effective.proc === 'ask' && csL.effective.priv === 'ask'),
       JSON.stringify(csL && csL.effective))
-    // 运行时对照：老配置下 `rm -rf C:/Windows` 必须**直接拒绝**（不是弹窗）
+    // 运行时对照：老配置下 `rm -rf C:/Windows` 落 **wide** 档 → 新规则下是弹窗（不是直接拒绝），
+    // 但**绝不能静默放行**（fail-closed 方向）。
     let nextedL = false
     const pL = hL.hooks.get('tools/pre-execute')(makeExec(legacyWs, 'bash', { command: 'rm -rf C:/Windows' }), async () => { nextedL = true; return { kind: 'allow' } })
     pL.catch(() => {})
     const outL = await Promise.race([pL, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-    ok('★★ 43b 存量全拒配置下 rm -rf C:/Windows → deny（用户显式写的拒绝未被默认值放开）',
-      !nextedL && outL && outL.kind === 'deny', JSON.stringify({ nexted: nextedL, kind: outL && outL.kind }))
+    ok('★★ 43b 存量配置下 rm -rf C:/Windows（wide 档）→ 弹窗询问，不得静默放行',
+      !nextedL && outL && outL.kind === 'timeout', JSON.stringify({ nexted: nextedL, kind: outL && outL.kind }))
 
     // ── ★★ 存量 `reason` 必须**随拒绝一起下发**，非 inside 档也不例外 ──────────────
     // 缺陷原状（本差异引入）：`tierVerdict` 只在 `decisiveTierOf` 选中的那一档取理由，
@@ -2674,40 +2775,36 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     // 拿得到理由，只有 `destructiveTiers`（生产路径）拿不到 —— 两条路径分叉，
     // 而纯函数/形状断言够不到这个分叉（它只在真实钩子返回值上显形）。
     //
-    // 三档各覆盖一类判据（§3.2）：wide=半径档、proc=组档、priv=半径+组并存；
-    // 并含 `action` 的对照 —— 本条是**补理由**，绝不能顺带改动作。
-    const legacyReasonCases = [
-      ['rm -rf C:/Windows', 'wide', '半径档（目标在系统目录）'],
-      ['kill 1234', 'proc', '组档（结束进程）'],
-      ['sudo ls', 'priv', '组档（提权，无半径目标）'],
-    ]
-    const reasonBad = []
-    for (const [cmd, tier, why] of legacyReasonCases) {
-      let nextedR = false
-      const pR = hL.hooks.get('tools/pre-execute')(makeExec(legacyWs, 'bash', { command: cmd }), async () => { nextedR = true; return { kind: 'allow' } })
-      pR.catch(() => {})
-      const outR = await Promise.race([pR, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-      // ① 动作不变：仍是 deny（对照项 —— 补理由不得改动作）
-      if (nextedR || !outR || outR.kind !== 'deny') {
-        reasonBad.push(cmd + '(' + tier + '，' + why + ')：动作被改动 nexted=' + nextedR + ' kind=' + (outR && outR.kind))
-        continue
-      }
-      // ② 理由必须真的下发到 AI 看到的文本里
-      const txt = String((outR && outR.reason) || '')
-      if (txt.indexOf('rm 危险') === -1) reasonBad.push(cmd + '(' + tier + '，' + why + ')：reason 里没有存量理由 → ' + JSON.stringify(txt))
-    }
-    ok('★★ 存量「全拒 + reason」在 wide / proc / priv 三档命中时仍拿到拒绝理由，且动作不变（仍是 deny）',
-      reasonBad.length === 0, JSON.stringify(reasonBad))
-    // 对照：inside 档本来就能拿到（缺陷前就成立），单独断一条以免上面的三档「因为整条链断了」
-    // 而一起变红时看不出是新增回归还是既有行为 —— 它是本条的基线。
+    // 三档各覆盖一类判据（§3.2）：wide=半径档、proc=组档、priv=半径+组并存。
+    // ⚠️ 旧的 `legacyReasonCases` 列表已随摊派规则一起删除 —— 新规则下这三档是 ask，
+    // 「每档都拿到拒绝理由」这个需求不再存在（见下）。
+    // ── 存量裸 `reason` 的**归属**：只随 inside 档下发 ─────────────────────────────
+    //
+    // ⚠️ 本块已按新规则改写。旧规则下 `action:'deny'` 被摊成八档全 deny，于是
+    // wide / proc / priv 三档命中时也要拿到那句理由（否则「看得见理由、AI 收不到理由」）。
+    // 新规则下这三档是 **ask**（不弹窗时用不上拒绝理由），那句理由只对 inside 档有意义 ——
+    // 「每档都给」这个需求随摊派规则一起消失了。
+    //
+    // 保留下来的是**真正还成立的那半条**：inside 档命中时必须带回那句理由
+    // （AI 收到的拒绝指令不能是空的）。这条是基线，也是唯一还可达的形态。
     {
       let nextedI = false
       const pI = hL.hooks.get('tools/pre-execute')(makeExec(legacyWs, 'bash', { command: 'rm test.txt' }), async () => { nextedI = true; return { kind: 'allow' } })
       pI.catch(() => {})
       const outI = await Promise.race([pI, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-      ok('★ 对照：同一存量配置下 inside 档命中也带理由（缺陷前即成立，作为上一条的基线）',
+      ok('★★ 存量「拒绝 + reason」在 inside 档命中时带回那句理由（AI 收到的拒绝指令不为空）',
         !nextedI && !!outI && outI.kind === 'deny' && String(outI.reason || '').indexOf('rm 危险') !== -1,
         JSON.stringify({ nexted: nextedI, kind: outI && outI.kind, reason: outI && outI.reason }))
+    }
+    // 反向对照：wide 档在新规则下是 ask，**不得**带着那句拒绝理由（它属于 inside 档的拒绝）
+    {
+      let nextedW = false
+      const pW = hL.hooks.get('tools/pre-execute')(makeExec(legacyWs, 'bash', { command: 'rm -rf C:/Windows' }), async () => { nextedW = true; return { kind: 'allow' } })
+      pW.catch(() => {})
+      const outW = await Promise.race([pW, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      ok('★ 反向对照：wide 档在新规则下是 ask，不携带 inside 档的拒绝理由（理由不跨档乱窜）',
+        !nextedW && !!outW && outW.kind === 'timeout' && String(outW.reason || '').indexOf('rm 危险') === -1,
+        JSON.stringify({ nexted: nextedW, kind: outW && outW.kind, reason: outW && outW.reason }))
     }
     // 且面板视图的口径**不变**：裸 `reason` 仍只显示在 inside 档（§7.1 的有意设计）。
     // 这一条与上面两条**不是**矛盾 —— 面板回答「用户在哪一档上写下了理由」（归 inside），
@@ -2718,6 +2815,177 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
         && !csL.globalReasons.wide && !csL.globalReasons.proc && !csL.globalReasons.priv),
       JSON.stringify(csL && csL.globalReasons))
     try { rmSync(legacyWs, { recursive: true, force: true }); rmSync(legacyHome, { recursive: true, force: true }) } catch (e) {}
+
+    // ── ★★ 动作来源层 ≠ 理由来源层：裸 `reason` 必须跨层回落（两个方向都要）────────────
+    // 缺陷原状（本差异引入）：`destructiveTiers` ③ 只按**该档自己的显式来源**（`explicitOf(t).from`）
+    // 取理由，即「动作来自哪一层，就去哪一层找理由」。这条假设**不成立** ——
+    // 裸 `reason` 是**类别级**字符串（老配置语义 = 「整个破坏性类别」），它落在哪一层
+    // 与「该档的动作来自哪一层」没有必然关系，两者可以不同层。于是两个方向都丢理由：
+    //
+    //   ① 全局 `{action:'deny', reason:'…'}` + 项目 `{wide:'deny'}`
+    //      → `rm -rf C:/Windows` 命中 wide，动作来源是**项目**（项目只写了动作、没写理由），
+    //        那句类别级理由却在**全局** → 只按 `from` 取得到 null；
+    //   ② 反向：全局 `{wide:'deny'}` + 项目 `{action:'deny', reason:'…'}`
+    //      → wide 的动作来源是**全局**，理由却在**项目**。
+    //
+    // 两个方向都**不是 fail-open**（动作始终 deny），丢的是用户写给 AI 的那句拒绝理由，
+    // 而面板上那句理由仍显示在 inside 档（`explicitReasonsOf` 的口径）——
+    // 「面板看得见理由、AI 收不到理由」，正是本文件反复警告的那一族。
+    //
+    // 为什么必须在**生产钩子路径**上断：丢理由发生在 `destructiveTiers` 产出的档位表里，
+    // 而它经 `assessCommand` → `tierVerdict` 才变成最终 `reason`；纯函数/形状断言
+    // 够不到「档位表 → 裁决理由」这一跳。故这里走真实 pre-execute，读最终返回值。
+    //
+    // 判据（缺一即为空转 / 改错方向）：
+    //   ① 两个方向都必须 **deny**（动作不得因补理由而变化）；
+    //   ② 两个方向都必须带回**另一层**那句理由（含「跨层」二字才算真跨了层）；
+    //   ③ 防空转对照：两层都没写理由时，同一条命令仍是 deny 但 **reason 里不含任何理由句**
+    //      —— 否则「拿到了理由」无从谈起（可能是无条件拼了一句常量）。
+    for (const dir of [
+      { name: '方向①动作在项目、理由在全局', g: { action: 'deny', reason: '全局那句理由' }, p: { tier: 'wide', action: 'deny' }, want: '全局那句理由' },
+      { name: '方向②动作在全局、理由在项目', g: { wide: 'deny' }, p: { tier: 'inside', action: 'deny', reason: '项目那句理由' }, want: '项目那句理由' },
+    ]) {
+      const wsX = mkdtempSync(join(tmpdir(), 'pg-xlayer-ws-'))
+      const homeX = mkdtempSync(join(tmpdir(), 'pg-xlayer-home-'))
+      mkdirSync(join(homeX, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(homeX, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: dir.g } }, projects: {},
+      }, null, 2), 'utf8')
+      const hX = createHost({ workspaceRoot: wsX, dshHome: homeX })
+      // 项目层经**真实路由**写入（与面板同一条路径），故它落盘的形状与用户点面板一致
+      await callRoute(hX.routes, 'POST', '/permgate/set-command-sub',
+        { target: 'project', tier: dir.p.tier, action: dir.p.action, reason: dir.p.reason, lang: 'zh', sessionId: 'sess-1' })
+      const preX = hX.hooks.get('tools/pre-execute')
+      const probeX = async (c) => {
+        let nexted = false
+        const p = preX(makeExec(wsX, 'bash', { command: c }), async () => { nexted = true; return { kind: 'allow' } })
+        p.catch(() => {})
+        const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+        return { nexted, kind: nexted ? 'allow' : ((out && out.kind) || 'timeout'), reason: String((out && out.reason) || '') }
+      }
+      // 前置：wide 档此刻确实是 deny（否则下面拿到的 deny 不是这条路径给的，断言空转）
+      const csX = (await callRoute(hX.routes, 'GET', '/permgate/status')).data.commandSub
+      const outX = await probeX('rm -rf C:/Windows')
+      ok('★★ 跨层理由回落 ' + dir.name + '：rm -rf C:/Windows（wide 档）必须 deny **且**带回另一层那句理由（动作来源层 ≠ 理由来源层）',
+        !!(!outX.nexted && outX.kind === 'deny' && outX.reason.indexOf(dir.want) !== -1
+          && csX && csX.effective && csX.effective.wide === 'deny'),
+        JSON.stringify({ dir: dir.name, nexted: outX.nexted, kind: outX.kind, reason: outX.reason, wide: csX && csX.effective && csX.effective.wide }))
+      // ③ 防空转对照：**两层都没写任何理由**时，同一命令仍是 deny，但 reason 里不含上面两句
+      const wsY = mkdtempSync(join(tmpdir(), 'pg-xlayer2-ws-'))
+      const homeY = mkdtempSync(join(tmpdir(), 'pg-xlayer2-home-'))
+      mkdirSync(join(homeY, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(homeY, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: { action: 'deny' } } }, projects: {},
+      }, null, 2), 'utf8')
+      const hY = createHost({ workspaceRoot: wsY, dshHome: homeY })
+      await callRoute(hY.routes, 'POST', '/permgate/set-command-sub',
+        { target: 'project', tier: 'wide', action: 'deny', lang: 'zh', sessionId: 'sess-1' })
+      let nextedY = false
+      const pY = hY.hooks.get('tools/pre-execute')(makeExec(wsY, 'bash', { command: 'rm -rf C:/Windows' }), async () => { nextedY = true; return { kind: 'allow' } })
+      pY.catch(() => {})
+      const outY = await Promise.race([pY, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+      const reasonY = String((outY && outY.reason) || '')
+      ok('★ 跨层理由回落 防空转对照：两层都没写理由时同一命令仍 deny，且理由里不含任何一层的那句（不是无条件拼常量）',
+        !!(!nextedY && outY && outY.kind === 'deny'
+          && reasonY.indexOf('全局那句理由') === -1 && reasonY.indexOf('项目那句理由') === -1),
+        JSON.stringify({ nexted: nextedY, kind: outY && outY.kind, reason: reasonY }))
+      try {
+        rmSync(wsX, { recursive: true, force: true }); rmSync(homeX, { recursive: true, force: true })
+        rmSync(wsY, { recursive: true, force: true }); rmSync(homeY, { recursive: true, force: true })
+      } catch (e) {}
+    }
+
+    // ── ★★ 同一条跨层性质对 **per-tier 理由**（`reasons[tier]`）同样必须成立 ────────────
+    // 上面那族用例只覆盖**裸 `reason`**（类别级字符串），而 per-tier 理由是**另一条**取值
+    // 路径（`destructive.reasons[tier]`）。缺陷原状：`destructiveTiers` ③ 对 per-tier 理由
+    // 仍只读**该档动作的来源层**（`explicitOf(t).from.reasons[t]`），跨层回落只补给了裸
+    // `reason` —— 于是 per-tier 这一族照旧丢理由。
+    //
+    // 形态比裸 `reason` 那族**更常见**，因为它就是面板档位下拉框的产物：下拉框只提交
+    // `{target, tier, action}`、**不带 reason**（client.js 的 changeSubDestructive），
+    // 只有用户点「编辑原因」时才带上（commitSubReason）。故
+    //   全局 `{wide:'deny', reasons:{wide:'…'}}` + 项目 `{wide:'deny'}`（下拉框写的）
+    // 是常规可达路径，不是边角：wide 的动作来源是**项目**、per-tier 理由却在**全局**。
+    //
+    // 判据（与上面那族同源）：
+    //   ① 动作必须仍是 deny（补理由不得改动作）；
+    //   ② 必须带回**另一层**那份 per-tier 理由；
+    //   ③ **本层优先**：两层都写了同一档的理由时，取该档动作来源层的（项目压过全局）；
+    //   ④ 防空转对照：两层都没写任何理由时仍是 deny，且理由里不含任何一句
+    //      —— 否则「拿到了理由」无从谈起（可能是无条件拼了一句常量）。
+    //
+    // ⚠️ 反向（理由在项目、该档动作在全局）在本文件**构造不出来**，故不在这里断：
+    // 写盘侧 normalizeSubSetting 只在**该层该档显式 deny** 时保留 `reasons[t]`
+    // （`const explicit = t === 'inside' ? out.action : out[t]; if (explicit !== 'deny') continue`），
+    // 故「理由所在层」必然同时是「该档动作的来源层」—— 反方向是**不可达形状**。
+    // 读取侧对反方向的次序由 regressions.mjs 直接喂原始块覆盖（那里绕开归一化）。
+    {
+      const mkXHost = async (globalDestructive, projectCalls) => {
+        const w = mkdtempSync(join(tmpdir(), 'pg-tierr-ws-'))
+        const h = mkdtempSync(join(tmpdir(), 'pg-tierr-home-'))
+        mkdirSync(join(h, 'dsh-permgate'), { recursive: true })
+        writeFileSync(join(h, 'dsh-permgate', 'config.json'), JSON.stringify({
+          global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: globalDestructive } }, projects: {},
+        }, null, 2), 'utf8')
+        const host = createHost({ workspaceRoot: w, dshHome: h })
+        for (const c of projectCalls) {
+          await callRoute(host.routes, 'POST', '/permgate/set-command-sub',
+            { target: 'project', tier: c.tier, action: c.action, reason: c.reason, lang: 'zh', sessionId: 'sess-1' })
+        }
+        const pre = host.hooks.get('tools/pre-execute')
+        const probe = async (cmd) => {
+          let nexted = false
+          const p = pre(makeExec(w, 'bash', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
+          p.catch(() => {})
+          const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+          return { nexted, kind: nexted ? 'allow' : ((out && out.kind) || 'timeout'), reason: String((out && out.reason) || '') }
+        }
+        return { w, h, host, probe }
+      }
+      // ① per-tier 理由在**全局**、动作来源在**项目**（面板下拉框的常规产物）
+      const cA = await mkXHost({ wide: 'deny', reasons: { wide: '全局那份逐档理由' } }, [{ tier: 'wide', action: 'deny' }])
+      const stA = (await callRoute(cA.host.routes, 'GET', '/permgate/status')).data.commandSub
+      const outA = await cA.probe('rm -rf C:/Windows')
+      ok('★★ per-tier 理由跨层回落（方向①动作在项目、reasons.wide 在全局）：wide 档必须 deny **且**带回全局那份逐档理由',
+        !!(!outA.nexted && outA.kind === 'deny' && outA.reason.indexOf('全局那份逐档理由') !== -1
+          && stA && stA.effective && stA.effective.wide === 'deny'),
+        JSON.stringify({ nexted: outA.nexted, kind: outA.kind, reason: outA.reason, wide: stA && stA.effective && stA.effective.wide }))
+      // 且面板视图照旧只在**写了理由的那一层**显示它（口径不变，不因裁决侧跨层回落而跟着搬）
+      ok('★ per-tier 理由跨层回落：面板视图仍把该理由显示在全局层（不因裁决跨层取用而搬到项目层）',
+        !!(stA && stA.globalReasons && stA.globalReasons.wide === '全局那份逐档理由'
+          && !(stA.projectReasons && stA.projectReasons.wide)),
+        JSON.stringify({ g: stA && stA.globalReasons, p: stA && stA.projectReasons }))
+      try { rmSync(cA.w, { recursive: true, force: true }); rmSync(cA.h, { recursive: true, force: true }) } catch (e) {}
+
+      // ② 本层优先：两层都写了 wide 的 per-tier 理由时，取**该档动作来源层**（项目）那句
+      const cB = await mkXHost({ wide: 'deny', reasons: { wide: '全局那份逐档理由' } },
+        [{ tier: 'wide', action: 'deny', reason: '项目那份逐档理由' }])
+      const outB = await cB.probe('rm -rf C:/Windows')
+      ok('★★ per-tier 理由本层优先：两层都写了 wide 的理由时取项目层那句（项目压过全局），且动作仍是 deny',
+        !!(!outB.nexted && outB.kind === 'deny' && outB.reason.indexOf('项目那份逐档理由') !== -1
+          && outB.reason.indexOf('全局那份逐档理由') === -1),
+        JSON.stringify({ nexted: outB.nexted, kind: outB.kind, reason: outB.reason }))
+      try { rmSync(cB.w, { recursive: true, force: true }); rmSync(cB.h, { recursive: true, force: true }) } catch (e) {}
+
+      // ③ 防空转对照：两层都没写**任何**理由（per-tier 与裸都没有）→ 仍是 deny，且理由里不含那两句
+      //
+      // ⚠️ 判据不能只比「不含那两句具体文字」—— 那样一个**无条件拼常量**的实现只要常量换句话
+      // 就能溜过去（实测：把回落写成 `|| '凭空造的理由'` 时，只比文字的版本照样通过）。
+      // 故这里同时断**档位表本身**：`effective.reasons` 里根本不得出现 wide 这个键
+      // —— 「两层都没写过理由」的直接含义就是该档没有理由可给。
+      const cC = await mkXHost({ wide: 'deny' }, [{ tier: 'wide', action: 'deny' }])
+      const stC = (await callRoute(cC.host.routes, 'GET', '/permgate/status')).data.commandSub
+      const outC = await cC.probe('rm -rf C:/Windows')
+      const effReasonsC = (stC && stC.effective && stC.effective.reasons) || null
+      ok('★ per-tier 理由跨层回落 防空转对照：两层都没写理由时同一命令仍 deny，且理由里不含任何一层那句（不凭空造理由）',
+        !!(!outC.nexted && outC.kind === 'deny'
+          && outC.reason.indexOf('全局那份逐档理由') === -1 && outC.reason.indexOf('项目那份逐档理由') === -1
+          // 档位表里该档**根本没有**理由键（「两层都没写过」= 无可给的理由，不是「给了句别的」）
+          && !(effReasonsC && effReasonsC.wide !== undefined)
+          && stC && stC.effective && stC.effective.wide === 'deny'),
+        JSON.stringify({ nexted: outC.nexted, kind: outC.kind, reason: outC.reason, effReasons: effReasonsC, wide: stC && stC.effective && stC.effective.wide }))
+      try { rmSync(cC.w, { recursive: true, force: true }); rmSync(cC.h, { recursive: true, force: true }) } catch (e) {}
+    }
 
     try { rmSync(wsT, { recursive: true, force: true }); rmSync(homeT, { recursive: true, force: true }) } catch (e) {}
   }
@@ -3502,11 +3770,15 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
   }
 
   // ── S14：T2 字面形态（command=deny 全程 6 次 → 6 次全 DENY）────────────
+  // ⚠️ 配置已按新规则调整：旧规则下 `mode:'deny'` 会把八档一起推成 deny，
+  // 故只写 mode 就够；新规则下八档一律「项目显式 → 全局显式 → ask」，
+  // **必须显式写出** `destructive:{action:'deny'}` 才能让 `rm -rf x`（inside 档）落在 deny。
+  // 被测的东西没变：doomloop=ask 不得把更严的 deny 削弱成 ask。
   {
-    const { ws, home, h } = mkHost({ command: { mode: 'deny', reason: '命令一律拒绝' }, doomloop: { mode: 'ask', threshold: 3 } })
+    const { ws, home, h } = mkHost({ command: { mode: 'deny', destructive: { action: 'deny' }, reason: '命令一律拒绝' }, doomloop: { mode: 'ask', threshold: 3 } })
     const seq = []
     for (let i = 0; i < 6; i++) seq.push(await probe(h, ws, 's14', 'bash', { command: 'rm -rf x' }))
-    ok('★★ group22 T2(字面): command=deny 全程 6 次同一命令 → 6 次全 DENY（无一次 ASK）',
+    ok('★★ group22 T2(字面): command=deny + inside 档显式 deny 全程 6 次 → 6 次全 DENY（无一次 ASK）',
       seq.every((v) => v === 'deny'), JSON.stringify(seq))
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
