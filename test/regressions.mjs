@@ -56,7 +56,6 @@ function tierChainOf(source) {
   // 复用同一个函数实例会让用例之间互相串味（实测踩过）。
   // 返回 (globalCommand, project) → 八档动作表（含 source / reasons 两个附加键）。
   const evaluate = (globalCommand, project) => {
-    // eslint-disable-next-line no-new-func
     const fn = new Function('projectBlock', 'config', 'TIERS', 'normalizeText',
       [keyStmt, legacyStmt, m[0], 'return destructiveTiers;'].join('\n'))(
       () => project || null,
@@ -1562,7 +1561,6 @@ ok('★★ commitExReason：未改动不发请求 + 只带改动字段 + 字段�
   const drafts = {}
   let fn = null
   try {
-    // eslint-disable-next-line no-new-func
     fn = new Function('call', 'setBusy', 'setMsg', 'applyStatus', 'markReasonSaved', 'tab', 'T', 'exReason', sb + '\n; return commitExReason;')(
       (method, payload) => { sent.push({ method: method, payload: payload }); return Promise.resolve({}) },
       () => {}, () => {}, () => {}, () => {},
@@ -1632,7 +1630,6 @@ ok('★★ commitExReason：草稿未播种（exReason 为空）+ cur 非空 →
   const drafts = {}
   let fn = null
   try {
-    // eslint-disable-next-line no-new-func
     fn = new Function('call', 'setBusy', 'setMsg', 'applyStatus', 'markReasonSaved', 'tab', 'T', 'exReason', sb + '\n; return commitExReason;')(
       (method, payload) => { sent.push({ method: method, payload: payload }); return Promise.resolve({}) },
       () => {}, () => {}, () => {}, () => {},
@@ -7697,7 +7694,6 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     // 全部由下面这个构造器注入 —— 于是它是**真的在跑**，不是在看源码文本。
     const mk = (sub) => {
       try {
-        // eslint-disable-next-line no-new-func
         return new Function('subTierList', 'subDestructive', 'tab', 'T', 'modeLabel',
           body + '\n; return subCollapsedSummary;')(
           () => [
@@ -8019,7 +8015,6 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     // 抠出的片段里 `s` 是唯一自由变量（setSubDestructive 等都在 j 之后，未被切进来）。
     const mk = (commandSub) => {
       try {
-        // eslint-disable-next-line no-new-func
         return new Function('s', body + '\n; return { subNext: subNext, SUB_TIERS: SUB_TIERS };')({ commandSub: commandSub })
       } catch (e) { return null }
     }
@@ -8126,11 +8121,9 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     const ASK_ALL = {}; for (const t of SP_TIERS) ASK_ALL[t] = 'ask'
     const run = (tab, commandSub) => {
       try {
-        // eslint-disable-next-line no-new-func
         const filled = new Function('s', fill + '\n; return subNext;')({ commandSub: commandSub })
         // `action` 在 subTierRow 里是 `const action = subActionOf(tier)`（渲染处的上一行），
         // 故这里用**同一个** subActionOf 复算它，再喂给真实的 showReason 判据 —— 两步都取自生产源码。
-        // eslint-disable-next-line no-new-func
         const api = new Function('subDestructive', 'tab', subActionStmt + '\nconst action = subActionOf("wide");\n' + showReasonStmt + '\n; return { show: showReason, action: action };')(filled, tab)
         return api
       } catch (e) { return null }

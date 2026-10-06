@@ -3005,9 +3005,11 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
   const ws = mkdtempSync(join(tmpdir(), 'pg-rule-ws-'))
   const home = mkdtempSync(join(tmpdir(), 'pg-rule-home-'))
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
-  const h = createHost({ workspaceRoot: ws, dshHome: home })
-  const pre = h.hooks.get('tools/pre-execute')
-  const probe = async (name, args) => {
+  // 判定探针：跑一次 `tools/pre-execute`，返回 `{ nexted, verdict }`。
+  // `nexted` = 是否走到 `next()`（放行）；`verdict` = 宿主返回的 `kind`。
+  // 300ms 超时兜底：宿主挂起时不能让测试永久卡住（超时得到 `kind:'timeout'`）。
+  // `pre` 由调用方传入 —— 本区块每组用例都重建宿主（`setRules`），hook 各不相同。
+  const probe = async (pre, name, args) => {
     let nexted = false
     const p = pre(makeExec(ws, name, args || {}), async () => { nexted = true; return { kind: 'allow' } })
     p.catch(() => {})
@@ -3026,17 +3028,11 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
     { id: 'r1', action: 'allow', tool: 'pwsh', args: 'git status' },
     { id: 'r2', action: 'deny', tool: 'pwsh' },
   ])
-  let pre1 = h1.hooks.get('tools/pre-execute')
-  let nexted = false
-  const p1 = pre1(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted = true; return { kind: 'allow' } })
-  p1.catch(() => {})
-  await Promise.race([p1, new Promise((r) => setTimeout(r, 300))])
-  ok('★ group21: 具体 allow 排在宽泛 deny 之前 → 该具体用法放行（顺序即优先级）', nexted === true)
-  let v1 = null
-  const p1b = pre1(makeExec(ws, 'pwsh', { command: 'rm -rf /' }), async () => ({ kind: 'allow' }))
-  p1b.catch(() => {})
-  v1 = await Promise.race([p1b, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-  ok('★ group21: 同一配置下其它 pwsh 命令仍被宽泛 deny 拦住', !!v1 && v1.kind === 'deny', JSON.stringify(v1))
+  const pre1 = h1.hooks.get('tools/pre-execute')
+  const r1 = await probe(pre1, 'pwsh', { command: 'git status' })
+  ok('★ group21: 具体 allow 排在宽泛 deny 之前 → 该具体用法放行（顺序即优先级）', r1.nexted === true)
+  const r1b = await probe(pre1, 'pwsh', { command: 'rm -rf /' })
+  ok('★ group21: 同一配置下其它 pwsh 命令仍被宽泛 deny 拦住', r1b.verdict === 'deny', JSON.stringify(r1b))
 
   // 意图二：「具体拒绝 + 宽泛放行」——反过来写也要能表达
   const h2 = setRules([
@@ -3044,17 +3040,11 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
     { id: 'r2', action: 'allow', tool: 'pwsh' },
   ])
   const pre2 = h2.hooks.get('tools/pre-execute')
-  let v2 = null
-  const p2 = pre2(makeExec(ws, 'pwsh', { command: 'rm -rf /' }), async () => ({ kind: 'allow' }))
-  p2.catch(() => {})
-  v2 = await Promise.race([p2, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  const r2 = await probe(pre2, 'pwsh', { command: 'rm -rf /' })
   ok('★ group21: 具体 deny 排在宽泛 allow 之前 → 该具体用法被拒（反方向同样可表达）',
-    !!v2 && v2.kind === 'deny', JSON.stringify(v2))
-  let nexted2 = false
-  const p2b = pre2(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted2 = true; return { kind: 'allow' } })
-  p2b.catch(() => {})
-  await Promise.race([p2b, new Promise((r) => setTimeout(r, 300))])
-  ok('★ group21: 同一配置下其它 pwsh 命令按宽泛 allow 放行', nexted2 === true)
+    r2.verdict === 'deny', JSON.stringify(r2))
+  const r2b = await probe(pre2, 'pwsh', { command: 'git status' })
+  ok('★ group21: 同一配置下其它 pwsh 命令按宽泛 allow 放行', r2b.nexted === true)
 
   // ★ add-rule 插到**尾部**（后加的排最后）：顺序完全归用户，不自动重排 —— 用户定。
   // 已知后果（有意接受）：新规则若被前面命中的规则遮蔽就不生效，直到用户手动把它调到前面。
@@ -3069,23 +3059,17 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
   // 端到端确认这个已知后果确实如此（不是 bug，是有意接受的取舍）：
   // 新加的 allow 排在老 deny 之后 → 被遮蔽，暂不生效；用户把它调到前面即可生效。
   const pre3 = h3.hooks.get('tools/pre-execute')
-  let nexted3 = false
-  const p3 = pre3(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted3 = true; return { kind: 'allow' } })
-  p3.catch(() => {})
-  const v3 = await Promise.race([p3, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
+  const r3 = await probe(pre3, 'pwsh', { command: 'git status' })
   ok('★ group21: 新规则排在老规则之后时被遮蔽（已知后果，由用户手动调节顺序解决）',
-    nexted3 === false && !!v3 && v3.kind === 'deny', JSON.stringify({ nexted: nexted3, v: v3 && v3.kind }))
+    r3.nexted === false && r3.verdict === 'deny', JSON.stringify(r3))
   // 对照：把新规则手动调到前面（模拟用户拖动排序后的配置）→ 立即生效
   const h4 = setRules([
     { id: 'rNew', action: 'allow', tool: 'pwsh', args: 'git status' },
     { id: 'rOld', action: 'deny', tool: 'pwsh' },
   ])
   const pre4 = h4.hooks.get('tools/pre-execute')
-  let nexted4 = false
-  const p4 = pre4(makeExec(ws, 'pwsh', { command: 'git status' }), async () => { nexted4 = true; return { kind: 'allow' } })
-  p4.catch(() => {})
-  await Promise.race([p4, new Promise((r) => setTimeout(r, 300))])
-  ok('★★ group21: 用户手动把规则调到前面后立即生效（顺序 = 优先级）', nexted4 === true)
+  const r4 = await probe(pre4, 'pwsh', { command: 'git status' })
+  ok('★★ group21: 用户手动把规则调到前面后立即生效（顺序 = 优先级）', r4.nexted === true)
 
   // ★★ 排序路由（/permgate/reorder）：上面那条用的是「手写配置文件模拟拖动后的顺序」，
   // 它证明的是**读侧**尊重顺序，而不是**写侧**能把顺序改对。这里补写侧：调路由 → 看落盘 →
@@ -3116,14 +3100,7 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
 
     // ③ 写侧真的改变了**判定结果**：现在 rC 排在 rB 之前，故 rm -rf 命中 deny 而不是被 allow 放行
     const pre5 = h5.hooks.get('tools/pre-execute')
-    const run5 = async (cmd) => {
-      let nexted = false
-      const p = pre5(makeExec(ws, 'pwsh', { command: cmd }), async () => { nexted = true; return { kind: 'allow' } })
-      p.catch(() => {})
-      const out = await Promise.race([p, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
-      return { nexted, verdict: out && out.kind }
-    }
-    const afterMove = await run5('rm -rf /')
+    const afterMove = await probe(pre5, 'pwsh', { command: 'rm -rf /' })
     ok('★★ group21: 排序后的顺序在真实判定链上生效（rC 的 deny 不再被 rB 的宽泛 allow 遮蔽）',
       afterMove.nexted === false && afterMove.verdict === 'deny', JSON.stringify(afterMove))
 

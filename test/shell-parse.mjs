@@ -9671,7 +9671,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
     //    outside。断言「诱饵那一档必须保留」时要用实测值，否则会把平台差异误报成缺陷。
     let n2 = 0
     for (const bait of ['/etc/hosts', '~/notes.txt']) for (const mk of MK) for (const sep of SEPS) {
-      const c = 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
+      const c = sep + 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
       for (const [sh, pl] of SHP) {
         n2 += 1
         const tw = flat(c, sh, pl, dsWide)
@@ -9701,7 +9701,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
     // ② 诱饵档位**不触发**的四种目标：不得凭空多档（它们自身已归 wide/unknown，
     //    或 blast 为 null 时走 `!seg.blast` 那条既有判据）—— 只断言「不得比修复前更松」
     for (const bait of ['C:/Windows/x', 'B:/', '$T', './build']) for (const mk of MK) for (const sep of SEPS) {
-      const c = 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
+      const c = sep + 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
       for (const [sh, pl] of SHP) {
         const tw = flat(c, sh, pl, dsWide)
         if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['诱饵（不触发档）形态未 deny', c, sh, pl, tw.join('+')])
@@ -9843,7 +9843,6 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
   }
   // ── 行为核查：整行读不懂分支的 `tiers` 不得重复，且三档齐全（行为不得回退）─────
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
     const withDs = (ds) => Object.assign(hooks({ category: 'allow' }), { destructive: () => ds })
     const bad = []
@@ -9985,7 +9984,6 @@ group('AG. 进程替换作重定向目标：`>( )` / `<( )` 是可作词的目�
   // 但那个 `>` 是**别的操作符的一部分**，bash 全是语法错误。故本修法再加一条：
   // 那个 `>` / `<` 的再前一个字符不得是 `<` `>` `|` `&`（即它必须是独立的单字符操作符）。
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
     const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
     const bad = []
@@ -10748,7 +10746,6 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
   // 命令（victim 存活）。修复后是 `["cat"]`。这是**消除误报**，方向正确。
   {
     const bad = []
-    const dsAllAllow = ONLY('none')
     const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
     for (const c of ['cat <<rm\nbody\nrm', 'cat <<sudo\nbody\nsudo', 'cat <<shutdown\nbody\nshutdown']) {
       const names = rawCommandNames(c)
@@ -10800,6 +10797,156 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       bad.length === 0, JSON.stringify(bad))
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AI. `RADIUS_TIERS_WHEN_UNREADABLE` 三档逐档承重（发现：`unknown` 档无断言守护）')
+{
+  // ── 这一组盯的是什么 ────────────────────────────────────────────────────────
+  // `RADIUS_TIERS_WHEN_UNREADABLE = ['wide','unknown','inside']` 是**单点常量**，
+  // 被两条路径共用：整行 `ok:false` 分支与段级 `opaqueHiddenPayload` 支。
+  // 三档是**并联**关系（任一档为 deny → 结论 deny），故删掉任一个只有在该档
+  // **独自**为 deny 时才显形 —— 这正是它此前逃过全部断言的原因：
+  // 上一批的变异测试（把 `unknown` 从数组里删掉）**测试全绿**，
+  // 而独立进程差分显示「只有 `unknown=deny`」这一族配置下结论由 deny 变 allow。
+  //
+  // ── 为什么值得钉 ────────────────────────────────────────────────────────────
+  // 风险不在「现在」而在「日后」：`wide` 与 `unknown` 在「半径读不出」这个场景下
+  // 语义重叠（`wide` 管「范围可能很大」、`unknown` 管「读不出」），
+  // 后来者很容易认为「反正 wide 已经并了，unknown 多余」而删掉它 ——
+  // 而面板上 `unknown` 档的标签就是「无法判定」，把它设成拒绝是很自然的配置。
+  // 删掉它 = 那一档静默失效（fail-open），且没有任何断言会红。
+  //
+  // ── 判据的三条约束（缺一不可）──────────────────────────────────────────────
+  //   ① 三档**逐档**测：只测「三档全 deny」是抓不住单档缺失的（并联关系）；
+  //   ② 两条**路径**都测：常量被两处消费，只测一条会漏掉另一条的接线；
+  //   ③ 必须带**全 allow 对照**：否则「把三档都改成无条件 deny」也能过 ——
+  //      那是凭空收紧，与 60g ④b/⑤b 的承重格（合法常用命令恰好 `['unknown']`）冲突。
+  const TIERS_AI = ['inside', 'outside', 'wide', 'unknown', 'priv', 'proc', 'power', 'reg']
+  const ONLY_AI = (tier) => { const t = {}; for (const x of TIERS_AI) t[x] = x === tier ? 'deny' : 'allow'; return t }
+  const ALLOW_AI = {}; for (const x of TIERS_AI) ALLOW_AI[x] = 'allow'
+  const mkAI = (t) => ({
+    home: HOME, userHome: HOME, platform: 'win32',
+    matchException: () => null,
+    destructive: () => t,
+    category: () => ({ action: 'allow', reason: null }),
+    isOutsideWorkspace: () => true,
+    isWorkspaceRoot: () => false,
+  })
+  const atAI = (c, t, sh) => assessCommand(c, sh || 'bash', mkAI(t))
+
+  // ── ① 整行读不懂路径（`ok:false` 分支）──────────────────────────────────────
+  // 靶格都是**真能执行**的破坏性命令，只是多带一个读不懂的构造 —— 命令名由
+  // `rawCommandNames` 从原文粗提（这是该路径唯一的命令名来源）。
+  const UNP_AI = [
+    ['heredoc', 'rm -rf /data <<EOF\nbody\nEOF'],
+    ['未闭合引号', 'rm -rf /data "unclosed'],
+    ['悬空重定向', 'rm -rf /data >'],
+    ['悬空管道', 'rm -rf /data |'],
+    ['未闭合 $()', 'rm -rf /data $(unclosed'],
+    ['taskkill + heredoc', 'taskkill /f /im x.exe <<EOF\nx\nEOF'],
+    ['kill + heredoc', 'kill 1234 <<EOF\nx\nEOF'],
+  ]
+  for (const tier of ['wide', 'unknown', 'inside']) {
+    const bad = []
+    for (const [n, c] of UNP_AI) {
+      const r = atAI(c, ONLY_AI(tier))
+      if (r.action !== 'deny') bad.push([n, r.action, r.code])
+    }
+    ok('★ AI1 整行读不懂：`' + tier + '=deny` 独自承重（其余七档 allow）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ② 段级 opaqueHiddenPayload 路径（`tierSetOf` 的守卫支）─────────────────
+  // 真命令藏在构造里、段首读不出破坏性命令 —— 与 ① 是**两条独立接线**，
+  // 常量被两处消费，必须分别钉。
+  //
+  // ⚠️ **`unknown` 这一格在段级路径上是「双来源」，测不出常量的缺失**（实测）：
+  // 段级还有一个补档行 `if (seg && (… || seg.opaque)) add('unknown')`（`tierSetOf` 判据③），
+  // 于是把 `unknown` 从常量里删掉时，本组**只有 `wide` / `inside` 两格会红**，
+  // `unknown` 那一格被补档行兜住、照旧 deny。这不是缺陷 —— 两条来源是**有意的冗余**
+  // （常量管「半径读不出」的通用口径，补档行管「段是 opaque」这一具体判据）。
+  // 真正能测出「段级 unknown 整体失守」的是**同时**拆掉两处（实测那样才由 deny 变 allow）。
+  // 故本格的断言名写「段级路径承重」，不写「常量承重」—— 后者是 AI1 与 AI5 的职责。
+  const SEG_AI = [
+    ['子 shell', 'echo a | (rm -rf C:/Windows)'],
+    ['反引号', 'echo a | Write-Output `rm -rf C:/Windows`'],
+    ['pwsh 脚本块', 'echo a | ForEach-Object { Remove-Item C:/Windows -Recurse -Force }'],
+    ['提权 + 子 shell', 'echo a | sudo $(rm -rf C:/Windows)'],
+  ]
+  for (const tier of ['wide', 'unknown', 'inside']) {
+    const bad = []
+    for (const [n, c] of SEG_AI) {
+      const r = atAI(c, ONLY_AI(tier))
+      if (r.action !== 'deny') bad.push([n, r.action, r.code])
+    }
+    ok('★ AI2 段级 opaqueHiddenPayload：`' + tier + '=deny` 独自承重（其余七档 allow）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ③ 全 allow 对照：三档并入**不得**变成「无条件 deny」────────────────────
+  // 没有这一条，「把三档改成硬 deny」也能通过 ①② —— 而那是凭空收紧：
+  // 靶格的目标在工作区内（`/data`、`C:/Windows` 由 `isOutsideWorkspace` 桩判为区内），
+  // 用户八档全 allow 时这些命令本就该放行（AH2 同口径：构造只是参数/读不出半径 ≠ 危险）。
+  {
+    const bad = []
+    for (const [n, c] of UNP_AI.concat(SEG_AI)) {
+      const r = atAI(c, ALLOW_AI)
+      if (r.action !== 'allow') bad.push([n, r.action, r.code])
+    }
+    ok('★ AI3 对照：八档全 allow 时两条路径都不得凭空收紧（并入 ≠ 无条件 deny）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ④ 单档承重的**互斥性**：只有该档 deny 时，另两档必须是 allow ──────────────
+  // 上一条 `ONLY_AI` 已保证这一点；这里显式断言一次，防止日后有人把 ONLY_AI
+  // 改成「该档 deny + 其余也 deny」而让 ①② 变成恒真（那会让整组失去意义）。
+  {
+    const bad = []
+    for (const tier of ['wide', 'unknown', 'inside']) {
+      const t = ONLY_AI(tier)
+      for (const x of TIERS_AI) {
+        if (x === tier) { if (t[x] !== 'deny') bad.push([tier, x, '应为 deny', t[x]]) }
+        else if (t[x] !== 'allow') bad.push([tier, x, '应为 allow', t[x]])
+      }
+    }
+    ok('★ AI4 逐档探针必须互斥（只该档 deny、其余七档 allow）—— 否则 ①② 恒真',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑤ 源码钉桩：常量内容恰好三档且含 `unknown` ──────────────────────────────
+  // 行为断言（①②）已能抓住「删 unknown」，但只在**两条路径都接线正确**时成立。
+  // 这一条直接钉常量本身：日后有人重构掉消费点、或把常量改成别的集合时，
+  // 它会在断言名里直接指出是哪个常量变了。
+  {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    const m = /const RADIUS_TIERS_WHEN_UNREADABLE = \[([^\]]*)\]/.exec(spSrc)
+    const list = m ? m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean) : null
+    const want = ['wide', 'unknown', 'inside']
+    ok('★ AI5 `RADIUS_TIERS_WHEN_UNREADABLE` 恰好 `[\'wide\',\'unknown\',\'inside\']`',
+      list !== null && list.length === want.length && want.every((x, i) => list[i] === x),
+      'got=' + JSON.stringify(list))
+  }
+
+  // ── ⑥ 段级 `unknown` 的**双来源**必须都在（判据③ 与常量各一份）──────────────
+  // 段级 opaqueHiddenPayload 支的 `unknown` 有两个产出点：
+  //   · `RADIUS_TIERS_WHEN_UNREADABLE`（本常量，支内 `for … add(t)`）；
+  //   · 支外的补档行 `if (seg && (… || seg.opaque)) add('unknown')`（`tierSetOf` 判据③）。
+  // 二者是**有意的冗余**，删掉任一个都还有另一个兜住（实测：只删常量时 AI2 的
+  // `unknown` 格仍 deny）。故这里断言**两个产出点都存在** —— 只删一个不该让行为
+  // 变红，但源码里少一个就是接线退化，必须显式看见。
+  // 真正需要防的是「**两个都被删**」：那时 `unknown=deny` 对段级 opaque 段完全失效
+  // （实测 `echo a | (rm -rf C:/Windows)` 由 deny 变 allow）。
+  {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    const hasConst = /const RADIUS_TIERS_WHEN_UNREADABLE = \[[^\]]*'unknown'[^\]]*\]/.test(spSrc)
+    // 补档行：`|| seg.opaque)) add('unknown')`（写法可换行，故按两段子串判）
+    const hasPatch = spSrc.includes('|| seg.opaque)) add(\'unknown\')')
+    ok('★ AI6 段级 `unknown` 的两个产出点都在（常量 + 判据③ 补档行）',
+      hasConst && hasPatch,
+      'const=' + hasConst + ' patchLine=' + hasPatch)
+  }
+}
+
 
 
 

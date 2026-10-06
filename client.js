@@ -531,8 +531,15 @@ window.__ModuleLoader__.load({
 			};
 		}
 		// 供面板读取当前栅栏状态（面板据此报错而不是渲染一份空配置）
-		function fenceState() { return fenceBlocked; }
-		function retryEvents() { fenceBlocked = null; ensureEventSource(); }
+		//
+		// ⚠️ 这两个函数目前**没有调用方**（eslint 因此报 no-unused-vars，是本文件仅有的两条
+		// 该类警告）。**刻意保留，不是死代码**：`fenceBlocked` 是栅栏机制的实际状态
+		// （:511 阻止无谓重连、:524 抑制重复上报、:527 置位），而它是**只写不读**的 ——
+		// 面板侧要按栅栏状态报错（而不是渲染一份空配置）时，唯一的读入口就是这两个。
+		// 删掉它们会让状态彻底不可读，将来接线时还得原样加回来。
+		// 若确要清理：请在面板侧接线**之后**连同消费点一起删，而不是现在单独删这两个。
+		function fenceState() { return fenceBlocked; } // eslint-disable-line no-unused-vars
+		function retryEvents() { fenceBlocked = null; ensureEventSource(); } // eslint-disable-line no-unused-vars
 		function subscribeEvents(fn) {
 			eventListeners.add(fn);
 			ensureEventSource();
