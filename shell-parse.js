@@ -3421,26 +3421,200 @@ function replaceCommandSubstitution(text, extracted) {
  * 从它首次单独成行的位置截断；找不到终止符就只保留 `<<` 之前的部分
  * （正文范围不确定时宁可少扫，方向仍是「命令部分照常查」，不会因此放行真命令）。
  */
+/**
+ * 丢掉 heredoc 正文，只留下**命令行**部分。
+ *
+ * 终止符取 `<<` 后紧跟的那个词（`<<EOF` / `<<'EOF'` / `<<-EOF` 都算），
+ * 从它首次单独成行的位置截断；找不到终止符就只保留 `<<` 之前的部分
+ * （正文范围不确定时宁可少扫，方向仍是「命令部分照常查」，不会因此放行真命令）。
+ *
+ * **提成单点**：`rawCommandNames` 与 `outsideTargetInUnparsable` 都要问「命令部分到哪为止」。
+ * 两处各写一份正则必然漂移，而漂移的后果是把 heredoc 正文（**数据**，不是命令）
+ * 当成命令扫 —— `cat > doc.txt <<EOF\nrm -rf is dangerous\nEOF` 会因为正文里出现
+ * `rm` 而被判成破坏性命令。单点化与 `CMD_VARIABLE` / `TIER_RANK` 是同一条纪律。
+ *
+ * @param {string} source 原始文本
+ * @returns {string} 已丢掉 heredoc 正文的文本
+ */
+function stripHeredocBody(source) {
+  // 正则的三处细节都是**实测**逼出来的（各有一个方向）：
+  //
+  // ① `(?<!<)` 排除 here-string（`<<<x`）。它不是 heredoc —— 正文就是同一行的那个词，
+  //    **不吞后续行**。不排除时 `[A-Za-z_]` 会从 `<<<x` 的第三个 `<` 之后读到标签 `x`，
+  //    把其后整段当正文吞掉。真 bash 实测 `cat <<<x\nrm -rf v` → **v 被删**（会被放行）。
+  // ② `\\?` 必须放在捕获组**外**。`<<\EOF` 的反斜杠转义分隔符是**合法 heredoc**
+  //    （真 bash 实测 `cat <<\EOF\nrm -rf v\nEOF` → v **不被删**，正文是数据），
+  //    但把反斜杠放进组内（`(['"\\]?)`）会让反向引用 `\1` 去匹配那个反斜杠：
+  //    `<<\EOF` 上直接 NO-MATCH（实测），于是正文被当命令 → 八档全 deny 的**误拦**。
+  // ③ 分隔符类必须是 bash **真正的**分隔符集合，且**不靠反向引用**配对引号：
+  //    只允许引号**整体包住**分隔符（`(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1`）时，引号夹在
+  //    分隔符**中间**的写法（`<<E"OF"`）被读成 `<<E`、标签取 `E` ⇒ 找不到终止符 `EOF`
+  //    ⇒ 走 `!end` 分支把终止符**之后**的真命令整段丢掉。真 bash 实测
+  //    `cat <<E"OF"\nbody\nEOF\nrm -rf v` → v **被删**（八档全 deny 下被放行）。
+  //    同族漏网还有 `<<END-OF` / `<<END.OF` / `<<""` / `<< E"OF"` / `<<\E"OF"`。
+  //    引号内的**换行**在真 bash 里是**语法错误**（实测 `cat <<'E` + 换行 + `OF'` →
+  //    syntax error），故字符类排除 `\n`：那种形态本就不执行，NO-MATCH 只走 `!end`（收紧）。
+  //    标签由 `heredoc[1]` 剥掉引号得到（bash 语义：引号只影响是否做参数展开，不属分隔符本身）。
+  let out = ''
+  let rest = source
+  // ── 循环剥离**每一个** heredoc（发现 2）──────────────────────────────────────
+  // 只处理第一个 opener 时，`slice(0, heredoc.index)` 把第一个 opener 之后的**一切**丢掉 ——
+  // 第二个 heredoc 的正文被顺带丢掉（错误理由下的正确结果）。新写法把终止符之后的整段接回，
+  // 于是第二个 heredoc 的头与正文重新进入被扫文本。
+  //
+  // ⚠️ 但**不能**无条件循环：真 heredoc 剥离后，下一个「opener」可能是引号/注释里的
+  // **假 opener**（`echo "x<<y"`、`# a<<b`、`$((x<<y))`），它的 `!end` 分支会把其后整段
+  // 真命令截掉 ⇒ 六处 fail-open（真 bash 实测这些命令**会执行**）。故加**方向守卫**：
+  // `!end` 时若 `stripped === 0` 保持既有截断（与 HEAD 同向，不引入新放宽），否则 `break`
+  // 返回当前已剥离的文本（**不**截断后续）。
+  for (let stripped = 0; ; stripped += 1) {
+    const heredoc = /(?<!<)<<-?[ \t]*\\?((?:'[^'\n]*'|"[^"\n]*"|[^\s;|&()<>'"\\])+)/.exec(rest)
+    if (!heredoc) break
+    const tag = heredoc[1].replace(/['"]/g, '')
+    const afterTag = heredoc.index + heredoc[0].length
+    // ① `<<TAG` **同一行**的剩余部分是命令行，必须保留 —— 操作符之后照常执行。
+    //    真 bash 实测 `rm -rf ./build <<EOF ; rm -rf v\nbody\nEOF` → v **被删**
+    //    （`&&` / `|` / `&` 同；`||` 因左侧成功而不执行，保留它只会多扫，方向是收紧）。
+    const nl = rest.indexOf('\n', afterTag)
+    const lineEnd = nl < 0 ? rest.length : nl
+    const sameLine = rest.slice(afterTag, lineEnd)
+    const body = rest.slice(lineEnd)
+    // 从 `<<TAG` 之后找首次「单独成行」的 TAG（允许前置制表符，兼容 `<<-`）。
+    // 标签可能含 `.` / `-` 等正则元字符，必须转义后再拼进终止符正则。
+    const tagRe = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const end = new RegExp('^[ \\t]*' + tagRe + '[ \\t]*$', 'm').exec(body)
+    if (!end) {
+      // 找不到终止符：正文范围不确定，只保留 `<<TAG` 之前的部分 + 同行剩余（宁可少扫）。
+      // 只对**第一个** opener 保持这个截断（与既有行为同向）；后续 opener 是假 opener 的
+      // 可能性很高，截断它会吞掉真命令，故 break 交回当前文本。
+      if (stripped === 0) return out + rest.slice(0, heredoc.index) + sameLine
+      break
+    }
+    // ② **终止符之后**的整段也是命令行。真 bash 实测
+    //    `rm -rf ./build <<EOF\nbody\nEOF\nrm -rf v` → v **被删**。
+    //    终止符行上的尾随内容（`EOF ; rm -rf v`）不是命令（实测**不**执行），
+    //    故从终止符行之后的第一个换行起截取，只丢正文。
+    const nl2 = body.indexOf('\n', end.index + end[0].length)
+    out += rest.slice(0, heredoc.index) + sameLine
+    if (nl2 < 0) { rest = ''; break }
+    rest = body.slice(nl2)
+  }
+  return out + rest
+}
+
+/**
+ * 引号感知分词器：引号内的**空白与操作符**都不算分隔符，token 内的引号按 bash 语义剥掉。
+ *
+ * 为什么必须是**一份**实现（而不是「先原切分、判不出再合并」的两份）：原实现先用
+ * `body.split(/[\n\r;|&(){}<>]+/)` 切，而这个正则**对引号无感知** —— 引号**内**的
+ * `& | ; ( ) { } < >` 同样被切开，切碎后的两片各自都不含完整引号对，而
+ * `mergeQuotedWords` 只在**引号内的空白**上合并，无从恢复。于是判不出目标 ⇒
+ * `outside` 档失明。真 bash 实测这些形态**会执行**（`outside=deny`、其余七档 allow 下
+ * 裸命令 deny、带构造 allow）：`rm -rf "D:/R&D"`、`"D:/my project (old)"`、`"D:/a|b"`、
+ * `"D:/a;b"`、`"D:/a&b"`、`"D:/my project"/sub`、`"D:/data;backup"`、
+ * `"D:/Project {old}"`；对照 `"/data/my project"`（无操作符字符）本就判 deny ——
+ * 同一语义两个结论，正是本文件反复要修的那类漂移。
+ *
+ * 两份实现合并成一份后**没有第二候选**（调用方只用它）：方向说明见
+ * `outsideTargetInUnparsable`（多认目标只会让更多档参与「取最严」，不放宽任何东西）。
+ *
+ * 返回**段数组**（每个操作符切出一段）而不是拉平成一维：调用方按段调
+ * `blastRadiusOfSegment`，拉平会让后一段的命令名被前一段当成目标实参。
+ *
+ * @param {string} text 已丢掉 heredoc 正文的文本
+ * @returns {string[][]} 每段的词元（引号已剥）
+ */
+function splitQuotedTokens(text) {
+  const out = []
+  let seg = []
+  let cur = ''
+  let quote = null
+  // `has` 区分「空词元」与「还没有词元」：`cat ""` 的第二个词元是**空串**而不是不存在。
+  let has = false
+  const flushTok = () => { if (cur || has) { seg.push(cur); cur = ''; has = false } }
+  const flushSeg = () => { flushTok(); if (seg.length) { out.push(seg); seg = [] } }
+  for (const ch of String(text)) {
+    if (quote) {
+      // 引号**内**：一切字符都是普通字符（空白与操作符都不切），但引号本身按 bash 语义剥掉
+      if (ch === quote) quote = null
+      else cur += ch
+      has = true
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      has = true
+    } else if (ch === '\n' || ch === '\r' || ch === ';' || ch === '|' || ch === '&'
+      || ch === '(' || ch === ')' || ch === '{' || ch === '}' || ch === '<' || ch === '>') {
+      flushSeg()
+    } else if (ch === ' ' || ch === '\t' || ch === '\f' || ch === '\v') {
+      flushTok()
+    } else {
+      cur += ch
+      has = true
+    }
+  }
+  flushSeg()
+  return out
+}
+
+/**
+ * 整行读不懂时，原文里是否**读得出一个 `outside` 目标**（工作区外）。
+ *
+ * 为什么需要它：整行 `ok:false`（heredoc / 悬空操作符 / 未闭合引号）时没有词元可判，
+ * 那条路径的档位集合由 `groupTiersOf(names) + priv + RADIUS_TIERS_WHEN_UNREADABLE` 拼成，
+ * 而 `RADIUS_TIERS_WHEN_UNREADABLE` 是 `wide ∪ unknown ∪ inside` —— **不含 `outside`**。
+ * 于是用户显式配的 `outside=deny` 在这条路径上整个失明（fail-open）：
+ *     rm -rf /etc              → deny（段级 outside 档）
+ *     rm -rf /etc <<EOF…EOF    → **allow** ← 同一命令，只因多了个 heredoc
+ *
+ * ── 为什么不能「无条件并入 `outside`」──────────────────────────────────────────
+ * `outside` 是「工作区**外**」这一**具体**档，而这条路径上「读不出目标」的语义是
+ * 「可能区内、可能大范围」—— 不是「确定在区外」。无条件并入会让**八档全 allow** 的
+ * 用户也拿到一个 `outside` 档，`test/shell-parse.mjs` 的 58d / 58e3 正是钉这一点
+ * （那两条断言用的目标是 `C:/Windows` 与 `./build`，**都不是** `outside`）。
+ *
+ * 故判据收窄为：**只有原文里真的读得出一个落在工作区外的目标时**才并入 ——
+ * 这与段级路径对同一目标给出的结论同源（`blastRadiusOfSegment` + `radiusTierOf`），
+ * 不是另造一套「哪里算区外」的知识。
+ *
+ * ⚠️ 目标**可能属于另一个段**（`rm -rf ./build && echo /etc <<EOF` 的 `/etc` 属于 `echo`）——
+ * 那是**假阳性**，方向是收紧（多一个档参与取最严），与 `rawCommandNames` 的粗提同一条
+ * 取舍：多认几个只会让更多档参与「取最严」，不会放宽任何东西。
+ *
+ * ⚠️ 必须丢掉 heredoc 正文（`stripHeredocBody`）：正文是**数据**，不是命令，
+ * 拿它判档会让 `cat > doc.txt <<EOF\nrm -rf /etc\nEOF` 凭空多出一个 `outside` 档。
+ *
+ * @param {string} source 整行原文
+ * @param {object} [opts] 判档选项（`home` / `userHome` / `platform` / `isOutsideWorkspace`）
+ * @returns {boolean} 原文里读得出工作区外的目标时为真
+ */
+function outsideTargetInUnparsable(source, opts) {
+  const body = stripHeredocBody(String(source == null ? '' : source))
+  // 切分与 `rawCommandNames` **同一份判据**（空白与操作符），不另写一套 ——
+  // 两条路径对「哪一段是命令」的认识必须一致，否则同一个 heredoc 在
+  // 「查 deny 例外」与「判 outside 档」两处看到不同的命令集合。
+  //
+  // ⚠️ 但切分**必须引号感知**：`body.split(/[\n\r;|&(){}<>]+/)` 对引号无感知，引号**内**的
+  // `& | ; ( ) { } < >` 同样被切开，而两片各自都不含完整引号对 ⇒ 判不出目标 ⇒
+  // `outside` 档失明（真 bash 实测 `rm -rf "D:/R&D"` 等会执行）。故改用
+  // `splitQuotedTokens`（引号内空白与操作符都不切、token 内引号按 bash 语义剥掉）。
+  // 词元已剥引号，无需再套一层「剥成对首尾引号」的正则。
+  for (const tokens of splitQuotedTokens(body)) {
+    let b = null
+    try { b = blastRadiusOfSegment(tokens, opts) } catch (e) { b = null }
+    // 判据问的是**档**（`radiusTierOf`）而不是 blast level：`outside` 档只由
+    // `level === 'outside'` 产出（`system` / `home` 那一族归 `wide`，不归 `outside`）。
+    if (b && radiusTierOf(b) === 'outside') return true
+  }
+  return false
+}
+
 export function rawCommandNames(text) {
   const out = []
   // 去重集合无原型：键是 label（来自命令文本）。用 `{}` 时 `constructor` / `__proto__`
   // 这类名字恒判「已见过」而被丢弃 —— 它们恰是本函数要抓出来的命令名。
   const seen = Object.create(null)
   // 丢掉 heredoc 正文（`<<TAG` 之后到终止符之间的内容是数据，不是命令 —— 见函数注释）
-  const source = String(text == null ? '' : text)
-  const heredoc = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(source)
-  let body = source
-  if (heredoc) {
-    const tag = heredoc[2]
-    // 保留 `<<TAG` 本身（它属于命令行），丢掉其后到终止符之间的正文。
-    // 从 `<<TAG` 之后找首次「单独成行」的 TAG（允许前置制表符，兼容 `<<-`）。
-    const afterTag = heredoc.index + heredoc[0].length
-    const rest = source.slice(afterTag)
-    const end = new RegExp('^[ \\t]*' + tag + '[ \\t]*$', 'm').exec(rest)
-    // 终止符位置之前的正文全部丢弃；找不到终止符时只保留 `<<TAG` 之前的部分
-    //（正文范围不确定时宁可少扫 —— 命令部分照常查，不会因此放行真命令）
-    body = end ? source.slice(0, afterTag) : source.slice(0, heredoc.index)
-  }
+  const body = stripHeredocBody(String(text == null ? '' : text))
   // 命令替换（`$(...)` 与反引号）**必须先于引号剥离**处理。
   //
   // 为什么：命令替换里的内容**会被执行**，而它经常出现在双引号内
@@ -3557,6 +3731,132 @@ function skipBalanced(input, start, open, close) {
 }
 
 /**
+ * 删掉 bash 的**续行符**（`\` + 换行）—— 必须在**分词之前**做（发现 3 的修法）。
+ *
+ * 为什么必须在分词之前：bash 在词法阶段就删掉续行符，**早于**识别多字符操作符。于是
+ * `>\<NL>&2` 在 bash 里就是 `>&2`（描述符复制，不需要目标），而本文件的词法器是**边扫
+ * 边匹配**操作符的：它先看到 `>`、把 `REDIRECT_OPERATOR` 匹配成**单字符** `>`（下一个字符
+ * 是 `\` 而不是 `&`）→ `pending = 'write'`；随后 `\`+换行 被转义分支吃掉；再随后那个 `&`
+ * 落进 `&` 分支 → `ampNoTarget` 置位（重定向无目标）→ 整行 `ok:false`。
+ *
+ * 后果不是「少分一段」而是**整条命令的判定路径被换掉**：`ok:false` 路径的档位集合不含
+ * `outside`、且**只认 deny 例外** —— 用户显式配的 `outside=deny` 与**全部 ask 例外**在这条
+ * 路径上整个失明（fail-open，本项目最高风险方向）。实测（`outside=deny`、其余七档 allow，
+ * 四条 `bash -n` 全 OK、真实执行会跑）：
+ *     rm -rf /tmp/pgx >&2          → deny ✅
+ *     rm -rf /tmp/pgx >\<NL>&2     → **allow** ❌
+ *     rm -rf /tmp/pgx >\<NL>& /tmp/log → **allow** ❌
+ *     rm -rf /tmp/pgx <\<NL>&2     → **allow** ❌
+ *
+ * 对照实验确认根因是「**续行符把多字符操作符劈开**」，而不是「扫描 `&` 时没跳续行符」：
+ *     echo a >& /tmp/log       → 正常（无续行符）
+ *     echo a >\<NL>> log       → 正常（`>>` 能拼回来：`>` 分支会把下一个 `>` 再匹配一次）
+ *     echo a >\<NL>& /tmp/log  → **失败**（`>` 与 `&` 被劈开，`&` 走了后台分支）
+ *
+ * ── 为什么不写成「无条件 `input.replace(/\\\n/g, '')`」（3 行版）───────────────────
+ * 那个版本**有真实副作用**，会**新开一条 fail-open**（已用真 bash 复核）：bash 的续行符
+ * **不是**在任何位置都生效，本函数必须与 bash 的边界一致：
+ *   · **注释内不生效** —— 注释在换行处结束，`\` **不延长**它。实测
+ *     `echo hi # c\` + NL + `rm -rf victim` 里 **victim 真的被删**（bash 把第二行当新命令
+ *     执行）。无条件剥离会把两行粘成**一条注释**、把 `rm` 藏进注释里 ——
+ *     实测该形态由 `deny` 变 **`allow`**，是修法自己引入的放宽。
+ *   · **单引号内不生效** —— 那里 `\` 是字面量（实测 `'a\<NL>b'` 的输出是 `a\`+NL+`b`）。
+ *   · **双引号内生效** —— 实测 `"a\<NL>b"` 输出 `ab`。
+ * 故本函数做一次**轻量词法扫描**：单引号块 / 双引号块 / 注释块原样搬运，只删**块外**的
+ * 续行符。扫描只认「块」，不解析命令 —— 与 `decomposeCommand` 本体保持同一粒度。
+ *
+ * ── ⚠️ 唯一一处**不删**的续行符：夹在两个 `<` 之间的那一个 ─────────────────────────
+ * bash 的词法真值确实是 `<\<NL><` ≡ `<<`（heredoc 操作符），但**本文件的词法器认出 heredoc
+ * 就整行 `ok:false`**（见 `decomposeCommand` 里的 heredoc 检查），而 `ok:false` 路径的档位
+ * 集合**不含 `outside`**、且**只认 deny 例外** ⇒ 用户显式配的 `outside=deny` 在这条路径上
+ * 整个失明（fail-open）。实测（`outside=deny`、其余七档 allow，真 bash 下 `bash -n` = OK
+ * 且**真的执行**）：
+ *     rm -rf /tmp/x <\<NL>< EOF + NL + x + NL + EOF
+ *       → 不剥离（= HEAD 行为）：**deny** ✅（`ok:true`，`outside` 档命中）
+ *       → 剥离：**allow** ❌（`ok:false` / `code=unparsable`，档位集合里没有 `outside`）
+ * 即「按 bash 语义把它粘成 heredoc」这一步**本身**就是本轮新开的放宽面 —— 它把一条 HEAD 上
+ * `ok:true` 且判 deny 的命令推进了 `ok:false`。故这里取「与 HEAD 相同」：**不删**这个续行符，
+ * 词法器的转义分支会原样跳掉 `\`+换行、把两个 `<` 当**独立**重定向 —— 与 HEAD 逐格相同。
+ *
+ * 为什么不改成「认 heredoc 但保留档位」：那要动 `ok:false` 路径的档位集合，是**另一件事**
+ * （忽略清单里既有任务），超出本函数范围；本函数只负责不让自己的剥离**新开**放宽面。
+ * 判据只排除**两侧都是 `<`** 的那一种：其余形态（`>\<NL>&` / `>\<NL>>` / `<\<NL>&` …）的
+ * 剥离是本函数存在的理由，一格都不能退。
+ *
+ * ⚠️ 方向：本函数只**删**字符、不新增任何段边界；它把「被劈开的操作符」拼回去，而拼回去
+ * 的形态在 bash 里**本来就合法**（`bash -n` = OK）。故它只会让判定从「读不懂」回到
+ * 「读得懂」，不会把合法命令判成非法，也不会放宽任何东西。
+ *
+ * @param {string} src 原始命令行
+ * @param {'bash'|'pwsh'} sh 方言（pwsh 的续行是反引号，由词法器自身处理，本函数不介入）
+ * @returns {string} 已删掉续行符的命令行
+ */
+function stripLineContinuations(src, sh) {
+  // pwsh 的续行不是 `\`；没有续行符时原样返回（**零分配**，判定热路径）
+  if (sh !== 'bash' || src.indexOf('\\\n') < 0) return src
+  const isWordBreak = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r'
+    || c === ';' || c === '|' || c === '&' || c === '(' || c === ')' || c === '<' || c === '>'
+  const out = []
+  // `#` 只在**词首**才是注释（与词法器的 `char === '#' && !started` 同判据）。
+  // 误判方向的取舍：把「其实不是注释」的位置当成注释 ⇒ **少删** ⇒ 退回改动前的行为
+  // （不放宽）；反过来才会把命令藏进注释。故词界判定宁可**偏宽**。
+  let wordStart = true
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i]
+    // ── 单引号块：原样搬运（`\` 在里面是字面量，**不删**）──
+    if (c === "'") {
+      out.push(c)
+      for (i += 1; i < src.length; i += 1) { out.push(src[i]); if (src[i] === "'") break }
+      wordStart = false
+      continue
+    }
+    // ── 双引号块：`\`+换行 **要删**（bash 在双引号内照样续行），其余 `\x` 原样 ──
+    if (c === '"') {
+      out.push(c)
+      for (i += 1; i < src.length; i += 1) {
+        const d = src[i]
+        if (d === '\\') {
+          if (src[i + 1] === '\n') { i += 1; continue }
+          out.push(d)
+          if (i + 1 < src.length) { i += 1; out.push(src[i]) }
+          continue
+        }
+        out.push(d)
+        if (d === '"') break
+      }
+      wordStart = false
+      continue
+    }
+    // ── 注释块：到换行为止原样搬运（`\` **不延长**注释，见函数头实测）──
+    if (c === '#' && wordStart) {
+      for (; i < src.length; i += 1) { out.push(src[i]); if (src[i] === '\n') break }
+      wordStart = true
+      continue
+    }
+    // ── 续行符：删掉（本函数存在的理由）──
+    //
+    // ⚠️ **例外**：夹在两个 `<` 之间的续行符**不删** —— 删了会把它粘成 heredoc 操作符 `<<`，
+    // 而词法器认出 heredoc 就整行 `ok:false`，于是丢掉 `outside` 档与全部 ask 例外
+    // （fail-open，详见函数头「唯一一处不删的续行符」）。判据只看**紧邻的两个字符**：
+    // 本分支一次只删一个 `\`+换行，故「粘成 `<<`」当且仅当 `\` 的前一个字符与换行之后的
+    // 那个字符**都是** `<`。其余形态（`>\<NL>&` / `>\<NL>>` / `<\<NL>&` / `>\<NL>|` …）
+    // 照旧剥离 —— 那正是本函数存在的理由，一格都不退。
+    //
+    // 不删时**落到下面的转义分支**：它把 `\`+换行 原样搬进结果，于是词法器看到的就是
+    // HEAD 看到的那串文本（HEAD 的转义分支同样只跳过这两个字符），逐格回到 HEAD 的行为。
+    const splitHeredoc = c === '\\' && src[i + 1] === '\n'
+      && out[out.length - 1] === '<' && src[i + 2] === '<'
+    if (c === '\\' && src[i + 1] === '\n' && !splitHeredoc) { i += 1; continue }
+    out.push(c)
+    // 转义字符：连同被转义的那一个一起搬运，且它不构成词界
+    if (c === '\\' && i + 1 < src.length) { i += 1; out.push(src[i]); wordStart = false; continue }
+    wordStart = isWordBreak(c)
+  }
+  return out.join('')
+}
+
+
+/**
  * 把一个命令行分解为段、重定向与词元元数据。
  *
  * 与旧实现的根本区别：操作符必须【在引号外】才生效，且解析不了的构造一律标 opaque，
@@ -3575,8 +3875,11 @@ function skipBalanced(input, start, open, close) {
  * @returns {{ ok: true, segments: object[] } | { ok: false, reason: string }}
  */
 export function decomposeCommand(source, shell) {
-  const input = String(source == null ? '' : source)
   const sh = shell === 'pwsh' ? 'pwsh' : 'bash'
+  // 续行符必须在**分词之前**删掉（发现 3 的修法，理由与边界见 `stripLineContinuations`）。
+  // ⚠️ `assessCommand` 的整行 `ok:false` 分支仍用**原始 source** 粗提命令名（那里不做本
+  // 替换），故「读不懂」路径的 deny 例外匹配面不受本行影响。
+  const input = stripLineContinuations(String(source == null ? '' : source), sh)
   const segments = []
   let words = []
   let writeTargets = []
@@ -3587,8 +3890,60 @@ export function decomposeCommand(source, shell) {
   let dynamic = false
   let segDynamic = false
   let segOpaque = null
+  // opaque 构造的**原文**（`$( … )` / 反引号 / `( … )` / `{ … }` 整块，含定界符），按出现次序。
+  //
+  // 存在的理由（发现 1 的修法）：判定侧要问「**opaque 构造自己有没有藏一个破坏性命令**」，
+  // 而 `seg.words` 只包含构造**之外**的可读词元 —— 构造里那个命令名在词元列表里根本不存在。
+  // 词法器是**唯一**知道「哪一段文本被判成了 opaque」的地方，故由它把原文记下来交给判定侧：
+  // 判定侧再拿别的东西（`seg.text` 前缀切片之类）去反推，就是同一份知识写两遍，
+  // 而本文件反复记录的那类缺陷正是「两处各写一份判据必然漂移」。
+  //
+  // ⚠️ 与 `segOpaque`（只记**第一个**原因）不同，这里是**全部**构造：一段里可以出现多个
+  // （`rm -rf ./x $(a) $(rm -rf /)`），漏记任何一个都可能漏掉真正的载荷。
+  let segOpaqueTexts = []
   let pending
   let nextOp = 'start'
+  // 「最后那个 `&` 前面**有内容**吗」—— 供行尾悬空检查区分「合法的异步列表收尾」与
+  // 「真悬空」。**只在 `&` 分支写入**，而 `nextOp = '&'` 也只在那个分支出现，
+  // 故 `nextOp === '&'` 时本标记必然描述的是**最后那个** `&`（两者严格配对，不会串台）。
+  // 见行尾检查处的说明：`echo a &` 合法而 `echo a & &` / `echo a | &` 不是。
+  let ampAfterContent = false
+  // 「最后那个 `&` **前面**有一个等着目标的重定向」—— `echo a > & (b)` / `> & $(b)` /
+  // `> & { b; }` / `> & )` / `echo a > & b` 在 bash 里都是
+  // `syntax error near unexpected token '&'`（`&` 不是 `>` 的目标）。
+  //
+  // ⚠️ **不能复用 `ampNoTarget`**（发现 4 的修法）：那个是**局部 const**、只在 `&` 分支里
+  // 活着，而 `&` 分支的 `flushSegment()` 会把 `pending` 复位 —— 行尾那条保留的词元级判据
+  // `pending !== undefined && !started`（约 `:3987`）于是看不到 `&` **之前**的那个 `>`。
+  // 且 `ampNoTarget` 只写进 `ampOk`，而 `ampOk` 仅在「段无内容」时才决定是否报错：
+  // `&` 后面还有内容时 `segHasContent` 为真 → 短路 → 整行照旧 `ok:true`。
+  //
+  // 故另立一个**跨段存活**的标记：`nextOp = '&'` 只在 `&` 分支出现，而本标记在该分支内
+  // 按「**有任何一个** `&` 满足条件」置位（粘性，见该分支内的说明）—— 故它描述的是
+  // 「行内存在一个前面挂着无目标重定向的 `&`」，不限于最后那个。
+  // 在 `flushSegment()` **之前**取值（它会把 `pending` / `started` 复位）。
+  //
+  // 实测（修复前 → 修复后，`echo a > & b` 同形）：
+  //     echo a > & (b) / > & $(b) / > & { b; } / > & )   ok:true → **ok:false**
+  // 而合法形态**不得误伤**（三格的 `ampNoTarget` 均为 false，故本标记为 false）：
+  //     echo a > b & / echo a 2>&1 & / echo a > $f &   → 照旧 ok:true
+  let ampTargetMissing = false
+  // 「当前这个等着目标的重定向，它的目标是不是一个 **opaque 构造**」—— `'none'` / `'word'`
+  // / `'not-word'` 三态，供 `&` 分支的 `ampNoTarget` 排除**误判**（见那里的完整论证）。
+  //
+  // ── 为什么必须是**逐重定向**的标记，而不是「本段出现过 opaque 构造」（`segOpaque`）──
+  // 后者**过宽**：`echo a $(b) > & c` 的 `$(b)` 是**命令参数**、与后面的 `>` 毫无关系，
+  // 而该形态在 bash 里仍是 `syntax error`（`bash -n` 实测）。按 `segOpaque` 口径会把它
+  // 一并放行 —— 那是**新开的 fail-open**（实测：`echo a $(b) > & c` / `echo a {b} > & c` /
+  // `echo a "x$(y)" > & c` / `echo a \`b\` > & c` / `echo $(a) > & b` 五格由 ok:false 变
+  // ok:true，`outside=deny` 下同一批命令由 deny 变 allow）。故本标记只在
+  // 「**opaque 构造紧跟在待读重定向之后**」时置位，`echo a > $(b) > & c` 里第二个 `>`
+  // 会把它复位（那个 `>` 确实没有目标，仍是语法错误）。
+  //
+  // 三态而非布尔：同一重定向后可能跟**多个** opaque 构造（`echo a > (c) $(b) & d`），
+  // bash 只在「全部可作字面词」时才合法，故只要**出现过一个**不可作词的构造，
+  // 结论就锁定为 `'not-word'`（`word` 只在仍是 `'none'` 时写入）。
+  let redirectOpaqueTarget = 'none'
   let quote
   // 段文本末尾是否已是空格。**不能用 segText.endsWith(' ')**：`segText += s` 在 V8 里
   // 只建 rope（O(1)），而 endsWith / 下标读取都必须先把 rope 扁平化成连续串（O(n) 拷贝），
@@ -3616,15 +3971,37 @@ export function decomposeCommand(source, shell) {
     dynamic = false
   }
 
+  // 「本段到目前为止有没有内容」—— **单一实现**，两个调用方问的是同一个问题：
+  //   · flushSegment      —— 本段值不值得产出一个段；
+  //   · 行尾悬空操作符检查 —— 上一个操作符后面到底有没有东西（段边界可不可信）。
+  //
+  // 曾经两处各写一份：flushSegment 写全了，行尾检查只写 `started` —— 于是同一个概念
+  // 有两个修改点，而其中一份是错的。
+  //
+  // ⚠️ `started` 必须在里面，且不能反过来只写它：
+  //   · 不能去掉 —— 行尾 `echo a | cat` 结束时 `cat` 还在 wordText 里没进 words，
+  //     只看数组会把这条合法命令判成悬空操作符；
+  //   · 不能只有它 —— `started` 是**词元级**状态，遇到引号外空白就被 flushWord 复位，
+  //     而分组块 / 命令替换这类构造**产不出词元**（它们被标记 opaque），于是
+  //     `Get-Content x | ForEach-Object { $_ }` 的行尾被判成「| 后面什么都没有」，
+  //     整行 ok:false → 段边界全部丢失 → **弹窗没有分段**，且 allow/ask 例外一律不认
+  //     （ok:false 路径只认 deny 例外），「默认放行 + 个别命令要求确认」这个配置下
+  //     末尾挂一个括号就等于把那条确认规则抹掉（fail-open）。
+  //
+  // 保留条件含 segOpaque：`(git status)` 这类分组段有文本但提取不出词元，
+  // 它必须成为一个「读不懂的段」（code: unparsable）而不是被静默丢弃 ——
+  // 丢弃会让整行变成 ok:false，虽然同样落分类默认值，但段级展示与 code 就没了。
+  // 但**不**按 segText 保留：`printf x >\n~/.ssh/keys` 的换行处文本是 `printf x >`，
+  // 按文本保留会凭空多出一个「只有重定向操作符」的段。
+  const segHasContent = () => started || words.length > 0 || writeTargets.length > 0 || readTargets.length > 0 || segOpaque !== null
+
+  // 返回值 = 「本段有没有内容」（与 `segHasContent` 同判据，供 `&` 分支在复位**之前**取用）：
+  // `&` 的合法性取决于它**前面**有没有内容，而本函数会把状态全部复位，故只能由它带回。
   const flushSegment = () => {
     flushWord()
-    // 保留条件含 segOpaque：`(git status)` 这类分组段有文本但提取不出词元，
-    // 它必须成为一个「读不懂的段」（code: unparsable）而不是被静默丢弃 ——
-    // 丢弃会让整行变成 ok:false，虽然同样落分类默认值，但段级展示与 code 就没了。
-    // 但**不**按 segText 保留：`printf x >\n~/.ssh/keys` 的换行处文本是 `printf x >`，
-    // 按文本保留会凭空多出一个「只有重定向操作符」的段。
     const text = segText.trim()
-    if (words.length > 0 || writeTargets.length > 0 || readTargets.length > 0 || segOpaque !== null) {
+    const hasContent = segHasContent()
+    if (hasContent) {
       segments.push({
         op: nextOp,
         text,
@@ -3633,6 +4010,7 @@ export function decomposeCommand(source, shell) {
         readTargets,
         dynamic: segDynamic,
         opaque: segOpaque,
+        opaqueTexts: segOpaqueTexts,
       })
     }
     words = []
@@ -3643,11 +4021,161 @@ export function decomposeCommand(source, shell) {
     segEndsWithSpace = true
     segDynamic = false
     segOpaque = null
+    segOpaqueTexts = []
     pending = undefined
     nextOp = 'start'
+    return hasContent
   }
 
   const markOpaque = (reason) => { if (segOpaque === null) segOpaque = reason }
+  // 记下 opaque 构造的原文（见 `segOpaqueTexts` 的说明）。与 `markOpaque` **分开**：
+  // 前者只认第一个原因（段级语义），本函数每个构造都要记（判定侧要逐块查载荷）。
+  const noteOpaqueText = (raw) => { if (raw) segOpaqueTexts.push(String(raw)) }
+
+  // ── opaque 构造是否可以充当**当前待读重定向的目标**（bash 语法真值，`bash -n` 实测）──
+  // 判据只在「本段正等着一个重定向目标、且还没产出任何词元」时才有意义 ——
+  // 其余情形下这个构造与重定向无关，不得影响 `redirectOpaqueTarget`。
+  //
+  //   · `$( )` / 反引号 / 双引号内的 `$( )` → **可作词**（`echo a > $(mktemp) & echo done` OK）
+  //   · `( )` 子 shell                → **不可作词**（`echo a > (mktemp) & echo done` SYNTAX-ERR）
+  //   · `{ }` 花括号组                → 看内容，见 `braceIsCommandGroup`
+  //   · 孤立 `}`                      → 可作词（`echo a > } & echo done` OK，是字面词）
+  //   · 孤立 `)`                      → **不可作词**（`echo a > ) & echo done` SYNTAX-ERR）
+  //
+  // 为何 `(` 与 `)` 不同：bash 里 `)` 只可能是**闭合**一个 `(`；既然 `(` 形态非法，
+  // 孤立的 `)` 同样非法。而 `{` / `}` 在 bash 里是**保留字**，只有「作为独立词」时才是
+  // 分组定界符 —— `}` 单独出现只是一个普通词（实测合法），故两者也不对称。
+  //
+  // ⚠️ 本函数**只**在 `pending !== undefined && !started` 时写入：`started` 为真意味着
+  // 重定向目标已经产出（或该构造是命令参数），与「无目标」无关，不得参与。
+  const noteOpaqueTarget = (isWord) => {
+    if (pending === undefined || started) return
+    if (!isWord) redirectOpaqueTarget = 'not-word'
+    else if (redirectOpaqueTarget === 'none') redirectOpaqueTarget = 'word'
+  }
+  // 花括号是**分组**（不可作重定向目标）还是**字面词 / 花括号展开**（可作）：
+  // bash 的分组要求「以 `;` 或换行收尾」，否则整个 `{…}` 只是一个词 —— `bash -n` 实测：
+  //     `> {mktemp} & …` OK、`> { b } & …` OK、`> {a,b} & …` OK、`> } & …` OK
+  //     `> { b; } & …` SYNTAX-ERR、`> {b;} & …` SYNTAX-ERR、`> {;} & …` SYNTAX-ERR
+  //     `> { b; c } & …` OK ← 注意：**只有末尾**的 `;` 才定分组，中间的 `;` 不定
+  // 故判据是「**最后一个**分隔符之后只剩空白」，不是「内容里有 `;`」。
+  //
+  // ── ⚠️ 判据必须在**词法层面**做，不能直接在原始文本上跑正则（发现 4 的修法）──────────
+  // 旧实现是 `/;[\s]*$/.test(content) || /[\n\r]/.test(content)` —— 它问的是「**文本里**
+  // 有没有换行 / 结尾有没有分号」，而 bash 问的是「**词法上**有没有一个未转义、未被引号
+  // 包裹的分隔符」。两者在下面两族上分叉（都实测过：`bash -n` = OK、真实执行会跑）：
+  //
+  //   ① **引号内的换行**：`{ "a` NL `b" }` 里的换行在双引号内，是**字面字符** ——
+  //      整个 `{…}` 只是一个词（bash 会创建字面名为 `{` 的文件、exit=0）。
+  //      旧判据看到文本里有 NL → 判成分组 → `noteOpaqueTarget(false)` →
+  //      `redirectOpaqueTarget = 'not-word'` → `&` 触发 → 整行 `ok:false` → 丢 `outside` 档。
+  //   ② **转义分号 `\;`**：`{ a\; }` 里的 `;` 被转义，是**字面字符**，同样只是一个词。
+  //
+  // 误判的后果与 `redirectOpaqueTarget` 那条注释同源：整行 `ok:false` 路径的档位集合
+  // **不含 `outside`**、且**只认 deny 例外**，于是用户显式配的 `outside=deny` 与全部 ask
+  // 例外在这条路径上整个失明（fail-open）。实测（`outside=deny`、其余七档 allow）：
+  //     rm -rf /tmp/pgx > { a b } & echo done   → deny ✅（对照格）
+  //     rm -rf /tmp/pgx > { a NL b } & echo done    → **allow** ❌
+  //     rm -rf /tmp/pgx > { "a NL b" } & echo done  → **allow** ❌
+  //     rm -rf /tmp/pgx > { a\; } & echo done       → **allow** ❌
+  //
+  // ⚠️ 三支都要修：仲裁的 V4 修法修好了靶 1/靶 2，**靶 3（`\;`）仍漏** ——
+  // 因为它的扫描没有把 `\` 转义算进「跳过」。故本实现把**引号与转义一并跳过**。
+  //
+  // ⚠️ 本判据的两半**承重程度不同**（变异测试实测，供日后维护参考）：
+  //   · 「**最后一个**顶层分隔符之后只剩空白」是**靶 1/靶 2 的承重项**。旧实现的错在于
+  //     它问「文本里**有没有**换行」（`/[\n\r]/.test`）而不是「**末尾**有没有分隔符」，
+  //     故引号内的换行被误判成分组。改成「取最后一个分隔符、看其后是否只剩空白」之后，
+  //     引号内换行**自然**不再命中（它后面还有收尾引号，非空白）。
+  //   · `\` 转义分支是**靶 3 的承重项**：`{ a\; }` 里那个 `;` 正是**最后一个**顶层候选、
+  //     其后恰好只剩空白 —— 不跳过它就必然误判分组（实测停用该分支 ⇒ 断言 AH7 红灯）。
+  //   · 引号分支（单/双）在现有语料上**不承重**（停用后判别格差异 = 0）：被引号包住的
+  //     分隔符后面总跟着收尾引号，永远不可能满足「其后只剩空白」。保留它是为了与上面
+  //     「跳过引号内内容」的判据描述一致、并对未来改动留一道防御，**不是**靶 1/靶 2 依赖它。
+  //
+  // ⚠️ 判据方向是 **fail-closed 优先**：本扫描只在「确实读到一个**顶层**分隔符、且其后
+  // 只剩空白」时才判分组。**顶层** = 未被单/双引号包裹、未被 `\` 转义。与 `bash -n` 的
+  // 56 格交叉语料对拍：**「bash 判 OK 而本判据判分组」= 0 格**（即不产生新的 fail-open），
+  // 另 47/56 逐格一致；余下 9 格是「bash 判 ERR 而本判据说词」（`{a&&}` / `{a|}` 这类
+  // 内容自身就非法的形态，命令在 bash 里根本不会执行），且这 9 格在旧判据下**同样是词**，
+  // 不构成回归。
+  //
+  // ⚠️ **不额外要求「`{` 之后必须有空白」**：bash 里 `{ b; }` 与 `{b;}` **都是** SYNTAX-ERR、
+  // `{ b }` 与 `{b}` **都是** OK（实测），即「`{` 后有没有空白」在本判据要回答的问题
+  // （这个 `{…}` 能不能当重定向目标）上**不构成区分**。反过来加这条要求会把 `{b;}` 判成
+  // 词（bash 判 ERR），是往 fail-open 方向走，故不加。
+  const braceIsCommandGroup = (content) => {
+    let quote
+    let last = -1
+    for (let i = 0; i < content.length; i += 1) {
+      const c = content[i]
+      if (quote === 'single') { if (c === "'") quote = undefined; continue }
+      if (quote === 'double') {
+        // 双引号内 `\` 转义下一个字符（含 `\` 与 `"`），转义目标不参与判据
+        if (c === '\\') { i += 1; continue }
+        if (c === '"') quote = undefined
+        continue
+      }
+      // 引号外：`\` 转义下一个字符 —— `\;` 的 `;` 是**字面**分号，不得计入
+      if (c === '\\') { i += 1; continue }
+      if (c === "'") { quote = 'single'; continue }
+      if (c === '"') { quote = 'double'; continue }
+      if (c === ';' || c === '\n' || c === '\r') last = i
+    }
+    if (last < 0) return false
+    return /^[\s]*$/.test(content.slice(last + 1))
+  }
+
+  // ── 进程替换 `>( )` / `<( )` 是**词**（可作重定向目标），与子 shell `( )` 相反 ─────────
+  // `bash -n` 实测：
+  //     OK   `echo a > >(cat)` / `echo a > <(cat x)` / `echo a >(cat)` / `echo a 2>(cat)`
+  //     ERR  `echo a > (cat)` / `echo a >>(cat)` / `echo a >|(cat)` / `echo a >&(cat)`
+  //     ERR  `echo a &>(cat)` / `echo a <>(cat)` / `echo a <<(cat)`
+  // 词法器里 `>` 先被 `REDIRECT_OPERATOR` 吃掉、`(` 单独进 `(` 分支，故这里只能**回看**
+  // 判断这个 `(` 是不是进程替换的开头。
+  //
+  // ⚠️ **不能只看「`(` 的前一个字符是 `>` 或 `<`」**（本判据的初版，实测过宽）：
+  // `>>(cat)` / `>|(cat)` / `>&(cat)` / `&>(cat)` / `&>>(cat)` / `<>(cat)` / `<<(cat)`
+  // 的 `(` 同样紧贴 `>` / `<`，但那个字符是**更长操作符的一部分**，bash 实测全是语法错误。
+  // 按「紧贴即算词」会把这一族一起放行 —— 那是**新开的 fail-open**
+  // （`rm -rf /etc >> >(tee log) & echo done` 由 deny 变 allow）。
+  //
+  // 故判据 = **把 `(` 之前那串操作符字符按 bash 的规则切成词元，要求最后一个词元恰好是
+  // 裸 `>` 或 `<`**（即 `(` 紧跟在一个独立的单字符重定向操作符之后）。这正是 bash 的
+  // 判定条件：`>(` / `<( ` 只在 `>` / `<` 是**独立操作符**时才是进程替换的开头。
+  // 逐格核对（`bash -n` 真值，本判据与 bash 在 1170 条「`(` 紧贴操作符」样本上**零误收紧**）：
+  //     true   `>(cat)` `<(cat)` `2>(cat)` `> >(cat)` `><(cat)` `>|>(cat)` `>&>(cat)`
+  //            `&&>(cat)` `>>>(cat)` `>><(cat)` `<>>(cat)`
+  //     false  `>>(cat)` `>|(cat)` `>&(cat)` `&>(cat)` `&>>(cat)` `<>(cat)` `<<(cat)`
+  //
+  // 为什么要**切词**而不是只看「前一个字符」或「前两个字符」：`<>` 是 bash 的操作符
+  // （`<>(cat)` 非法），而 `><` **不是**（`><(cat)` 合法）—— 两个字符的先后次序决定结论，
+  // 任何「看固定长度前缀」的判据都会把其中一边判错（实测：只看 1 个字符误放行 537 条，
+  // 只看 2 个字符仍误放行 296 条且误收紧 207 条）。
+  //
+  // ⚠️ 操作符表按**最长优先**排列，与 bash 的词法一致（`<<<` / `&>>` 三元，其余二元，
+  // 最后是单字符）。`OPERATOR_RUN` 只含重定向与控制操作符字符 —— 空白 / `2` / `;` 都会
+  // 终止回看，故 `> (cat)`（有空格）与 `2>(cat)`（fd 号）都落回「单字符操作符」这一支。
+  // `;` 不在其中是有意的：`>;<(cat)` 的错在于**前一个 `>` 没有目标**（bash 报错），
+  // 与本判据无关，且那条缺口在 HEAD 上同样存在（`echo a > ; echo done` 也是 ok:true）。
+  const OPERATOR_RUN = '<>&|'
+  const OPERATOR_TOKENS = ['<<<', '&>>', '&&', '||', '<<', '>>', '<&', '>&', '<>', '>|', '&>', '|&', '>', '<', '&', '|']
+
+  const parenIsProcessSub = (text, i) => {
+    if (text[i - 1] !== '>' && text[i - 1] !== '<') return false
+    let start = i - 1
+    while (start > 0 && OPERATOR_RUN.includes(text[start - 1])) start -= 1
+    let p = start
+    let bare = false
+    while (p < i) {
+      let hit = null
+      for (const op of OPERATOR_TOKENS) { if (text.startsWith(op, p)) { hit = op; break } }
+      if (hit === null) { p += 1; bare = false; continue }
+      p += hit.length
+      bare = hit === '>' || hit === '<'
+    }
+    return p === i && bare
+  }
 
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index]
@@ -3682,6 +4210,7 @@ export function decomposeCommand(source, shell) {
         // 原文同时进 wordText：若替换式就是段首词，label 会因含反引号而被判「认不出」
         // （BAD_LABEL_CHARS），方向 fail-closed；不写 wordText 则会产出一个空词元。
         const raw = input.slice(index, end + 1)
+        noteOpaqueText(raw)
         pushText(raw)
         wordText += raw
         index = end
@@ -3694,7 +4223,9 @@ export function decomposeCommand(source, shell) {
           const end = skipBalanced(input, index + 1, '(', ')')
           if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
           markOpaque('command substitution cannot be read statically')
-          pushText(input.slice(index, end + 1))
+          const sub = input.slice(index, end + 1)
+          noteOpaqueText(sub)
+          pushText(sub)
           index = end
           continue
         }
@@ -3733,6 +4264,41 @@ export function decomposeCommand(source, shell) {
       continue
     }
 
+    // ── pwsh 数组运算符 `,`：**词分隔符**，不是普通字符 ──────────────────────────
+    //
+    // PowerShell 里 `,` 是**运算符**，不是标点。用官方词法分析器测定
+    // （`[System.Management.Automation.Language.Parser]::ParseInput`，PowerShell 5.1）：
+    //     Remove-Item "a", "b"      → … [StringExpandable:"a"] [Comma:,] [StringExpandable:"b"]
+    //     Remove-Item "a","b"       → 同上（**引号紧贴也一样**，逗号仍是独立 token）
+    //     Remove-Item "C:\tmp\a,b"  → … [StringExpandable:"C:\tmp\a,b"]（引号内是字面量）
+    // 即它与空格无关、与引号边界无关（只与「在不在引号内」有关）。
+    // 语义验证：`Remove-Item <两个文件>` 的 `-WhatIf` 输出两条 "Remove File"，确认是两个目标。
+    //
+    // ── 为什么必须在这里切词，而不是在判档侧剥尾逗号 ────────────────────────────
+    // 逗号粘在词元尾部会让**精确匹配**的档位判据全部落空：`B:\` 判 `drive-root`、
+    // `C:\Windows` 判 `system`，而 `B:\,` / `C:\Windows,` 两个判据都不匹配，只剩「工作区外」。
+    // 实测档位**降级**（BLAST_ORDER 数字越小越严重）：
+    //     B:\          drive-root → B:\,         outside   ★ 降级
+    //     /            drive-root → /,           outside   ★ 降级
+    //     C:/Windows   system     → C:/Windows,  outside   ★ 降级
+    // 端到端（`wide=deny`、其余 ask）：
+    //     Remove-Item "B:\" -Recurse -Force          → deny
+    //     Remove-Item "B:\", "D:\x" -Recurse -Force  → **ask**  ← 一个逗号绕过显式 deny
+    // 这就是为什么修在词法器：**判据没有错，是喂给它的词元错了**。在判档侧剥逗号属于
+    // 给下游补丁，且会与「引号内的逗号是字面量」这条正确行为打架。
+    //
+    // ⚠️ 只在 pwsh 生效：bash 里 `,` 是**普通字符**（`rm -rf /tmp/a,b` 删的是名字里带
+    // 逗号的那**一个**文件），照切会凭空造出一个不存在的目标。花括号展开 `{a,b}` 由下面的
+    // 分组分支处理（标 opaque），与本分支无关 —— 两条路径不会同时命中。
+    //
+    // 逗号**保留在 segText**（例外匹配的对象是用户写的原文，`Remove-Item "a", "b"` 必须
+    // 仍能命中 `Remove-Item *`），但**不进 wordText** —— 它是运算符，不是词元的一部分。
+    if (sh === 'pwsh' && char === ',') {
+      flushWord()
+      pushText(char)
+      continue
+    }
+
     if (char === "'") { pushText(char); quote = 'single'; started = true; continue }
     if (char === '"') { pushText(char); quote = 'double'; started = true; continue }
 
@@ -3752,6 +4318,7 @@ export function decomposeCommand(source, shell) {
       if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
       markOpaque(sh === 'bash' ? 'command substitution cannot be read statically' : 'PowerShell escape sequences cannot be read statically')
       const raw = input.slice(index, end + 1)
+      noteOpaqueText(raw)
       pushText(raw)
       wordText += raw
       started = true
@@ -3766,7 +4333,10 @@ export function decomposeCommand(source, shell) {
         const end = skipBalanced(input, index + 1, '(', ')')
         if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
         markOpaque('command substitution cannot be read statically')
-        pushText(input.slice(index, end + 1))
+        noteOpaqueTarget(true)
+        const sub = input.slice(index, end + 1)
+        noteOpaqueText(sub)
+        pushText(sub)
         index = end
         continue
       }
@@ -3810,18 +4380,77 @@ export function decomposeCommand(source, shell) {
         flushWord()
         pushText(input[index + 2] === '>' ? '&>>' : '&>')
         pending = 'write'
+        redirectOpaqueTarget = 'none'
         index += input[index + 2] === '>' ? 2 : 1
         continue
       }
-      flushSegment()
+      // ⚠️ 两条都必须在 `flushSegment()` **之前**取 —— 它会把 `pending` / `words` /
+      // `started` / `segOpaque` 全部复位，之后再问恒为「空段」。
+      //   · `noTarget`：重定向还等着目标（`echo a > &` 的 `&` **不是** `>` 的目标，
+      //     bash 判语法错误）。少了这一条，`&` 的豁免会把「重定向无目标」一起放行 ——
+      //     判据与下面行尾那条 `pending !== undefined && !started` 同源（都是词元级）。
+      //   · `flushSegment()` 的返回值：本段有没有内容（异步列表的 list 部分）。
+      //
+      // ── ⚠️ 第三个合取项 `redirectOpaqueTarget !== 'word'`：`!started` 的**误判**修正 ──
+      // `!started` 对「重定向目标是 **opaque 构造**」是**误判**：`$( )` / `( )` / `{ }` /
+      // 反引号四条分支**都不设 `started`**（只 `markOpaque` + `pushText` + 跳过配对），
+      // 而其中一部分在 bash 里是**合法**的重定向目标（`bash -n` 实测）：
+      //     OK          `echo a > $(mktemp) & echo done` / `2> $(mktemp) & …` / `>> …` / `< …`
+      //     OK          `echo a > {mktemp} & …`（字面词） / `echo a > } & …`
+      //     SYNTAX-ERR  `echo a > (mktemp) & …` / `echo a > ) & …` / `echo a > { b; } & …`
+      // 即 `$( )` / 字面花括号形态**合法**，而 `( )` / `)` / 花括号**分组**形态非法 ——
+      // 这个区分本就不该由 `started` 承担，故由 `redirectOpaqueTarget` 精确判（三态见其注释）。
+      //
+      // 为什么必须在这里修：`&` 分支的 `flushSegment()` 本来会把这个误判随 `pending` 一起
+      // 清掉，故 HEAD 上不显形；**粘性**（下面那行）把它保留到行尾后，**合法命令被推进
+      // `ok:false`** —— 而 `ok:false` 路径（`assessCommand` 的 `if (!d.ok)` 支，约 `:6600`）
+      // 只认 deny 例外，档位集合是 `groupTiersOf + priv + RADIUS_TIERS_WHEN_UNREADABLE`、
+      // **不含 `outside`**，于是用户显式配的 `outside=deny` 与**全部 ask 例外**在这条路径上
+      // 整个失明（fail-open，本项目最高风险方向）。实测（`outside=deny`、其余七档 allow）：
+      //     rm -rf /tmp/x                            → deny
+      //     rm -rf /tmp/x > $(mktemp) & echo done    → HEAD **deny** / 仅加粘性 **allow** ❌
+      //     rm -rf /tmp/x 2> $(mktemp) & echo done   → HEAD deny / 仅加粘性 allow ❌
+      // （例外侧同形：分类 allow + 例外 `curl *`=ask 时 `curl … > $(mktemp) & echo done`
+      //   由 ask 变 allow。）
+      //
+      // ⚠️ 读取位置必须在 `flushSegment()` **之前**（与 `pending` / `started` 同处），
+      // 且**粘性的全部收益都保住**：`echo a > & (b) &` 的第一个 `&` 处 `(b)` 尚未被解析、
+      // `redirectOpaqueTarget` 仍是 `'none'` ⇒ 照旧置位 ⇒ 照旧 `ok:false`。
+      const ampNoTarget = pending !== undefined && !started && redirectOpaqueTarget !== 'word'
+      // ⚠️ **粘性**（`||`，不是覆盖）：`echo a > & (b) &` 里第一个 `&` 满足条件、第二个
+      // （行尾那个）不满足，覆盖式写入会把结论抹掉。语义上只要**有任何一个** `&` 前面
+      // 挂着没目标的重定向，整行在 bash 里就是语法错误，故一旦置位就不再复位。
+      ampTargetMissing = ampTargetMissing || ampNoTarget
+      ampAfterContent = flushSegment() && !ampNoTarget
       nextOp = '&'
       continue
     }
     if (char === '|') {
+      // ── `|&`（管道 + stderr）必须被本分支**整体消费**（发现 9 的修法）────────────────
+      // bash 里 `|&` 是**一个**操作符（`cmd 2>&1 | cmd` 的简写），与 `|` 同为管道分隔符。
+      // 本分支此前只看 `||`，于是 `|&` 的 `|` 被当分隔符、`&` 落到下面的 `&` 分支 ——
+      // 而那个分支按「异步列表的 `&`」处理，于是 `echo a |&>& log & echo b` 走
+      // `&` 的悬空检查 → 整行 `ok:false`。
+      //
+      // ⚠️ 后果不是「少分一段」而是**整条命令的判定路径被换掉**：`ok:false` 路径
+      // （`assessCommand` 的 `if (!d.ok)` 支）档位集合不含 `outside`、且**只认 deny 例外**
+      // —— 用户显式配的 `outside=deny` 与**全部 ask 例外**在这条路径上整个失明（fail-open）。
+      // 实测（分类 allow + 例外 `curl *`=ask）：
+      //     curl -s http://example.com |&>& log & echo done   HEAD ask → 当前 **allow** ❌
+      // 而这两条在 bash 里 `-n` = OK、真实执行**真的写出 `log` 文件**（已用真 bash 复核）。
+      //
+      // ⚠️ **报告者建议的修法（删 `OPERATOR_TOKENS` 里的 `|&`）实测无效**：靶格无括号，
+      // `parenIsProcessSub` 根本不参与。真正的原因在这里 —— 是**主循环**没消费 `|&`。
+      // 且实测删 `|&` 只翻转 4 格，而删 `<>` 会翻转 26 格并使套件 FAIL：`<>` 承重，不能动。
+      //
+      // `|&` 的 `&` **必须一并跳过**（`index += 1`）：留给下一轮的话，`&` 分支会把它当
+      // 异步列表的分隔符 —— 于是 `echo a |& log & echo b` 会**凭空多出一个段边界**。
+      // 判据顺序：先判 `||`（`|&` 不以 `|` 开头，两者不可能同时命中）。
       const isOr = input[index + 1] === '|'
+      const isPipeErr = !isOr && input[index + 1] === '&'
       flushSegment()
       nextOp = isOr ? '||' : '|'
-      if (isOr) index += 1
+      if (isOr || isPipeErr) index += 1
       continue
     }
     if (char === ';') {
@@ -3852,6 +4481,8 @@ export function decomposeCommand(source, shell) {
       const op = matchAt(REDIRECT_OPERATOR, input, index)
       pushText(op)
       pending = char === '>' ? 'write' : 'read'
+      // 新开一个待读目标 ⇒ 上一个重定向的 opaque 结论作废（见 `redirectOpaqueTarget` 的注释）
+      redirectOpaqueTarget = 'none'
       index += op.length - 1
       continue
     }
@@ -3871,12 +4502,22 @@ export function decomposeCommand(source, shell) {
       const end = skipBalanced(input, index, char, close)
       if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced group' }
       markOpaque('shell grouping or brace expansion cannot be read statically')
+      noteOpaqueText(input.slice(index, end + 1))
+      // `(` 分支必须再分一次：**进程替换** `>( )` / `<( )` 是可作词的（见 `parenIsProcessSub`），
+      // 而**子 shell** `( )` 不可作词。少了这一分，`>(tee log)` 会被记成 `not-word`
+      // → `ampNoTarget` 置位 → 整行 `ok:false` → 用户显式配的 `outside=deny` 与全部 ask 例外
+      // 在这条路径上失明（fail-open，与 `$( )` / `{ }` / `}` 同族，见 `redirectOpaqueTarget`）。
+      noteOpaqueTarget(char === '{'
+        ? !braceIsCommandGroup(input.slice(index + 1, end))
+        : parenIsProcessSub(input, index))
       pushText(input.slice(index, end + 1))
       index = end
       continue
     }
     if (char === ')' || char === '}') {
       markOpaque('shell grouping or brace expansion cannot be read statically')
+      // 孤立 `}` 是普通词（可作目标），孤立 `)` 不可能合法（见 `noteOpaqueTarget` 的注释）
+      noteOpaqueTarget(char === '}')
       pushText(char)
       continue
     }
@@ -3887,10 +4528,55 @@ export function decomposeCommand(source, shell) {
   }
 
   if (quote !== undefined) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
+  // 重定向目标缺失。⚠️ 这里的判据是 `started`（**词元级**），与下面那条段级的
+  // segHasContent **不是**同一个问题，不得合并：
+  //   · 本行问「`>` 后面有没有**词元**」—— `echo a > (b)` 的分组块不是有效目标
+  //     （bash 里这是语法错误），`echo a > $f` 的变量展开才是；
+  //   · 下面那条问「上一个操作符后面有没有**东西**」—— 它必须接受 opaque 构造
+  //     （`Get-Content x | ForEach-Object { $_ }` 的末尾就是分组块）。
+  // 实测合并的后果（把本行改成 segHasContent）：`echo a > (b)` 与 `echo a >`
+  // 双双由 ok:false 变 ok:true —— 重定向无目标被静默放行，是 fail-open。
   if (pending !== undefined && !started) return { ok: false, reason: 'a redirection has no target' }
   // 悬空操作符：`git status |` / `a &&` 在 shell 里是语法错误，段边界不可信。
-  // `;` 与换行允许尾随（shell 接受 `echo a;`），故不在此列。
-  if (nextOp !== 'start' && nextOp !== ';' && nextOp !== 'newline' && !started) {
+  //
+  // ── 允许尾随的操作符，两个判据（缺一即为误判）────────────────────────────────
+  //   · `;` 与换行 —— 两种 shell 都接受 `echo a;` / `echo a\n`，与方言无关。
+  //   · `&` —— **仅 bash**。POSIX 异步列表（`list &`）的尾随 `&` 是**合法语法**
+  //     （`sleep 5 &` / `echo a &`），而 pwsh 的 `&` 是保留的调用运算符、**不接受**
+  //     尾随（用官方解析器实测 `echo a &` → `AmpersandNotAllowed`）。故按方言分流。
+  //
+  // ⚠️ 曾经把 `&` 与 `|` / `&&` / `||` 一同当作语法错误，后果是**fail-open**：
+  // 整行 ok:false 只认 **deny** 例外（见 `assessCommand` 的 `if (!d.ok)` 那一支），
+  // 于是用户写的 **ask** 例外被一个 ` &` 抹掉。实测（分类默认 allow + 例外 `curl *`=ask）：
+  //     curl -s http://example.com    → ask
+  //     curl -s http://example.com &  → **allow** ← 用户写的确认规则被规避
+  //     curl -s http://example.com ;  → ask（`;` 早已在豁免列表里，故这是不一致，不是设计）
+  //
+  // ⚠️ 放行 `&` **只放行「合法的异步列表收尾」这一个形态**，不是「`&` 一律不算悬空」：
+  //   · **pwsh 恒不放行** —— 它的 `&` 是保留的调用运算符，尾随一律是语法错误。
+  //     这一条由 `ampOk` 的 `sh === 'bash'` 项承担（不另写判据）：pwsh 时 `ampOk` 恒假
+  //     ⇒ `!ampOk` 恒真 ⇒ 尾随 `&` 照旧落 `ok:false`。
+  //   · **bash 下 `&` 前面必须有内容**（`ampAfterContent`）—— `echo a & &` / `echo a | &`
+  //     的第二个 `&` 前面空无一物，仍是语法错误；
+  //   · 本行整体仍受上面的 `nextOp !== 'start'` 约束（空命令行早由 `EMPTY_COMMAND_REASON` 拦下）。
+  // 这三条守卫使 `&` 的豁免面**恰好**等于 bash 真正接受的形态。
+  const ampOk = nextOp === '&' && sh === 'bash' && ampAfterContent
+  // ── `&` 之前那个 `>` 没有目标：`&` 的豁免**不得**把它一起放行（发现 4 的修法）─────────
+  // 上面那条 `pending !== undefined && !started` 是**保留的**词元级判据，但它读的是**当前**
+  // 的 `pending` —— `&` 分支的 `flushSegment()` 已经把它复位，故 `&` **之前**的那个 `>`
+  // 它看不到。本行补的正是这个盲区，两者**互补而非重复**（去掉上面那条会让 `echo a > &`
+  // 由 FAIL 变 ok，测试 Z2 红灯；去掉本行则下面四种形态仍被放行）。
+  //
+  // 只对 `nextOp === '&'` 生效：其它操作符下 `pending` 不会被 `flushSegment` 吃掉
+  // （`|` / `;` / `&&` / `||` 分支同样调 `flushSegment()`，但那些操作符的尾随悬空
+  // 已由上面那条 `!ampOk` 的判据拦下，无需本行）。
+  //
+  // ⚠️ **bash 与 pwsh 都拦**：`echo a > & b` 在 bash 是
+  // `syntax error near unexpected token '&'`（exit=2），在 pwsh 里 `&` 是保留的调用
+  // 运算符、同样不接受「重定向后紧跟 `&`」。故本行**不带** `sh === 'bash'` 守卫 ——
+  // 它与 `ampOk` 的方向相反（`ampOk` 是放行，本行是收紧），收紧方向不按方言分流。
+  if (ampTargetMissing) return { ok: false, reason: 'a redirection has no target' }
+  if (nextOp !== 'start' && nextOp !== ';' && nextOp !== 'newline' && !ampOk && !segHasContent()) {
     return { ok: false, reason: 'the command line ends with a dangling operator' }
   }
   flushSegment()
@@ -4554,6 +5240,156 @@ export function groupTiersOf(labels) {
 }
 
 /**
+ * 「**半径侧读不出**」时该并入的档位集合 —— **单一实现**，两个调用方共用：
+ *
+ *   · `assessCommand` 的整行读不懂分支 —— 连段边界都定不了、**根本没有词元**；
+ *   · `tierSetOf` ① 里「**破坏性命令本身藏在 opaque 构造里**」那一族
+ *     （守卫是 `destructiveHeadReadable`）。
+ *
+ * 两处的处境相同：**半径侧没有任何结论**。而「读不出」既可能落在工作区内、也可能落在
+ * 盘根，故 `inside` / `wide` / `unknown` **同时**参与「取最严」—— 读不出半径**不等于**
+ * 半径安全（见整行分支处 §7.2 的完整论证）。
+ *
+ * ⚠️ `inside` **必须在集合里**（发现 1 的修法）：整行分支早已并它（那处 `tiers.push('inside')`
+ * 是本批**未改动**的上下文，注释明写「丢掉它就等于丢掉一条显式表态」），而段级 opaque 支
+ * 只并 `wide ∪ unknown` —— 于是同一个「目标读不出」在两条路径上给出两个答案：用户显式配的
+ * `inside=deny` 在段级路径上被静默丢弃。实测（`inside=deny`、其余七档 allow，
+ * win32/posix × bash/pwsh 四格同值）：
+ *     rm -rf ./build              → deny（tiers=['inside']）
+ *     echo a | rm -rf ./build     → deny（tiers=['inside']）
+ *     echo a | (rm -rf ./build)   → **allow**（tiers=['wide','unknown']）← inside 档丢失
+ * 且这一格是**本批改动新打开**的：HEAD 上 `echo a | (rm -rf ./build)` 因悬空检查返回
+ * ok:false、走整行分支 → deny；本批放宽悬空检查后它走段级路径 → allow。
+ *
+ * ⚠️ 提成单点是为了消除**同一句「读不出」在两个路径上给出两个答案**的分叉：整行分支并的
+ * 是这三档，而段级 opaque 支一度只 `add('unknown')` —— 于是用户显式配的 `wide=deny`
+ * 在段级路径上被静默丢弃（fail-open，实测见 `tierSetOf` ① 的说明）。
+ *
+ * ⚠️ **不是「凡 opaque 段都并这三档」**：命令可读、构造只是**参数**的那一族
+ * （`rm -rf ./tmp/{a,b,c}`：段首 label 是 `rm`）半径判据已按可读前缀判过档，
+ * 并 `wide` 等于把已知结论抬成「可能很大」，是凭空收紧 —— `test/shell-parse.mjs` 的
+ * 60g ④b/⑤b 把这一族（合法常用命令）钉死为「恰好 `['unknown']`」。
+ */
+const RADIUS_TIERS_WHEN_UNREADABLE = ['wide', 'unknown', 'inside']
+
+/**
+ * 段首的**主 label** 是否读得出一个破坏性命令名 —— 「真命令在段内、还是藏在构造里」。
+ *
+ * 与「目标读不出」是**两个不同的问题**，判据必须分开（见 `tierSetOf` ① 的说明）：
+ *   · 读得出（`rm -rf ./tmp/{a,b,c}` 的 label 是 `rm`）—— 命令可读，构造只是**参数**，
+ *     半径判据已按可读前缀（`./tmp/`）判过档。并 `wide` 等于把已知结论抬成「可能很大」，
+ *     是凭空收紧，60g ④b/⑤b 把这一族（合法常用命令）钉死为「只有 `unknown`」。
+ *   · 读不出（`(rm -rf C:/Windows)` / `` `rm -rf C:/Windows` `` /
+ *     `{ Remove-Item C:/Windows -Recurse -Force }`：`words` 里连命令名都没留下）——
+ *     真命令在构造里，半径侧**没有**任何结论。
+ *
+ * ⚠️ 判据用 `segmentLabel`（**主 label**）而不是 `segmentLabels`：后者会为
+ * `find -exec rm {} +` 合成 `rm` 这种**间接** label，而那一族的词元齐全、半径判据正常
+ * 工作（`find` 的路径目标可判），不属于本判据要覆盖的形态。
+ *
+ * ⚠️ **提权前缀必须单独排除**（发现 1 的修法）：`sudo` / `doas` / `su` / `pkexec` /
+ * `runas` / `gsudo` **六个名字全部在 `DESTRUCTIVE_LABELS` 里**（那一行的注释明禁把它们
+ * 移出名单，见 `assessCommand` 的 `priv` 分支），于是「提权前缀 + 真命令藏在 opaque 构造里」
+ * 会被本判据误判成「命令可读」→ 走 `else` 支只并 `unknown` → 用户显式配的
+ * `wide=deny` / `inside=deny` 被静默丢弃。
+ *
+ * 语义上提权前缀**不是命令头**：它只是权限包装，段首读出 `sudo` 恰恰说明**真命令在别处**
+ * （`sudo $(rm -rf C:/Windows)` 的真命令在构造里）。故 `PRIV_PREFIXES[head] === 1` 时必须
+ * 返回「读不出」——这与 `commandHeadEnd` 穿过提权前缀取真命令头是同一条口径。
+ *
+ * 实测（`wide=deny` + 其余七档 allow）：`echo a | sudo $(rm -rf C:/Windows)` 由
+ * **allow**（tiers=`['unknown','priv']`）变 **deny**（tiers=`['wide','unknown','inside','priv']`）；
+ * 而 `sudo rm -rf /etc` 与 `sudo ls` 逐字不变（它们的 `head` 是 `sudo`，但 `seg.opaque`
+ * 为空 / `blast` 已有结论，走不到本守卫）。
+ *
+ * ⚠️ **`:4932` 那条提权兜底不可删**（发现 8 的报告者建议删掉它，实测会让
+ * `sudo $(rm -rf C:/Windows)` 由 deny 变 **allow**）：`sudo` 本身就在 `DESTRUCTIVE_LABELS`
+ * 里，故「段首是提权前缀、真命令在构造里」这一格只有它能挡住。它承重，不是冗余。
+ *
+ * ── 判据问的是「**opaque 构造自己有没有藏一个破坏性命令**」（发现 1 的修法）─────────────
+ * 本函数此前问的是「**段首**是不是破坏性命令」，于是「段首本身是破坏性命令、而构造里
+ * **另有一个**真破坏性命令」这一族判错：`echo a | rm -rf /tmp/x $(rm -rf /)` 的段首 label
+ * 确实是 `rm`，判据说「命令可读」→ 走 `else` 支只并 `unknown` → 用户显式配的 `wide=deny`
+ * 与 `inside=deny` 静默消失（实测 tiers=`['unknown','outside']`，**allow**）。
+ *
+ * ⚠️ 而这一格在 bash 里 `-n` = OK、**可执行**，`$(rm -rf /)` 真会跑。故它不是「构造只是参数」，
+ * 而是**两个破坏性命令**：段首那个可读、构造里那个读不出。判据必须把两者**都**问一遍 ——
+ * 只问段首就会漏掉后半句，只问构造就会把 `rm -rf ./build $(date)`（构造里是 `date`）
+ * 一起误伤（60g ④b/⑤b 把它钉死为「恰好 `['unknown']`」）。
+ *
+ * ⚠️ **换 label 取法修不好这一格**：靶格的 `headCommandNameOf` 与 `segmentLabel` 同值
+ * （都是 `rm`）—— 病因不在「取哪个 label」，而在**问错了问题**。故本判据=「段首可读
+ * **且**构造里没有第二个破坏性命令名」。
+ *
+ * 构造原文由词法器按块记在 `seg.opaqueTexts`（见该字段的说明）：判定侧若拿 `seg.text`
+ * 自己反推「哪段是构造」，就是同一份知识写两遍 —— 那正是本文件反复要修的那类分叉。
+ *
+ * @param {{words?: string[], opaqueTexts?: string[]}} seg 段
+ * @returns {boolean} 段首 label 确实是破坏性命令名、且 opaque 构造里没有另一个时为真
+ */
+function destructiveHeadReadable(seg) {
+  const w = seg && Array.isArray(seg.words) ? seg.words : []
+  let head = ''
+  // 判据用 `headCommandNameOf`（穿过提权前缀 / wrapper / 语句关键字取**真命令头**），
+  // 不用 `segmentLabel`（发现 8）：后者不跳提权前缀，`segmentLabel(['sudo','rm',…])` = `'sudo'`
+  // —— 于是「段首是 `sudo`」被无条件判成「命令读不出」，**即使紧跟其后的就是可读的 `rm`**：
+  // `sudo rm -rf ./build $(date)` 由 allow 变 deny（tiers=`['wide','unknown','inside','priv']`），
+  // 形态极常见，属误拦。`headCommandNameOf` 是文件里已有的单一来源（它的注释明写必须穿过
+  // 提权前缀取真命令头），本判据与它同源后，`sudo rm …` 的 head 就是 `rm`。
+  try { head = headCommandNameOf(w) } catch (e) { head = '' }
+  // 空 label = 读不出（`(rm -rf /)` 的 `words` 是 `[]`）。
+  // ⚠️ 这一行**是冗余的防御**：`isDestructiveLabel('')` 本身就返回 false（它先 `!!l`），
+  //    且 `PRIV_PREFIXES` 是 `Object.create(null)` 的字典，`PRIV_PREFIXES['']` 是
+  //    `undefined` 而非 `1`。保留它是为了让「空 label 算读不出」这条语义在**本函数里**
+  //    显式可见（不依赖被调函数的内部实现），实测去掉它行为完全不变（变异测试无红灯）。
+  if (!head) return false
+  // 提权前缀不是命令头 —— 真命令在它后面（可能在 opaque 构造里）。
+  if (PRIV_PREFIXES[head] === 1) return false
+  // ── 段首那个**不是**真载荷：opaque 构造里另有破坏性命令 ────────────────────────────
+  // 逐块问「这一块构造自己有没有藏一个破坏性命令」。命中即返回「读不出」——语义是
+  // **段首那个可读的破坏性命令不是全部载荷**，构造里还有一个读不出的。
+  //
+  // ⚠️ 只对**构造原文**取 `rawCommandNames`，不整段取：整段取会把段首那个命令名本身
+  // 也算进来（`rm -rf ./build $(date)` 的原文里就有 `rm`），于是**每一格**都命中、
+  // 承重格 `rm -rf ./tmp/{a,b,c}` 被误伤成 `['wide','unknown','inside']`（60g ④b/⑤b 红灯）。
+  // 判据必须问「构造**里**」，不能问「段里」—— 这正是发现 1 的病根（问错了范围）。
+  //
+  // ⚠️ `opaqueTexts` 缺席时（旧调用方 / 手搓的 `seg` 字面量）本判据**整个不生效**，
+  // 退化为改动前的行为（只问段首）—— 方向是保守而非放宽。生产调用点已补传（见
+  // `assessCommand` 的 `tierSetOf` 调用），故真实路径上恒生效。
+  const texts = seg && Array.isArray(seg.opaqueTexts) ? seg.opaqueTexts : null
+  if (texts) {
+    for (const raw of texts) {
+      let names = null
+      try { names = rawCommandNames(raw) } catch (e) { names = null }
+      if (!names) continue
+      for (const n of names) { if (isDestructiveLabel(n)) return false }
+    }
+  }
+  return isDestructiveLabel(head)
+}
+
+/**
+ * 档位集合的**固定顺序**（`TIER_RANK` 的**唯一**比较实现）。
+ *
+ * 三个产出点共用它：`tierSetOf`、`assessCommand` 的整行读不懂分支，
+ * 以及 `tierVerdict` 里「并列在最严档上的其余命中档」那一次排序。
+ * 后两处曾经各自**手抄**了一份逐字相同的比较函数 —— 而 `decisiveTierOf` 的稳定性论证
+ * 依赖「`tiers` 已按 `TIER_RANK` 排过」，抄漏一处的后果是**动作不变、拒绝理由随书写
+ * 形态漂移**（发现 3）；`tierVerdict` 那一份更直接：它就是用户看到的拒绝理由。
+ * 三处现在只剩这一个比较实现（发现 5 的修法：把 `tierVerdict` 的副本也换成本函数）。
+ *
+ * 原地排序并返回同一数组（调用方都要的就是排好序的那一份）。
+ */
+function sortTiersByRank(tiers) {
+  return tiers.sort((a, b) => {
+    const ra = TIER_RANK[a]
+    const rb = TIER_RANK[b]
+    return (ra === undefined ? 99 : ra) - (rb === undefined ? 99 : rb)
+  })
+}
+
+/**
  * 该段命中的**全部档位**（半径档 ∪ 组档），按 TIER_ORDER 排序。
  *
  * 组合规则（§3.3）：
@@ -4619,7 +5455,26 @@ export function tierSetOf(seg, labels, opts) {
     if (g === 'priv') hasPrivGroup = true
     else hasPureRadius = true
   }
-  if (hasPureRadius || (hasPrivGroup && seg && seg.blast)) {
+  // ── 门控的第三个合取项：**破坏性命令藏在 opaque 构造里**（发现 3 的修法）──────────────
+  // 前两项都只覆盖「半径组 label」：`hasPureRadius` 要求段内有 del/disk/perm 组的 label，
+  // `hasPrivGroup` 要求有 priv 组。而**纯组档段**（`kill` / `pkill` / `reboot` / `shutdown` /
+  // `taskkill` / `stop-computer` / `reg delete` / `stop-process`）的 `GROUP_OF_LABEL` 是
+  // `proc` / `power` / `reg` —— **既非 pureRadius 也非 privGroup**，于是整个门控不进入，
+  // 下面那个 `opaqueHiddenPayload` 守卫**从不被求值**，同一条「真命令藏在构造里」的结论
+  // 只因命令属组档就静默 allow（fail-open）。
+  //
+  // 实测（`wide=deny` + 其余七档 allow，修复前）：
+  //     echo a | (rm -rf ./build)  → deny tiers=['wide','unknown','inside'] ✅（del 族进门控）
+  //     echo a | (kill 1234)       → **allow** tiers=['unknown','proc']      ❌（proc 族被跳过）
+  //     echo a | (reboot)          → **allow** tiers=['unknown','power']     ❌
+  //     echo a | (reg delete HKCU\\X /f) → **allow** tiers=['unknown','reg'] ❌
+  // 可达面 = 8 个组档命令 × `|` / `&&` / `||` / `&` 四种分隔符。
+  //
+  // ⚠️ 第三个合取项**必须**是「opaque 且命令读不出」，不能放宽成 `seg.opaque`：
+  // 后者会把「命令可读、构造只是参数」的那一族也拉进门控，改掉 `diskpart /s a.txt`
+  // 这类承重格的「替换」语义（`:4244-4245` 明禁）。判据与门控内那两条守卫同源。
+  const opaqueHiddenPayload = !!(seg && seg.opaque && !destructiveHeadReadable(seg))
+  if (hasPureRadius || (hasPrivGroup && seg && seg.blast) || opaqueHiddenPayload) {
     // ── opaque 段：目标被读不懂的构造吞掉，`null` 的含义**不是**「在区内」────────────
     // 词法器把 opaque 构造（子 shell `( )`、命令替换 `$( )` / 反引号、花括号分组 `{ }`）
     // 整块吞掉，段级词元只剩构造**之外**的部分：
@@ -4646,9 +5501,118 @@ export function tierSetOf(seg, labels, opts) {
     // `diskpart /s a.txt` 走的就是这一支（`isUnknownTierSegment` 为真 → 只给 `unknown`，
     // 半径档 `outside` 被替换掉），改成叠加会白送一个半径档，而 `:4207-4208` 明禁。
     const opaqueUnjudgeable = !!(seg && seg.opaque && !seg.blast)
-    add((opaqueUnjudgeable || isUnknownTierSegment(list, seg && seg.words, opts))
-      ? 'unknown'
-      : radiusTierOf(seg && seg.blast))
+    // ── 门控修正（发现 2 的修法）：`!seg.blast` **不是**「半径侧读不出」的完整判据 ──────────
+    // `blast` 非空也可能是 `{level:'unknown'}` —— 那同样是「半径侧没有结论」，只是
+    // `blastRadiusOfSegment` 走的是**另一条**产出路径：词法器**不吞**反引号，命令替换
+    // 作为一个字面词元留在 `words` 里（`Write-Output \`rm -rf C:/Windows\`` 的
+    // `words` 是 `['Write-Output','`rm -rf C:/Windows`']`），该词元被判为「读不出」
+    // → `sawUnjudgeable` 置位 → 段级 blast 是 `{level:'unknown'}` 而非 `null`。
+    //
+    // 于是旧门控 `seg.opaque && !seg.blast` 对反引号形态**恒假**，本守卫整个不被求值，
+    // 落到 `else` 支的 `radiusTierOf({level:'unknown'})` —— **只**并 `unknown`，
+    // `wide` 被静默丢弃。同一构造的四种写法里只有反引号漏网，方向 fail-open：
+    //     echo a | Write-Output $(rm -rf C:/Windows)   → deny  tiers=['wide','unknown']
+    //     echo a | Write-Output (rm -rf C:/Windows)    → deny  tiers=['wide','unknown']
+    //     echo a | Write-Output {rm -rf C:/Windows}    → deny  tiers=['wide','unknown']
+    //     echo a | Write-Output `rm -rf C:/Windows`    → **allow** tiers=['unknown'] ❌
+    // （实测 `wide=deny` + 其余七档 allow。）
+    //
+    // ⚠️ 两条守卫**缺一不可**，且都不可放宽：
+    //   · `!destructiveHeadReadable(seg)` —— 命令可读、构造只是**参数**的那一族
+    //     （`rm -rf ./build $(date)`、`rm -rf ./tmp/{a,b,c}`）**必须**留在 `else` 支，
+    //     60g ④b/⑤b 把它们钉死为「恰好 `['unknown']`」。它们的段首 label 是 `rm`，
+    //     故被本条排除；`rm -rf $TARGET` 同理（且它 `opaque` 为空，双重排除）。
+    //   · `seg.opaque` —— 没有 opaque 构造的段不参与（`kill 1234` 那族不得凭空多档）。
+    //
+    // ⚠️ 只把「半径侧读不出」的判据补齐，**不动** `else` 支的「替换」语义：
+    // `diskpart /s a.txt`（`opaque` 为空、`isUnknownTierSegment` 为真）照旧恰好
+    // `['unknown']` —— 它不满足 `seg.opaque`，走不进本支。
+    // ── 「半径侧读不出」这个判据**已被下面的守卫完全吸收**，故不再单列变量（发现 10）──────
+    // 曾写作 `const opaqueRadiusUnreadable = !!(seg.opaque && (!seg.blast || seg.blast.level === 'unknown'))`
+    // 并作为**第一个析取项**参与守卫：`(opaqueRadiusUnreadable || opaqueHiddenPayload) && !destructiveHeadReadable(seg)`。
+    // 那个写法里的第一个析取项是**冗余**的，且是**代数上恒等**的冗余（不依赖
+    // `destructiveHeadReadable` 怎么定义，故修复 A 改动它不影响本结论）。记 `O = seg.opaque`、
+    // `D = destructiveHeadReadable(seg)`、`B = seg.blast`：
+    //     opaqueHiddenPayload    = O && !D
+    //     opaqueRadiusUnreadable = O && (!B || B.level === 'unknown')
+    //     守卫 = (opaqueRadiusUnreadable || opaqueHiddenPayload) && !D
+    //          = O && ((!B || …) || !D) && !D
+    //          = O && !D && ((!B || …) || !D)      ← 已有 `!D`，故括号内恒真
+    //          = O && !D
+    //          = opaqueHiddenPayload                ∎
+    // 直白地说：`opaqueRadiusUnreadable` 蕴含 `O`，而 `opaqueHiddenPayload` 也蕴含 `O`；
+    // 一旦 `!D` 成立，两个析取项**都不可能**提供 `opaqueHiddenPayload` 之外的信息 ——
+    // 「半径侧读不出」从来不是与「载荷藏在构造里」并列的第二个结论。
+    // 实测（950 条语料 × 11 配置 × 2 方言 = 20900 次判定，守卫被求值 17424 次）：
+    // 化简前后**真值不一致 0 次**，两侧同为真 13178 次。
+    //
+    // ⚠️ 化简**不改变语义**，只去掉冗余；下面 `if` 的判据仍是「opaque 且段首命令读不出」，
+    // 故 `!destructiveHeadReadable(seg)` 与 `seg.opaque` **两个条件照旧都在承重**
+    // （它们现在由 `opaqueHiddenPayload` 一并表达，见 `:5259` 的门控第三项，同一个布尔）。
+    //
+    // ⚠️ 只把「半径侧读不出」的判据补齐，**不动** `else` 支的「替换」语义：
+    // `diskpart /s a.txt`（`opaque` 为空、`isUnknownTierSegment` 为真）照旧恰好
+    // `['unknown']` —— 它不满足 `seg.opaque`，走不进本支。
+    // ── 发现 2 的修法：**诱饵目标**使 `wide`/`inside` 静默消失 ────────────────────────
+    // 本守卫的判据是「命令读不出」，而**不是**「`blast` 空**或**为 `unknown`」——
+    // 后者是初版写法，当 opaque 段里另有一个**可读**目标、且其 blast 恰为 `outside`
+    // （`home` 同）时，该式为假 → 落进 `else` 支 → 只并 `outside`，`wide` 与 `inside`
+    // 从 `tiers` **静默消失**。
+    //
+    // 实测（`wide=deny` + 其余七档 allow，修复前）：
+    //     cat /etc/hosts $(rm -rf C:/Windows)  → **allow** tiers=['unknown','outside']
+    //                                            blast=outside:/etc/hosts ← 诱饵把判据骗开
+    //     echo $(rm -rf C:/Windows)            → deny      tiers=['wide','unknown','inside'] ✅
+    // 诱饵档位逐条实测：`/etc/hosts`、`~/notes.txt` 触发（outside）；`C:/Windows/x`（system）、
+    // `B:/`（drive-root）、`$T`（unknown）、`./build`（null）**都不触发** —— 前三者自身就
+    // 归 `wide`/`unknown`（已有更严结论），后者 blast 为 null 时仍走上面那条 `!seg.blast` 判据。
+    // 其中**尾随 `&` 一格是本批新引入的 deny→allow**（`&` 的悬空检查放宽后走段级路径），
+    // 其余分隔符是既有缺口。
+    //
+    // 故把 `opaqueHiddenPayload`（= `seg.opaque && !destructiveHeadReadable(seg)`，
+    // 与门控第三项**同一个布尔**）作为本守卫的**唯一**判据：真命令藏在构造里这件事与
+    // 诱饵目标无关，诱饵档由下面那句 `add(radiusTierOf(seg.blast))` **显式保留**。
+    //
+    // ⚠️ 两个方向都不能少（这一句指的是**支内**那两条语句，与上面的守卫判据无关）：
+    //   · 只并三档、**不**保留诱饵档 —— 会把已判出的 `outside` 丢掉，而用户可能显式配了
+    //     `outside=deny`（丢掉它就是丢掉一条显式表态）；
+    //   · 只保留诱饵档、**不**并三档 —— 就是修复前那个 fail-open（`wide=deny` 被静默丢弃）。
+    // 故下面在三档之后**显式**补 `add(radiusTierOf(seg.blast))`（`add` 自带去重，
+    // `blast` 为 `null` / `unknown` 时它落在三档之内，是空操作）。
+    if (opaqueHiddenPayload) {
+      // ── 「**破坏性命令本身藏在 opaque 构造里**」：与「整行读不懂」分支取同一口径 ──────
+      // 判据 = 段首读出来的命令名**不是**破坏性命令（空 label 也算读不出），而这一段却被
+      // 判成破坏性段 —— 那只可能是 `rawCommandNames` 在构造里认出了真命令。此时：
+      //   · 半径判据**没有**任何可判目标（`blast` 是 null，**或**是 `{level:'unknown'}`，
+      //     两者都不是「判过、在区内」）；
+      //   · 构造里藏着的既可能是无害命令、也可能是删盘根 —— **读不出半径不等于半径安全**。
+      // 故并 `wide ∪ unknown ∪ inside` 三档参与取最严（`inside` 见 `RADIUS_TIERS_WHEN_UNREADABLE`
+      // 的注释：整行分支一直并它，丢掉它就等于丢掉用户可能显式配过的 `inside=deny`），
+      // 档位集合与整行分支**单点共用**（`RADIUS_TIERS_WHEN_UNREADABLE`），不再两处各写一份。
+      //
+      // ⚠️ 修的是一个 fail-open：用户**显式配置的 `wide=deny`** 曾在段级路径上被静默丢弃。
+      // 实测（`wide=deny` + `unknown=allow` + `category=allow`）：
+      //     echo a | (rm -rf C:/Windows)  ← 行尾悬空检查放宽前 ok:false，走整行分支 → deny
+      //                                     放宽后 ok:true、末段 opaque → 只命中 unknown → **allow**
+      // `|` / `&&` / `||` / `&` 四种分隔符同形（`;` 与换行分隔的同形态在放宽前**已经是**
+      // allow，早就走段级路径）—— 即缺陷面正是这次放宽新打开的。
+      //     Get-ChildItem | ForEach-Object { Remove-Item C:/Windows -Recurse -Force }
+      //     同理：段首 label 是 `foreach-object`，真命令 `remove-item` 只在构造里。
+      //
+      // ⚠️ **不得放宽成「凡 opaque 且半径侧读不出就并 wide」**（仲裁的初版修法）：
+      // 那会连带改掉「命令可读、构造只是**参数**」的一族，而它们是合法常用命令、
+      // 半径判据已按可读前缀判过档，并 `wide` 等于把已知结论抬成「可能很大」——
+      // `test/shell-parse.mjs` 的 60g ④b/⑤b 把这一族钉死为「恰好 `['unknown']`」
+      // （`rm -rf ./tmp/{a,b,c}`、`rm -rf ./build $(date)`：段首 label 是 `rm`，
+      // 命中本行的 `destructiveHeadReadable` 守卫 → 不并 `wide`/`inside`，行为逐字不变）。
+      for (const t of RADIUS_TIERS_WHEN_UNREADABLE) add(t)
+      // 诱饵目标已判出的半径档（`outside` / `home` 那一族）**显式保留**，见本支开头。
+      add(radiusTierOf(seg && seg.blast))
+    } else {
+      add((opaqueUnjudgeable || isUnknownTierSegment(list, seg && seg.words, opts))
+        ? 'unknown'
+        : radiusTierOf(seg && seg.blast))
+    }
   }
   // ── 并列补档行：`unknown` 侧的三条产出判据（**移出门控**，见 `tierSetOf` 的 ① 说明）──
   // 上面那一支是「半径档 / unknown **二选一**」的替换语义，而它整个被门控包着 —— 于是
@@ -4721,12 +5685,9 @@ export function tierSetOf(seg, labels, opts) {
   // ③ 提权（位置判据）。与 ② 的 `priv` 组档互为冗余而非重复 ——
   // 冗余的那一侧（位置判据）覆盖的是 `segmentLabels` 刻意不扩展的形态（`su` / `runas`）。
   if (seg && segmentPrivilege(seg.words)) add('priv')
-  // 排序：固定顺序，与用户配置无关（见 TIER_ORDER 的注释）
-  return set.sort((a, b) => {
-    const ra = TIER_RANK[a]
-    const rb = TIER_RANK[b]
-    return (ra === undefined ? 99 : ra) - (rb === undefined ? 99 : rb)
-  })
+  // 排序：固定顺序，与用户配置无关（见 TIER_ORDER 的注释）。
+  // 与整行读不懂分支共用 `sortTiersByRank`（同一条纪律：排序键只有一份）。
+  return sortTiersByRank(set)
 }
 
 /**
@@ -6164,11 +7125,12 @@ export function assessCommand(source, shell, hooks) {
       for (const u of (Array.isArray(tiers) ? tiers : [])) {
         if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
       }
-      same.sort((a, b) => {
-        const ra = TIER_RANK[a]
-        const rb = TIER_RANK[b]
-        return (ra === undefined ? 99 : ra) - (rb === undefined ? 99 : rb)
-      })
+      // 排序键复用 `sortTiersByRank`（与 `tierSetOf` / 整行分支**同一个**函数）。
+      // 这里曾经手抄一份逐字相同的比较函数，而「抄漏一处」正是发现 3 的成因：
+      // 同一份 `TIER_RANK` 出现在两处时，改一处而漏另一处的后果是**动作不变、
+      // 拒绝理由随书写形态漂移**，且这一处直接决定用户可见的拒绝理由。
+      // `same` 是本函数内的局部新数组，原地排序无副作用。
+      sortTiersByRank(same)
       for (const u of same) {
         const ru = reasonOfTier(u)
         if (ru) return { action, reason: ru }
@@ -6284,14 +7246,35 @@ export function assessCommand(source, shell, hooks) {
         // 不新造表 —— 与段级路径同源，两条路径的 `tiers` 顺序从此不可能分叉。
         const tiers = groupTiersOf(names)
         if (segmentPrivilege(names)) tiers.push('priv')
-        tiers.push('wide')
-        tiers.push('unknown')
-        tiers.push('inside')
-        tiers.sort((a, b) => {
-          const ra = TIER_RANK[a]
-          const rb = TIER_RANK[b]
-          return (ra === undefined ? 99 : ra) - (rb === undefined ? 99 : rb)
-        })
+        // 半径侧读不出 —— 档位集合与段级 opaque 段**单点共用**
+        // （`RADIUS_TIERS_WHEN_UNREADABLE`：`wide ∪ unknown ∪ inside`，见该常量的注释）。
+        // ⚠️ `inside` 照旧**并入**（不是「回落到它」）：它跟随大分类，但用户可能显式
+        // 配了 `inside=deny`，丢掉它就等于丢掉一条显式表态。
+        //
+        // ⚠️ **裸 push**（发现 6 的修法）：这里曾经写成
+        // `if (tiers.indexOf(t) === -1) tiers.push(t)`，而该条件**恒真** —— 本处的
+        // `tiers` 只有两个产出者：`groupTiersOf(names)`（值域实测只有
+        // `proc`/`power`/`priv`/`reg`）与上面那行字面量 `'priv'`，与
+        // `RADIUS_TIERS_WHEN_UNREADABLE = ['wide','unknown','inside']` **无交集**，
+        // 跳过支永不执行（等价于裸 push）。实测 318 条语料 × 2 方言，跳过支执行 0 次。
+        // 原先注释给的两条论据与实测相反，故一并订正：
+        //   · 「原先裸 push 会得到重复档位」—— 重复档确实存在，但来自上面那行
+        //     `tiers.push('priv')`（`groupTiersOf(['sudo','kill'])` 已含 `priv`），
+        //     在 HEAD 上完全相同；本守卫既非它的修法，也从未触及它。
+        //   · 「该数组是对外字段（决策日志 / 弹窗）」—— 整行分支返回对象的键实测为
+        //     `["action","code","segments","matched","reason","note"]`，**没有 `tiers` 键**，
+        //     `segments` 恒为 `[]`，故该数组从不外泄。
+        // 保留裸 push 而不是删掉整行：三档仍须并入（`inside` 见上，用户可能显式配了
+        // `inside=deny`），删掉才是 fail-open。
+        for (const t of RADIUS_TIERS_WHEN_UNREADABLE) tiers.push(t)
+        // ── `outside` 档：**只在原文里读得出区外目标时**才并入（发现 1 的修法）──────────
+        // 上面那三档是「半径侧读不出」的通用口径，而 `outside` 是**具体**档 ——
+        // 无条件并入会让 58d / 58e3（八档全 allow 的用户）凭空多出一个档。
+        // 判据见 `outsideTargetInUnparsable`：与段级路径对同一目标给出的结论同源。
+        if (outsideTargetInUnparsable(source, h)) tiers.push('outside')
+        // 排序键与段级路径**同一个**函数（`sortTiersByRank` 复用 `TIER_RANK`）——
+        // 这里曾经手抄一份逐字相同的比较函数，而「抄漏一处」正是发现 3 的成因。
+        sortTiersByRank(tiers)
         const v = tierVerdict(ds, tiers)
         if (v.action !== 'inherit') {
           action = v.action
@@ -6451,7 +7434,14 @@ export function assessCommand(source, shell, hooks) {
     // `opaque` 必须一起传：`(rm -rf /etc)` 的 words 是空的（词法器把分组整块吞掉），
     // `blastRadiusOfSegment` 因此返回 `null`，而 `null` 在 §5.1 里映射成 `inside`
     // —— 「目标读不出」会被当成「目标在区内」。`tierSetOf` 靠这个字段把它改判 `unknown`。
-    const tiers = destructive ? tierSetOf({ words: seg.words, blast: blast, opaque: seg.opaque }, labels, h) : []
+    //
+    // `opaqueTexts` 同样必须一起传（发现 1 的修法）：`destructiveHeadReadable` 要问
+    // 「**opaque 构造自己**有没有藏一个破坏性命令」，而构造里的命令名不在 `words` 里
+    // （词法器把构造整块吞掉），只能由词法器记下的构造原文回答。**漏传这一项会让该判据
+    // 恒不生效**（`opaqueTexts` 缺席时按旧行为退化），靶格照旧 allow。
+    const tiers = destructive
+      ? tierSetOf({ words: seg.words, blast: blast, opaque: seg.opaque, opaqueTexts: seg.opaqueTexts }, labels, h)
+      : []
 
     let action
     let source

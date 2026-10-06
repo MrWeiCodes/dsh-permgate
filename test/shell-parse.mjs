@@ -2342,6 +2342,7 @@ group('M. 查找表无原型（原型属性名不得被当成表项）')
     JSON.stringify(rawCommandNames('constructor -rf / && __proto__ x')))
 }
 
+
 // ─────────────────────────────────────────────────────────────────────────────
 group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
 {
@@ -9099,6 +9100,1708 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('Z. 末尾 opaque 构造：段边界仍确定（dangling operator 误判回归）')
+{
+  // ── 这一组盯的是什么 ────────────────────────────────────────────────────────
+  // 行尾检查曾经用 `started` 当段级判据。`started` 是**词元级**状态：遇到引号外空白
+  // 就被 flushWord 复位，而分组块 / 命令替换这类构造**产不出词元**（它们被标记 opaque），
+  // 于是 `Get-Content x | ForEach-Object { $_ }` 的行尾被判成「| 后面什么都没有」，
+  // 整行 ok:false。
+  //
+  // 后果有轻重两层，两层都要钉住：
+  //   ① 段边界全丢 → 弹窗的「分段」行消失（症状，用户先看到的就是它）；
+  //   ② ok:false 路径**只认 deny 例外**（见 assessCommand 里 `if (!d.ok)` 那一支，
+  //      命令名靠 rawCommandNames 粗提）→ allow/ask 例外一律不认。
+  //      于是「分类默认 allow + 个别命令写 ask 要求每次确认」这个配置下，
+  //      末尾挂一个括号就等于把那条确认规则抹掉 —— **fail-open**，比 ① 严重得多。
+  //
+  // 反向同样要钉：判据放宽不得放过**真**悬空（`echo a |`）与**真**无目标的重定向。
+  // 后者尤其重要：`echo a >` 与行尾检查看着像同一个判据，其实不是（一个问「有没有
+  // 词元」、一个问「有没有东西」），把它们合并会让 `echo a >` 静默变成合法命令。
+
+  const tailOpaque = [
+    ['pwsh 脚本块 {…} 收尾', 'echo a | ForEach-Object { $_ }', 'pwsh'],
+    ['bash 子 shell (…) 收尾', 'echo a | (cat)', 'bash'],
+    ['bash 花括号组 {…} 收尾', 'echo a | { cat; }', 'bash'],
+    ['命令替换 $(…) 收尾', 'echo a | Write-Output $(date)', 'bash'],
+    ['孤立右括号收尾', 'echo a | Write-Output )', 'bash'],
+  ]
+  for (const [label, cmd, shell] of tailOpaque) {
+    const r = decomposeCommand(cmd, shell)
+    ok('Z1 ' + label + '：段边界仍确定（不是悬空操作符）',
+      r.ok === true && r.segments.length === 2,
+      JSON.stringify(r.ok ? r.segments.map((s) => s.text) : r))
+  }
+  // 用户报上来的那条命令的**最小复现**（真机形态：三个管道，末尾是 pwsh 脚本块）
+  const zReal = decomposeCommand('Get-Content -LiteralPath \'x.js\' | Select-Object -Skip 1 -First 30 | ForEach-Object { $_ }', 'pwsh')
+  ok('Z1 用户实测形态（三管道 + 末尾脚本块）必须 ok:true 且有 3 段',
+    zReal.ok === true && zReal.segments.length === 3,
+    JSON.stringify(zReal.ok ? zReal.segments.map((s) => s.text) : zReal))
+
+  // ── 反向 1：真悬空操作符仍须拦下 ──────────────────────────────────────────
+  // ⚠️ `&` **不在此列** —— 尾随 `&` 在 bash 里是**合法**的（POSIX 异步列表：
+  // `sleep 5 &` / `echo a &`），只有 pwsh 才拒绝它（`AmpersandNotAllowed`）。
+  // 曾把 `&` 与 `|` / `&&` / `||` 并列钉成「真悬空」，那是**错误的语义**：
+  // 整行 ok:false 只认 deny 例外，于是用户写的 **ask** 例外被一个 ` &` 抹掉（fail-open）。
+  // 实测（分类默认 allow + 例外 `curl *`=ask）：
+  //     curl -s http://example.com    → ask
+  //     curl -s http://example.com &  → allow ← 确认规则被规避
+  //     curl -s http://example.com ;  → ask（`;` 早已在豁免列表里，故那是不一致，不是设计）
+  for (const [label, cmd] of [['|', 'echo a |'], ['&&', 'echo a &&'], ['||', 'echo a ||']]) {
+    const r = decomposeCommand(cmd, 'bash')
+    ok('Z2 真悬空 ' + label + ' 仍须 ok:false', r.ok === false, JSON.stringify(r))
+  }
+  // 尾随 `&`：**按方言分流**（bash 合法 / pwsh 语法错误）。两个方向都要钉住 ——
+  // 只钉 bash 侧会让「`&` 一律放行」这种过度放宽也变绿。
+  ok('Z2 尾随 & 在 bash 下合法（POSIX 异步列表）',
+    decomposeCommand('echo a &', 'bash').ok === true
+    && decomposeCommand('echo a & ', 'bash').ok === true,
+    JSON.stringify(decomposeCommand('echo a &', 'bash')))
+  ok('Z2 尾随 & 在 pwsh 下仍须 ok:false（AmpersandNotAllowed）',
+    decomposeCommand('echo a &', 'pwsh').ok === false
+    && decomposeCommand('echo a & ', 'pwsh').ok === false,
+    JSON.stringify(decomposeCommand('echo a &', 'pwsh')))
+  // 放行面**恰好**是「合法的异步列表收尾」：`&` 前面空无一物时仍是语法错误
+  // （`echo a & &` 的第二个 `&`、`echo a | &` 的 `&`）。少了这条，`&` 的豁免会
+  // 退化成「`&` 一律不算悬空」，把真错误一起放行。
+  // ⚠️ 语料**不含行首 `&`**（`& echo a`）：那个形态在 HEAD 与修复前**都已经**是
+  // `ok:true`（`nextOp === 'start'` 走的是另一条分支，与本行判据无关）—— 把它写进来
+  // 是语料错误，不是本次修复的判据。
+  for (const [label, cmd] of [['& 前无内容', 'echo a & &'], ['| 后的 &', 'echo a | &'],
+    ['&& 后的 &', 'echo a && &'], ['重定向后的 &', 'echo a > &']]) {
+    const r = decomposeCommand(cmd, 'bash')
+    ok('Z2 真悬空（' + label + '）仍须 ok:false', r.ok === false, JSON.stringify(r))
+  }
+  // 尾随空白不得改变结论（`echo a | ` 与 `echo a |` 同判）
+  ok('Z2 尾随空白不改变悬空判定',
+    decomposeCommand('echo a | ', 'bash').ok === false && decomposeCommand('echo a |', 'bash').ok === false)
+
+  // ── 反向 2：重定向目标缺失仍须拦下 ────────────────────────────────────────
+  // 这几条是「不得把两个判据合并」的护栏：合并后它们会全部变 ok:true。
+  for (const [label, cmd] of [
+    ['> 后无目标', 'echo a >'],
+    ['< 后无目标', 'echo a <'],
+    ['> 后是分组块（bash 里是语法错误）', 'echo a > (b)'],
+    ['> 后是花括号块', 'echo a > {b}'],
+    ['> 后是命令替换', 'echo a > $(b)'],
+  ]) {
+    const r = decomposeCommand(cmd, 'bash')
+    ok('Z3 ' + label + ' 仍须 ok:false', r.ok === false, JSON.stringify(r))
+  }
+  // 对照：真词元目标照常放行（判据不得收紧到误伤）
+  for (const [label, cmd] of [['普通词', 'echo a > b'], ['变量展开', 'echo a > $f']]) {
+    const r = decomposeCommand(cmd, 'bash')
+    ok('Z3 对照 ' + label + ' 目标仍须 ok:true', r.ok === true, JSON.stringify(r))
+  }
+
+  // ── 端到端：末尾构造不得让 ask 例外被静默绕过（② 的 fail-open）────────────
+  // 分类默认 allow + 例外 `curl *`=ask。末尾挂构造前后必须都是 ask。
+  const zHooks = (catAction) => ({
+    home: HOME,
+    userHome: HOME,
+    platform: 'win32',
+    matchException: (segText, label) => {
+      const targets = (label && label !== segText) ? [segText, label] : [segText]
+      for (const t of targets) if (matchCommand('curl *', t)) return { action: 'ask', ruleId: 'z1' }
+      return null
+    },
+    destructive: () => ({ action: 'ask', reason: null }),
+    category: () => ({ action: catAction, reason: null }),
+    isOutsideWorkspace: () => false,
+    isWorkspaceRoot: () => false,
+  })
+  for (const [label, cmd] of [
+    ['末尾普通词元（对照）', 'echo a | curl -s http://example.com'],
+    ['末尾 (…)', 'echo a | curl -s (date)'],
+    ['末尾 {…}', 'echo a | curl -s { x }'],
+    ['末尾 $(…)', 'echo a | curl -s $(date)'],
+  ]) {
+    const a = assessCommand(cmd, 'bash', zHooks('allow'))
+    ok('★ Z4 ask 例外不被末尾构造绕过：' + label,
+      a.action === 'ask',
+      'action=' + a.action + ' code=' + a.code)
+  }
+  // 同一形态下 deny 例外必须照旧生效（放宽判据不得削掉收紧方向）
+  const zDeny = assessCommand('echo a | curl -s { x }', 'bash', Object.assign(zHooks('allow'), {
+    matchException: () => ({ action: 'deny', ruleId: 'z2' }),
+  }))
+  ok('★ Z4 末尾构造下 deny 例外照常生效', zDeny.action === 'deny', 'action=' + zDeny.action)
+
+  // ── 结构断言：段级判据必须是**单一实现** ──────────────────────────────────
+  // 这条盯的是「日后又有人往某一处补一份内联副本」——两处各写一份正是本 bug 的成因
+  // （flushSegment 那份写全了，行尾那份漏了 started 以外的四项）。
+  const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+  const defs = (spSrc.match(/const segHasContent = \(\) =>/g) || []).length
+  ok('Z5 segHasContent 定义恰好一处', defs === 1, 'count=' + defs)
+  // 调用点恰好两个（flushSegment 与行尾检查）。注意定义行写的是 `segHasContent = () =>`，
+  // 不含 `segHasContent()`，故这里只数得到调用点。
+  const calls = (spSrc.match(/segHasContent\(\)/g) || []).length
+  ok('Z5 segHasContent 调用点恰好两处（flushSegment + 行尾检查）',
+    calls === 2, 'count=' + calls)
+  // 行尾检查与重定向检查**不得**再直接读 started
+  ok('Z5 行尾悬空检查不再直接读 started',
+    spSrc.includes("!segHasContent()) {\n    return { ok: false, reason: 'the command line ends with a dangling operator' }"))
+  // 重定向那条**必须**保留 started（词元级判据，与段级不是同一个问题）
+  ok('Z5 重定向目标检查保留词元级判据 started',
+    spSrc.includes("if (pending !== undefined && !started) return { ok: false, reason: 'a redirection has no target' }"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('Y. pwsh 数组运算符 `,`：词元必须切开（档位降级回归）')
+{
+  // ── 这一组盯的是什么 ────────────────────────────────────────────────────────
+  // PowerShell 里 `,` 是**运算符**（不是标点）。用官方词法分析器测定：
+  //     Remove-Item "a","b"  → … [StringExpandable:"a"] [Comma:,] [StringExpandable:"b"]
+  // 引号紧贴与否都一样。而词法器此前没有 `,` 分支，`,` 落进通用分支被当成普通字符
+  // 拼进词元尾巴：`B:\` 变成 `B:\,`。
+  //
+  // 后果是**档位降级**（BLAST_ORDER 数字越小越严重），端到端可达：
+  //     Remove-Item "B:\" -Recurse -Force          → deny
+  //     Remove-Item "B:\", "D:\x" -Recurse -Force  → ask   ← 一个逗号绕过显式 wide=deny
+  // 因为盘根/系统目录的判据都是**精确匹配**（`/^[a-z]:$/`、WIN_SYSTEM_ROOT_RE），
+  // 尾逗号让它们全部落空，只剩「工作区外」这一档。
+  //
+  // ⚠️ bash 侧**不得**切：那里 `,` 是普通字符（`rm -rf /tmp/a,b` 删的是名字里带逗号的
+  // 那**一个**文件）。下面 Y3 钉住这条 —— 它是「按方言分词」这条纪律的现场。
+
+  const lvlY = (t) => { const r = blastRadiusOf(t, yOpts); return r ? r.level : null }
+  const yOpts = {
+    home: 'C:/Users/me', userHome: 'C:/Users/me', platform: 'win32',
+    isOutsideWorkspace: (p) => {
+      const raw = String(p).replace(/\\/g, '/')
+      const abs = (raw.startsWith('/') || /^[a-zA-Z]:/.test(raw)) ? raw : 'X:/ws/' + raw
+      const s = abs.toLowerCase()
+      return !(s === 'x:/ws' || s.startsWith('x:/ws/'))
+    },
+    isWorkspaceRoot: (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === 'x:/ws',
+  }
+
+  // ── Y1 词元切分：三种书写形态都必须切出独立词元 ────────────────────────────
+  const yForms = [
+    ['带空格', 'Remove-Item "B:\\", "D:\\x" -Force'],
+    ['不带空格', 'Remove-Item "B:\\","D:\\x" -Force'],
+    ['裸路径', 'Remove-Item B:\\, D:\\x -Force'],
+  ]
+  for (const [label, cmd] of yForms) {
+    const d = decomposeCommand(cmd, 'pwsh')
+    ok('Y1 pwsh 数组（' + label + '）切出两个独立目标词元',
+      d.ok && d.segments[0].words.join('|') === 'Remove-Item|B:\\|D:\\x|-Force',
+      d.ok ? JSON.stringify(d.segments[0].words) : JSON.stringify(d))
+  }
+  // 词元里**不得**残留逗号（这是本 bug 的直接形态）
+  for (const [label, cmd] of yForms) {
+    const d = decomposeCommand(cmd, 'pwsh')
+    ok('Y1 pwsh 数组（' + label + '）词元里无残留逗号',
+      d.ok && !d.segments[0].words.some((w) => w.indexOf(',') !== -1),
+      d.ok ? JSON.stringify(d.segments[0].words) : 'F')
+  }
+
+  // ── Y2 档位必须恢复（本 bug 的实质后果）────────────────────────────────────
+  // 对照的是「单个目标」那条基线：数组形态**不得**比它更宽。
+  const yPairs = [
+    ['盘根', 'B:\\', 'Remove-Item "B:\\" -Recurse -Force', 'Remove-Item "B:\\", "D:\\x" -Recurse -Force'],
+    ['系统目录', 'C:\\Windows', 'Remove-Item "C:\\Windows" -Recurse -Force', 'Remove-Item "C:\\Windows", "D:\\x" -Recurse -Force'],
+  ]
+  for (const [label, path, one, two] of yPairs) {
+    const lv = lvlY(path)
+    const d1 = decomposeCommand(one, 'pwsh')
+    const d2 = decomposeCommand(two, 'pwsh')
+    const b1 = d1.ok ? blastRadiusOfSegment(d1.segments[0].words, yOpts) : null
+    const b2 = d2.ok ? blastRadiusOfSegment(d2.segments[0].words, yOpts) : null
+    ok('★ Y2 ' + label + '：数组形态的档位与单目标一致（不得降级）',
+      b1 && b2 && b1.level === lv && b2.level === lv,
+      'want=' + lv + ' 单个=' + JSON.stringify(b1) + ' 数组=' + JSON.stringify(b2))
+  }
+
+  // ── Y3 端到端：一个逗号不得绕过显式 deny ──────────────────────────────────
+  // wide=deny（想拦大范围删除）、其余 ask —— 这是最容易看出绕过的配置。
+  const yTiers = { inside: 'ask', outside: 'ask', wide: 'deny', unknown: 'ask', proc: 'ask', power: 'ask', priv: 'ask', reg: 'ask' }
+  const yHooks = Object.assign({}, yOpts, {
+    matchException: () => null,
+    destructive: () => yTiers,
+    category: () => ({ action: 'ask', reason: null }),
+  })
+  const yE2E = [
+    ['删盘根 B:\\', 'Remove-Item "B:\\" -Recurse -Force', 'Remove-Item "B:\\", "D:\\x" -Recurse -Force'],
+    ['删盘根 B:\\（无空格）', 'Remove-Item "B:\\" -Recurse -Force', 'Remove-Item "B:\\","D:\\x" -Recurse -Force'],
+    ['删系统目录', 'Remove-Item "C:\\Windows" -Recurse -Force', 'Remove-Item "C:\\Windows", "D:\\x" -Recurse -Force'],
+  ]
+  for (const [label, one, two] of yE2E) {
+    const a1 = assessCommand(one, 'pwsh', yHooks)
+    const a2 = assessCommand(two, 'pwsh', yHooks)
+    ok('★★ Y3 ' + label + '：数组形态的动作不得比单目标更宽',
+      a1.action === 'deny' && a2.action === 'deny',
+      '单个=' + a1.action + ' 数组=' + a2.action)
+  }
+
+  // ── Y4 bash 侧**不得**切逗号（按方言分词的纪律）────────────────────────────
+  const yBash = [
+    ['路径里的逗号是字面量', 'rm -rf /tmp/a,b', 'rm|-rf|/tmp/a,b'],
+    ['echo 的逗号是字面量', 'echo a,b', 'echo|a,b'],
+  ]
+  for (const [label, cmd, want] of yBash) {
+    const d = decomposeCommand(cmd, 'bash')
+    ok('Y4 bash 不切逗号（' + label + '）',
+      d.ok && d.segments[0].words.join('|') === want,
+      d.ok ? JSON.stringify(d.segments[0].words) : 'F')
+  }
+  // bash 的花括号展开仍走分组分支（标 opaque），与逗号分支互不干扰
+  const yBrace = decomposeCommand('rm -rf /tmp/{a,b}', 'bash')
+  ok('Y4 bash 花括号展开仍判 opaque（未被逗号分支接管）',
+    yBrace.ok && yBrace.segments[0].opaque !== null,
+    yBrace.ok ? JSON.stringify(yBrace.segments[0]) : 'F')
+
+  // ── Y5 引号内的逗号是字面量（不得切）──────────────────────────────────────
+  const yQuoted = [
+    ['双引号内', 'Remove-Item "C:\\tmp\\a,b" -Force', 'Remove-Item|C:\\tmp\\a,b|-Force'],
+    ['单引号内', "Remove-Item 'C:\\tmp\\a,b' -Force", 'Remove-Item|C:\\tmp\\a,b|-Force'],
+  ]
+  for (const [label, cmd, want] of yQuoted) {
+    const d = decomposeCommand(cmd, 'pwsh')
+    ok('Y5 ' + label + '逗号是字面量（不切）',
+      d.ok && d.segments[0].words.join('|') === want,
+      d.ok ? JSON.stringify(d.segments[0].words) : 'F')
+  }
+
+  // ── Y6 segText 必须保留原文（例外匹配的对象）──────────────────────────────
+  // 切的是**词元**，不是段原文：`Remove-Item "a", "b"` 仍须命中 `Remove-Item *`。
+  const ySeg = decomposeCommand('Remove-Item "B:\\", "D:\\x" -Force', 'pwsh')
+  ok('Y6 段原文保留逗号（例外匹配对象不受影响）',
+    ySeg.ok && ySeg.segments[0].text === 'Remove-Item "B:\\", "D:\\x" -Force',
+    ySeg.ok ? JSON.stringify(ySeg.segments[0].text) : 'F')
+  ok('Y6 例外 `Remove-Item *` 仍命中数组形态',
+    ySeg.ok && matchCommand('Remove-Item *', ySeg.segments[0].text),
+    ySeg.ok ? JSON.stringify(ySeg.segments[0].text) : 'F')
+
+  // ── Y7 结构断言：逗号分支必须按方言门控 ──────────────────────────────────
+  // 盯「日后有人把 sh === 'pwsh' 这个门控删掉」——那会让 bash 侧凭空多出目标。
+  const ySrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+  ok('Y7 逗号分支按 pwsh 方言门控',
+    ySrc.includes("if (sh === 'pwsh' && char === ',')"))
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修法）')
+{
+  // ── 背景：本批新增的 `RADIUS_TIERS_WHEN_UNREADABLE` 声称让**段级 opaque 路径**与
+  // 「整行读不懂」分支对「目标读不出」取同一口径。核实后它当时并**不**同口径，两处 fail-open：
+  //
+  //   发现 1 —— 整行分支另外还并 `inside`（那处 `tiers.push('inside')` 是本批**未改动**的
+  //   上下文，注释明写「丢掉它就等于丢掉一条显式表态」），而段级 opaque 支只并
+  //   `wide ∪ unknown`。于是用户显式配的 `inside=deny` 在段级路径上被静默丢弃：
+  //       rm -rf ./build              → deny（tiers=['inside']）
+  //       echo a | rm -rf ./build     → deny（tiers=['inside']）  ← 非 opaque，走半径档
+  //       echo a | (rm -rf ./build)   → **allow**（tiers=['wide','unknown']）❌ inside 档丢失
+  //   且这一格是**本批改动新打开**的：HEAD 上它因行尾悬空检查返回 ok:false、走整行分支 → deny。
+  //
+  //   发现 2 —— 新守卫的门控是 `seg.opaque && !seg.blast`。反引号命令替换**不被词法器吞掉**，
+  //   而是作为字面词元留在 `words` 里，于是 `blastRadiusOfSegment` 返回 `{level:'unknown'}`
+  //   而非 `null`，门控**恒假**、守卫根本不被求值，落到 `else` 支只并 `unknown`：
+  //       echo a | Write-Output $(rm -rf C:/Windows)   → deny  tiers=['wide','unknown']
+  //       echo a | Write-Output (rm -rf C:/Windows)    → deny  tiers=['wide','unknown']
+  //       echo a | Write-Output {rm -rf C:/Windows}    → deny  tiers=['wide','unknown']
+  //       echo a | Write-Output `rm -rf C:/Windows`    → **allow** tiers=['unknown'] ❌
+  //
+  // 判据（六条，缺一即为「只修一支」或「过度收紧」）：
+  //   ① 发现 1：`inside=deny` 下 opaque 段必须 deny，且 `tiers` 含 `inside`；
+  //   ② 发现 2：`wide=deny` 下**四种构造写法**必须逐字同值（同一构造不得因写法不同而分叉）；
+  //   ③ 两路径同口径：段级 opaque 段的档位集合必须**含**整行分支并的那三档
+  //      （`wide` / `unknown` / `inside` 一个不少）；
+  //   ④ 反向核查（不得误伤）：`rm -rf ./tmp/{a,b,c}` / `rm -rf ./build $(date)` 这类
+  //      **合法常用命令**必须仍恰好 `['unknown']`，不得凭空多出 `wide`/`inside`；
+  //   ⑤ 承重格：`diskpart /s a.txt` 恰好 `['unknown']`（「替换」语义保住）；
+  //   ⑥ 不变量：`tiers` 不得出现重复项（整行分支去重 push 的形态断言）。
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier, rest) => {
+      const t = {}
+      for (const k of TIERS) t[k] = k === tier ? 'deny' : (rest || 'allow')
+      return t
+    }
+    // 逐档配置的钩子（与 F96b 的 `opaqueDefault` 同形：覆盖 destructive 返回档位表）
+    const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})),
+      { destructive: () => ds })
+    const judge = (cmd, shell, platform, ds) => assessCommand(cmd, shell || 'bash', withDs(ds, { platform: platform || 'win32' }))
+    const tiersOf2 = (cmd, shell, platform, ds) => {
+      const r = judge(cmd, shell, platform, ds)
+      return (r.segments || []).map((s) => s.tiers || [])
+    }
+    const flatTiers = (cmd, shell, platform, ds) => [].concat(...tiersOf2(cmd, shell, platform, ds))
+    const bad = []
+    const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
+
+    // ① 发现 1：`inside=deny` + 其余七档 allow —— opaque 段里的破坏性命令必须 deny 且含 inside
+    const dsInside = dsOnly('inside')
+    const insideForms = []
+    for (const mk of [(c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => '$(' + c + ')',
+      (c) => BT + c + BT, (c) => 'ForEach-Object { ' + c + ' }']) {
+      for (const sep of ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']) {
+        insideForms.push(sep + mk('rm -rf ./build'))
+      }
+    }
+    for (const c of insideForms) for (const [sh, pl] of SHP) {
+      const r = judge(c, sh, pl, dsInside)
+      const t = flatTiers(c, sh, pl, dsInside)
+      if (r.action !== 'deny') bad.push(['发现1 未 deny', c, sh, pl, r.action, t.join('+')])
+      if (t.indexOf('inside') === -1) bad.push(['发现1 缺 inside 档', c, sh, pl, t.join('+')])
+      // ③ 两路径同口径：整行分支并的三档必须都在
+      for (const want of ['wide', 'unknown', 'inside']) {
+        if (t.indexOf(want) === -1) bad.push(['发现1 口径不全，缺 ' + want, c, sh, pl, t.join('+')])
+      }
+    }
+
+    // ② 发现 2：`wide=deny` + 其余七档 allow —— 同一构造的四种写法必须逐字同值
+    const dsWide = dsOnly('wide')
+    const four = (c) => [
+      'Write-Output $(' + c + ')', 'Write-Output (' + c + ')',
+      'Write-Output {' + c + '}', 'Write-Output ' + BT + c + BT,
+    ]
+    const keyOf = (c, sh, pl) => {
+      const r = judge(c, sh, pl, dsWide)
+      return r.action + '|' + flatTiers(c, sh, pl, dsWide).join('+')
+    }
+    for (const c of ['rm -rf C:/Windows', 'rm -rf ./build', 'rm -rf /', 'rm -rf ../other', 'rm -rf $TARGET']) {
+      for (const [sh, pl] of SHP) {
+        const ks = four(c).map((x) => keyOf(x, sh, pl))
+        if (new Set(ks).size !== 1) bad.push(['发现2 四写法分叉', c, sh, pl, ks.join('  vs  ')])
+        // 反引号形态（原漏网者）必须 deny 且含 wide
+        const bt = 'Write-Output ' + BT + c + BT
+        if (judge(bt, sh, pl, dsWide).action !== 'deny') bad.push(['发现2 反引号未 deny', bt, sh, pl])
+        if (flatTiers(bt, sh, pl, dsWide).indexOf('wide') === -1) bad.push(['发现2 反引号缺 wide 档', bt, sh, pl])
+      }
+    }
+    // 反引号在管道/包装位置同样不得漏网
+    for (const c of ['echo a | Write-Output ' + BT + 'rm -rf C:/Windows' + BT,
+      'echo a | ' + BT + 'rm -rf C:/Windows' + BT,
+      'Write-Output ' + BT + 'rm -rf C:/Windows' + BT]) {
+      for (const [sh, pl] of SHP) {
+        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['发现2 反引号位置形态未 deny', c, sh, pl])
+      }
+    }
+
+    // ④ 反向核查（必须 0 误伤）：合法常用命令仍恰好 `['unknown']`
+    const dsAny = dsOnly('wide')  // 最严的「只 wide deny」配置，最容易被误伤
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'rm -rf ./build ' + BT + 'date' + BT,
+      'chmod 777 ./{a,b}.sh', 'rm -rf ./{a,b}/x', 'rm -rf {a,b}', 'rm -rf $TARGET']) {
+      for (const [sh, pl] of SHP) {
+        const t = flatTiers(c, sh, pl, dsAny)
+        if (t.indexOf('inside') !== -1) bad.push(['误伤：合法命令被并 inside', c, sh, pl, t.join('+')])
+        if (t.indexOf('wide') !== -1) bad.push(['误伤：合法命令被并 wide', c, sh, pl, t.join('+')])
+        if (t.join('+') !== 'unknown') bad.push(['合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
+      }
+    }
+
+    // ⑤ 承重格：「替换」语义 —— `diskpart /s a.txt` 恰好 `['unknown']`
+    for (const [sh, pl] of SHP) {
+      if (flatTiers('diskpart /s a.txt', sh, pl, dsAny).join('+') !== 'unknown') {
+        bad.push(['承重格 diskpart 替换语义破坏', sh, pl, flatTiers('diskpart /s a.txt', sh, pl, dsAny).join('+')])
+      }
+    }
+
+    // ⑥ 不变量：`tiers` 不得有重复项（整行分支与段级路径都要守）
+    for (const c of insideForms.concat(['rm -rf ./build <<EOF\nx\nEOF', 'rm -rf C:/Windows <<EOF\nx\nEOF'])) {
+      for (const [sh, pl] of SHP) {
+        for (const arr of tiersOf2(c, sh, pl, dsInside)) {
+          if (new Set(arr).size !== arr.length) bad.push(['tiers 出现重复项', c, sh, pl, arr.join('+')])
+        }
+      }
+    }
+
+    // ⑦ 防空转：无 opaque 的组档段不得凭空多出 wide/inside
+    for (const c of ['kill 1234', 'pkill', 'reboot', 'shutdown /s']) {
+      for (const [sh, pl] of SHP) {
+        const t = flatTiers(c, sh, pl, dsAny)
+        if (t.indexOf('inside') !== -1 || t.indexOf('wide') !== -1) bad.push(['防空转：无 opaque 却多档', c, sh, pl, t.join('+')])
+      }
+    }
+
+    ok('★★ AA opaque 段两条路径同口径（发现 1：段级须并 inside；发现 2：反引号须并 wide）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃（发现 1 的修法）')
+{
+  // ── 为什么单开一组：AA 组语料**不含任何提权前缀**，故发现 1 的回归网有缺口 ──────
+  // `destructiveHeadReadable` 的判据是「段首主 label 是否在 `DESTRUCTIVE_LABELS` 里」，
+  // 而 6 个提权前缀（sudo / doas / su / pkexec / runas / gsudo）**全部**在那个名单里
+  // （`:96` 的「提权」一行，且 `:6767-6768` 明文要求不要把它们移出名单）。于是
+  // 「提权前缀 + 真命令藏在 opaque 构造里」被判成「命令可读」→ 走 `else` 支只并
+  // `unknown` → 用户显式配的 `wide=deny` / `inside=deny` 被静默丢弃（fail-open）。
+  //
+  // 修法：`destructiveHeadReadable` 增加 `if (!head) return false;` 与
+  // `if (PRIV_PREFIXES[head] === 1) return false;`（提权前缀不是命令头 —— 段首读出
+  // `sudo` 恰恰说明真命令在别处，与 `commandHeadEnd` 穿过提权前缀取真命令头同口径）。
+  //
+  // 实测（`wide=deny` + 其余七档 allow）：修复前 `echo a | sudo $(rm -rf C:/Windows)`
+  // → **allow**（tiers=`['unknown','priv']`）；修复后 → deny
+  // （tiers=`['wide','unknown','inside','priv']`）。
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier) => {
+      const t = {}
+      for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'
+      return t
+    }
+    const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
+    const judge = (cmd, sh, pl, ds) => assessCommand(cmd, sh, withDs(ds, { platform: pl }))
+    const flat = (cmd, sh, pl, ds) => [].concat(...(judge(cmd, sh, pl, ds).segments || []).map((s) => s.tiers || []))
+    const bad = []
+    const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
+    const PRIVS = ['sudo', 'doas', 'su', 'pkexec', 'runas', 'gsudo']
+    // 四种构造写法（与 AA 组的 `four` 同源）
+    const MK = [(c) => '$(' + c + ')', (c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => BT + c + BT]
+    const SEPS = ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']
+
+    // ① 6 提权前缀 × 4 构造 × 7 分隔符 × 4 (shell,platform) —— `wide=deny` 下必须 deny
+    //    且含 `wide`；`inside=deny` 下必须 deny 且含 `inside`。
+    const dsWide = dsOnly('wide'), dsInside = dsOnly('inside')
+    let n1 = 0
+    for (const p of PRIVS) for (const mk of MK) for (const sep of SEPS) {
+      const c = sep + p + ' ' + mk('rm -rf C:/Windows')
+      for (const [sh, pl] of SHP) {
+        n1 += 1
+        const tw = flat(c, sh, pl, dsWide)
+        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['提权+opaque 未 deny（wide=deny）', c, sh, pl, tw.join('+')])
+        if (tw.indexOf('wide') === -1) bad.push(['提权+opaque 缺 wide 档', c, sh, pl, tw.join('+')])
+        const ti = flat(c, sh, pl, dsInside)
+        if (judge(c, sh, pl, dsInside).action !== 'deny') bad.push(['提权+opaque 未 deny（inside=deny）', c, sh, pl, ti.join('+')])
+        if (ti.indexOf('inside') === -1) bad.push(['提权+opaque 缺 inside 档', c, sh, pl, ti.join('+')])
+      }
+    }
+
+    // ② 与**无前缀**的同形命令逐字同值（提权前缀不得让判定分叉）
+    for (const mk of MK) for (const sep of SEPS) {
+      const bare = sep + mk('rm -rf C:/Windows')
+      for (const [sh, pl] of SHP) {
+        const kb = judge(bare, sh, pl, dsWide).action + '|' + flat(bare, sh, pl, dsWide).join('+')
+        for (const p of PRIVS) {
+          const c = sep + p + ' ' + mk('rm -rf C:/Windows')
+          const k = judge(c, sh, pl, dsWide).action + '|' + flat(c, sh, pl, dsWide).join('+')
+          // 提权形态**另含** priv 档，故只要求动作一致 + 半径三档一个不少
+          if (judge(c, sh, pl, dsWide).action !== judge(bare, sh, pl, dsWide).action) {
+            bad.push(['提权形态与无前缀形态动作分叉', c, 'vs', bare, sh, pl, k, kb])
+          }
+          for (const want of ['wide', 'unknown', 'inside']) {
+            if (flat(c, sh, pl, dsWide).indexOf(want) === -1) bad.push(['提权形态缺 ' + want + ' 档', c, sh, pl, flat(c, sh, pl, dsWide).join('+')])
+          }
+        }
+      }
+    }
+
+    // ③ 反向核查（必须 0 误伤）：**无 opaque 构造**的提权命令行为逐字不变 ——
+    //    修法只应影响「真命令藏在构造里」那一族。
+    // ⚠️ 期望值**按平台分列**：`/etc` 与 `C:/Windows` 的系统目录名单本来就是
+    //    win32/posix 各一套（posix 下 `/etc` 是 system → wide、`C:/Windows` 是普通
+    //    相对路径 → outside；win32 下反过来），这不是本修法引入的差异。
+    const noOpaque = [
+      ['sudo ls', 'allow', 'allow'], ['doas ls', 'allow', 'allow'], ['su -c ls', 'allow', 'allow'],
+      ['pkexec ls', 'allow', 'allow'], ['runas /user:x ls', 'allow', 'allow'], ['gsudo ls', 'allow', 'allow'],
+      ['sudo rm -rf /etc', 'allow', 'deny'], ['sudo rm -rf C:/Windows', 'deny', 'allow'],
+      ['sudo rm -rf /', 'deny', 'deny'],
+    ]
+    for (const [c, wantWin, wantPosix] of noOpaque) {
+      for (const [sh, pl] of SHP) {
+        const want = pl === 'win32' ? wantWin : wantPosix
+        const r = judge(c, sh, pl, dsWide)
+        if (r.action !== want) bad.push(['误伤：无 opaque 的提权命令行为改变', c, sh, pl, 'want=' + want + ' got=' + r.action, flat(c, sh, pl, dsWide).join('+')])
+      }
+    }
+    // ④ 反向核查：合法常用命令仍恰好 `['unknown']`（与 AA 组 ④ 同判据）
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'rm -rf ./build ' + BT + 'date' + BT,
+      'chmod 777 ./{a,b}.sh', 'rm -rf $TARGET']) {
+      for (const [sh, pl] of SHP) {
+        const t = flat(c, sh, pl, dsWide)
+        if (t.join('+') !== 'unknown') bad.push(['误伤：合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
+      }
+    }
+    // ⑤ 防空转：`destructiveHeadReadable` 的提权排除**不得**影响段级 blast 判据 ——
+    //    `sudo rm -rf /` 的半径仍须是 drive-root（`:6763-6766` 的现值依赖）。
+    for (const [sh, pl] of SHP) {
+      const r = judge('sudo rm -rf /', sh, pl, dsWide)
+      const lvl = (r.segments || []).map((s) => (s.blast ? s.blast.level : 'null')).join('/')
+      if (lvl.indexOf('drive-root') === -1) bad.push(['提权命令的半径判据被削弱', sh, pl, lvl])
+    }
+
+    ok('★★ AB 提权前缀 + opaque 构造：wide/inside 档不得被静默丢弃（' + n1 + ' 格 × 2 配置）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发现 3 的修法）')
+{
+  // ── 发现 2：**诱饵目标**使 `wide`/`inside` 静默消失 ──────────────────────────────
+  // 半径门控内那条守卫的判据是「`blast` 空**或**为 `unknown`」。当 opaque 段里另有一个
+  // **可读**目标、且其 blast 恰为 `outside`（`home` 同）时该式为假 → 落 `else` 支 →
+  // 只并 `outside`，`wide` 与 `inside` 从 tiers **静默消失**。
+  // 实测（`wide=deny` + 其余七档 allow，修复前）：
+  //     cat /etc/hosts $(rm -rf C:/Windows)  → **allow** tiers=['unknown','outside']
+  //     echo $(rm -rf C:/Windows)            → deny      tiers=['wide','unknown','inside'] ✅
+  // 修法：把 `opaqueHiddenPayload` 并进守卫判据，并在三档之后**显式保留**诱饵已判出的
+  // 半径档（只并三档会丢掉用户可能显式配过的 `outside=deny`）。
+  //
+  // ── 发现 3：**纯组档段**整段不进半径门控 ────────────────────────────────────────
+  // 门控 `hasPureRadius || (hasPrivGroup && seg.blast)` 只覆盖半径组 label，而
+  // `kill` / `pkill` / `reboot` / `shutdown` / `taskkill` / `stop-computer` /
+  // `reg delete` / `stop-process` 的组是 `proc`/`power`/`reg` —— 既非 pureRadius 也非
+  // privGroup，于是新守卫**从不被求值**。
+  // 实测（`wide=deny` + 其余七档 allow，修复前）：
+  //     echo a | (rm -rf ./build)  → deny tiers=['wide','unknown','inside'] ✅
+  //     echo a | (kill 1234)       → **allow** tiers=['unknown','proc']      ❌
+  // 修法：门控增加第三项 `opaqueHiddenPayload`（= `seg.opaque && !destructiveHeadReadable(seg)`）。
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
+    const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
+    const judge = (cmd, sh, pl, ds) => assessCommand(cmd, sh, withDs(ds, { platform: pl }))
+    const flat = (cmd, sh, pl, ds) => [].concat(...(judge(cmd, sh, pl, ds).segments || []).map((s) => s.tiers || []))
+    const bad = []
+    const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
+    const MK = [(c) => '$(' + c + ')', (c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => BT + c + BT]
+    const SEPS = ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']
+    const dsWide = dsOnly('wide'), dsInside = dsOnly('inside'), dsOutside = dsOnly('outside')
+
+    // ① 发现 2：诱饵目标（可读、且其自身半径档为 outside / wide） × 4 构造 × 7 分隔符
+    // ⚠️ 诱饵档位**按平台实测取值**，不写死：`/etc/hosts` 在 win32 下是普通外部路径
+    //    （outside），在 posix 下是**系统目录**（system → wide）；`~/notes.txt` 两侧都是
+    //    outside。断言「诱饵那一档必须保留」时要用实测值，否则会把平台差异误报成缺陷。
+    let n2 = 0
+    for (const bait of ['/etc/hosts', '~/notes.txt']) for (const mk of MK) for (const sep of SEPS) {
+      const c = 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
+      for (const [sh, pl] of SHP) {
+        n2 += 1
+        const tw = flat(c, sh, pl, dsWide)
+        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['诱饵形态未 deny', c, sh, pl, tw.join('+')])
+        for (const want of ['wide', 'unknown', 'inside']) {
+          if (tw.indexOf(want) === -1) bad.push(['诱饵形态缺 ' + want + ' 档', c, sh, pl, tw.join('+')])
+        }
+        // 诱饵**已判出的半径档**必须保留（不得因并三档而丢掉用户可能显式配过的档）。
+        // ⚠️ 诱饵档从**段级 blast** 推导，不能从「`cat <诱饵>` 单独成命令」推导 ——
+        //    `cat` 不是破坏性命令，那种探针返回的 blast 恒为 null，会推出恒真的 `inside`
+        //    而使断言空转（实测过）。这里直接读本段 blast 的 level 再经 `radiusTierOf` 归并。
+        const segBlast = (judge(c, sh, pl, dsWide).segments || [])
+          .map((s) => s.blast).filter((b) => b && b.level)[0]
+        if (!segBlast) bad.push(['诱饵形态读不到段级 blast（语料失效）', c, sh, pl])
+        else {
+          const baitTier = radiusTierOf({ level: segBlast.level })
+          if (tw.indexOf(baitTier) === -1) bad.push(['诱饵形态丢了诱饵档 ' + baitTier, c, sh, pl, tw.join('+')])
+          // 诱饵档若恰好是 `outside`（win32 下的 `/etc/hosts`），`outside=deny` 必须 deny
+          if (baitTier === 'outside' && judge(c, sh, pl, dsOutside).action !== 'deny') {
+            bad.push(['诱饵形态未 deny（outside=deny）', c, sh, pl])
+          }
+        }
+        const ti = flat(c, sh, pl, dsInside)
+        if (judge(c, sh, pl, dsInside).action !== 'deny') bad.push(['诱饵形态未 deny（inside=deny）', c, sh, pl, ti.join('+')])
+      }
+    }
+    // ② 诱饵档位**不触发**的四种目标：不得凭空多档（它们自身已归 wide/unknown，
+    //    或 blast 为 null 时走 `!seg.blast` 那条既有判据）—— 只断言「不得比修复前更松」
+    for (const bait of ['C:/Windows/x', 'B:/', '$T', './build']) for (const mk of MK) for (const sep of SEPS) {
+      const c = 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
+      for (const [sh, pl] of SHP) {
+        const tw = flat(c, sh, pl, dsWide)
+        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['诱饵（不触发档）形态未 deny', c, sh, pl, tw.join('+')])
+        for (const want of ['wide', 'unknown', 'inside']) {
+          if (tw.indexOf(want) === -1) bad.push(['诱饵（不触发档）缺 ' + want, c, sh, pl, tw.join('+')])
+        }
+      }
+    }
+
+    // ③ 发现 3：8 个纯组档命令 × 4 构造 × 7 分隔符 —— `wide=deny` 下必须 deny 且含 wide
+    const GROUP_CMDS = ['kill 1234', 'pkill', 'reboot', 'shutdown /s', 'taskkill /im x.exe',
+      'stop-computer', 'reg delete HKCU\\X /f', 'stop-process -Id 1']
+    let n3 = 0
+    for (const g of GROUP_CMDS) for (const mk of MK) for (const sep of SEPS) {
+      const c = sep + mk(g)
+      for (const [sh, pl] of SHP) {
+        n3 += 1
+        const tw = flat(c, sh, pl, dsWide)
+        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['组档+opaque 未 deny', c, sh, pl, tw.join('+')])
+        for (const want of ['wide', 'unknown', 'inside']) {
+          if (tw.indexOf(want) === -1) bad.push(['组档+opaque 缺 ' + want + ' 档', c, sh, pl, tw.join('+')])
+        }
+      }
+    }
+    // ④ 反向核查（必须 0 误伤）：**无 opaque** 的纯组档命令不得凭空多出 wide/inside
+    //    （门控第三项带 `seg.opaque`，这一族必须逐字不变）
+    for (const g of GROUP_CMDS) for (const [sh, pl] of SHP) {
+      const t = flat(g, sh, pl, dsWide)
+      if (t.indexOf('inside') !== -1 || t.indexOf('wide') !== -1) bad.push(['误伤：无 opaque 的组档命令多档', g, sh, pl, t.join('+')])
+    }
+    // ⑤ 承重格：`diskpart /s a.txt`（opaque 为空）必须仍恰好 `['unknown']`（「替换」语义）
+    for (const [sh, pl] of SHP) {
+      if (flat('diskpart /s a.txt', sh, pl, dsWide).join('+') !== 'unknown') {
+        bad.push(['承重格 diskpart 替换语义破坏', sh, pl, flat('diskpart /s a.txt', sh, pl, dsWide).join('+')])
+      }
+    }
+    // ⑥ 承重格：`echo a | (rm -rf ./build)` 仍须 deny 且三档齐全（del 族进门控的既有路径）
+    for (const [sh, pl] of SHP) {
+      const t = flat('echo a | (rm -rf ./build)', sh, pl, dsWide)
+      if (judge('echo a | (rm -rf ./build)', sh, pl, dsWide).action !== 'deny') bad.push(['承重格 del 族未 deny', sh, pl, t.join('+')])
+      for (const want of ['wide', 'unknown', 'inside']) {
+        if (t.indexOf(want) === -1) bad.push(['承重格 del 族缺 ' + want, sh, pl, t.join('+')])
+      }
+    }
+    // ⑦ 合法常用命令仍恰好 `['unknown']`（发现 2/3 都不得误伤这一族）
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'chmod 777 ./{a,b}.sh',
+      'rm -rf $TARGET', 'rm -rf ./build ' + BT + 'date' + BT]) {
+      for (const [sh, pl] of SHP) {
+        const t = flat(c, sh, pl, dsWide)
+        if (t.join('+') !== 'unknown') bad.push(['误伤：合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
+      }
+    }
+
+    ok('★★ AC 诱饵目标（' + n2 + ' 格）与纯组档段（' + n3 + ' 格）不得丢失 wide/inside',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AD. `&` 之前的重定向无目标：不得被 `&` 的豁免放行（发现 4 的修法）')
+{
+  // ── 问题 ────────────────────────────────────────────────────────────────────
+  // `ampNoTarget = pending !== undefined && !started` 只写进 `ampOk`，而 `ampOk` 仅在
+  // 「段无内容」时才决定是否报错：`&` 后面还有内容时 `segHasContent` 为真 → 短路 →
+  // 整行照旧 `ok:true`。根因是 `&` 分支的 `flushSegment()` 把 `pending` 复位了，
+  // 行尾那条保留的词元级判据 `pending !== undefined && !started` 看不到 `&` **之前**的 `>`。
+  //
+  // 修法：新增只在最后一个 `&` 写入的 `ampTargetMissing` 标记并接到行尾检查。
+  //
+  // 实测（修复前 → 修复后）：`echo a > & (b)` / `> & $(b)` / `> & { b; }` / `> & )`
+  // 由 ok:true 变 ok:false；Git bash 实测这四种与 `echo a > & b` 都是
+  // `syntax error near unexpected token '&'`（exit=2），而 `echo a > b &` 合法（exit=0）。
+  {
+    const bad = []
+    // ① 必须拦下：`&` 之前有等着目标的重定向
+    for (const c of ['echo a > & (b)', '> & $(b)', '> & { b; }', '> & )', 'echo a > & b',
+      'echo a > & ' + String.fromCharCode(96) + 'b' + String.fromCharCode(96),
+      'echo a < & (b)', 'echo a >> & (b)', 'echo a > > & (b)',
+      'echo a > & | cat', 'echo a > & && cat', 'echo a > &;', 'echo a > & (b) &', 'a > & (b) | c']) {
+      for (const sh of ['bash', 'pwsh']) {
+        const r = decomposeCommand(c, sh)
+        if (r.ok !== false) bad.push(['`&` 前的无目标重定向被放行', c, sh, JSON.stringify(r.ok ? r.segments.map((s) => s.text) : r)])
+      }
+    }
+    // ② 反向核查（必须 0 误伤）：合法的异步列表收尾仍须 ok:true
+    for (const c of ['echo a > b &', 'echo a 2>&1 &', 'echo a > $f &', 'echo a > b', 'echo a > $f']) {
+      const r = decomposeCommand(c, 'bash')
+      if (r.ok !== true) bad.push(['误伤：合法重定向形态被拦下', c, 'bash', JSON.stringify(r)])
+    }
+    // ③ 既有的 `echo a > &`（`&` 在行尾）仍须 ok:false（不得因新标记而变成 ok:true）
+    for (const sh of ['bash', 'pwsh']) {
+      if (decomposeCommand('echo a > &', sh).ok !== false) bad.push(['echo a > & 被放行', sh])
+      if (decomposeCommand('echo a > & ', sh).ok !== false) bad.push(['echo a > & （尾随空白）被放行', sh])
+    }
+    // ④ 既有的尾随 `&` 豁免不得被削掉（`ampTargetMissing` 必须只在「有 pending」时为真）
+    if (decomposeCommand('echo a &', 'bash').ok !== true) bad.push(['误伤：echo a & 被拦下'])
+    if (decomposeCommand('echo a & &', 'bash').ok !== false) bad.push(['echo a & & 被放行'])
+    if (decomposeCommand('echo a | &', 'bash').ok !== false) bad.push(['echo a | & 被放行'])
+
+    ok('★ AD `&` 之前的重定向无目标必须 ok:false，合法异步列表收尾不得误伤',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的修法）')
+{
+  // ── 发现 5：`TIER_RANK` 的比较实现必须**只有一处** ──────────────────────────────
+  // `tierVerdict` 里曾经手抄一份逐字相同的比较函数，而它直接决定**用户可见的拒绝理由**。
+  // 修法：换成 `sortTiersByRank(same)`（`same` 是局部新数组，原地排序无副作用）。
+  // 结构断言：源码里不得再出现手抄的那两行。
+  {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    const bad = []
+    const handCopy = (spSrc.match(/ra === undefined \? 99 : ra/g) || []).length
+    if (handCopy !== 1) bad.push(['`TIER_RANK` 比较实现不是恰好一处（发现 5 回退）', 'count=' + handCopy])
+    const consumers = (spSrc.match(/TIER_RANK\[/g) || []).length
+    if (consumers !== 2) bad.push(['`TIER_RANK[...]` 消费点不是恰好两处（应只在 sortTiersByRank 内）', 'count=' + consumers])
+    if (!spSrc.includes('sortTiersByRank(same)')) bad.push(['tierVerdict 未复用 sortTiersByRank'])
+    // `tierSetOf` 与整行分支仍须共用同一个排序函数
+    const uses = (spSrc.match(/sortTiersByRank\(/g) || []).length
+    if (uses !== 4) bad.push(['sortTiersByRank 的调用点不是 3 处 + 定义 1 处', 'count=' + uses])
+    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、三处调用共用',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+  // ── 发现 6：整行分支的三档并入不得退化成「条件恒真」的死守卫 ─────────────────────
+  // 修法：简化为裸 push，并订正与实测相反的注释。
+  {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    const bad = []
+    // 该处不得再出现 `indexOf(t) === -1` 形态的守卫（条件恒真 = 死代码）
+    if (/for \(const t of RADIUS_TIERS_WHEN_UNREADABLE\) \{\s*\n\s*if \(tiers\.indexOf\(t\) === -1\)/.test(spSrc)) {
+      bad.push(['发现 6 回退：去重守卫条件恒真'])
+    }
+    if (!spSrc.includes('for (const t of RADIUS_TIERS_WHEN_UNREADABLE) tiers.push(t)')) {
+      bad.push(['整行分支未简化为裸 push'])
+    }
+    ok('★ AE 整行分支三档并入：死守卫已移除（发现 6）', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+  // ── 行为核查：整行读不懂分支的 `tiers` 不得重复，且三档齐全（行为不得回退）─────
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
+    const withDs = (ds) => Object.assign(hooks({ category: 'allow' }), { destructive: () => ds })
+    const bad = []
+    for (const c of ['rm -rf C:/Windows <<EOF\nx\nEOF', 'rm -rf ./build <<EOF\nx\nEOF',
+      'sudo kill 1234 <<EOF\nx\nEOF', 'kill 1234 <<EOF\nx\nEOF']) {
+      for (const [sh, pl] of [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]) {
+        const r = assessCommand(c, sh, withDs(dsOnly('wide'), { platform: pl }))
+        // 整行分支返回对象**没有** `tiers` 键（`segments` 恒为 `[]`）—— 记录形态契约
+        if (r.segments && r.segments.length !== 0) bad.push(['整行分支 segments 非空（契约变化）', c, sh, pl])
+        if (r.action !== 'deny') bad.push(['整行分支未 deny（wide=deny）', c, sh, pl, r.action])
+      }
+    }
+    ok('★ AE 整行读不懂分支：形态契约与动作不回退（发现 6）', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AF. opaque 构造作重定向目标：不得被粘性标记误判为「无目标」（发现 4 粘性的回归）')
+{
+  // ── 问题 ────────────────────────────────────────────────────────────────────
+  // 发现 4 的修法把 `ampNoTarget` 改成**粘性**（`ampTargetMissing = ampTargetMissing || ampNoTarget`），
+  // 而 `ampNoTarget` 的判据 `pending !== undefined && !started` 对「重定向目标是 **opaque 构造**」
+  // 是**误判**：`$( )` / `( )` / `{ }` / 反引号四条分支都不设 `started`（只 markOpaque + pushText
+  // + 跳过配对），而其中一部分在 bash 里是**合法**的重定向目标。
+  //
+  // HEAD 上这个误判被 `&` 分支的 `flushSegment()` 清掉，故不显形；粘性把它保留到行尾后，
+  // **合法命令被推进 `ok:false`** —— 而 `ok:false` 路径（assessCommand 的 `if (!d.ok)` 支）
+  // 只认 deny 例外，档位集合是 `groupTiersOf + priv + RADIUS_TIERS_WHEN_UNREADABLE`、
+  // **不含 `outside`**，于是用户显式配的 `outside=deny` 与**全部 ask 例外**在这条路径上整个失明。
+  // 实测（outside=deny、其余七档 allow）：
+  //     rm -rf /tmp/x                          → deny
+  //     rm -rf /tmp/x > $(mktemp) & echo done  → 仅加粘性 **allow** ❌（HEAD 是 deny）
+  //
+  // 修法：`ampNoTarget` 补上「这个待读重定向的目标是不是一个**可作词**的 opaque 构造」，
+  // 由 `redirectOpaqueTarget`（三态 'none' / 'word' / 'not-word'）精确判 —— 逐重定向记录，
+  // 故 `echo a $(b) > & c` 这类「opaque 在 `>` **之前**」的形态不会被误放行。
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
+    const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
+    const bad = []
+
+    // ① bash 合法（`bash -n` 实测 OK）：必须 ok:true —— 误判回归的主判据
+    const legal = [
+      'echo a > $(mktemp) & echo done', 'echo a > {mktemp} & echo done', 'echo a > { b } & echo done',
+      'echo a > {a,b} & echo done', 'echo a > } & echo done', 'echo a > ' + BT + 'mktemp' + BT + ' & echo done',
+      'echo a > "$(mktemp)" & echo done', 'echo a 2> $(mktemp) & echo done',
+      'echo a >> $(mktemp) & echo done', 'echo a < $(mktemp) & echo done',
+      'echo a > $(b) > $(c) & d', 'echo a $(b) > $(c) & d',
+      'echo z ; echo a > $(mktemp) & echo done', 'echo z && echo a > $(mktemp) & echo done',
+      'rm -rf /etc > $(mktemp) & echo done', 'rm -rf /etc > {mktemp} & echo done',
+      'rm -rf /etc 2> $(mktemp) & echo done', 'rm -rf /etc >> $(mktemp) & echo done',
+      'rm -rf /etc < $(mktemp) & echo done',
+    ]
+    for (const c of legal) {
+      const r = decomposeCommand(c, 'bash')
+      if (r.ok !== true) bad.push(['误判回归：bash 合法的 opaque 重定向目标被拦下', c, JSON.stringify(r)])
+    }
+
+    // ② bash 语法错误（`bash -n` 实测 SYNTAX-ERR）：必须仍 ok:false —— 不得因本修法被放行
+    const illegal = [
+      'echo a > (mktemp) & echo done', 'echo a > { b; } & echo done', 'echo a > {b;} & echo done',
+      'echo a > {;} & echo done', 'echo a > { a;b; } & echo done', 'echo a > ) & echo done',
+      'echo a > (c) $(b) & d', 'echo a > $(b) (c) & d',
+      // ⚠️ 这一族是**本修法最易开出的新洞**：opaque 构造在 `>` **之前**（是命令参数），
+      // 与「重定向目标」无关 —— 逐重定向的判据必须能区分它们，按 `segOpaque` 口径会误放行。
+      'echo a $(b) > & c', 'echo a > $(b) > & c', 'echo a > $(b) c > & d',
+      'echo a > $(b) && c > & d', 'echo a > $(b) ; c > & d', 'echo a > $(b) & c > & d',
+      // 发现 4 原目标族（粘性的收益）不得回退
+      'echo a > & (b)', '> & $(b)', '> & { b; }', '> & )', 'echo a > & b', 'echo a > &',
+      'echo a > & (b) &', 'echo a > & $(b) &',
+      // 真悬空 / 真无目标
+      'echo a >', 'echo a |', 'echo a &&', 'echo a ||', 'echo a & &', 'echo a | &',
+    ]
+    for (const c of illegal) {
+      for (const sh of ['bash', 'pwsh']) {
+        const r = decomposeCommand(c, sh)
+        if (r.ok !== false) bad.push(['语法错误形态被放行', c, sh, JSON.stringify(r.ok ? r.segments.map((s) => s.text) : r)])
+      }
+    }
+
+    ok('★ AF opaque 重定向目标：合法形态不得误判、语法错误形态不得放行', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+
+    // ③ 端到端：`outside=deny` 不得因「末尾挂 opaque 目标」而失明（本发现的 fail-open 本体）
+    {
+      const bad2 = []
+      const ds = dsOnly('outside')
+      for (const c of ['rm -rf /tmp/x > $(mktemp) & echo done', 'rm -rf /tmp/x 2> $(mktemp) & echo done',
+        'rm -rf /tmp/x >> $(mktemp) & echo done', 'rm -rf /tmp/x < $(mktemp) & echo done',
+        'rm -rf /tmp/x > {mktemp} & echo done',
+        'echo z ; rm -rf /tmp/x > $(mktemp) & echo done',
+        'echo z && rm -rf /tmp/x > $(mktemp) & echo done']) {
+        for (const [sh, pl] of [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]) {
+          const r = assessCommand(c, sh, withDs(ds, { platform: pl }))
+          if (r.action !== 'deny') bad2.push(['outside=deny 被绕过', c, sh, pl, r.action, r.code])
+        }
+      }
+      ok('★ AF outside=deny 不得被 opaque 重定向目标绕过（fail-open 回归）', bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+    }
+
+    // ④ 端到端：ask 例外不得被绕过（ok:false 路径只认 deny 例外，故 ask 会整个失明）
+    {
+      const bad3 = []
+      const h = withDs(null, { excAction: 'ask', exceptions: ['curl *'] })
+      for (const c of ['curl -s http://example.com > $(mktemp) & echo done',
+        'curl -s http://example.com > {mktemp} & echo done',
+        'curl -s http://example.com 2> $(mktemp) & echo done']) {
+        const r = assessCommand(c, 'bash', h)
+        if (r.action !== 'ask') bad3.push(['ask 例外被绕过', c, r.action, r.code])
+      }
+      ok('★ AF ask 例外不得被 opaque 重定向目标绕过（fail-open 回归）', bad3.length === 0, JSON.stringify(bad3.slice(0, 8)))
+    }
+
+    // ⑤ 关键一格：粘性的**唯一增量收益**必须仍被堵住（本修法不得把收益一起削掉）
+    for (const sh of ['bash', 'pwsh']) {
+      ok('★ AF 粘性的增量收益仍保住：`echo a > & (b) &` 仍须 ok:false（' + sh + '）',
+        decomposeCommand('echo a > & (b) &', sh).ok === false)
+    }
+  }
+}
+
+group('AG. 进程替换作重定向目标：`>( )` / `<( )` 是可作词的目标（AF 的同族漏网）')
+{
+  // ── 问题 ────────────────────────────────────────────────────────────────────
+  // AF 把「opaque 构造作重定向目标」按三态 `redirectOpaqueTarget` 精确判了，但 `(` 分支
+  // 的判据是 `char === '{' && !braceIsCommandGroup(...)` —— 只有 `{` 能记成可作词，
+  // **`(` 一律 `false`（not-word）**。而 bash 的**进程替换** `>( )` / `<( )` 与**子 shell**
+  // `( )` 在词法器里走的是同一条 `(` 分支（`>` 先被 `REDIRECT_OPERATOR` 吃掉，`(` 单独进分支），
+  // 于是 `>(tee log)` 被记成「不可作词」→ `ampNoTarget` 置位 → 整行 `ok:false`。
+  // 这正是 AF 要消灭的那条 fail-open 路径（`ok:false` 只认 deny 例外、档位集合不含 `outside`）。
+  //
+  // bash 真值（`bash -n` 实测）—— `>( )` / `<( )` 合法，`( )` 非法：
+  //     OK   `echo a > >(cat)` / `echo a > <(cat x)` / `echo a >(cat)` / `echo a 2>(cat)`
+  //     ERR  `echo a > (cat)` / `echo a >>(cat)` / `echo a >|(cat)` / `echo a >&(cat)`
+  //     ERR  `echo a &>(cat)` / `echo a <>(cat)` / `echo a <<(cat)`
+  //
+  // ⚠️ 判据**不能**只看「`(` 的前一个字符是 `>` 或 `<`」（初版，实测过宽）：
+  // `>>(cat)` / `>|(cat)` / `>&(cat)` / `&>(cat)` / `<>(cat)` 的 `(` 同样紧贴 `>`，
+  // 但那个 `>` 是**别的操作符的一部分**，bash 全是语法错误。故本修法再加一条：
+  // 那个 `>` / `<` 的再前一个字符不得是 `<` `>` `|` `&`（即它必须是独立的单字符操作符）。
+  {
+    const BT = String.fromCharCode(96)
+    const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
+    const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
+    const bad = []
+
+    // ① bash 合法（`bash -n` 实测 OK）：必须 ok:true —— 误判回归的主判据
+    //    ⚠️ 只列**带 `&`** 的形态：不带 `&` 的 `echo a > >(cat)` 在 HEAD 上同样是 ok:false
+    //    （那条路径的缺口与 `echo a > $(mktemp)` **同源**、由 `pending && !started` 那条
+    //    行尾判据拦下，不是本次 `&` 粘性引入的），故不在本组范围内、也不得在此断言 ok:true
+    //    —— 否则会逼着把修法扩张到另一个未报告的问题上。
+    const legal = [
+      'echo a > >(cat) & echo b', 'echo a < <(cat x) & echo b', 'echo a > >(tee log) & echo done',
+      'echo a >(cat) & echo b', 'echo a 2>(cat) & echo b', 'echo x>(cat) & echo b',
+      'echo a >> >(cat) & echo b', 'echo a 2> >(cat) & echo b',
+      'echo z ; echo a > >(cat) & echo b', 'echo z && echo a > >(cat) & echo b',
+      'echo a > >(cat) ; echo b', 'echo a > >(cat) && echo b', 'echo a > >(cat) | cat',
+      'echo a > >(cat) $(b) & d', 'echo a > >(cat) > >(tee y) & d',
+      'echo a > >(cat) 2> >(tee e) & echo b', 'echo a > >(cat) 2>&1 & b',
+      '> >(cat) & echo a', 'echo a <(cat) & echo b',
+      'echo a > >(cat) &', 'echo a > >(cat) & (b)', 'echo a > >(cat) & $(b)',
+      // ⚠️ 这几格钉住判据的**精确性**：`(` 前是一串操作符字符时，只有最后一个词元恰为
+      // 裸 `>` / `<` 才算进程替换。这些（`bash -n` 实测 OK）曾被「只看前 1~2 个字符」
+      // 的保守判据漏认，从而在 HEAD 上由 deny 落回 allow。
+      'echo a >|>(cat) & echo b', 'echo a >&>(cat) & echo b', 'echo a &&>(cat) & echo b',
+      'echo a >><(cat) & echo b', 'echo a >>>(cat) & echo b', 'echo a <>>(cat) & echo b',
+      'echo a ><(cat) & echo b', 'echo a >| >(cat) & echo b', 'echo a >& >(cat) & echo b',
+      'rm -rf /etc > >(tee log) & echo done', 'rm -rf /etc > <(cat x) & echo done',
+      'rm -rf /etc 2> >(tee log) & echo done', 'rm -rf /etc >> >(tee log) & echo done',
+      'rm -rf /etc < <(cat x) & echo done',
+    ]
+    for (const c of legal) {
+      const r = decomposeCommand(c, 'bash')
+      if (r.ok !== true) bad.push(['误判回归：bash 合法的进程替换目标被拦下', c, JSON.stringify(r)])
+    }
+
+    // ② bash 语法错误（`bash -n` 实测 SYNTAXERR）：必须仍 ok:false —— 不得因本修法被放行
+    //    ⚠️ 前三格是**本修法最易开出的新洞**（验证者建议的「`(` 紧贴 `>` / `<` 即算词」
+    //       判据会把它们放行）：`>>(cat)` / `>|(cat)` / `>&(cat)` / `&>(cat)` / `<>(cat)` /
+    //       `2>>(cat)` / `<&(cat)` / `>>>(cat)` 的 `(` 也紧贴 `>`，但那个 `>` 属于更长的
+    //       操作符，bash 判语法错误。
+    const illegal = [
+      // 进程替换的「假兄弟」：紧贴但 `>` 属于别的操作符
+      'echo a >>(cat)', 'echo a >>(cat) & echo b', 'echo a >|(cat) & echo b',
+      'echo a >&(cat) & echo b', 'echo a &>(cat) & echo b', 'echo a &>>(cat) & echo b',
+      'echo a <>(cat)', 'echo a <>(cat) & echo b', 'echo a 2>>(cat) & echo b',
+      'echo a <&(cat) & echo b', 'echo a >><>(cat) & echo b', 'echo a <<(cat) & echo b',
+      'echo a <<<(cat) & echo b', 'echo a >|(cat) & echo b',
+      // ⚠️ 刻意**不**列入 `echo a &|<(cat) & echo b` / `echo a <>><(cat) & echo b` /
+      // `echo a <><(cat) & echo b` 三格：前两者在 HEAD 上就是 ok:true（**既有缺口**，
+      // 与本修法无关，修它们要动「重定向无目标」的另一条判据，超出本次范围）；
+      // 第三格 `bash -n` 实测 **OK**（`<>` 被切成 `<>`+`<(cat)`？实测合法），不得当非法形态。
+      // 子 shell / 分组 / 孤立右括号：不可作词
+      'echo a > (cat)', 'echo a > (cat) & echo b', 'echo a > (mktemp) & echo done',
+      'echo a > { b; } & echo done', 'echo a > ) & echo done',
+      'echo a > >(cat) (b) & d',
+      // 本次发现的两个关键对照格（必须仍是 ok:false）
+      'echo a > & >(cat)', 'echo a > >(cat) > & b',
+      // AF 族与发现 4 族的既有收益不得回退
+      'echo a > & b', 'echo a >', 'echo a > &',
+      'echo a > & (b) &', 'echo a > & (b)', '> & $(b)', 'echo $(a) > & b',
+      'echo a $(b) > & c', 'echo a > $(b) > & c',
+    ]
+    for (const c of illegal) {
+      for (const sh of ['bash', 'pwsh']) {
+        const r = decomposeCommand(c, sh)
+        if (r.ok !== false) bad.push(['语法错误形态被放行', c, sh, JSON.stringify(r.ok ? r.segments.map((s) => s.text) : r)])
+      }
+    }
+
+    ok('★ AG 进程替换目标：合法形态不得误判、语法错误形态不得放行', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+
+    // ③ 端到端：`outside=deny` 不得因「重定向目标是进程替换」而失明（本发现的 fail-open 本体）
+    //    ⚠️ 目标用 `/tmp/x` 而非 `/etc`：`/etc` 在 posix 平台上的档位判定与 win32 不同
+    //    （HEAD 上 `rm -rf /etc` 在 posix 就是 allow），那属于另一条既有路径，与本修法无关。
+    {
+      const bad2 = []
+      const ds = dsOnly('outside')
+      for (const c of ['rm -rf /tmp/x > >(tee log) & echo done', 'rm -rf /tmp/x > <(cat x) & echo done',
+        'rm -rf /tmp/x 2> >(tee log) & echo done', 'rm -rf /tmp/x >> >(tee log) & echo done',
+        'rm -rf /tmp/x < <(cat x) & echo done', 'rm -rf /tmp/x > $(mktemp) & echo done',
+        'echo z ; rm -rf /tmp/x > >(tee log) & echo done',
+        'echo z && rm -rf /tmp/x > >(tee log) & echo done']) {
+        for (const [sh, pl] of [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]) {
+          const r = assessCommand(c, sh, withDs(ds, { platform: pl }))
+          if (r.action !== 'deny') bad2.push(['outside=deny 被绕过', c, sh, pl, r.action, r.code])
+        }
+      }
+      ok('★ AG outside=deny 不得被进程替换目标绕过（fail-open 回归）', bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+    }
+
+    // ④ 端到端：ask 例外不得被绕过（ok:false 路径只认 deny 例外，故 ask 会整个失明）
+    {
+      const bad3 = []
+      const h = withDs(null, { excAction: 'ask', exceptions: ['curl *'] })
+      for (const c of ['curl -s http://example.com > >(tee log) & echo done',
+        'curl -s http://example.com < <(cat x) & echo done',
+        'curl -s http://example.com 2> >(tee log) & echo done',
+        'curl -s http://example.com > $(mktemp) & echo done']) {
+        const r = assessCommand(c, 'bash', h)
+        if (r.action !== 'ask') bad3.push(['ask 例外被绕过', c, r.action, r.code])
+      }
+      ok('★ AG ask 例外不得被进程替换目标绕过（fail-open 回归）', bad3.length === 0, JSON.stringify(bad3.slice(0, 8)))
+    }
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、发现 3（续行符）、发现 4（花括号词法）')
+{
+  // 逐档配置：只把某一档设为 deny，其余七档 allow —— 与 final-verify 探针同形。
+  const ONLY = (tier) => {
+    const t = {}
+    for (const x of ['inside', 'outside', 'wide', 'unknown', 'priv', 'proc', 'power', 'reg']) t[x] = x === tier ? 'deny' : 'allow'
+    return t
+  }
+  const withDs2 = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
+  const at = (cmd, ds, sh, opts) => assessCommand(cmd, sh || 'bash', withDs2(ds, opts))
+  // §6.1 默认八档（`inside` 跟随大分类 = allow，其余 ask）—— 与生产默认同形
+  const DEFAULT8 = { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', priv: 'ask', proc: 'ask', power: 'ask', reg: 'ask' }
+
+  // ── ① 发现 1：段首**本身**是破坏性命令、而构造里**另藏**一个真破坏性命令 ──────
+  // 判据必须问「构造**里**有没有第二个破坏性命令」，而不是「段首是不是破坏性命令」。
+  // 靶格在 bash 里 `-n` = OK、可执行（`$(rm -rf /)` 真会跑），故这是真 fail-open。
+  {
+    const bad = []
+    for (const c of [
+      'echo a | rm -rf /tmp/x $(rm -rf /)',
+      'echo a && rm -rf /tmp/x $(rm -rf /)',
+      'echo a || rm -rf /tmp/x $(rm -rf /)',
+      'echo a & rm -rf /tmp/x $(rm -rf /)',
+    ]) {
+      const r = at(c, ONLY('wide'))
+      if (r.action === 'allow') bad.push([c, r.action, r.code])
+    }
+    ok('★ AH1 段首可读 + 构造内另藏破坏性命令：不得静默放行（发现 1）', bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ② 发现 7 / 8：段首是提权前缀、紧跟**可读**的破坏性命令 → 命令**读得出** ────
+  // 这是**有意的放宽**（旧判据只看段首词元，把 `sudo rm …` 一律判成「命令读不出」→ 误拦）。
+  // 判据换成 `headCommandNameOf`（穿过提权前缀取真命令头）后，构造只是**参数**。
+  {
+    const bad = []
+    for (const c of [
+      'sudo rm -rf ./build $(date)',
+      'sudo rm -rf ./tmp/{a,b,c}',
+      'doas rm -rf ./build $(date)',
+      'pkexec rm -rf ./build `date`',
+      'sudo rm -rf ./build {a,b}',
+    ]) {
+      // `wide=deny` / `inside=deny` 下必须是 allow（构造只是参数，不凭空收紧）
+      for (const tier of ['wide', 'inside']) {
+        const r = at(c, ONLY(tier))
+        if (r.action !== 'allow') bad.push([tier, c, r.action, r.code])
+      }
+    }
+    ok('★ AH2 提权前缀 + 可读破坏性命令 + opaque 参数：不得凭空收紧（发现 7/8 的有意放宽）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ③ 保护格：提权前缀后面**没有**可读命令（真命令在构造里）→ 必须仍判读不出 ──
+  // `:4910` 的提权兜底承重，删掉它这一族会变 allow（发现 8 报告者的建议实测不可用）。
+  // 档位逐格按实测填：`C:/Windows` 是**系统目录** → 命中 `wide`（不是 `outside`）；
+  // 只有诱饵格 `cat /etc/hosts …` 才额外带 `outside`（`/etc/hosts` 是工作区外路径）。
+  {
+    const bad = []
+    for (const [c, tiers] of [
+      ['echo a | sudo $(rm -rf C:/Windows)', ['wide', 'inside']],
+      ['echo a | (rm -rf C:/Windows)', ['wide', 'inside']],
+      ['ForEach-Object { Remove-Item C:/Windows -Recurse -Force }', ['wide', 'inside']],
+      ['echo a | Write-Output `rm -rf C:/Windows`', ['wide', 'inside']],
+      ['cat /etc/hosts $(rm -rf C:/Windows)', ['wide', 'inside', 'outside']],
+    ]) {
+      for (const tier of tiers) {
+        const r = at(c, ONLY(tier))
+        if (r.action !== 'deny') bad.push([tier, c, r.action, r.code])
+      }
+    }
+    ok('★ AH3 保护格：真命令藏在 opaque 构造里 → 命中档的 deny 不得失明', bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ④ 承重格：命令可读、构造只是参数 → 必须**恰好** `['unknown']`（60g ④b/⑤b 同口径）
+  {
+    const bad = []
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'chmod 777 ./{a,b}.sh', 'diskpart /s a.txt']) {
+      const r = at(c, { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', priv: 'ask', proc: 'ask', power: 'ask', reg: 'ask' })
+      const t = (r.segments[0] && r.segments[0].tiers) || []
+      if (t.join(',') !== 'unknown') bad.push([c, t.join(',')])
+    }
+    ok('★ AH4 承重格：命令可读、构造只是参数 → 恰好 `[\'unknown\']`', bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑤ 发现 9：`|&` 必须被 `|` 分支整体消费 ──────────────────────────────────
+  // 靶格在 bash 里 `-n` = OK、真实执行会写出 `log` 文件。此前 `|&` 的 `&` 落进后台分支
+  // → 整行 `ok:false` → 只认 deny 例外 → 用户写的 **ask 例外整个失明**（fail-open）。
+  {
+    const bad = []
+    const h = withDs2(null, { excAction: 'ask', exceptions: ['curl *'] })
+    for (const c of [
+      'echo a |&>& log & echo b',
+      'curl -s http://example.com |&>& log & echo done',
+    ]) {
+      const d = decomposeCommand(c, 'bash')
+      if (!d.ok) bad.push(['ok:false', c, d.reason])
+    }
+    // 整行读得懂之后，**用户写的 ask 例外**才生效（此前 `ok:false` 路径只认 deny 例外）
+    const rc = assessCommand('curl -s http://example.com |&>& log & echo done', 'bash', h)
+    if (rc.action !== 'ask') bad.push(['ask 失明', 'curl …', rc.action, rc.code])
+    // 对照：没有例外命中的那条仍按大分类 allow（不得凭空收紧）
+    const re = assessCommand('echo a |&>& log & echo b', 'bash', h)
+    if (re.action !== 'allow') bad.push(['凭空收紧', 'echo a …', re.action, re.code])
+    ok('★ AH5 `|&` 不得把整行推进 ok:false（发现 9：ask 例外失明）', bad.length === 0, JSON.stringify(bad))
+  }
+  // `|&` 是**一个**管道操作符，不得凭空多切一段（`&` 不得再被当后台分隔符）
+  {
+    const d = decomposeCommand('echo a |& log & echo b', 'bash')
+    ok('★ AH5b `|&` 后不得凭空多出段边界', d.ok && d.segments.length === 3,
+      d.ok ? ('segments=' + d.segments.length + ' ops=' + d.segments.map((s) => s.op).join(',')) : d.reason)
+  }
+
+  // ── ⑥ 发现 3：续行符劈开多字符操作符 → 必须与「不写续行符」的对照同结论 ──────
+  // ⚠️ 判据是「**与对照格同结论**」，不是「任何配置下都 deny」：靶格的目标 `/tmp/pgx`
+  // 在工作区**外**，故 `inside=deny` / `wide=deny` / `unknown=deny` 下对照格本就是 allow
+  // （用户没把 `outside` 设为 deny）。旧代码在这里 deny，是因为整行被推进 `ok:false`、
+  // 走了那条保守回退 —— 那是**解析失败的假象**，不是保护。修复消除的是这个分歧。
+  // 真正体现保护的是 `outside=deny`：对照格 deny，靶格此前 allow（fail-open），修复后 deny。
+  {
+    const bad = []
+    for (const [cmd, ctrl] of [
+      ['rm -rf /tmp/pgx >\\\n&2', 'rm -rf /tmp/pgx >&2'],
+      ['rm -rf /tmp/pgx >\\\n& /tmp/log', 'rm -rf /tmp/pgx >& /tmp/log'],
+      ['rm -rf /tmp/pgx >\\\n& out.txt', 'rm -rf /tmp/pgx >& out.txt'],
+      ['rm -rf /tmp/pgx <\\\n&2', 'rm -rf /tmp/pgx <&2'],
+    ]) {
+      for (const tier of ['inside', 'outside', 'wide', 'unknown', 'default']) {
+        const ds = tier === 'default' ? DEFAULT8 : ONLY(tier)
+        const a = at(cmd, ds), b = at(ctrl, ds)
+        if (a.action !== b.action) bad.push(['与对照分歧', tier, cmd, a.action, b.action])
+      }
+      // `outside=deny` 下必须是 deny（保护本身）
+      const r = at(cmd, ONLY('outside'))
+      if (r.action !== 'deny') bad.push(['outside=deny 未 deny', cmd, r.action, r.code])
+    }
+    ok('★ AH6 续行符劈开 `>&`：与对照同结论，且 `outside=deny` 下 deny（发现 3）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+  // ⚠️ 反向：**注释内**的 `\`+换行**不是**续行符（bash 把下一行当新命令执行）——
+  // 无条件剥离会把 `rm` 藏进注释里，是修法自己会引入的 fail-open。必须钉住。
+  {
+    const bad = []
+    for (const c of ['echo hi # c\\\nrm -rf /tmp/victim', '# c\\\nrm -rf /tmp/victim']) {
+      const r = at(c, ONLY('outside'))
+      if (r.action !== 'deny') bad.push([c, r.action, r.code])
+    }
+    // 单引号内的 `\`+换行是字面量，同样不得被剥离（不得因此改变段文本）
+    const dq = decomposeCommand("echo 'a\\\nb'", 'bash')
+    if (!dq.ok || dq.segments[0].text.indexOf('\\\n') < 0) bad.push(['单引号内被误剥离', dq.ok ? dq.segments[0].text : dq.reason])
+    ok('★ AH6b 注释内 / 单引号内的 `\\`+换行**不得**被当续行符剥离', bad.length === 0, JSON.stringify(bad))
+  }
+  // ⚠️ 反向之二：夹在**两个 `<`** 之间的 `\`+换行**不得**被剥离（本批修复新开的放宽面）。
+  //
+  // bash 的词法真值确实是 `<\<NL><` ≡ `<<`（heredoc 操作符），但本文件的词法器**认出 heredoc
+  // 就整行 `ok:false`**，而 `ok:false` 路径的档位集合**不含 `outside`**、且**只认 deny 例外**
+  // ⇒ 剥离这一步会把一条 HEAD 上 `ok:true` 且判 deny 的命令推进 `ok:false`，`outside=deny`
+  // 整个失明。实测（`outside=deny`、其余七档 allow，真 bash 下 `bash -n` = OK 且**真的删掉**
+  // 目标目录）：
+  //     rm -rf /tmp/x <\<NL>< EOF + NL + x + NL + EOF
+  //       不剥离（= HEAD）：**deny** ✅   剥离：**allow** ❌（ok:false / unparsable）
+  // 故判据是「**与不剥离的同形格同结论**」+「`outside=deny` 下 deny」—— 与 AH6 同一口径。
+  // 只排除**两侧都是 `<`** 的那一种：其余形态（`>\<NL>&` / `>\<NL>>` / `<\<NL>&` …）的剥离
+  // 是 AH6 要保的东西，一格都不能退（下面同时钉住）。
+  {
+    const bad = []
+    const HD = [
+      'rm -rf /tmp/x <\\\n<EOF',
+      'rm -rf /tmp/x <\\\n< EOF',
+      'rm -rf /tmp/x <\\\n<-EOF',
+      'rm -rf /tmp/x 2<\\\n<EOF',
+      "rm -rf /tmp/x <\\\n<'EOF'",
+      'rm -rf /tmp/x <\\\n<\\\n< EOF',
+      'rm -rf /tmp/x <\\\n< /dev/null',
+      'echo a && rm -rf /tmp/x <\\\n<EOF',
+      'echo a; rm -rf /tmp/x <\\\n<EOF',
+      'echo a\nrm -rf /tmp/x <\\\n<EOF',
+    ]
+    for (const c of HD) {
+      for (const tier of ['inside', 'outside', 'wide', 'unknown', 'default']) {
+        const ds = tier === 'default' ? DEFAULT8 : ONLY(tier)
+        // 对照 = 把 `\`+换行 换成**裸换行**（即「续行符不生效」时词法器看到的形态）
+        const ctrl = c.replace(/<\\\n</, '<\n<')
+        const a = at(c, ds), b = at(ctrl, ds)
+        if (a.action !== b.action) bad.push(['与对照分歧', tier, c, a.action, b.action])
+      }
+      const r = at(c, ONLY('outside'))
+      if (r.action !== 'deny') bad.push(['outside=deny 未 deny', c, r.action, r.code])
+    }
+    // 真·heredoc 仍必须整行读不懂（本修复不得把它一起放宽）
+    for (const c of ['rm -rf /tmp/x <<EOF\nx\nEOF', 'rm -rf /tmp/x <<EOF']) {
+      if (decomposeCommand(c, 'bash').ok !== false) bad.push(['真 heredoc 被放宽成 ok:true', c])
+    }
+    // 反向：AH6 那一族（`>\<NL>&` 等）的续行符**必须照旧剥离**
+    for (const c of ['rm -rf /tmp/pgx >\\\n&2', 'rm -rf /tmp/pgx <\\\n&2', 'rm -rf /tmp/pgx >\\\n> out.txt']) {
+      const d = decomposeCommand(c, 'bash')
+      if (!d.ok || d.segments[0].text.indexOf('\\\n') >= 0) {
+        bad.push(['AH6 族的续行符未剥离（回退）', c, d.ok ? d.segments[0].text : d.reason])
+      }
+    }
+    ok('★ AH6c 夹在两个 `<` 之间的续行符不得被剥离（不得粘成 heredoc → 不得丢 `outside` 档）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑦ 发现 4：花括号组的判据必须在**词法层面**做 ────────────────────────────
+  // 引号内的换行、转义分号 `\;` 都是**字面字符**，`{…}` 只是一个词 → 可作重定向目标。
+  {
+    const bad = []
+    for (const [cmd, ctrl] of [
+      ['rm -rf /tmp/pgx > { a\nb } & echo done', 'rm -rf /tmp/pgx > { a b } & echo done'],
+      ['rm -rf /tmp/pgx > { "a\nb" } & echo done', 'rm -rf /tmp/pgx > { "ab" } & echo done'],
+      ['rm -rf /tmp/pgx > { a\\; } & echo done', 'rm -rf /tmp/pgx > { a } & echo done'],
+      ["rm -rf /tmp/pgx > { 'a\nb' } & echo done", "rm -rf /tmp/pgx > { 'ab' } & echo done"],
+    ]) {
+      for (const tier of ['inside', 'outside', 'wide', 'unknown', 'default']) {
+        const ds = tier === 'default' ? DEFAULT8 : ONLY(tier)
+        const a = at(cmd, ds), b = at(ctrl, ds)
+        if (a.action !== b.action) bad.push(['与对照分歧', tier, cmd, a.action, b.action])
+      }
+      // `outside=deny` 下必须是 deny（靶格目标 `/tmp/pgx` 在工作区外）
+      const r = at(cmd, ONLY('outside'))
+      if (r.action !== 'deny') bad.push(['outside=deny 未 deny', cmd, r.action, r.code])
+    }
+    ok('★ AH7 花括号内「引号内换行 / 转义分号」是字面词：与对照同结论，且 `outside=deny` 下 deny（发现 4）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+  // ⚠️ 反向：真·命令组（末尾顶层 `;`）**必须仍然**判分组 → 整行 ok:false（不得放宽）
+  {
+    const bad = []
+    for (const c of [
+      'rm -rf /tmp/pgx > { a; } & echo done',
+      'rm -rf /tmp/pgx > { a;b; } & echo done',
+      'rm -rf /tmp/pgx > { a\nb; } & echo done',
+      'rm -rf /tmp/pgx > { "a\nb"; } & echo done',
+    ]) {
+      const d = decomposeCommand(c, 'bash')
+      if (d.ok) bad.push([c, 'ok:true（应 ok:false）'])
+    }
+    ok('★ AH7b 真·命令组（末尾顶层 `;`）仍须判 ok:false（不得放宽）', bad.length === 0, JSON.stringify(bad))
+  }
+  // ⚠️ 反向：字面词形态**不得**被误判成分组（否则合法命令被推进 ok:false）
+  {
+    const bad = []
+    for (const c of [
+      'rm -rf /tmp/pgx > { a b } & echo done',
+      'rm -rf /tmp/pgx > {mktemp} & echo done',
+      'rm -rf /tmp/pgx > } & echo done',
+      'rm -rf /tmp/pgx > { "a;b" } & echo done',
+      'rm -rf /tmp/pgx > {a,b} & echo done',
+    ]) {
+      const d = decomposeCommand(c, 'bash')
+      if (!d.ok) bad.push([c, d.reason])
+    }
+    ok('★ AH7c 字面词 / 花括号展开仍须 ok:true（不得误收紧）', bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑧ 接线点：`opaqueTexts` 必须由词法器记录并传到判定侧 ─────────────────────
+  // 少了这条接线，AH1 的判据**恒不生效**（靶格照旧 allow）—— 这是本批最容易漏的一环。
+  {
+    const d = decomposeCommand('echo a | rm -rf /tmp/x $(rm -rf /)', 'bash')
+    const seg = d.ok ? d.segments[1] : null
+    ok('★ AH8 词法器须记录 opaque 构造原文（`opaqueTexts`）',
+      !!seg && Array.isArray(seg.opaqueTexts) && seg.opaqueTexts.length === 1
+      && seg.opaqueTexts[0] === '$(rm -rf /)',
+      seg ? JSON.stringify(seg.opaqueTexts) : 'no seg')
+    // 多个构造必须**全部**记下（漏记任何一个都可能漏掉真载荷）
+    const d2 = decomposeCommand('rm -rf ./x $(a) $(rm -rf /)', 'bash')
+    ok('★ AH8b 段内多个 opaque 构造须逐个记录',
+      d2.ok && d2.segments[0].opaqueTexts.length === 2, d2.ok ? JSON.stringify(d2.segments[0].opaqueTexts) : d2.reason)
+  }
+
+  // ── ⑨ 提权兜底（`destructiveHeadReadable` 里 `PRIV_PREFIXES[head] === 1` 那一行）──
+  // 这一行**承重、不可删**（发现 8 的报告者建议删掉它，实测不可用）：构造里那个命令
+  // **不是**破坏性命令时（`sudo $(date)` / `su $(id)`），新的「构造内载荷」判据够不到它，
+  // 只有这一行能判「命令读不出」。删掉它 ⇒ 用户显式配的 `wide=deny` / `inside=deny`
+  // 被静默丢弃（实测 `wide=deny` 下由 deny 变 **allow**）。
+  // ⚠️ 它与「构造里藏破坏性命令」那一支**互补**：后者覆盖 `sudo $(rm -rf …)`，
+  // 前者覆盖 `sudo $(无害命令)` —— 两条都要有，缺一即 fail-open。
+  {
+    const bad = []
+    for (const c of ['echo a | sudo $(date)', 'echo a | su $(id)', 'echo a | sudo $(cat p)',
+      'echo a | sudo `date`', 'echo a | pkexec $(date)', 'echo a | doas $(date)']) {
+      for (const tier of ['wide', 'inside']) {
+        const r = at(c, ONLY(tier))
+        if (r.action !== 'deny') bad.push([tier, c, r.action, r.code])
+      }
+    }
+    ok('★ AH9 提权前缀 + 构造内**非**破坏性命令：仍须判「读不出」（提权兜底承重）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑩ 发现 1（本批）：整行 `ok:false` 路径的档位集合**不含 `outside`** ──────────────
+  // 该路径的档位集合由 `groupTiersOf(names) + priv + RADIUS_TIERS_WHEN_UNREADABLE` 拼成，
+  // 而 `RADIUS_TIERS_WHEN_UNREADABLE` 是 `wide ∪ unknown ∪ inside` —— 于是用户显式配的
+  // `outside=deny` 在这条路径上**整个失明**。真 bash 实测（`bash -n` = OK 且**真的执行**、
+  // 真的删掉目标）：`rm -rf <目标> <<EOF … EOF` / `<<-EOF` / `<<"EOF"` / `<<'EOF'` / `<<<x`
+  // 五种写法全部删除成功；而 `cat <<EOF` + `rm` 正文**不执行** `rm`（正文是数据）。
+  //     rm -rf /etc              → deny（段级 outside 档）
+  //     rm -rf /etc <<EOF…EOF    → 修复前 **allow** ← 同一命令，只因多了个 heredoc
+  //
+  // 判据（四条，缺一即「只修一支」或「过度收紧」）：
+  //   ① `outside=deny` 下，带读不懂构造的形态必须与**裸命令同结论**（不变量，不是硬编码 deny）；
+  //   ② 反向核查：`./build` / `$TARGET` / `../other` / `~` 这类裸命令在 `outside=deny` 下
+  //      本是 allow，加了构造**不得**被收紧（`outside` 是**具体**档，不得无条件并入）；
+  //   ③ 58d / 58e3 的加强版：**八档全 allow** 时读不懂形态仍必须 allow（不得凭空多档）；
+  //   ④ heredoc **正文**是数据、不是命令：正文里写 `/etc` 不得让它多出一个 `outside` 档。
+  {
+    const bad = []
+    const dsOutside = ONLY('outside')
+    const dsAllAllow = ONLY('none')
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    // ① 与裸命令同结论（`outside=deny`）——真 bash 会执行的形态
+    //
+    // 基座**必须含一个「带空格 + 引号」的目标**：粗分词元按空白切分，
+    // `rm -rf "/data/my project"` 被切成两片而两片都不匹配整块引号正则 ⇒ 判不出目标。
+    // 仲裁实测：把基座换成含空格目标后，**原断言立刻产生 48 处 mismatch** ——
+    // 即原基座（全是无空格目标）对该族的采样过窄，修复 2 正是补这一族。
+    for (const base of ['rm -rf /etc', 'rm -rf /etc/x', 'chmod 777 /etc', 'rm -rf C:/Windows', 'rm -rf ./build',
+      'rm -rf "/data/my project"', 'rm -rf "C:/Users/me/My Docs"']) {
+      // opener 补 `<<\EOF`（反斜杠转义分隔符是**合法 heredoc**，见下面 AH10 ⑤）
+      for (const red of ['<<EOF\nbody\nEOF', '<<-EOF\nbody\nEOF', '<<"EOF"\nbody\nEOF', "<<'EOF'\nbody\nEOF", '<<<x', '<<EOF\nEOF', '<<\\EOF\nbody\nEOF']) {
+        for (const sh of SH) for (const pl of PL) {
+          const plain = at(base, dsOutside, sh, { platform: pl }).action
+          const withRed = at(base + ' ' + red, dsOutside, sh, { platform: pl }).action
+          if (plain !== withRed) bad.push(['① 与裸命令分歧', base, red.replace(/\n/g, '\\n'), sh, pl, plain, withRed])
+        }
+      }
+    }
+    // ② 不得凭空收紧：裸命令本是 allow 的那一族
+    for (const base of ['rm -rf ./build', 'rm -rf $TARGET', 'rm -rf ../other', 'rm -rf ~']) {
+      for (const red of ['<<EOF\nbody\nEOF', '<<<x']) {
+        for (const pl of PL) {
+          if (at(base + ' ' + red, dsOutside, 'bash', { platform: pl }).action !== 'allow') {
+            bad.push(['② 凭空收紧', base, red, pl, at(base + ' ' + red, dsOutside, 'bash', { platform: pl }).action])
+          }
+        }
+      }
+    }
+    // ③ 八档全 allow（58d / 58e3 的加强版）
+    for (const c of ['rm -rf /etc <<EOF\nbody\nEOF', 'rm -rf /etc <<<x', 'rm -rf /etc "unclosed', 'rm -rf /etc &&']) {
+      for (const pl of PL) {
+        if (at(c, dsAllAllow, 'bash', { platform: pl }).action !== 'allow') {
+          bad.push(['③ 全 allow 被收紧', c, pl, at(c, dsAllAllow, 'bash', { platform: pl }).action])
+        }
+      }
+    }
+    // ④ 正文是数据：`cat > doc.txt <<EOF\n/etc\nEOF` 不得因为正文里的 `/etc` 多出 outside 档
+    for (const c of ['cat > doc.txt <<EOF\n/etc\nEOF', 'cat <<EOF\n/etc\nEOF', 'echo hi <<EOF\n/etc\nEOF']) {
+      for (const pl of PL) {
+        if (at(c, dsOutside, 'bash', { platform: pl }).action !== 'allow') {
+          bad.push(['④ 正文被当成命令', c, pl, at(c, dsOutside, 'bash', { platform: pl }).action])
+        }
+      }
+    }
+    ok('★★ AH10 整行读不懂分支必须并入 `outside` 档（且**仅当**原文读得出区外目标时）——发现 1',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑪ 本批修复：`stripHeredocBody` 的**边界**（修复 1 / 4）+ 引号内空白（修复 2）──────
+  // 根因是同一处：`stripHeredocBody` 只保留到 `<<TAG` 的**结束**位置，
+  // 于是 ① `<<TAG` **同一行**上操作符之后的内容、② **终止符之后**的整段，全被当正文丢掉。
+  // 真 bash 实测（隔离目录内 `eval`，victim 是否被删即判据）：
+  //     rm -rf ./build <<EOF\nbody\nEOF\nrm -rf v          → v **被删**
+  //     rm -rf ./build <<EOF ; rm -rf v\nbody\nEOF         → v **被删**（`&&` / `|` / `&` 同）
+  //     cat <<<x\nrm -rf v                                  → v **被删**（here-string 不吞后续行）
+  // 反向对照（**不**执行，修法不得误伤）：终止符行有尾随 `EOF ; rm -rf v` → 不执行；
+  // 无终止符时正文里的 `rm` → 不执行。
+  {
+    const bad = []
+    const dsOutside = ONLY('outside')
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    const dsAllAllow = ONLY('none')
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    // 裸命令作**不变量**基准（不硬编码 deny —— 与 AH10 ① 同一条纪律）。
+    // 基准目标取**两平台都判 `outside`** 的形态：`/etc` 在 posix 下不属于 outside 档
+    // （`/var/lib/my app` 与 `"/data/my project"` 两平台一致），拿 `/etc` 当基准会得到
+    // 「posix 上裸命令与带构造形态同结论」的假分歧。
+    const NAKED = 'rm -rf /var/lib/my app'
+    const danger = [
+      // ① `<<TAG` 同一行、操作符之后
+      'rm -rf ./build <<EOF ; rm -rf /var/lib/my app\nbody\nEOF',
+      'rm -rf ./build <<EOF && rm -rf /var/lib/my app\nbody\nEOF',
+      'rm -rf ./build <<EOF | rm -rf /var/lib/my app\nbody\nEOF',
+      'rm -rf ./build <<EOF & rm -rf /var/lib/my app\nbody\nEOF',
+      'rm -rf ./build <<EOF || rm -rf /var/lib/my app\nbody\nEOF',
+      // ② 终止符之后（`<<-` / 引号分隔符同）
+      'rm -rf ./build <<EOF\nbody\nEOF\nrm -rf /var/lib/my app',
+      'rm -rf ./build <<-EOF\nbody\nEOF\nrm -rf /var/lib/my app',
+      'rm -rf ./build <<"EOF"\nbody\nEOF\nrm -rf /var/lib/my app',
+      // ③ here-string 之后（`<<<` 不是 heredoc，不吞后续行）
+      'cat <<<x\nrm -rf /var/lib/my app',
+      'cat <<<x ; rm -rf /var/lib/my app',
+    ]
+    for (const c of danger) {
+      for (const sh of SH) for (const pl of PL) {
+        const plain = at(NAKED, dsOutside, sh, { platform: pl }).action
+        const got = at(c, dsOutside, sh, { platform: pl }).action
+        if (got !== plain) bad.push(['⑤ 与裸命令分歧', c, sh, pl, plain, got])
+        // 真 bash 会执行 ⇒ 八档全 deny 下**绝不**能 allow
+        if (at(c, dsAllDeny, sh, { platform: pl }).action === 'allow') {
+          bad.push(['⑤ 全 deny 下放行（真 bash 会执行）', c, sh, pl])
+        }
+      }
+    }
+    // 命令替换 / 反引号内：**只钉「全 deny 下不得 allow」**，不钉「与裸命令同结论」——
+    // 这两条走 opaque 段路径，而 `outside` 档在该路径上**本就不参与**（HEAD 上亦然：
+    // 实测 `echo $(rm -rf /etc)` 在 `outside=deny` 下 HEAD/pre/post 三版都是 allow）。
+    // 那是一条既有的、与本批 4 条缺陷无关的路径行为，不在本次修复范围（不越界改动）。
+    // 本批修的是 strip 边界：HEAD/pre 上这两条连**全 deny** 都放行，修复后判 deny
+    //（真 bash 实测 victim 被删）。
+    for (const c of ['echo $(cat <<EOF ; rm -rf /var/lib/my app\nbody\nEOF)',
+      'echo `cat <<EOF ; rm -rf /var/lib/my app\nbody\nEOF`',
+      'echo $(cat <<EOF\nbody\nEOF\nrm -rf /var/lib/my app)']) {
+      for (const sh of SH) for (const pl of PL) {
+        if (at(c, dsAllDeny, sh, { platform: pl }).action === 'allow') {
+          bad.push(['⑤ 命令替换内全 deny 下放行（真 bash 会执行）', c, sh, pl])
+        }
+      }
+    }
+    // 反向核查：这些形态真 bash **不**执行，不得被收紧
+    // ⚠️ 终止符**之后**的 `rm` 不在这一族 —— 它会执行（见上 ②），别误分类。
+    for (const c of ['cat <<EOF\n/etc\nEOF', 'cat > doc.txt <<EOF\nrm -rf /etc\nEOF',
+      'cat <<EOF\nbody\nrm -rf /etc', 'cat <<-EOF\n\trm -rf /etc\n\tEOF']) {
+      for (const pl of PL) {
+        if (at(c, dsAllAllow, 'bash', { platform: pl }).action !== 'allow') {
+          bad.push(['⑤ 反向：正文被当命令', c, pl, at(c, dsAllAllow, 'bash', { platform: pl }).action])
+        }
+      }
+    }
+    ok('★★ AH10b `stripHeredocBody` 必须保留「同行操作符之后」与「终止符之后」的命令（修复 1）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑪-2 修复 1：**分隔符里夹引号**的 opener（opener 正则的靶心）────────────────────
+  // 原正则 `(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1` 只允许引号**整体包住**分隔符。引号夹在
+  // 分隔符**中间**时匹配 `<<E`、标签读成 `E` ⇒ 找不到终止符 `EOF` ⇒ 走 `!end` 分支把
+  // 终止符**之后**的真命令整段丢掉 ⇒ `rawCommandNames` 只看到 `cat`。
+  // 真 bash 实测（隔离目录，victim 是否被删即判据）：这 10 个形态**全部执行**。
+  {
+    const bad = []
+    const dsOutside = ONLY('outside')
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    const NAKED = 'rm -rf /var/lib/my app'
+    // [opener 写法, 终止符] —— 分隔符取 `EOF`（引号剥掉后的值）
+    const FORMS = [
+      ['<<E"OF"', 'EOF'], ["<<E'OF'", 'EOF'], ['<<EO"F"', 'EOF'], ['<<"E"OF', 'EOF'],
+      ['<<E"O"F', 'EOF'], ['<<\\E"OF"', 'EOF'], ['<<END-OF', 'END-OF'], ['<<END.OF', 'END.OF'],
+      ['<<""', ''], ['<< E"OF"', 'EOF'],
+    ]
+    for (const [form, tag] of FORMS) {
+      // 三种构造：终止符之后 / 同行操作符之后 / 不带正文
+      const forms = [
+        'cat ' + form + '\nbody\n' + tag + '\n' + NAKED,
+        'cat ' + form + ' ; ' + NAKED + '\nbody\n' + tag,
+        'cat ' + form + '\n' + tag + '\n' + NAKED,
+      ]
+      for (const c of forms) {
+        for (const sh of SH) for (const pl of PL) {
+          const plain = at(NAKED, dsOutside, sh, { platform: pl }).action
+          const got = at(c, dsOutside, sh, { platform: pl }).action
+          if (got !== plain) bad.push(['⑤b 夹引号分隔符与裸命令分歧', form, c, sh, pl, plain, got])
+          // 真 bash 会执行 ⇒ 八档全 deny 下**绝不**能 allow
+          if (at(c, dsAllDeny, sh, { platform: pl }).action === 'allow') {
+            bad.push(['⑤b 全 deny 下放行（真 bash 会执行）', form, c, sh, pl])
+          }
+        }
+      }
+    }
+    ok('★★ AH10b-2 分隔符里夹引号的 heredoc（`<<E"OF"` 等 10 形态）不得吞掉终止符之后的命令（修复 1）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑪-3 修复 2：**循环剥离**必须带方向守卫 ────────────────────────────────────────
+  // 只剥离第一个 heredoc 时，第二个 heredoc 的正文被「顺带」丢掉（错误理由下的正确结果）；
+  // 循环剥离后第二个 heredoc 的头与正文重新进入被扫文本，正文里的 `rm` 会被判成命令。
+  // 真 bash 实测：双 heredoc 的**第二个正文是数据**（victim 存活）⇒ 不得被收紧。
+  {
+    const bad = []
+    const dsAllAllow = ONLY('none')
+    for (const c of [
+      'cat <<A\nbody\nA\ncat <<B\nrm -rf /var/lib/my app\nB',
+      'cat <<A\nbody\nA\ncat <<B\n/etc\nB',
+      'cat <<A\nbody\nA\ncat <<B\nbody2\nB\ncat <<C\nrm -rf /var/lib/my app\nC',
+      'cat <<A ; echo hi\nbody\nA\ncat <<B\nrm -rf /var/lib/my app\nB',
+      'cat <<rm\nbody\nrm',
+      'cat <<sudo\nbody\nsudo',
+      'cat <<A\nbody\nA\ncat <<rm\nx\nrm',
+      'cat <<A\nbody\nA\ncat <<shutdown\nx\nshutdown',
+    ]) {
+      for (const pl of ['win32', 'posix']) {
+        if (at(c, dsAllAllow, 'bash', { platform: pl }).action !== 'allow') {
+          bad.push(['⑨ 正文是数据却被当命令', c, pl, at(c, dsAllAllow, 'bash', { platform: pl }).action])
+        }
+      }
+      // 标签 / 终止符与真命令同名时不得被当命令名（`rm *`=deny 例外因此误命中）
+      const names = rawCommandNames(c)
+      for (const n of ['rm', 'sudo', 'shutdown']) {
+        if (names.includes(n)) bad.push(['⑨ 标签/终止符被当命令名', c, n, JSON.stringify(names)])
+      }
+    }
+    ok('★★ AH10b-3 第二个 heredoc 的正文是**数据**；标签/终止符与命令同名时不得被当命令（修复 2）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑪-4 修复 2 的**方向守卫**：假 opener 不得吞掉后续真命令（⚠️ 反例钉桩）──────────
+  // 这是报告者建议的「无条件循环剥离」修法的**反例**：真 heredoc 剥离后，下一个「opener」
+  // 可能是引号 / 注释 / 算术里的**假 opener**，它的 `!end` 分支会把其后整段真命令截掉
+  // ⇒ fail-open。真 bash 实测下列 6 个形态**全部执行**（victim 被删），故必须仍判 deny。
+  {
+    const bad = []
+    const dsOutside = ONLY('outside')
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    const NAKED = 'rm -rf /var/lib/my app'
+    const FAKE = [
+      // ① 双引号内的假 opener
+      'cat <<A\nbody\nA\necho "x<<y"\n' + NAKED,
+      // ② 注释里的假 opener
+      'cat <<A\nbody\nA\n# a<<b\n' + NAKED,
+      // ③ 算术展开里的假 opener
+      'cat <<A\nbody\nA\n$((x<<y))\n' + NAKED,
+      // ④ 重定向 + 引号里的假 opener
+      'cat <<EOF > o.txt\nbody\nEOF\necho "a<<b"\n' + NAKED,
+      // ⑤ 同行注释里的假 opener
+      'cat <<A\nbody\nA\necho hi # a<<b\n' + NAKED,
+      // ⑥ 双 heredoc（第二个是**真** heredoc，其正文是数据，但后续命令仍会执行）
+      'cat <<A\nbody\nA\ncat <<B\nrm -rf /var/lib/my app\nB',
+    ]
+    // ⚠️ ⑥ 与 ①–⑤ 的期望不同：⑥ 的 `rm` 在**第二个 heredoc 的正文里**（真 bash 实测**不**执行），
+    // 故它归 AH10b-3 的「正文是数据」族，这里只钉 ①–⑤ 这 5 个真执行形态 + ⑥ 的裸命令不变量。
+    for (let i = 0; i < FAKE.length; i += 1) {
+      const c = FAKE[i]
+      for (const sh of SH) for (const pl of PL) {
+        if (i < 5) {
+          // 真 bash 会执行 ⇒ 必须与裸命令同结论，且八档全 deny 下绝不 allow
+          const plain = at(NAKED, dsOutside, sh, { platform: pl }).action
+          const got = at(c, dsOutside, sh, { platform: pl }).action
+          if (got !== plain) bad.push(['⑩ 假 opener 吞掉后续真命令', c, sh, pl, plain, got])
+          if (at(c, dsAllDeny, sh, { platform: pl }).action === 'allow') {
+            bad.push(['⑩ 全 deny 下放行（真 bash 会执行）', c, sh, pl])
+          }
+        }
+        // ⑥ 的正文是数据 ⇒ 八档全 deny 下必须 allow（与 `cat` 同结论）
+        if (i === 5 && at(c, dsAllDeny, sh, { platform: pl }).action !== 'allow') {
+          bad.push(['⑩ 双 heredoc 正文被当命令', c, sh, pl])
+        }
+      }
+    }
+    ok('★★ AH10b-4 假 opener（引号/注释/算术里的 `<<`）不得吞掉后续真命令（修复 2 的方向守卫）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑫ 修复 2：`outsideTargetInUnparsable` 的粗分词元**不认引号内的空白** ────────────
+  // `rm -rf "/data/my project"` 被按空白切成 `["rm","-rf","\"/data/my","project\""]`，
+  // 两片都不匹配整块引号正则 ⇒ 判不出目标 ⇒ `outside` 档失明。
+  // 仲裁实测（`outside=deny`、其余七档 allow）：`rm -rf "C:/Users/me/My Docs"` → **deny**；
+  // 加 `<<EOF` / `<<<x` / `&&` / `"unclosed` / `>` 五种构造后**全部 allow**。
+  // 修法把切分与合并**合并成一份引号感知分词器** `splitQuotedTokens`（引号内空白与操作符
+  // 都不切、token 内引号按 bash 语义剥掉），删掉「先原切分、判不出再合并」的第二候选。
+  //
+  // ── 修复 3 追加的基座：引号**内**的操作符字符 ──────────────────────────────────────
+  // 原 `body.split(/[\n\r;|&(){}<>]+/)` **对引号无感知** —— 引号内的 `& | ; ( ) { } < >`
+  // 同样被切开，切碎后两片各自都不含完整引号对，而 `mergeQuotedWords` 只在**引号内的
+  // 空白**上合并，无从恢复 ⇒ 判不出目标 ⇒ `outside` 档失明。
+  // 仲裁实测（`outside=deny`、其余七档 allow）：`rm -rf "D:/R&D"`、
+  // `"D:/my project (old)"`、`"D:/a|b"`、`"D:/a;b"`、`"D:/a&b"`、`"D:/my project"/sub`、
+  // `"D:/data;backup"`、`"D:/Project {old}"` 全部**裸=deny → 带构造=allow**；
+  // 对照 `"/data/my project"`（无操作符字符）→ deny→deny ✅。真 bash 实测这些目标**真的被删**。
+  // `R&D`、`(x86)` 是**真实存在的目录名**。该族在 HEAD 上也是 allow（**不是回归**），
+  // 但恰好落在本轮修复的靶心（AH10c 原基座全部是不含操作符字符的目标）。
+  {
+    const bad = []
+    const dsOutside = ONLY('outside')
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    const CONSTRUCTS = ['<<EOF\nbody\nEOF', '<<<x', '&&', '"unclosed', '>']
+    // 含空格 + 引号的区外目标（含 `chmod 777` 那一族 —— posix 下合并后判 `system` 归 `wide`，
+    // 故它只保证「与裸命令同结论」，不保证走 `outside` 档；win32 下才判 `outside`）
+    //
+    // 后 8 条是修复 3 的基座：引号**内**含 `& ( ) | ; { }` 的目标（两平台四方言下裸命令均判
+    // `outside` ⇒ deny，见 AH10c 的「与裸命令同结论」判据）。
+    for (const base of ['rm -rf "/data/my project"', 'rm -rf "/var/lib/my app"',
+      'rm -rf "C:/Users/me/My Docs"', 'chmod 777 "/var/www/my site"',
+      'rm -rf "D:/R&D"', 'rm -rf "D:/my project (old)"', 'rm -rf "D:/a|b"',
+      'rm -rf "D:/a;b"', 'rm -rf "D:/a&b"', 'rm -rf "D:/my project"/sub',
+      'rm -rf "D:/data;backup"', 'rm -rf "D:/Project {old}"']) {
+      for (const red of CONSTRUCTS) {
+        for (const sh of SH) for (const pl of PL) {
+          const plain = at(base, dsOutside, sh, { platform: pl }).action
+          const got = at(base + ' ' + red, dsOutside, sh, { platform: pl }).action
+          if (got !== plain) bad.push(['⑥ 含空格/操作符目标与裸命令分歧', base, red, sh, pl, plain, got])
+        }
+      }
+    }
+    // 不含空格的引号目标：既有行为不得回退。判据用「与裸命令同结论」而**不是**硬编码 deny ——
+    // `"/etc"` 在 **posix** 下本就不是 `outside` 档（实测裸命令 `rm -rf "/etc"` 在
+    // `outside=deny` / posix 下就是 allow，HEAD/pre/post 三版一致），硬编码 deny 会把
+    // 「posix 的平台名单差异」误报成修复 2 的回退。win32 下它是 deny，两者都钉住。
+    for (const base of ['rm -rf "/etc"', "rm -rf '/etc'"]) {
+      for (const red of CONSTRUCTS) {
+        for (const pl of PL) {
+          const plain = at(base, dsOutside, 'bash', { platform: pl }).action
+          const got = at(base + ' ' + red, dsOutside, 'bash', { platform: pl }).action
+          if (got !== plain) bad.push(['⑥ 无空格引号目标回退', base, red, pl, plain, got])
+        }
+      }
+      // win32 下该形态**必须**是 deny（`/etc` 属于 win32 的 outside 名单）
+      if (at(base, dsOutside, 'bash', { platform: 'win32' }).action !== 'deny') {
+        bad.push(['⑥ win32 无空格引号目标判不出 outside', base])
+      }
+    }
+    ok('★★ AH10c 含空格 + 引号（及引号内含操作符字符）的区外目标在整行读不懂时**同样**读得出（修复 2/3）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑬ 修复 4：`<<\EOF` 是**合法 heredoc**，正文是数据（修的是**误拦**方向）─────────
+  // 原正则 `(['"]?)` 不认反斜杠转义分隔符 ⇒ 不剥离正文 ⇒ 正文被当命令 ⇒ 八档全 deny 的误拦。
+  // 真 bash 实测：`cat <<\EOF\nrm -rf v\nEOF` → v **不被删**（正文是数据）；
+  // 报告者建议的 `(['"\\]?)` **无效**（反向引用 `\1` 被 `\` 占掉，`<<\EOF` 上 NO-MATCH）——
+  // 正确写法是把转义放到捕获组**外**（`\\?(['"]?)`）。
+  {
+    const bad = []
+    const dsAllAllow = ONLY('none')
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    const SH = ['bash', 'pwsh'], PL = ['win32', 'posix']
+    // 正文是数据 ⇒ 与裸 `cat` 同结论（不变量），且八档全 deny 下也必须 allow
+    for (const c of ['cat <<\\EOF\nrm -rf /etc\nEOF', 'cat <<\\EOF\n/etc\nEOF',
+      'cat <<-\\EOF\nrm -rf /etc\nEOF', 'cat <<-\\EOF\n/etc\nEOF',
+      'cat <<\\EOF\nrm -rf /var/lib/my app\nEOF']) {
+      for (const sh of SH) for (const pl of PL) {
+        const plain = at('cat', dsAllDeny, sh, { platform: pl }).action
+        const got = at(c, dsAllDeny, sh, { platform: pl }).action
+        if (got !== plain) bad.push(['⑦ `<<\\EOF` 正文被当命令', c, sh, pl, plain, got])
+        if (at(c, dsAllAllow, sh, { platform: pl }).action !== 'allow') {
+          bad.push(['⑦ 全 allow 下被拦', c, sh, pl, at(c, dsAllAllow, sh, { platform: pl }).action])
+        }
+      }
+    }
+    // 但 `<<\EOF` **同行操作符之后**与**终止符之后**仍是真的命令（真 bash 实测 v 被删）
+    for (const c of ['cat <<\\EOF ; rm -rf /var/lib/my app\ndata\nEOF',
+      'cat <<\\EOF\ndata\nEOF\nrm -rf /var/lib/my app']) {
+      for (const pl of PL) {
+        const plain = at('rm -rf /var/lib/my app', ONLY('outside'), 'bash', { platform: pl }).action
+        const got = at(c, ONLY('outside'), 'bash', { platform: pl }).action
+        if (got !== plain) bad.push(['⑦ `<<\\EOF` 之后被漏', c, pl, plain, got])
+      }
+    }
+    ok('★★ AH10d `<<\\EOF` 是合法 heredoc：正文是数据（修误拦），其后命令照常判（修复 4）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+
+  // ── ⑭ 消误报方向：heredoc **标签 / 终止符**与真命令同名时不得被当命令名 ────────────
+  // HEAD 上 `cat <<rm\nbody\nrm` 的 `rawCommandNames` 是 `["cat","rm"]` —— 标签 `rm` 与
+  // 终止符 `rm` 都被当成了命令名，`rm *`=deny 例外因此误命中。真 bash 实测这两处都不是
+  // 命令（victim 存活）。修复后是 `["cat"]`。这是**消除误报**，方向正确。
+  {
+    const bad = []
+    const dsAllAllow = ONLY('none')
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    for (const c of ['cat <<rm\nbody\nrm', 'cat <<sudo\nbody\nsudo', 'cat <<shutdown\nbody\nshutdown']) {
+      const names = rawCommandNames(c)
+      if (names.includes('rm') || names.includes('sudo') || names.includes('shutdown')) {
+        bad.push(['⑧ 标签/终止符被当命令名', c, JSON.stringify(names)])
+      }
+      for (const pl of ['win32', 'posix']) {
+        if (at(c, dsAllDeny, 'bash', { platform: pl }).action !== 'allow') {
+          bad.push(['⑧ 全 deny 下仍被拦', c, pl, at(c, dsAllDeny, 'bash', { platform: pl }).action])
+        }
+      }
+    }
+    ok('★★ AH10e heredoc 标签/终止符与命令同名时不得被当成命令（消误报方向）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 10)))
+  }
+  // ── ⑮ 源码钉桩：`stripHeredocBody` 的正则必须同时满足五条（修复 1 / 4 的写法约束）──
+  // 每一条都是**实测**逼出来的，写成源码正则是因为它们各自有一个方向的反例：
+  //   · `(?<!<)` 必须在 —— 否则 here-string `<<<x` 会被误当 heredoc 标签（吞掉后续真命令）；
+  //   · 转义必须放在捕获组**外**（`\\?(`）—— 放进组内（`(['"\\]?)`）会让反向引用
+  //     `\1` 去匹配那个反斜杠，`<<\EOF` 上直接 NO-MATCH（报告者建议的写法实测无效）；
+  //   · **不得**用反向引用配对引号（`(['"]?)…\1`）—— 那种写法只允许引号**整体包住**
+  //     分隔符，引号夹在中间（`<<E"OF"`）时标签被读成 `E` ⇒ 找不到终止符 `EOF`
+  //     ⇒ 走 `!end` 分支把终止符**之后**的真命令整段丢掉。真 bash 实测
+  //     `cat <<E"OF"\nbody\nEOF\nrm -rf v` → v **被删**（八档全 deny 下被放行）。
+  //   · 分隔符类必须**接受引号内的字符**（`'…'` 与 `"…"` 两个分支）—— 否则 `<<E"OF"`
+  //     与同族的 `<<END-OF` / `<<END.OF` / `<<""` 全部判不出（实测仍有 4 类漏网）。
+  {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    const m = /function stripHeredocBody\(source\) \{\n([\s\S]*?)\n\}/.exec(spSrc)
+    const fnBody = m ? m[1] : ''
+    // 只扫**正则声明那一行**：函数体注释里为解释反例也会出现同样的字面量，
+    // 扫整个函数体会把注释误判成代码（实测踩过）。
+    const declLine = (fnBody.split('\n').find((l) => l.includes('const heredoc =')) || '').trim()
+    const bad = []
+    if (!declLine) bad.push('未找到 stripHeredocBody 里的 heredoc 正则声明行')
+    // ① here-string 排除
+    if (!declLine.includes('(?<!<)<<-?')) bad.push('缺 (?<!<) —— here-string `<<<x` 会被误当 heredoc')
+    // ② 转义在捕获组**外**（源码形态 `\\?(` —— 反斜杠转义紧跟捕获组开括号）
+    if (!declLine.includes('\\\\?(')) bad.push('转义未放在捕获组外 —— `<<\\EOF` 会 NO-MATCH')
+    // ③ 捕获组内不得含反斜杠（否则反向引用被占掉）
+    if (declLine.includes('([\'"\\\\]?)')) bad.push('捕获组内含反斜杠 —— 反向引用会被占掉')
+    // ④ 不得用反向引用配对引号（`<<E"OF"` 的根因）
+    if (declLine.includes('\\1')) bad.push('用反向引用配对引号 —— `<<E"OF"` 的标签会被读成 `E`（吞掉后续真命令）')
+    // ⑤ 分隔符类必须接受引号内的字符（单引号与双引号两个分支都在）
+    if (!declLine.includes("(?:'") || !declLine.includes('|"')) {
+      bad.push('分隔符类不接受引号内的字符 —— `<<E"OF"` / `<<END-OF` / `<<END.OF` 判不出')
+    }
+    ok('★ AH10f `stripHeredocBody` 的 opener 正则必须含 `(?<!<)`、转义在捕获组外、且不用反向引用配对引号（修复 1/4 写法约束）',
+      bad.length === 0, JSON.stringify(bad))
+  }
+}
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 if (fail.length) {
