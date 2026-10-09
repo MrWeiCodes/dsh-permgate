@@ -8623,6 +8623,96 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
 }
 
 // ─────────────────────────────────────────────────────────────
+group('28. 插件清单元信息：插件管理页显示的名字/描述/图标')
+{
+  // 背景：插件管理页的卡片**不加载插件**就读显示文本与图标，来源是包清单本身
+  // （dsh-app-boot/lib/index.js 的 readPluginMeta，:1969）：
+  //   title       = locale/<lang>.json 的 meta.title       → package.json name → 完整模块说明符
+  //   description = locale/<lang>.json 的 meta.description → package.json description → 空
+  //   icon        = package.json 的 icon（相对路径、SVG/PNG/JPEG/WebP、≤256 KiB、
+  //                 realpath 后必须仍在清单目录内，:1860 iconOf）
+  // 实测（未加之前）：七行全部显示裸包名 + package.json 的英文 description + 默认图形。
+
+  const pkg = JSON.parse(readFileSync(pathJoin(ROOT, 'package.json'), 'utf8'))
+
+  // ★ 71 locale 子路径必须导出
+  // 这是本组最容易踩且**完全静默**的一条：readPluginMeta 用 Node ESM 解析器去 resolve
+  // `<pkg>/locale/en.json`，包一旦声明 exports，未导出的子路径就抛 ERR_PACKAGE_PATH_NOT_EXPORTED，
+  // 而 optionalResourcePath（:1894）把它归入 missingResource **吞掉**——
+  // 实测对照：locale 两个文件都在磁盘上、JSON 合法，readPluginMeta 只回 { title: "@…/pgctl" }，
+  // error 字段为空，没有任何提示。故 locale 内容对不对是次要的，**先得让它能被解析到**。
+  ok('★ 71 exports 导出 ./locale/*.json（缺则 locale 被静默忽略，只显示包名）',
+    !!pkg.exports && pkg.exports['./locale/*.json'] === './locale/*.json',
+    JSON.stringify(pkg.exports))
+  // ./package.json 同理：icon 与 description 的回退都经它读取
+  ok('★ 71 exports 导出 ./package.json（icon / description 的读取入口）',
+    !!pkg.exports && pkg.exports['./package.json'] === './package.json')
+
+  // ★ 71 两个语言文件都必须存在，且 meta.title / meta.description 都是非空字符串
+  // 依据：dsh-app-boot 的 textOf（:1908）对空串/纯空白直接抛错，
+  // 而 readPluginMeta 会把该错降级成 error 字段——**标题会退回包名**。
+  for (const lang of ['zh', 'en']) {
+    const file = pathJoin(ROOT, 'locale', lang + '.json')
+    let parsed = null
+    try { parsed = JSON.parse(readFileSync(file, 'utf8')) } catch { /* 下面统一断言 */ }
+    const meta = parsed && parsed.meta
+    ok('★ 71 locale/' + lang + '.json 存在、可解析、meta.title 非空',
+      !!(meta && typeof meta.title === 'string' && meta.title.trim() !== ''),
+      meta ? JSON.stringify(meta.title) : '文件缺失或 JSON 非法')
+    ok('★ 71 locale/' + lang + '.json 的 meta.description 非空',
+      !!(meta && typeof meta.description === 'string' && meta.description.trim() !== ''),
+      meta ? JSON.stringify(meta.description) : '文件缺失或 JSON 非法')
+  }
+
+  // ★ 71 图标：声明 + 文件存在 + 扩展名在白名单内 + 不超 256 KiB
+  // 扩展名判据同 iconOf 的 ICON_MEDIA_TYPES（:1853）：.svg/.png/.jpg/.jpeg/.webp
+  ok('★ 71 package.json 声明了 icon',
+    typeof pkg.icon === 'string' && pkg.icon.trim() !== '', String(pkg.icon))
+  const iconPath = typeof pkg.icon === 'string' ? pkg.icon : ''
+  ok('★ 71 icon 是相对路径（iconOf 拒绝绝对路径与 URL，:1863）',
+    iconPath !== '' && !pathIsAbsolute(iconPath) && !/^[A-Za-z][A-Za-z\d+.-]*:/u.test(iconPath),
+    iconPath)
+  const iconAbs = pathJoin(ROOT, iconPath)
+  const iconExists = iconPath !== '' && fsExistsSync(iconAbs)
+  ok('★ 71 icon 文件存在', iconExists, iconAbs)
+  if (iconExists) {
+    ok('★ 71 icon 扩展名在 iconOf 白名单内（svg/png/jpg/jpeg/webp）',
+      /\.(svg|png|jpe?g|webp)$/i.test(iconPath), iconPath)
+    ok('★ 71 icon 不超过 256 KiB（iconOf 的上限）',
+      fsLstatSync(iconAbs).size <= 256 * 1024, String(fsLstatSync(iconAbs).size))
+    // realpath 后必须仍在清单目录内（符号链接逃逸会被 iconOf 拒绝）
+    ok('★ 71 icon realpath 后仍在包目录内（不得经软链逃逸）',
+      fsRealpathSync(iconAbs).startsWith(fsRealpathSync(ROOT)))
+    // SVG 必须能自洽渲染：有 viewBox 且引用的每个 url(#id) 都有对应 def
+    // （实测：图标经 base64 data URL 以 <img> 渲染，页面 CSS 与 currentColor 都够不到，
+    //   故颜色必须写死在文件内；漏一个 def 就是一片空白，且 onError 不触发、不会退回默认图）
+    const svg = readFileSync(iconAbs, 'utf8')
+    ok('★ 71 icon SVG 带 viewBox', /viewBox\s*=/.test(svg))
+    const refs = [...svg.matchAll(/url\(#([^)]+)\)/g)].map((m) => m[1])
+    const defs = new Set([...svg.matchAll(/\sid\s*=\s*"([^"]+)"/g)].map((m) => m[1]))
+    ok('★ 71 icon SVG 的每个 url(#id) 都有对应定义（缺则渲染空白且不报错）',
+      refs.every((r) => defs.has(r)), 'refs=' + JSON.stringify(refs) + ' defs=' + JSON.stringify([...defs]))
+  }
+
+  // ★ 71 npm 发布时必须带上这些文件，否则装到用户机器上元信息又退回包名
+  // （files 白名单决定 npm pack 的产物；locale 与 icon 都不在默认包含范围内）
+  const files = Array.isArray(pkg.files) ? pkg.files : []
+  ok('★ 71 files 含 icon.svg（否则发布的包里没有图标）', files.includes('icon.svg'), JSON.stringify(files))
+  ok('★ 71 files 含 locale/*.json（否则发布的包里没有显示文本）',
+    files.includes('locale/*.json'), JSON.stringify(files))
+
+  // ★ 71 真实复算：用 DSH 自己的 readPluginMeta 读本包，而不是只查字段
+  // 上面全是静态检查，全绿也可能因为 exports 写法不被 Node 接受而实际解析失败
+  // （实测对照：exports 缺 ./locale/*.json 时，locale 两个文件都在、JSON 也合法，
+  //   readPluginMeta 照样只回 { title: "<包名>" }，error 字段为空——零提示）。
+  // 该复算需要动态 import + 顶层 await，且依赖本机装有 DSH，故独立成 test/meta.mjs：
+  // 找不到 dsh-app-boot 时它自报 SKIP 并退出 0（不因换机器而假红），找到则逐项断言。
+  ok('★ 71 端到端复算文件 test/meta.mjs 在（由 npm test 串起）',
+    fsExistsSync(pathJoin(ROOT, 'test', 'meta.mjs')))
+}
+
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)

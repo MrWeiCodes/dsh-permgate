@@ -2,6 +2,7 @@
   "name": "@mrweicodes/dsh-permgate",
   "description": "Permission gateway for DSH (DeepSeek Harness): reviews tool calls per category (directory/command/read/image/edit/undo/subagent/doom loop) with global/project config, exceptions, quick-tool defaults, custom rules, a fallback policy for unmatched calls, bilingual approval modal and sandbox-upgrade flow. Config persisted at $DSH_HOME/dsh-permgate/config.json.",
   "version": "1.6.0",
+  "icon": "./icon.svg",
   "repository": {
     "type": "git",
     "url": "https://github.com/MrWeiCodes/dsh-permgate.git"
@@ -15,7 +16,8 @@
     "./client": {
       "default": "./client.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc <2",
@@ -37,11 +39,14 @@
     "index.js",
     "shell-parse.js",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json"
   ],
   "scripts": {
-    "test": "node test/regressions.mjs && node test/shell-parse.mjs && node test/smoke.mjs",
+    "test": "node test/regressions.mjs && node test/meta.mjs && node test/shell-parse.mjs && node test/smoke.mjs",
     "test:unit": "node test/regressions.mjs",
+    "test:meta": "node test/meta.mjs",
     "test:parse": "node test/shell-parse.mjs",
     "test:smoke": "node test/smoke.mjs",
     "lint": "eslint ."

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Permission Gateway",
+    "description": "Reviews tool calls per category — directories, commands, reads, writes, subagents — with exceptions, custom rules, and a bilingual approval modal."
+  }
+}

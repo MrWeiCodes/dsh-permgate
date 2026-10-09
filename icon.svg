@@ -1,0 +1,16 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- 插件管理页的图形：DSH 读成 base64 data URL 后用 <img> 渲染，
+     故页面 CSS 与 currentColor 都够不到——颜色必须写死在本文件里。
+     画布 36×36 与内置那套图形（PluginArtworkDefault 等）一致。 -->
+<defs>
+<linearGradient id="permgate-g" x1="18" y1="4.8" x2="18" y2="31.2" gradientUnits="userSpaceOnUse">
+<stop stop-color="#38BDF8"/>
+<stop offset="1" stop-color="#4F46E5"/>
+</linearGradient>
+</defs>
+<!-- 盾牌：顶边 18,4.8 起，两侧肩点下折，底端收成一点 -->
+<path d="M18 4.8L29.2 8.6V17.2C29.2 24.3 24.4 29.5 18 31.2C11.6 29.5 6.8 24.3 6.8 17.2V8.6Z" stroke="url(#permgate-g)" stroke-width="2.4" stroke-linejoin="round"/>
+<!-- 钥匙孔：圆头 + 向下收窄的柱（上宽下窄，别画反） -->
+<circle cx="18" cy="18.1" r="3.1" fill="url(#permgate-g)"/>
+<path d="M15.72 20.2H20.28L19.6 25.4H16.4Z" fill="url(#permgate-g)"/>
+</svg>
