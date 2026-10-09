@@ -46,6 +46,19 @@ const MAX_DECISIONS = 30
 // perm_status 向 AI 下发 196,322 bytes），且重启后不会被截断。
 // 上限取 2000：正常破坏性命令（含几十个路径）远低于它，而单条例外的下发体积被限制在 2 KB 量级。
 const CAND_VALUE_MAX_CHARS = 2000
+// 审批弹窗「意图」文本的字符上限。六级取值链**共用这一处裁剪**（见 intentFor）。
+//
+// 为什么必须收在一处：此前这条链上有三种口径 —— `description` **完全无上限**、
+// 用户的话 200、机械标签 80。`description` 那个是活的漏洞：schema 写的是「5-10 words」，
+// 但那是**给模型的建议、不是校验**，模型写 3000 字时它会经 /permgate/pending 原样下发
+// 并渲染进 .pg-intent 框，而卡片只有 max-height:82vh —— 允许/拒绝按钮会被挤出可视区。
+// （与 note 曾经的洞是同一个，见 askUser 里 note 的注释。）
+//
+// 取 120：比 normalizeText 的 200 短（那是**存储口径**，服务例外/分类默认值/兜底/快捷工具
+// 四处落盘，与显示层无关，不应复用），比原机械标签的 80 长（够放一句完整的话）。
+const INTENT_MAX_CHARS = 120
+// ④ 思考末尾的取样长度（字符）。见 reasoningTail 的按行收敛规则。
+const REASONING_TAIL_CHARS = 100
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
 // 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
@@ -3726,15 +3739,123 @@ export default {
       return def ? { action: def, isDefault: true } : null
     }
 
+    // ── 意图取值链（六级）────────────────────────────────────────────────────
+    // 弹窗「意图说明」框的内容来源，按**具体度**从高到低：
+    //
+    //   ① justification  提权意图  —— 模型为这次提权专门写的一句话
+    //   ② description    执行意图  —— 命令/任务描述（命令类工具必有）
+    //   ③ 模型说的话      模型意图  —— 发起这次调用的那条 assistant 消息的 text 块
+    //   ④ 思考末尾        模型思考  —— 同一条消息的 reasoning 块（③ 与 ④ **同源**）
+    //   ⑤ 用户说的话      用户意图  —— 最近一条**真人**输入
+    //   ⑥ 机械标签        操作概要  —— describeIntent（永不为空）
+    //
+    // 每一级**自带标签**（intentFor 一并返回），因为六级回答的是**不同的问题**：
+    // ③ 是「这一步要干什么」，⑤ 是「你要的最终结果」，⑥ 只是「这是什么操作」。
+    // 此前一律挂「意图说明」的牌子，等于让 ⑤⑥ 冒充 ③。
+    //
+    // ⚠️ ③④ 同源，故**不存在「③ 取不到要不要往回找」的问题**：
+    // 同一位置再试一次 reasoning 块即可；两者都空说明模型这次一个字都没说，
+    // 那时显示 ⑤/⑥ 才是诚实的。「往回找最近一条 assistant 文本」是按**时间接近**
+    // 定位，会取到说给别的调用的话 —— 那是引入缺陷，明确不做。
+
+    // 块 → 文本。只认 type，不做「兜底猜字段」：
+    // 旧实现有 `typeof b.text === 'string'` / `typeof b.content === 'string'` 两条猜测分支，
+    // 会让**任意**带 text/content 字段的非文本块（如 tool-call 的 arguments 若改名叫 text）
+    // 混进意图。ContentBlock 是 merge-extensible 联合，类型由 type 判别，按 type 取才稳。
     function textOfBlock(b) {
-      if (!b) return ''
-      if (typeof b === 'string') return b
-      if (b.type === 'text' && typeof b.text === 'string') return b.text
-      if (typeof b.text === 'string') return b.text
-      if (typeof b.content === 'string') return b.content
-      return ''
+      if (!b || typeof b !== 'object') return ''
+      return b.type === 'text' && typeof b.text === 'string' ? b.text : ''
     }
 
+    function reasoningOfBlock(b) {
+      if (!b || typeof b !== 'object') return ''
+      return b.type === 'reasoning' && typeof b.text === 'string' ? b.text : ''
+    }
+
+    // ④ 思考末尾：取末尾 REASONING_TAIL_CHARS 字符，再**按行收敛**。
+    //
+    // 规则（用户方案）：切点落在行中间时，那半行不要 —— 宁可少显示一行，
+    // 也不给审批人看半句话。切点正好落在行首时第一行其实也完整，但**无法判断**，
+    // 故一律丢弃首行（保守方向，代价很小）。
+    //
+    // 换行三态都要认：\r\n（Windows 模型输出常见）、\n、\r。
+    function reasoningTail(s) {
+      const full = String(s == null ? '' : s).trim()
+      if (!full) return ''
+      let t = full
+      if (full.length > REASONING_TAIL_CHARS) {
+        let cut = full.length - REASONING_TAIL_CHARS
+        // 代理对不能切一半：低位代理（DC00-DFFF）说明切点落在字符中间，往回退一格。
+        const c = full.charCodeAt(cut)
+        if (c >= 0xdc00 && c <= 0xdfff) cut += 1
+        t = full.slice(cut)
+        // 首行是否被切断，只看**切点是否落在行首**：nl > 0 说明切点之后还有内容
+        // 才遇到换行 ⇒ 首行是半行，丢掉。nl === 0（切点正好落在换行上）时首行不存在，
+        // nl === -1（整段无换行）时按用户规则「直接用这 100 字符」，都不丢。
+        const nl = t.search(/[\r\n]/)
+        if (nl > 0) t = t.slice(nl)
+      }
+      // 收敛成单行：意图框是一行标签 + 一段文字，多行会把卡片撑高。
+      return t.replace(/[\r\n]+/g, ' ').trim()
+    }
+
+    // ③④ 的共同定位：**哪条 assistant 消息里含有 id === exec.callId 的 tool-call 块**。
+    // 这是构造上的精确对应（tool-call 块带 id，exec.callId 就是它），不是时间上的「最近」。
+    function assistantMessageForCall(exec) {
+      try {
+        const callId = exec && exec.callId
+        if (!callId) return null
+        const agent = (exec && exec.agent) || agentRef
+        const session = agent && agent.session
+        if (!session || typeof session.deriveMessages !== 'function') return null
+        const msgs = session.deriveMessages()
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i]
+          if (!m || m.role !== 'assistant') continue
+          const c = m.content
+          if (!Array.isArray(c)) continue
+          for (const b of c) {
+            if (b && b.type === 'tool-call' && b.id === callId) return m
+          }
+        }
+        return null
+      } catch (e) { return null }
+    }
+
+    function assistantTextOf(m) {
+      if (!m || !Array.isArray(m.content)) return ''
+      let out = ''
+      for (const b of m.content) out += textOfBlock(b)
+      return String(out).trim()
+    }
+
+    function assistantReasoningOf(m) {
+      if (!m || !Array.isArray(m.content)) return ''
+      let out = ''
+      for (const b of m.content) {
+        const r = reasoningOfBlock(b)
+        if (r) out += (out ? '\n' : '') + r
+      }
+      return out.trim()
+    }
+
+    // ⑤ 用户说的话：**白名单**过滤。
+    //
+    // 为什么必须是白名单（旧实现是黑名单，只挡 tool/plugin）：
+    // MessageSourceMap 的契约是 merge-extensible 联合，注释写死了 ——
+    // 「Model and tool sources answer their role messages; **user messages carry any
+    // producer's kind**, and consumers fall through unknown kinds」
+    // （dsh-llm/lib/types/message.d.ts:95-99）。
+    // 即 **user 角色是「任何生产者都能投递」的公共车道**，真实人类输入的 kind 恰好是 'user'
+    // （dsh-api-session-controller/lib/index.js:856 prompt() 的 source）。
+    //
+    // 黑名单漏判的失败方向是**往审批人脸上糊几百字注入文本**（实测：dsh-tool-skill 的
+    // skill 目录带 kind:'skill-catalog'，既非 tool 也非 plugin，整段 <system-reminder>
+    // 灌进了意图框）；白名单漏判只会返回空串、落到下一级。
+    // 且注入消息都排在本轮用户消息**之后**，跳过它们正好命中发起本轮的那句话。
+    //
+    // 保留展示的两类 kind:'user' 但非键盘输入：subagent 的 prompt（父 agent 写给子会话的
+    // 任务正文）与 plan mode 的 steer（/plan 附带的正文）—— 两者确是本会话的输入。
     function recentUserText(exec) {
       try {
         const agent = (exec && exec.agent) || agentRef
@@ -3745,7 +3866,7 @@ export default {
           const m = msgs[i]
           if (!m || m.role !== 'user') continue
           const src = m.source
-          if (src && (src.kind === 'tool' || src.kind === 'plugin')) continue
+          if (!src || src.kind !== 'user') continue
           let text = ''
           const c = m.content
           if (typeof c === 'string') text = c
@@ -3753,7 +3874,7 @@ export default {
             for (const b of c) text += textOfBlock(b)
           }
           text = String(text).trim()
-          if (text) return text.length > 200 ? text.slice(0, 200) + '…' : text
+          if (text) return text
         }
         return ''
       } catch (e) { return '' }
@@ -3766,6 +3887,62 @@ export default {
         if (typeof d === 'string' && d.trim()) return d.trim()
         return ''
       } catch (e) { return '' }
+    }
+
+    function argJustification(args) {
+      try {
+        if (!args || typeof args !== 'object') return ''
+        const j = args.justification
+        if (typeof j === 'string' && j.trim()) return j.trim()
+        return ''
+      } catch (e) { return '' }
+    }
+
+    // 六级取值链的**唯一出口**：返回 { text, label }，两者都是 bi 对象，text 恒非空。
+    //
+    // ⚠️ text 必须是 bi 而**不是裸字符串**：entry.intent 历来是 bi，由投影层 L(e.intent, lang)
+    // 按语言取（用户切语言时弹窗要跟着变）。①-⑤ 的文本是模型/用户原话、无需翻译，
+    // 但仍要包成 bi(s, s) 以维持这一契约；⑥ 的 describeIntent 本来就产出 bi。
+    // 曾经这里对 ⑥ 直接 String(bi) ⇒ entry.intent 变成 "[object Object]"。
+    //
+    // 裁剪在**这里**统一做（INTENT_MAX_CHARS），不散到各取值函数里 ——
+    // 散着切必然漏（description 就是这么漏成无上限的），且口径会分叉（曾有 200/80/无 三种）。
+    function intentFor(exec, d) {
+      const asBi = (v) => {
+        if (typeof v === 'string') return bi(v, v)
+        return (v && typeof v === 'object') ? v : bi('', '')
+      }
+      const cutOne = (s) => {
+        const t = String(s == null ? '' : s).trim()
+        return t.length > INTENT_MAX_CHARS ? t.slice(0, INTENT_MAX_CHARS) + '…' : t
+      }
+      // 两种语言各自独立裁剪：中英前缀长度不同（「执行命令 」5 字 vs「Run command 」12 字），
+      // 按同一数值分别切才是「每种语言都最多 120 字」。
+      const cut = (v) => { const o = asBi(v); return bi(cutOne(o.zh), cutOne(o.en)) }
+      const args = exec && exec.arguments
+      // 逐级**惰性**求值，命中即返回。不写成「先构造五元组再遍历」——
+      // 那样即使 ① 命中也会把 ③④⑤ 全算一遍，其中 ③④⑤ 都要调 session.deriveMessages()
+      // （⑤ 还要倒序扫全表），在一次审批的入口路径上白付三遍。
+      const level = (raw, label) => {
+        const text = cut(raw)
+        return (text.zh || text.en) ? { text, label } : null
+      }
+      const hit =
+        level(argJustification(args), bi('提权意图', 'Escalation intent')) ||
+        level(argDescription(args), bi('执行意图', 'Execution intent'))
+      if (hit) return hit
+      // ③④ 同源：定位一次，两种块各试一次（见上方注释）。
+      const msg = assistantMessageForCall(exec)
+      if (msg) {
+        const h3 = level(assistantTextOf(msg), bi('模型意图', 'Model intent')) ||
+          level(reasoningTail(assistantReasoningOf(msg)), bi('模型思考', 'Model reasoning'))
+        if (h3) return h3
+      }
+      const h5 = level(recentUserText(exec), bi('用户意图', 'User intent'))
+      if (h5) return h5
+      // ⑥ 兜底：describeIntent 的结果自带「执行命令 …」前缀，本身已说明是什么操作，
+      // 标签用「操作概要」。它**不含任何意图信息**，故不叫「意图」。
+      return { text: cut(describeIntent(exec, d)), label: bi('操作概要', 'Operation summary') }
     }
 
     function describeIntent(exec, d) {
@@ -3784,8 +3961,10 @@ export default {
           const dec = decomposeCommand(v, SHELL_OF_TOOL[exec.name] || 'bash')
           if (dec.ok && dec.segments.length) first = dec.segments[0].text
         }
-        const f = first.length > 80 ? first.slice(0, 80) + '…' : first
-        return bi('执行命令 ' + f, 'Run command ' + f)
+        // 段文本**不在这里截断**：整条意图链的裁剪统一由 intentFor 的 cut 做（INTENT_MAX_CHARS）。
+        // 这里曾有一道 `> 80` 的内切，是链条上的第二套口径 —— 它与 intentFor 的 120 叠加后，
+        // 实际显示长度取决于「先撞到哪一个」，改上限时必漏一处。
+        return bi('执行命令 ' + first, 'Run command ' + first)
       }
       if (d.kind === 'path' && v) {
         if (d.cat === 'read') return bi('读取文件 ' + v, 'Read file ' + v)
@@ -4682,7 +4861,33 @@ export default {
         }
         const id = 'p' + Math.random().toString(36).slice(2, 10)
         const argsJson = safeJson(exec.arguments)
-        const taskText = argDescription(exec.arguments) || recentUserText(exec)
+        // 意图：六级取值链的唯一出口（见 intentFor）。intent 与 intentLabel 成对产出 ——
+        // 标签必须与**实际命中那一级**同源，否则会「内容取自 ③、牌子写 ⑤」。
+        //
+        // 取值失败**绝不能**把审批带停：这里是 askUser 的 Promise executor 之内，抛出去会让
+        // 这个 Promise 变成 rejected —— 弹窗根本不会出现，而调用方 await 到异常后只能走
+        // pre-execute 的 catch 分支，那是一条**未确认的放行**。即「意图取不到」这种与安全
+        // 判定无关的显示层故障，会升级成一次静默放行（fail-open）。
+        // 故在**唯一调用点**兜底，降级为 ⑥「操作概要」：弹窗照常弹、用户照常批准/拒绝，
+        // 只是意图退回机械摘要（它本来就只描述「是什么操作」，不含任何意图信息）。
+        //
+        // 只包这一处、不给六级链内部各取值函数逐个包：本函数全仓只有这一个调用点，这里就是
+        // 唯一咽喉；逐级包一层则是把同一份兜底抄六遍，日后新增一级必漏。
+        let intentInfo
+        try {
+          intentInfo = intentFor(exec, d)
+        } catch (e) {
+          // 兜底自身也必须安全：⑥ 要过 decomposeCommand，与链上其它取值同属「可能出问题的那一半」，
+          // 故再包一层。连它都失败时**不带意图**（entry.intent = null，不是空串）——
+          // 客户端对 falsy intent 整块不渲染、标签回落 T('app.intent')（client.js），
+          // 弹窗仍照常出现。任何情况下都不得因为「意图取不到」而放行。
+          let text = null
+          try { text = describeIntent(exec, d) } catch (e2) {}
+          intentInfo = { text, label: bi('操作概要', 'Operation summary') }
+          try {
+            console.error('[permgate] 意图取值失败，已降级为「操作概要」：', e)
+          } catch (e3) {}
+        }
         const entry = {
           id,
           tool: exec.name,
@@ -4704,7 +4909,10 @@ export default {
           //
           // 不进 /permgate/pending 的下发白名单（见那里的投影）：它只服务宿主内部的候选生成。
           segments: Array.isArray(d.segments) ? d.segments : [],
-          intent: taskText || describeIntent(exec, d),
+          intent: intentInfo.text,
+          // 意图标签：与 intent 同级、成对下发。客户端只负责显示，**不做任何推导** ——
+          // 「这一级是谁说的」是判定侧的语义，客户端拿不到取值来源，推导必错。
+          intentLabel: intentInfo.label,
           ts: Date.now(),
           candidates: [],
           argLines: humanArgsPreview(exec.name, exec.arguments, exec, d),
@@ -5988,7 +6196,7 @@ export default {
             // 标签（缺失则永远回落通用扳手图标 + 裸工具名），倒计时条要按 deadline 倒数、
             // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位。
             // 白名单式投影漏字段不会报错，只会让客户端静默退化，故新增 entry 字段时必须同步此处。
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null, blast: e.blast || null })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, intentLabel: e.intentLabel ? L(e.intentLabel, lang) : null, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null, blast: e.blast || null })
           }
           return json(res, out)
         }

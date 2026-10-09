@@ -8222,6 +8222,251 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
 }
 
 // ─────────────────────────────────────────────────────────────
+group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、标签随级切换')
+{
+  // 计划：.plan/intent-source-plan.md（该目录被 .gitignore，故断言自带全部依据）
+  //
+  // 背景（两个实测缺陷）：
+  //   ① write/read/edit 这类工具**没有** description 参数（只有 pwsh/bash/subagent/workflow 有），
+  //      故旧链 `description || recentUserText` 对文件类工具必然掉到第二级。
+  //   ② 旧的 recentUserText 用**黑名单**挡注入消息（只挡 tool/plugin），而 MessageSourceMap
+  //      是 merge-extensible 联合、注释写死「user messages carry any producer's kind」
+  //      （dsh-llm/lib/types/message.d.ts:95-99）—— user 角色是公共车道。
+  //      实测：dsh-tool-skill 的 skill 目录带 kind:'skill-catalog'，整段 <system-reminder>
+  //      灌进了意图框。黑名单补不完，必须翻白名单。
+
+  // ★ 61 白名单过滤：不得回退成黑名单
+  // 判据：recentUserText 里必须有 `src.kind !== 'user'` 的正向判据。
+  // 反向钉住旧写法（`src.kind === 'tool' || src.kind === 'plugin'`）不得复活。
+  ok('★ 61 recentUserText 用白名单（kind !== \'user\' 即跳过），黑名单写法不得复活',
+    /function recentUserText\(exec\) \{[\s\S]*?src\.kind !== 'user'[\s\S]*?\n    \}/.test(src)
+    && !/src\.kind === 'tool' \|\| src\.kind === 'plugin'/.test(src))
+
+  // ★ 62 六级链的顺序与标签（逐级配对断言）
+  // 顺序错 = 语义错（例如把「用户意图」排到「模型意图」前面，就又回到「用户的话代表本次操作」）。
+  // 用**函数体切片**而不是固定字符窗口：窗口宽度脆，加一段注释就会假红（本仓踩过）。
+  const intentFn = (src.match(/function intentFor\(exec, d\) \{[\s\S]*?\n    \}/) || [''])[0]
+  ok('★ 62 intentFor 存在且可提取', intentFn.length > 0)
+  const order = [
+    ['argJustification', '提权意图', 'Escalation intent'],
+    ['argDescription', '执行意图', 'Execution intent'],
+    ['assistantTextOf', '模型意图', 'Model intent'],
+    ['reasoningTail(assistantReasoningOf', '模型思考', 'Model reasoning'],
+    ['recentUserText', '用户意图', 'User intent'],
+  ]
+  ok('★ 62 六级取值顺序正确（justification → description → 模型说的话 → 思考 → 用户的话 → 机械标签）',
+    (function () {
+      let last = -1
+      for (const [fn] of order) {
+        const at = intentFn.indexOf(fn)
+        if (at < 0 || at <= last) return false
+        last = at
+      }
+      // 机械标签必须是**最后**的 return（兜底），且在各级之后
+      const fb = intentFn.indexOf('Operation summary')
+      return fb > last
+    })())
+  ok('★ 62 每一级都带自己的标签（中英成对，不得只写中文或只写英文）',
+    order.every(([, zh, en]) => intentFn.includes("'" + zh + "'") && intentFn.includes("'" + en + "'")))
+
+  // ★ 63 ③④ 同源：都按 exec.callId 定位，且**不得**「往回找最近一条」
+  // 往回找是按**时间接近**定位，会取到说给别的调用的话 —— 计划里明确判为引入缺陷。
+  const asstFn = (src.match(/function assistantMessageForCall\(exec\) \{[\s\S]*?\n    \}/) || [''])[0]
+  ok('★ 63 ③④ 按 callId 精确对应（tool-call 块的 id === exec.callId）',
+    /b\.type === 'tool-call' && b\.id === callId/.test(asstFn)
+    && /const callId = exec && exec\.callId/.test(asstFn))
+  ok('★ 63 不得有「取不到就往前找最近一条 assistant」的放宽逻辑',
+    // 按**定义**判，不按出现判：本仓已有教训（见 3b 组「旧实现已删除且未复活」那条）——
+    // 注释里会提到被否决的方案（index.js 里就写着「不找」「明确不做」），
+    // 拿关键词扫全文会命中注释本身，得到假红。
+    // 真正的判据：定位函数只有**一个**倒序循环、命中即 return、循环外 return null
+    // （即「找不到就是找不到」，不存在第二遍更宽松的扫描）。
+    (function () {
+      const loops = (asstFn.match(/for \(let i = msgs\.length - 1; i >= 0; i--\)/g) || []).length
+      const hits = (asstFn.match(/return m\b/g) || []).length
+      // 只有一个倒序循环、命中即返回、且循环之后是 return null（不是再扫一遍）
+      return loops === 1 && hits === 1 && /return null/.test(asstFn)
+    })()
+    // 且不得存在第二个「取最近 assistant 文本」的函数
+    && !/function\s+(recent|last|nearest)Assistant/i.test(src))
+
+  // ★ 64 ④ 思考末尾的按行收敛：切点落在行中时丢掉那半行
+  const tailFn = (src.match(/function reasoningTail\(s\) \{[\s\S]*?\n    \}/) || [''])[0]
+  ok('★ 64 reasoningTail 存在且按行收敛（nl > 0 才丢首行）',
+    tailFn.length > 0 && /search\(\/\[\\r\\n\]\/\)/.test(tailFn) && /if \(nl > 0\)/.test(tailFn))
+  ok('★ 64 reasoningTail 处理代理对（切点落在字符中间时回退一格）',
+    /0xdc00/.test(tailFn) && /0xdfff/.test(tailFn))
+  ok('★ 64 reasoningTail 收敛为单行（多行会把卡片撑高）',
+    /replace\(\/\[\\r\\n\]\+\/g, ' '\)/.test(tailFn))
+
+  // ★ 65 裁剪收在一处：INTENT_MAX_CHARS=120，且 describeIntent 内不得再有第二套口径
+  ok('★ 65 INTENT_MAX_CHARS = 120',
+    /const INTENT_MAX_CHARS = 120\b/.test(src))
+  ok('★ 65 intentFor 是唯一的裁剪点（对 bi 的两侧各自裁）',
+    /const cutOne = \(s\) => \{[\s\S]{0,300}?INTENT_MAX_CHARS/.test(intentFn)
+    && /bi\(cutOne\(o\.zh\), cutOne\(o\.en\)\)/.test(intentFn))
+  ok('★ 65 describeIntent 内不再自带 80 字截断（口径分叉会漏改）',
+    !/const f = first\.length > 80/.test(src))
+
+  // ★ 66 intent 与 intentLabel 必须成对下发（漏了 intentLabel 客户端会静默退回旧标签）
+  ok('★ 66 askUser 里 intent / intentLabel 成对写入 entry',
+    /intent: intentInfo\.text,/.test(src) && /intentLabel: intentInfo\.label,/.test(src))
+  ok('★ 66 /permgate/pending 白名单投影含 intentLabel（漏字段不报错，只会静默退化）',
+    /out\.push\(\{ id: e\.id, tool: e\.tool, reason, ts: e\.ts, args: argsPreview, intent, intentLabel:/.test(src))
+
+  // ★ 67 客户端只显示、不推导：intentLabel 缺失时回落旧标签
+  ok('★ 67 客户端用 p.intentLabel || T(\'app.intent\') 回落，不做任何推导',
+    /p\.intentLabel \|\| T\('app\.intent'\)/.test(cli))
+
+  // ★ 68 entry.intent 必须是 bi 对象（由投影层 L() 按语言取）
+  // 曾经把 describeIntent 的 bi 直接 String() ⇒ entry.intent 变成 "[object Object]"。
+  ok('★ 68 intentFor 的 text 保持 bi 契约（字符串要包成 bi(s, s)）',
+    /const asBi = \(v\) => \{[\s\S]{0,200}?return bi\(v, v\)/.test(intentFn))
+
+  // ★ 69 逐级惰性求值：命中即返回，不得先把五级全算一遍
+  // ③④⑤ 都要调 session.deriveMessages()（⑤ 还要倒序扫全表），在审批入口路径上白付三遍。
+  // 判据：intentFor 体内**没有**「先构造数组再遍历」的写法，且 assistantMessageForCall 只调一次。
+  ok('★ 69 六级逐级惰性求值（命中即返回，不预先算全部来源）',
+    (intentFn.match(/assistantMessageForCall\(exec\)/g) || []).length === 1
+    && !/const tries = \[/.test(intentFn))
+
+  // ── 运行时复算：把 intentFor 从源码里摘出来**真跑一遍** ──────────────────
+  //
+  // 上面那些是**静态**断言（正则扫源码），只能保证「写法在」。行为对不对必须真求值 ——
+  // 例如「③ 与 ④ 都有时 ③ 优先」「找不到 callId 时不往回找」是**语义**，正则看不出来。
+  // 手法与 tierChainOf 同源：new Function 注入依赖后取出函数实例。
+  const grabFn = (name) => (src.match(new RegExp('(?:^|\\n)    function ' + name + '\\([\\s\\S]*?\\n    \\}\\n', 'm')) || [''])[0]
+  const intentDeps = ['textOfBlock', 'reasoningOfBlock', 'reasoningTail', 'assistantMessageForCall',
+    'assistantTextOf', 'assistantReasoningOf', 'recentUserText',
+    'argDescription', 'argJustification', 'intentFor', 'describeIntent']
+  const intentSrc = intentDeps.map(grabFn).join('')
+  const intentOf = (function () {
+    if (intentDeps.some((n) => !grabFn(n))) return null
+    try {
+      return new Function(
+        'const INTENT_MAX_CHARS = 120\nconst REASONING_TAIL_CHARS = 100\n' +
+        'const bi = (zh, en) => ({ zh, en })\nconst agentRef = null\n' +
+        'const decomposeCommand = () => ({ ok: false, segments: [] })\nconst SHELL_OF_TOOL = {}\n' +
+        intentSrc + '\nreturn intentFor;')()
+    } catch (e) { return null }
+  })()
+  ok('★ 70 intentFor 可从源码摘出并求值（依赖被改名/删除时此处变红，不静默跳过）',
+    typeof intentOf === 'function')
+  if (typeof intentOf === 'function') {
+    const mkExec = (o) => ({
+      name: (o && o.name) || 'write', callId: (o && o.callId) || 'c1',
+      arguments: (o && o.arguments) || {},
+      agent: { session: { deriveMessages: () => (o && o.msgs) || [] } },
+    })
+    const ZH = (r) => r.text.zh
+    const LBL = (r) => r.label.zh
+    const D = { kind: 'path', cat: 'edit', value: 'X:/a.txt' }
+
+    // 六级顺序：逐级把前一级的输入清空，确认落到下一级
+    ok('★ 70 ① justification 命中时取它，标签「提权意图」',
+      ZH(intentOf(mkExec({ arguments: { justification: 'J', description: 'D' } }), D)) === 'J'
+      && LBL(intentOf(mkExec({ arguments: { justification: 'J' } }), D)) === '提权意图')
+    ok('★ 70 ② description 命中时取它，标签「执行意图」',
+      ZH(intentOf(mkExec({ arguments: { description: 'D' } }), D)) === 'D'
+      && LBL(intentOf(mkExec({ arguments: { description: 'D' } }), D)) === '执行意图')
+    const msg3 = [{ role: 'assistant', content: [{ type: 'text', text: 'T' }, { type: 'tool-call', id: 'c1' }] }]
+    ok('★ 70 ③ 模型说的话按 callId 命中，标签「模型意图」',
+      ZH(intentOf(mkExec({ msgs: msg3 }), D)) === 'T'
+      && LBL(intentOf(mkExec({ msgs: msg3 }), D)) === '模型意图')
+    const msg4 = [{ role: 'assistant', content: [{ type: 'reasoning', text: 'R' }, { type: 'tool-call', id: 'c1' }] }]
+    ok('★ 70 ④ 同一条消息的 reasoning 兜底，标签「模型思考」',
+      ZH(intentOf(mkExec({ msgs: msg4 }), D)) === 'R'
+      && LBL(intentOf(mkExec({ msgs: msg4 }), D)) === '模型思考')
+    const msg5 = [{ role: 'user', content: [{ type: 'text', text: 'U' }], source: { kind: 'user' } }]
+    ok('★ 70 ⑤ 真人输入，标签「用户意图」',
+      ZH(intentOf(mkExec({ msgs: msg5 }), D)) === 'U'
+      && LBL(intentOf(mkExec({ msgs: msg5 }), D)) === '用户意图')
+    ok('★ 70 ⑥ 兜底是 describeIntent，标签「操作概要」，且中英都是 bi（不是 [object Object]）',
+      (function () {
+        const r = intentOf(mkExec({}), D)
+        return r.text.zh === '写入/修改文件 X:/a.txt' && r.text.en === 'Write/modify file X:/a.txt'
+          && LBL(r) === '操作概要'
+      })())
+
+    // ③④ 同源且 ③ 优先
+    const both = [{ role: 'assistant', content: [{ type: 'text', text: 'T' }, { type: 'reasoning', text: 'R' }, { type: 'tool-call', id: 'c1' }] }]
+    ok('★ 70 ③④ 都有时 ③ 优先（模型选择对用户说的话，优先于内部思考）',
+      ZH(intentOf(mkExec({ msgs: both }), D)) === 'T')
+
+    // callId 精确对应：一轮内多条 assistant 消息时不得张冠李戴
+    const twoMsgs = [
+      { role: 'assistant', content: [{ type: 'text', text: '别人的话' }, { type: 'tool-call', id: 'OTHER' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '我的话' }, { type: 'tool-call', id: 'c1' }] },
+    ]
+    ok('★ 70 callId 精确对应：一轮内多条 assistant 消息时取本次调用的那条',
+      ZH(intentOf(mkExec({ msgs: twoMsgs }), D)) === '我的话')
+    const noMatch = [{ role: 'assistant', content: [{ type: 'text', text: '别人的话' }, { type: 'tool-call', id: 'NOPE' }] }]
+    ok('★ 70 callId 找不到时**不往回找**（落到 ⑥，不取别条消息的文本）',
+      ZH(intentOf(mkExec({ msgs: noMatch }), D)) === '写入/修改文件 X:/a.txt')
+
+    // 白名单过滤：注入消息不得进意图框（这是本次修复的**主症状**）
+    const injected = [
+      { role: 'user', content: [{ type: 'text', text: '真人输入' }], source: { kind: 'user' } },
+      { role: 'user', content: [{ type: 'text', text: '<system-reminder>skill 目录</system-reminder>' }], source: { kind: 'skill-catalog', form: 'catalog' } },
+      { role: 'user', content: [{ type: 'text', text: 'goal 注入' }], source: { kind: 'goal' } },
+      { role: 'user', content: [{ type: 'text', text: '无 source 的注入' }] },
+    ]
+    ok('★ 70 注入消息被跳过，取到真人输入（主症状：skill 目录曾灌进意图框）',
+      ZH(intentOf(mkExec({ msgs: injected }), D)) === '真人输入')
+    ok('★ 70 只有注入消息时落到 ⑥，绝不显示注入原文',
+      (function () {
+        const only = [{ role: 'user', content: [{ type: 'text', text: '<system-reminder>skill</system-reminder>' }], source: { kind: 'skill-catalog' } }]
+        const t = ZH(intentOf(mkExec({ msgs: only }), D))
+        return t === '写入/修改文件 X:/a.txt' && !t.includes('system-reminder')
+      })())
+
+    // 截断：中英各自 120（+省略号）
+    ok('★ 70 裁剪 120：中英各自独立裁（前缀长度不同，同数值分别切）',
+      (function () {
+        const r = intentOf(mkExec({ arguments: { description: 'x'.repeat(300) } }), {})
+        return r.text.zh.length === 121 && r.text.en.length === 121 && r.text.zh.endsWith('…')
+      })())
+    ok('★ 70 命令类兜底同样受 120 约束（描述无上限那个洞已堵）',
+      (function () {
+        const r = intentOf(mkExec({}), { kind: 'command', cat: 'command', value: 'y'.repeat(300) })
+        return r.text.zh.length <= 121 && r.text.en.length <= 121
+      })())
+
+    // 非 text 块不得混入（tool-call 的 arguments 是 JSON 串，不是给人看的话）
+    ok('★ 70 tool-call 块不被当成 text（arguments 里的 text 字段不得泄漏）',
+      (function () {
+        const m = [{ role: 'assistant', content: [{ type: 'tool-call', id: 'c1', arguments: '{"text":"不该出现"}' }] }]
+        return ZH(intentOf(mkExec({ msgs: m }), D)) === '写入/修改文件 X:/a.txt'
+      })())
+    ok('★ 70 图片等非 text 块不混进意图，只取 text 块',
+      (function () {
+        const m = [{ role: 'user', content: [{ type: 'image', attachment: {} }, { type: 'text', text: '看图' }], source: { kind: 'user' } }]
+        return ZH(intentOf(mkExec({ msgs: m }), D)) === '看图'
+      })())
+
+    // ④ 的按行收敛（真求值，不是扫源码）
+    const rt = (function () {
+      try {
+        return new Function('const REASONING_TAIL_CHARS = 100\n' + grabFn('reasoningTail') + '\nreturn reasoningTail;')()
+      } catch (e) { return null }
+    })()
+    ok('★ 70 reasoningTail 可求值', typeof rt === 'function')
+    if (typeof rt === 'function') {
+      ok('★ 70 reasoningTail：无换行时硬截 100 字符', rt('a'.repeat(250)).length === 100)
+      ok('★ 70 reasoningTail：有换行时丢掉被切断的首行（首行是完整的）',
+        (function () {
+          const lines = Array.from({ length: 40 }, (_, i) => '第' + i + '行x').join('\n')
+          return /^第\d+行x$/.test(rt(lines).split(' ')[0])
+        })())
+      ok('★ 70 reasoningTail：CRLF / LF / CR 三态都收敛为单行',
+        rt('a\r\nb\r\nc') === 'a b c' && rt('a\nb') === 'a b' && rt('a\rb') === 'a b')
+      ok('★ 70 reasoningTail：空串与 null 返回空串（不得抛异常）',
+        rt('') === '' && rt(null) === '')
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 if (fail.length) {
   console.log('\nFAIL (' + fail.length + ')：')
   for (const f of fail) console.log('  ✗ ' + f)

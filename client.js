@@ -2624,7 +2624,7 @@ window.__ModuleLoader__.load({
 					blastBanner(p.blast),
 					p.reason ? React.createElement('div', { className: 'pg-modal-body' }, p.reason) : null,
 					p.intent ? React.createElement('div', { className: 'pg-intent' },
-						React.createElement('span', { className: 'pg-intent-tag' }, T('app.intent')),
+						React.createElement('span', { className: 'pg-intent-tag' }, p.intentLabel || T('app.intent')),
 						React.createElement('span', null, p.intent),
 					) : null,
 					(p.args || (p.argLines && p.argLines.length)) ? (p.hasDiff
