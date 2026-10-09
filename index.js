@@ -4011,6 +4011,22 @@ export default {
       try {
         if (!args || typeof args !== 'object') return lines
         const fp = pathArg(args)
+        // 意图框是否已被 ① 级 justification 独占 —— 决定 description 要不要在参数框补位。
+        //
+        // 判据直接调 `argJustification`（① 级的**唯一**取值函数，intentFor 也调它），
+        // 不另写一份「args.justification 非空」：那是同一条链的第二份口径，日后 ① 级
+        // 改名、加白名单或改裁剪时，两处必然漂移，而漂移的后果正是下面要防的那个洞。
+        // `argJustification` 自身已做 trim + 非空判定，`!!` 与 intentFor 里
+        // `level(...)` 的命中判据等价（cut 对非空串恒非空）。
+        const escOwnsIntent = !!argJustification(args)
+        // 补位值。与 `escOwnsIntent` **同构**：也走该级的唯一取值函数 `argDescription`
+        // （② 级，intentFor 调的是同一个），不写裸判据。
+        //
+        // ⚠️ 曾写 `typeof args.description === 'string' && args.description`：那是**裸真值判断、
+        // 不 trim**，于是纯空白的 description（'   '）能通过守卫，而下面的 push 只挡空串
+        // （`if (!s) return`）不挡空白 —— 参数框会多出一条视觉上全空的「说明：」行。
+        // 两个半边一个 trim 一个不 trim，正是本条要消除的口径分叉。
+        const descFallback = escOwnsIntent ? argDescription(args) : ''
         if (isUndoNow(name, args, exec)) {
           push(t('撤销', 'Undo'), fp ? baseName(fp) : '', fp ? { path: fp } : undefined)
           if (fp) push(t('路径', 'Path'), fp, { path: fp })
@@ -4084,13 +4100,55 @@ export default {
             const nt = segs && segs.length === 1 ? noteOf(segs[0]) : ''
             push(t('命令', 'Command'), args.command || '', nt ? { note: nt } : undefined)
           }
-          if (typeof args.description === 'string' && args.description) push(t('说明', 'Description'), args.description)
+          // ⚠️ `args.description` 平时**刻意不在这里显示**。
+          //
+          // 它的 schema 定位就是「给人看的一句话」，不是执行参数 ——
+          // dsh-tool-pwsh 的 schema 原文：「Clear, concise description of what this
+          // command does in active voice, 5-10 words **(shown in the UI)**」。
+          // 而本插件已把它作为意图链的第 ② 级消费（argDescription → intentFor），
+          // 弹窗顶部那个意图框显示的就是它。此处再 push 一行「说明」，就是
+          // **同一个值被两条独立路径各渲染一次**（实测：命令弹窗上意图框与参数框
+          // 逐字重复同一句 "Inspect raw bytes for BOM and line endings"）。
+          //
+          // 删这一行而不是删意图链的 ② 级：意图框才是它该待的地方（它答的是
+          // 「这条命令要干什么」，正是意图框的问题）；参数框该放的是 command /
+          // timeoutMs / workdir 这类**真正参与执行**的值。
+          // 段文本（上面的「段 N」行）已经把命令全文摊开了，再补一行说明等于
+          // 同一条信息在卡片上出现第三次。
+          //
+          // ⚠️ 但「意图框独占它」有**一个例外**：① 级 justification 命中时，
+          // 意图框装的是提权理由（且标签是「提权意图」），② 级根本没被求值
+          // —— `intentFor` 是 `level(①) || level(②)` 的短路求值。
+          // 而宿主 pwsh/bash 的 schema 里 `description` 是 **required: true**、
+          // `justification` 是「Required with sandbox_permissions」：**提权调用
+          // 必然同时带两者**。此时若仍不显示，description 在弹窗上就**一处都没有**
+          // —— 参数框只有「命令」行，且客户端在 argLines 非空时不回落 argsJson
+          // （client.js 的 argsBox：`p.argLines.length ? map(...) : p.args`）。
+          // 那等于在**风险最高的那类审批**（提权）上，比普通命令少显示一条信息：
+          // 意图框只剩「为什么提权」，而「这条命令要干什么」的自述消失了。
+          // 故这里按 `escOwnsIntent` 补位 —— 补的**只在这一种情况下**发生，
+          // 普通调用的去重效果原样保留。值走 `descFallback`（见其定义处：与守卫同源、
+          // 已 trim，空白串不会产出空行）。
+          if (descFallback) push(t('说明', 'Description'), descFallback)
         } else if (name === 'web_search' || name === 'web_fetch') {
           if (typeof args.query === 'string') push(t('查询', 'Query'), args.query)
           if (typeof args.url === 'string') push('URL', args.url)
         } else {
           if (fp) push(t('路径', 'Path'), fp)
-          if (typeof args.description === 'string' && args.description) push(t('说明', 'Description'), args.description)
+          // 同上的理由：subagent / workflow 的 description 也写着 "for display"
+          // （dsh-tool-subagent schema：「A short (3-5 word) description of the
+          // delegated task, for display.」），同样由意图链 ② 级消费。
+          // 这里一并删掉 —— 否则同一个重复会在 subagent / workflow 弹窗上复现，
+          // 只是那些弹窗不常开、不易撞见。
+          //
+          // ⚠️ 补位条件与命令分支**同一口径**（同一个 `escOwnsIntent`）：
+          // subagent/workflow 自身没有 justification 参数，但这一分支还会接住
+          // **外装 MCP 工具**（mcp__* 走兜底），它们的参数表由外部服务器定义、
+          // 可以同时带 justification 与 description。此时 ① 级独占意图框、
+          // ② 级未被求值，description 同样会一处都不显示。
+          // 判据共用同一个变量而不是各写各的，是为了让「意图框装了什么」与
+          // 「参数框补了什么」永远由**同一个**条件决定。
+          if (descFallback) push(t('说明', 'Description'), descFallback)
         }
       } catch (e) {}
       return lines

@@ -2553,6 +2553,98 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   ok('★ 段级信息随判定下发（segments + code）',
     src.includes('segments: a.segments,') && src.includes('code: a.code,')
     && src.includes('argLines: humanArgsPreview(exec.name, exec.arguments, exec, d),'))
+
+  // ★ 73 description 不得在参数预览里重复出现（意图链 ② 级已消费它）
+  //
+  // `description` 的 schema 定位是「给人看的一句话」而非执行参数
+  // （dsh-tool-pwsh：「... 5-10 words **(shown in the UI)**」；
+  //   dsh-tool-subagent：「A short (3-5 word) description ... **for display**」）。
+  // 本插件把它作为意图链第 ② 级消费（argDescription → intentFor），
+  // 弹窗顶部的意图框显示的就是它。humanArgsPreview 若再 push 一行「说明」，
+  // 同一个值会被两条独立路径各渲染一次 —— 实测命令弹窗上意图框与参数框
+  // 逐字重复同一句 "Inspect raw bytes for BOM and line endings"。
+  //
+  // ⚠️ 判据是「**无条件**输出才算重复」，不是「出现即违规」：
+  // ① 级 justification 命中时意图框装的是提权理由（标签「提权意图」），
+  // ② 级**根本没被求值**（intentFor 是 `level(①) || level(②)` 短路），
+  // 而宿主 pwsh/bash 的 description 是 required、justification 是
+  // 「Required with sandbox_permissions」⇒ **提权调用必然同时带两者**。
+  // 那时若不补位，description 在弹窗上一处都不显示（客户端在 argLines 非空时
+  // 不回落 argsJson），等于在风险最高的审批上比普通命令少显示一条信息。
+  // 故合法形态**只有**「被 descFallback 守卫的补位」这一种。
+  //
+  // 判据写成**计数配平**而不是扫字面量：给每一处 push 都要求有一个守卫，
+  // 数量不等即变红 —— 加回一处无条件 push 会被抓住，补位本身则不被误伤。
+  // 不用 `!/push\(t\('说明'.../` 那种「出现即违规」：它会把上面那种补位判成假红
+  // （实测：加补位后原断言当场失败，而补位是对的）。
+  // 也不扫关键词判：注释里会解释为什么删（本文件里就有），扫关键词命中注释得假红。
+  ok('★ 73 humanArgsPreview 的「说明」行只能出现在 descFallback 守卫之内（无条件的即重复）', (function () {
+    const pushes = (src.match(/push\(t\('说明', 'Description'\), descFallback\)/g) || []).length
+    const guards = (src.match(/if \(descFallback\) push\(t\('说明', 'Description'\), descFallback\)/g) || []).length
+    // 守卫必须存在（否则「一处都不显示」回归 —— 那正是本条要防的洞），
+    // 且数量与 push 配平（多出来的 push 就是无条件的重复）。
+    return guards > 0 && pushes === guards
+  })())
+  // 反向：意图链仍必须消费 description（删了重复不等于把功能删掉）
+  ok('★ 73 意图链 ② 级仍消费 description（删的是重复显示，不是功能）',
+    /level\(argDescription\(args\), bi\('执行意图', 'Execution intent'\)\)/.test(src))
+  // 守卫条件必须来自 ① 级的**唯一**取值函数，不得另写一份「args.justification 非空」：
+  // 那是同一条链的第二份口径，日后 ① 级改名/加白名单/改裁剪时两处必然漂移，
+  // 而漂移的后果正是上面那个洞（意图框被 ① 独占、参数框却不补位）。
+  ok('★ 73 补位守卫与 ① 级同源（调 argJustification，不另写一份判据）',
+    /const escOwnsIntent = !!argJustification\(args\)/.test(src))
+  // ★ 补位值必须与守卫**同构**：也走该级的唯一取值函数（argDescription，② 级），
+  // 不写裸判据。裸判据 `typeof args.description === 'string' && args.description`
+  // **不 trim**，纯空白（'   '）能通过；而 push 只挡空串不挡空白 ⇒
+  // 参数框多出一条视觉上全空的「说明：」行（实测：探针当场失败）。
+  // 两个半边一个 trim 一个不 trim，正是本条要消除的口径分叉。
+  ok('★ 73 补位值与守卫同源且已 trim（空白 description 不得产出空行）',
+    // 反向判据按**代码**判，不按出现判：上面那段注释里就引用了被否定的裸判据原文
+    // （为了说明它错在哪），扫全文会命中注释本身得到假红 —— 本仓已有此教训。
+    // 真判据：裸判据只可能出现在 push 的实参位置，故查「push 那一行里有没有它」。
+    /const descFallback = escOwnsIntent \? argDescription\(args\) : ''/.test(src)
+    && !/push\(t\('说明', 'Description'\), typeof args\.description/.test(src)
+    && !/if \(escOwnsIntent && typeof args\.description/.test(src))
+  // ── 运行时复算：把 humanArgsPreview 摘出来真跑（上面都是静态扫源码）──
+  // 补位的**行为**（哪种调用补、哪种不补、空白串补不补）正则看不出来，必须求值。
+  const hap = (function () {
+    const g = (n) => (src.match(new RegExp('(?:^|\\n)    function ' + n + '\\([\\s\\S]*?\\n    \\}\\n', 'm')) || [''])[0]
+    const need = ['argJustification', 'argDescription', 'humanArgsPreview']
+    if (need.some((n) => !g(n))) return null
+    try {
+      return new Function(
+        "const uiLang = 'zh'\nconst bi = (zh, en) => ({ zh, en })\n" +
+        "const L = (o, lang) => (typeof o === 'string' ? o : ((o && (o[lang] || o.zh)) || ''))\n" +
+        'const COMMAND_TOOLS = { pwsh: 1, bash: 1 }\nconst SHELL_OF_TOOL = {}\n' +
+        "const pathArg = (a) => (a && (a.file_path || a.path)) || ''\n" +
+        'const isUndoNow = () => false\nconst isFileRead = () => false\nconst isFileImage = () => false\n' +
+        'const isFileWrite = () => false\nconst isFileInsert = () => false\nconst sreCommand = () => \'\'\n' +
+        "const codeLabel = () => ''\nconst tierLabel = () => ''\n" +
+        need.map(g).join('') + '\nreturn humanArgsPreview;')()
+    } catch (e) { return null }
+  })()
+  ok('★ 74 humanArgsPreview 可从源码摘出并求值（依赖被改名时变红，不静默跳过）',
+    typeof hap === 'function')
+  if (typeof hap === 'function') {
+    const LBL = (r) => r.map((l) => l.label).join(',')
+    // 普通调用：description 由意图框显示，参数框不得重复
+    ok('★ 74 普通命令调用不补位（description 由意图框独占，无重复）',
+      LBL(hap('pwsh', { command: 'ls', description: '列目录' }, {}, { segments: [] })) === '命令')
+    // 提权调用：① 级独占意图框 ⇒ ② 级未被求值 ⇒ 必须补位，否则一处都不显示
+    ok('★ 74 提权调用补位（① 独占意图框时 description 否则一处都不显示）',
+      LBL(hap('pwsh', { command: 'rm -rf X:/o', description: '清理产物', justification: '写工作区外' }, {}, { segments: [] })) === '命令,说明')
+    // 空白/空串不得产出空行（裸判据不 trim 的那个洞）
+    ok('★ 74 提权但 description 为空串或纯空白 ⇒ 不补空行',
+      LBL(hap('pwsh', { command: 'x', description: '', justification: 'r' }, {}, { segments: [] })) === '命令'
+      && LBL(hap('pwsh', { command: 'x', description: '   ', justification: 'r' }, {}, { segments: [] })) === '命令')
+    // justification 空白不算提权 —— 与 intentFor 的命中判据同源（argJustification 内部 trim）
+    ok('★ 74 justification 为纯空白 ⇒ 不算提权、不补位（与 intentFor 判据一致）',
+      LBL(hap('pwsh', { command: 'ls', description: '列目录', justification: '   ' }, {}, { segments: [] })) === '命令')
+    // 兜底分支（外装 MCP 工具）同口径
+    ok('★ 74 兜底分支同口径：带 justification 补位、不带则不补',
+      LBL(hap('mcp__x__y', { path: 'X:/a', description: '读配置', justification: '理由' }, {}, null)) === '路径,说明'
+      && LBL(hap('mcp__x__y', { path: 'X:/a', description: '读配置' }, {}, null)) === '路径')
+  }
   // ★ 设置页有子设置控件（D-12）
   // 断言「排在例外之后」：界面顺序必须与判定链顺序一致（例外 → 子设置 → 分类默认值）。
   // 反例：把 commandSubRow() 挪回例外列表之前 —— 用户自上而下读到的次序就与实际生效次序相反
