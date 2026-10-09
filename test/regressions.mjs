@@ -2274,12 +2274,12 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   ok('★ 破坏性名单不含高频日常命令（mv/cp/tee/git push/npm publish）',
     !sp.includes("'mv'") && !sp.includes("'cp'") && !sp.includes("'tee'")
     && !sp.includes("'git push'") && !sp.includes("'npm publish'"))
-  // ★★ wrapper 带值选项表必须兜底，否则 `command -v rm` 这类会让判定链抛异常 → fail-open。
+  // ★★ wrapper 带值选项表必须兜底，否则 `command -v rm` 这类会让判定链抛异常 → 误拒（可用性损失）。
   // 判据：不得直接对表取下标（WRAPPERS 里有几个成员根本没有条目）。
   // 按**去注释后**的代码判：注释里会引用旧写法说明为什么要改（用裸 includes 会误报，实测踩过）。
   // 兜底值必须是 EMPTY_DICT 而不是 `{}`：本仓已确立「查表对象不得继承 Object.prototype」
   // 的纪律（见 shell-parse.js 的 dict()），`|| {}` 会在兜底路径上退回有原型对象。
-  ok('★★ wrapper 带值选项表访问有兜底（无条目不得抛异常 → 否则 pre-execute fail-open）',
+  ok('★★ wrapper 带值选项表访问有兜底（无条目不得抛异常 → 否则判定链崩溃 → 误拒）',
     (function () {
       const code = sp.replace(/\/\/[^\n]*/g, '')
       return !/WRAPPER_VALUE_FLAGS\[name\]\[/.test(code)
@@ -5699,6 +5699,34 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   ok('★ 超时回调先认领再结案（不会双结案）',
     /timer = null\s*\n\s*if \(!entry\.claim\(\)\) return\s*\n\s*\/\/[^\n]*\n\s*entry\.settle\(/.test(ask))
   ok('超时结案带 timedOut 标记（供上层区分「自动」与「人工」）', /timedOut: true/.test(ask))
+
+  // ── 27c. askUser 的意图取值兜底（防显示层故障升级为误拒）─────────────
+  //
+  // 为什么这条必须有：intentFor 位于 askUser 的 Promise executor 之内。若它抛出，
+  // 这个 Promise 直接变成 rejected —— 弹窗根本不出现，而调用方 await 到异常后走
+  // pre-execute 的 catch 分支，那条路径现为 fail-safe（见 index.js
+  // `ctx.on('tools/pre-execute'` 的 catch：返回 deny，不再是 next()）。
+  // 即「意图取不到」这种与安全判定无关的显示层故障，会把本该弹窗的调用变成**误拒**。
+  // 故取值必须包在自己的 try/catch 里：兜底保住弹窗，且兜底路径本身也要安全。
+  ok('★ 71 intentFor 的调用包在 try/catch 内（否则意图故障 → 弹窗不出现 → 误拒）',
+    /try \{\s*\n\s*intentInfo = intentFor\(exec, d\)\s*\n\s*\} catch \(e\) \{/.test(ask))
+  // 反向钉住：不得出现**未包**的裸调用（两者同时存在时上面那条会恒真而失去意义）
+  ok('★ 71 intentFor 在 askUser 内只有一处调用，且必在 try 之内',
+    (ask.match(/intentFor\(exec, d\)/g) || []).length === 1)
+  ok('★ 71 兜底路径自身也包一层（⑥ 要过 decomposeCommand，同属可能出问题的那一半）',
+    /\} catch \(e\) \{[\s\S]{0,900}?try \{ text = describeIntent\(exec, d\) \} catch \(e2\) \{\}/.test(ask))
+  ok('★ 71 兜底标签固定为「操作概要」（降级后牌子必须与内容同源，不得仍写「意图」）',
+    /\} catch \(e\) \{[\s\S]{0,900}?bi\('操作概要', 'Operation summary'\)/.test(ask))
+  // 日志级别：这是**预期内的显示层降级**（弹窗照常工作），不是宿主故障。
+  // 与 approval timed out 同类，故用 warn；error 留给 syncSandbox / route error 那种真故障。
+  ok('★ 71 意图降级用 console.warn（预期内降级），不是 console.error（宿主故障）',
+    /console\.warn\('\[permgate\] 意图取值失败/.test(ask)
+    && !/console\.error\('\[permgate\] 意图取值失败/.test(ask))
+  // 兜底产出必须是 bi（维持 intentFor 的「text 恒为 bi」契约）。
+  // ⚠️ 曾写 `let text = null`：投影层是 L(e.intent, lang)，而 L 对 null 与 '' 都折成 ''，
+  // 故「给 null 而非空串」在本链路里不可观测 —— 那个区分不表达任何东西，别当成手段用。
+  ok('★ 71 兜底产出是空 bi 而非 null（null 与 \'\' 在 L() 下等价，区分不可观测）',
+    /let text = bi\('', ''\)/.test(ask) && !/let text = null/.test(ask))
   ok('★ timedOut 真的有消费方（落审计，而非只写不读）',
     /if \(out\.timedOut\) \{/.test(src) && /'timeout-allow' : 'timeout-deny'/.test(src))
   ok('entry 下发 deadline/onTimeout/note（客户端据此本地倒数）',
@@ -5715,6 +5743,42 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     !/timeoutMs: timeoutMs \|\| null/.test(ask) && !/entry\.timeoutMs = null/.test(ask))
   ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note/blast（白名单漏字段即静默退化）',
     /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \|\| null, blast: e\.blast \|\| null \}\)/.test(src))
+
+  // ── 27d. pre-execute 的异常兜底必须是 fail-safe（★72）────────────
+  //
+  // 这是**安全方向**的断言，比上面那些显示层的更要紧。
+  //
+  // 宿主把 pre-execute 挂成 waterfall，内层兜底回调是 `() => ({ kind: 'allow' })`
+  // （dsh-tools/lib/index.js:3225 `this.ctx.waterfall(carrier, "tools/pre-execute", exec,
+  // () => Promise.resolve({ kind: "allow" }))`）。
+  // 故本插件的 catch 里若 `return next()`，等于「permgate 自己崩了 → 放行」：
+  // 弹窗不出现、用户与 AI 都看不见，与「这个工具本来就不需要审批」在外部完全不可区分。
+  //
+  // 宿主自己那层 try/catch 本是 fail-safe（catch → `{ kind:'final-result', result: toolErrorResult(error) }`，
+  // dsh-tools/lib/index.js:3267），但它在 waterfall **之外** —— 本函数只要调了 next()，
+  // waterfall 就正常返回 allow，根本不会抛到外层，于是 fail-safe 被抢先转成 fail-open。
+  // 故此处必须显式返回 deny。
+  const preExecCatch = (() => {
+    const s = src.indexOf("ctx.on('tools/pre-execute'")
+    if (s < 0) return ''
+    const e = src.indexOf("ctx.on('tools/post-execute'", s)
+    return e > s ? src.slice(s, e) : src.slice(s, s + 30000)
+  })()
+  ok('能切出 pre-execute 处理体', preExecCatch.length > 0)
+  ok('★★ 72 pre-execute 的 catch 返回显式 deny（不得 next()）',
+    /\} catch \(e\) \{[\s\S]{0,1200}?return \{ kind: 'deny', reason:[\s\S]{0,200}?\}\s*\n\s*\}/.test(preExecCatch))
+  // 反向钉住：catch 段内不得出现 next()。用「最后一个 catch 到函数末尾」切片比较，
+  // 避免把 try 内的正常 return next() 误判成兜底。
+  ok('★★ 72 catch 分支内不得调用 next()（next() 是宿主的内层兜底，返回 allow）',
+    (function () {
+      const i = preExecCatch.lastIndexOf('} catch (e) {')
+      if (i < 0) return false
+      const tail = preExecCatch.slice(i)
+      return !/return next\(\)/.test(tail)
+    })())
+  // 拒绝理由必须中英成对（与全文件 reason 口径一致）
+  ok('★ 72 fail-safe 的拒绝理由中英成对',
+    /uiLang === 'en' \? '[^']*' : '[^']*'/.test(preExecCatch.slice(preExecCatch.lastIndexOf('} catch (e) {'))))
 
   // ── 27c. 客户端 factory 真实求值（本组唯一「执行」而非「匹配」的断言）──
   // 起因：PG_CARD_CSS 在模块顶层拼接了声明在其后的 const，命中 TDZ 抛 ReferenceError，

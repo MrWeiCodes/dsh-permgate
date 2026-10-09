@@ -1031,9 +1031,9 @@ group('F. 破坏性命令（落 destructive 子设置）')
   // ★★ F97：wrapper 表缺条目时**不得抛异常**。
   // 曾经 `WRAPPER_VALUE_FLAGS[name][token]` 对 `command`/`builtin`/`exec`/`nohup`/`setsid`
   // 直接取下标（它们在 WRAPPERS 里但没有带值选项）→ TypeError。
-  // 崩溃点在 tools/pre-execute 的判定链上，异常被上层 catch 后走 next() ——
-  // **比漏判更糟：该次调用直接 fail-open**。
-  ok('★★ F97 wrapper 无带值选项表时不抛异常（否则判定链崩溃 → fail-open）', (() => {
+  // 崩溃点在 tools/pre-execute 的判定链上，异常被上层 catch 后返回 deny ——
+  // **该次调用被误拒**（可用性损失）。
+  ok('★★ F97 wrapper 无带值选项表时不抛异常（否则判定链崩溃 → 误拒）', (() => {
     for (const c of ['command -v rm', 'command -V rm', 'builtin echo x', 'exec echo x', 'nohup echo x', 'setsid echo x', 'stdbuf -o0 echo x', 'ionice -c2 echo x']) {
       try { run(c, 'bash', {}) } catch (e) { return false }
     }

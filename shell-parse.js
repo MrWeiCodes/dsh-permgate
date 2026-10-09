@@ -2087,8 +2087,8 @@ function unwrapWordsFrom(current, start) {
       // 表里没有该 wrapper 的条目时不能直接取属性 —— 会抛 TypeError。
       // 这里曾漏掉：`command`/`builtin`/`exec`/`nohup`/`setsid` 没有带值选项，
       // 于是 `WRAPPER_VALUE_FLAGS[name][token]` 对 `undefined` 取下标而崩溃。
-      // 崩溃点在 tools/pre-execute 的判定链上，后果是**该次调用直接 fail-open**
-      // （异常被上层 catch 后走 next()），比漏判更糟。用 EMPTY_DICT 兜住
+      // 崩溃点在 tools/pre-execute 的判定链上，异常被上层 catch 后返回 deny ——
+      // 后果是**该次调用被误拒**（可用性损失）。用 EMPTY_DICT 兜住
       //（不用 `{}` —— 那会退回有原型对象，见 EMPTY_DICT 的说明）。
       const valueFlags = WRAPPER_VALUE_FLAGS[name] || EMPTY_DICT
       if (valueFlags[token]) index += 1

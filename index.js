@@ -4866,8 +4866,8 @@ export default {
         //
         // 取值失败**绝不能**把审批带停：这里是 askUser 的 Promise executor 之内，抛出去会让
         // 这个 Promise 变成 rejected —— 弹窗根本不会出现，而调用方 await 到异常后只能走
-        // pre-execute 的 catch 分支，那是一条**未确认的放行**。即「意图取不到」这种与安全
-        // 判定无关的显示层故障，会升级成一次静默放行（fail-open）。
+        // pre-execute 的 catch 分支，那条路径现为 fail-safe（返回 deny，不再是 next()）。
+        // 即「意图取不到」这种与安全判定无关的显示层故障，会把本该弹窗的调用变成**误拒**。
         // 故在**唯一调用点**兜底，降级为 ⑥「操作概要」：弹窗照常弹、用户照常批准/拒绝，
         // 只是意图退回机械摘要（它本来就只描述「是什么操作」，不含任何意图信息）。
         //
@@ -4878,14 +4878,21 @@ export default {
           intentInfo = intentFor(exec, d)
         } catch (e) {
           // 兜底自身也必须安全：⑥ 要过 decomposeCommand，与链上其它取值同属「可能出问题的那一半」，
-          // 故再包一层。连它都失败时**不带意图**（entry.intent = null，不是空串）——
-          // 客户端对 falsy intent 整块不渲染、标签回落 T('app.intent')（client.js），
+          // 故再包一层。连它都失败时给出**空 bi**（bi('', '')）—— 维持 intentFor 的
+          // 「text 恒为 bi」契约，客户端对 falsy intent 整块不渲染、标签回落 T('app.intent')。
           // 弹窗仍照常出现。任何情况下都不得因为「意图取不到」而放行。
-          let text = null
+          //
+          // ⚠️ 不要以为「给 null 而非空串」能多表达什么：投影层是 `L(e.intent, lang)`，
+          // 而 L 的实现是 `(o && (o[lang] || o.zh)) || ''` —— null 与 '' 都会被折成 ''，
+          // 客户端收到的永远是空串。二者的区别在本链路里**不可观测**。
+          let text = bi('', '')
           try { text = describeIntent(exec, d) } catch (e2) {}
           intentInfo = { text, label: bi('操作概要', 'Operation summary') }
+          // warn 而非 error：这是**预期内的显示层降级**（弹窗照常工作、用户照常决定），
+          // 不是宿主故障。与 approval timed out 同类，故用 warn；
+          // error 留给 syncSandbox / route error 那种真正的故障。
           try {
-            console.error('[permgate] 意图取值失败，已降级为「操作概要」：', e)
+            console.warn('[permgate] 意图取值失败，已降级为「操作概要」：', e)
           } catch (e3) {}
         }
         const entry = {
@@ -6726,10 +6733,18 @@ export default {
         return next()
       } catch (e) {
         console.error('[permgate] pre-execute error:', e)
-        // 抛错 = 未确认放行 → 不计数。这里**不清零**：异常可能来自与本调用无关的宿主故障，
+        // 抛错 = 本次调用被拒绝（见下）→ 不计数。这里**不清零**：异常可能来自与本调用无关的宿主故障，
         // 拿它清掉用户的连续计数会让「提醒」被无关故障吞掉；而计数本身不会因异常前进，
         // 方向安全（最坏是少一次清零，不是放宽权限）。
-        return next()
+        //
+        // ★ 异常必须 fail-safe：这里**不得 next()**。
+        // next() 是宿主 waterfall 的内层兜底回调，它返回 { kind: 'allow' }（放行）——
+        // 于是「permgate 自己崩了」会变成一次**静默放行**：弹窗不出现、用户与 AI 都看不见，
+        // 与「工具本来就不需要审批」在外部完全不可区分（实测：rm -rf build 被直接放行）。
+        // 宿主自己那层 try/catch 本是 fail-safe（catch → final-result 报错），但它在
+        // waterfall **之外** —— 本函数只要调了 next()，就抢先把它转成了 fail-open。
+        // 故此处显式返回 deny：拿不准就拒绝，AI 收到这条理由、用户可重新发起。
+        return { kind: 'deny', reason: uiLang === 'en' ? 'permgate internal error; call denied' : 'permgate 内部错误，已拒绝本次调用' }
       }
     })
 
