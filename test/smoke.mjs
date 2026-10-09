@@ -978,6 +978,52 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   await Promise.race([p8, new Promise((r) => setTimeout(r, 200))])
   try { rmSync(ws8, { recursive: true, force: true }); rmSync(home8, { recursive: true, force: true }) } catch (e) {}
 
+  // (e2) 大小写等价的例外：删掉其中一条时，remaining 必须与读侧 alreadyInProject、写侧
+  // addProjectException 同源（命令分类走 cmdExcKey，因为例外真正生效的 matchCommand 大小写不敏感）。
+  //
+  // 为什么这条语料承重：修复前 remaining 是裸 `r[key] === value`，删 `Get-ChildItem *` 时等价的
+  // `get-childitem *` 被算成「没有剩余」→ 返回 0 → 客户端清掉提示 → 用户以为已彻底清除，
+  // 而那条等价例外**仍在生效**（以为收紧了授权，实际没有）。
+  //
+  // 三条数据的形态都是刻意的，各自钉住一种写错的实现（少任何一条，断言都会退化成恒真）：
+  //   · eLower 与 eUpper **仅大小写不同** —— 裸比较（大小写敏感）会让 remaining 错回 0；
+  //   · eSpaced 只多一个前导空格 —— `matchCommand` 不 trim（实测 `' Get-ChildItem *'` 匹配不上
+  //     `Get-ChildItem x`），故它与另两条**不等价**、不该计入 remaining。它同时把「剩余同值条数」
+  //     （1）与「剩余总条数」（2）分开，钉住 `remaining = kept.length` 与「给 cmdExcKey 加 trim」
+  //     这两种写法 —— 只有两条数据时这两处错法与正确值恰好相同，语料照样全绿。
+  //
+  // 用预置配置文件而不是走 add-exception：写侧判重修复后已不会再产出第二条等价条目，
+  // 而这里要守的恰是**存量配置**里已经并存两条的形态（历史遗留，用户删不掉印象里的那条）。
+  const wsEq = mkdtempSync(join(tmpdir(), 'pg-smoke-wseq-'))
+  const homeEq = mkdtempSync(join(tmpdir(), 'pg-smoke-homeeq-'))
+  mkdirSync(join(homeEq, 'dsh-permgate'), { recursive: true })
+  writeFileSync(join(homeEq, 'dsh-permgate', 'config.json'), JSON.stringify({
+    global: {
+      sandboxMode: 'danger-full-access', fallbackMode: 'ask',
+      command: {
+        mode: 'ask',
+        exceptions: [
+          { id: 'eUpper', action: 'allow', match: 'Get-ChildItem *' },
+          { id: 'eLower', action: 'deny', match: 'get-childitem *', reason: '合成数据：等价例外仍在生效' },
+          { id: 'eSpaced', action: 'allow', match: ' get-childitem *' },
+        ],
+      },
+    },
+    projects: {},
+  }, null, 2), 'utf8')
+  const hEq = createHost({ workspaceRoot: wsEq, dshHome: homeEq })
+  const rowsEq = async () => {
+    const st = await callRoute(hEq.routes, 'GET', '/permgate/status')
+    return ((((st.data || {}).categories || {}).global || {}).command || {}).exceptions || []
+  }
+  const delEq = await callRoute(hEq.routes, 'POST', '/permgate/remove-exception', { target: 'global', category: 'command', id: 'eUpper' })
+  const rowsEqB = await rowsEq()
+  ok('★ 大小写等价的命令例外：删掉其中一条时 remaining === 1（另一条仍在，未被算成「已清空」）',
+    !!(delEq.data && delEq.data.removed) && delEq.data.removedCount === 1 && delEq.data.remaining === 1 &&
+    JSON.stringify(rowsEqB.map((r) => r.id)) === JSON.stringify(['eLower', 'eSpaced']),
+    JSON.stringify({ count: delEq.data && delEq.data.removedCount, remaining: delEq.data && delEq.data.remaining, rows: rowsEqB.map((r) => r.id + '=' + r.match) }))
+  try { rmSync(wsEq, { recursive: true, force: true }); rmSync(homeEq, { recursive: true, force: true }) } catch (e) {}
+
   // (f) 同向重复写入：命中的旧条目**原地更新文字**（不移动位置）。
   //
   // 这里曾断言「把命中的条目提到头部」（unshift 语义）—— 新语义下位置归用户，
@@ -3340,6 +3386,48 @@ group('23. 爆炸半径与破坏性候选：盘根删除的警告与候选范围
     ok('★★ group23: 载荷族自带通配时不给任何候选（写下的模式会比点击目标更宽）',
       !!fgIt && ((fgIt.candidates || []).length === 0),
       JSON.stringify((fgIt && fgIt.candidates || []).map((c) => c.value)))
+
+    // ★★ group23 追加 4：**已被放行的段不得给出候选按钮**。
+    //
+    // 这条是运行时断言，静态断言挡不住它：候选侧曾经自己再 decomposeCommand 一遍，
+    // 那份段**没有 action** —— 源码里「调了 segmentLabel、方言也对」看起来完全正常，
+    // 只有真跑一遍才能看出它把已放行的段又授权了一次。
+    // 变异测试实测：把 words 透传删掉、或把 `seg.action === 'allow'` 那行删掉，
+    // regressions 的静态断言会**存活**，只有本组会红。
+    //
+    // 场景取自真实弹窗（用户截图）：三段命令，其中两段已被项目例外放行。
+    {
+      const hC = createHost({ workspaceRoot: wsB, dshHome: homeB, connection: { requestRejection: ({ headers }) => ((headers || {}).cookie ? undefined : 401) } })
+      hC.ctx.approval.request = () => new Promise(() => {})
+      // 项目层配两条 allow：段 2 的 Get-ChildItem 与段 3 的 Select-Object
+      writeFileSync(join(homeB, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: { fallbackMode: 'ask', command: { mode: 'ask', exceptions: [] } },
+        projects: {
+          [String(wsB).replace(/\\/g, '/')]: {
+            command: { mode: 'inherit', exceptions: [
+              { id: 'e1', action: 'allow', match: 'Get-ChildItem *' },
+              { id: 'e2', action: 'allow', match: 'Select-Object *' },
+            ] },
+          },
+        },
+      }, null, 2), 'utf8')
+      const preC = hC.hooks.get('tools/pre-execute')
+      const CMD = 'Get-Location ; Get-ChildItem -Force | Select-Object Mode, Length, Name'
+      const pc = preC(makeExec(wsB, 'pwsh', { command: CMD }), async () => ({ kind: 'allow' }))
+      pc.catch(() => {})
+      await new Promise((r) => setTimeout(r, 200))
+      const itemsC = await pendOf(hC)
+      const itC = itemsC.find((x) => JSON.stringify(x.args || '').indexOf('Get-Location') !== -1)
+      const cC = (itC && itC.candidates) || []
+      const vals = cC.map((c) => String(c.value))
+      ok('★★ group23: 已被 allow 的段不给候选（否则把已放行的东西再授权一遍、多写重复例外）',
+        !!itC && !vals.some((v) => /get-childitem|select-object/i.test(v)),
+        JSON.stringify(vals))
+      // 对照：仍需审批的那一段（Get-Location，无既有例外）必须照常给按钮 ——
+      // 否则「跳过已放行段」会退化成「一律不给候选」，用户想放行也没有按钮可点。
+      ok('★ group23(对照): 仍需审批的段照常给候选（Get-Location → get-location *）',
+        vals.some((v) => /get-location/i.test(v)), JSON.stringify(vals))
+    }
     try { rmSync(homeB, { recursive: true, force: true }) } catch (e) {}
   }
 

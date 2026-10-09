@@ -374,6 +374,1377 @@ const INLINE_PROGRAM_FLAG = /^(?:-c|-e|-E|--eval|--exec|--command|--print|-[A-Za
 // 命令名里出现这些字符即视为「认不出」（变量、通配符、shell 元字符）
 const BAD_LABEL_CHARS = /[$%{}()'"`*?<>|;&=]/
 
+/**
+ * PowerShell 的转义表（反引号 + 一个字符）。真值由**官方解析器实测**逐格核对
+ * （`[System.Management.Automation.Language.Parser]::ParseInput` + 实际执行取值）：
+ *
+ *     `n → LF(0x0A)   `r → CR(0x0D)   `t → TAB(0x09)   `0 → NUL(0x00)
+ *     `a → BEL(0x07)  `b → BS(0x08)   `e → 字面 e       `f → FF(0x0C)   `v → VT(0x0B)
+ *     `` → 字面反引号  `" → 字面双引号   `z → z（**未知转义 = 字符本身**，不是错误）
+ *
+ * ⚠️ `` `e `` 是**版本相关**的一格：PS 5.1 里它是**未知转义**、取字符本身 `e`
+ * （实测 `ExpandString('"a`eb"')` → `aeb`），ESC(0x1B) 是 PowerShell 6.0 才加入的。
+ * 本表按**宿主实际解析器（5.1）**取值：若这里写成 `\x1b`，以 `e` 开头的命令名会被
+ * 写成 `<ESC>xxx`，破坏性名单与用户 deny 例外双双看不见 —— 实测 `erase`（`Remove-Item`
+ * 的别名）与 `r`emove-item -Recurse -Force C:/x` 都会由 deny 变 **allow**（fail-open）。
+ *
+ * ⚠️ 与 bash 的 `\` **不同构**的地方（这正是本表必须存在、而不能照搬 bash 分支的原因）：
+ *   · bash 的 `\` 后跟未知字符时保留反斜杠（`\z` → `\z`），pwsh 的 `` ` `` 后跟未知字符
+ *     是**丢掉反引号**（`` `z `` → `z`）。实测执行结果分别为 `azb` 与 `a\zb`。
+ *   · `` ` `` + 换行是**续行**，但它转义出的是**字面换行字符**：实测 `Write-Output one`+`` ` ``+NL+`two`
+ *     的 token 是**一个** `Generic|one<NL>two`（不是两个词元）。词法器按「词元边界」处理它
+ *     （见那里的说明）—— 命令名里含换行的形态无法执行，按边界处理只会让参数被切细，
+ *     方向是收紧，不会放宽。
+ *
+ * 键是**单字符**（`next`），故用 `dict`（无原型）而不是 `{}`：`` `constructor `` 这类
+ * 转义在 `{}` 上会读到原型方法、把「未知转义」误判成「已知转义」。
+ */
+const PWSH_ESCAPES = dict({
+  n: '\n', r: '\r', t: '\t', 0: '\0', a: '\x07', b: '\b', e: 'e', f: '\f', v: '\v',
+})
+
+/**
+ * 「这个词元到此为止」的分隔字符集 —— 供 `readPwshEscape` 的**行尾**分支判
+ * 「行尾反引号是字面字符还是语法错误」。
+ *
+ * ⚠️ **只有这一个消费方**（全文件唯一的代码引用在 `readPwshEscape` 里）。第十轮把词法器中
+ *    「`` ` `` + 换行」那处续行判据整体换成**词元维度**（`wordText` / `tokenTyped` /
+ *    `lastGroupClose`）后，它**不再**引用本表 —— 两处判据不同维度，不得互相套用
+ *    （见词法器引号外那条 pwsh 转义分支里「那处用的是 `PWSH_TOKEN_BREAK`（**字符**维度）」
+ *    的说明：那处是对的，因为行尾没有「下一个词元」可言）。
+ *    此前这里写的是「两个判据共用…故共用一张表」，那句话在第十轮之后已经过期。
+ *
+ * 逐格实测（官方解析器，`abc` + 该字符 + 反引号，看 `ParseInput` 报不报错）：
+ *   报 `IncompleteString`（= 分隔符，反引号另起词元、后面什么都没有）：空白 `;` `|` `&`
+ *     `(` `)` `{` `}` `,` `"` `'`
+ *   报 `OK`（= **不是**分隔符，反引号紧贴词元、是**字面**反引号）：字母 数字 `.` `-` `_`
+ *     `/` `:` `\` `~` `+` `=` `%` `@` `#` `!` `<` `>` `*` `?` `[` `]`
+ * ⚠️ `<` `>` `[` `]` **不在**集合里（实测合法）—— 参数模式下它们不是运算符，凭直觉加进去会误判。
+ * ⚠️ 引号也算分隔符：`"abc"` + 反引号实测 `IncompleteString`（与引号内的判据不同，见 `readPwshEscape`）。
+ */
+const PWSH_TOKEN_BREAK = /[\s;|&(){},'"]/
+
+/**
+ * pwsh **Parameter 词元**的整词形态（`-NoNewline` / `-Recurse` / `-NoEnumerate` / `-Verbose`
+ * / `-Force` / `-rf` …）—— 供反引号续行守卫判「前一个词元是否已完结」。
+ *
+ * ⚠️ 与下面那个「带冒号收尾」的形态**必须分开**，因为两者在真实 PS 里的边界**不同级**：
+ *   · 整词 `-NoNewline` + `` ` `` + 换行 → `Parameter[-NoNewline`]` + `NewLine`，
+ *     `[Parser]` 报 **2 条 PipelineAst** = **语句边界**（必须 `flushSegment()`）；
+ *   · 带冒号收尾的 `-Confirm:` + `` ` `` + 换行 → `Parameter[-Confirm:]` + `LineContinuation`
+ *     = **词元边界、同一条语句**（只需 `flushWord()`）。
+ * 把两者合并成一条判据（都用 `flushWord()` 或都用 `flushSegment()`）实测各错一族 ——
+ * 前者实测仍然 `allow`（等于没修），后者会把同一句话切成语义独立的两段。
+ *
+ * 逐格实测（官方解析器 + 实参绑定，见 `decomposeCommand` 里反引号分支的完整论证）。
+ *
+ * ── 字符类：`33..126` 全字符两轮扫描（本轮修复，字符类此前窄 17 格）────────────────────
+ * 判据是「PS 把 `-x<c>y` + `` ` `` + 换行 整体吃成一个 `Parameter[-x<c>y`]`、随后报 `NewLine`
+ * （`stmts=2`，第二行**独立执行**）」。逐字符扫描官方解析器（本机 PowerShell 5.1，
+ * `[Parser]::ParseInput` 的 token 表 + `PipelineAst` 语句数）：
+ *
+ *   · **STMT（语句边界，81 格，必须命中）**：词身
+ *     `` ! # $ % * + - / 0-9 < = > ? @ A-Z \ ] ^ _ ` a-z ~ ``
+ *   · **STICK（粘住，PS 判 `LineContinuation` / 一个 `Generic` 词元）**：
+ *     `"` `&` `'` `(` `)` `,` `.` `:` `;` `[` `{` `|` `}`
+ *   · 首字符 PS **还**允许 `?`：`-?y` 实测 `Parameter[-?y`]` + `NewLine`、`stmts=2`
+ *
+ * 旧字符类 `[A-Za-z_]` / `[A-Za-z0-9_/-]` 因此**漏判 16 格词身 + 1 格首字符、误判 0 格**。
+ * 后果是端到端 fail-open（实测 `cmd /c ver -Path$p` + `` ` `` + NL +
+ * `Remove-Item -Recurse -Force C:/Windows`：HEAD `deny` → 旧字符类 **`allow`**；
+ * 用户显式配的 deny 例外 `remove-item *` 下同样 `deny` → `allow`）——
+ * `-Path$p` / `-Filter*` / `-Name$n`（无空格紧跟取值）是 AI 生成 pwsh 的常见写法。
+ *
+ * ⚠️ **不要顺手扩 `PWSH_PARAMETER_COLON_TAIL`**：`-x!y:` / `-x$y:` 实测是
+ *    `Parameter[-x!y:]` + `LineContinuation`（**词元**边界、`stmts=1`），与那条 COLON 正则
+ *    的现行行为一致，扩它是无收益的改动。
+ * ⚠️ 必须仍为 `false`（PS 实测 STICK / 非 Parameter）：`-x[y` `-x.y` `-x:y` `-1` `-` `--force`。
+ */
+const PWSH_PARAMETER_TOKEN = /^-[?A-Za-z_][A-Za-z0-9_/\-!#$%*+<=>?@\\\]^`~]*$/
+
+/** pwsh Parameter 词元中**带冒号收尾**的那一族（`-Confirm:` / `-WhatIf:` …）：词元边界。 */
+const PWSH_PARAMETER_COLON_TAIL = /^-[A-Za-z_][A-Za-z0-9_/-]*:$/
+
+/**
+ * 词元尾部是**成员访问 / 下标访问 / 静态成员访问**（`.Name` / `[0]` / `[k]` / `::y`，或
+ * 以裸 `.` 收尾）—— 这类词元在 PS 里是**已完结的完整词元**，后面的反引号+换行是
+ * `LineContinuation`（词元边界，同一条语句）。
+ *
+ * ⚠️ **必须与 `tokenTyped` 合取**：`a.b` / `x$y.y` 的尾部同样命中本判据，但官方解析器实测
+ * 它们是**一个** `Generic` 词元（两行粘住）—— 差别只在词元的**首个字符**：
+ *   · `$x.Name` / `$a[0]` / `"abc".Length` / `(Get-Item x).Name` → 首字符是变量/引号/分组块 ⇒ 切；
+ *   · `a.b` / `x$y.y` / `abc]` → 首字符是普通字符 ⇒ **粘住**。
+ * 只看尾部会多切 `a.b` 族（新误报）；只看首字符会漏掉 `.Name` 族（fail-open）。
+ *
+ * ⚠️ **本正则现在只作为「形态影子」的字符类来源**（见 `CHAR_CLASS`：`CC_WORD` / `CC_ALPHA_U`
+ *    都由它逐码探针生成）—— 运行时判据走 `accessorTailOf(shape)`，**不再**对词元原文跑本正则
+ *    （读 `wordText` 会触发 rope 扁平化，O(n²)，见 `newWordShape` 那段说明）。
+ *    三支逐条对应关系写在 `accessorTailOf` 的说明里。
+ *
+ * ⚠️ 其中「下标访问」支（`(?<!\.)\[[^\]]*\]$`）**不能**放回本正则：它没有左锚定，失配时对
+ *    每个起始位置各回溯一遍，退化成 O(n²)（实测端到端 `'"x"' + '['*64k + '`\n'` → 919 ms，
+ *    HEAD 同形态 1.2 ms）。其余三支都以 `$` 结尾、无歧义分支，不存在同类回溯。
+ *    下标支由影子的 `lastOpenIdx` / `closeBeforeLast` 两格承担（等价性证明见
+ *    `bracketAccessorTailOf`）。
+ */
+const PWSH_ACCESSOR_TAIL = /(?<!\.)(?:\.[A-Za-z_]\w*|(?<!\.)\.|::[A-Za-z_]\w*)$/
+
+/**
+ * 词元尾部是**闭合引号**（引号串已完结）—— 与 `PWSH_ACCESSOR_TAIL` 同族，都是「typed 词元
+ * 已完结」的尾部证据，同样**必须与 `tokenTyped` 合取**。
+ *
+ * ⚠️ 这一条是**必须的**，不是冗余：判据从「反引号前一个字符」改成「前一个词元」后，
+ *    引号串**不再**由 `PWSH_TOKEN_BREAK`（它含 `'"`）覆盖 —— 少了本判据，第七轮已修的
+ *    `"C:/Windows"` + `` ` `` + NL + `-Confirm:$false` 会**回退**成两行粘住
+ *    （实测：`words` 由两个变回一个 `C:/Windows-Confirm:$false`，`blast` 由 `system`
+ *    掉成 `unknown` ⇒ 用户显式配的 `wide=deny` 失明，fail-open 复发）。
+ *
+ * ⚠️ 判据对象是 **`segText`（段原文）而不是 `wordText`**：闭合引号**只进 segText**
+ *    （引号分支是 `pushText(char)`，不写 `wordText`）—— 对 `wordText` 判恒不命中。
+ *    而 `segText` 的尾部就是当前词元的尾部（两者逐字符同步写入，只有闭合引号例外，
+ *    而那正是本判据要找的字符）。
+ *
+ * ⚠️ 该判据**不再**以 `PWSH_QUOTED_TAIL.test(segText)` 的形式直接跑正则（那会读 `segText`，
+ *    见下），而是由 `segLastIsQuote` 这个 O(1) 增量标记回答；标记在 `pushText` 里**用本正则
+ *    判刚追加的那一小段 `s`** 置位 —— 判据原文仍只有这一份，没有第二份定义。
+ *
+ *    为什么不直接读 `segText`：`segText += s` 只建 rope，任何内容读取（含正则）都要先
+ *    扁平化成连续串（O(n) 拷贝），于是每个「反引号 + 换行」都触发一次全长拷贝，
+ *    整段分解退化为 O(n²) —— 与 `segEndsWithSpace` 那条注释里的坑**完全同一个**
+ *    （那是第一处，这是第二处）。
+ *    实测 `'New-Item -Path $base' + ('`\n  -Name $n<i>')*N` 端到端
+ *    20.2/365.1/1749.6 ms（N=8k/16k/32k）→ 改用标记后 6.0/4.8/10.9 ms；
+ *    真实入口 `assessCommand` N=32000（520 KB）→ 1752 ms 降到同量级个位数毫秒
+ *    （HEAD 同形态 59 ms）。900 格语料对拍判定分歧 **0 格**。
+ *    ⚠️ 判 `s`（刚追加的那一段）与判 `segText` 末字符**恒同值**：`segText` 的末字符就是
+ *    最后一次非空 `s` 的末字符，而空串不改变 `segText`（标记保持原值）。
+ *    `/["']$/` 无嵌套量词、失配时每个位置只看一个字符 ⇒ 对 `s` 是线性的。
+ */
+const PWSH_QUOTED_TAIL = /["']$/
+
+/**
+ * 「文本尾部是一段连字符串、其后只跟空白」的**线性**判定 —— 等价于 `/-{min,}\s*$/`
+ * 的「命中与否 / 命中起始下标」，但不回溯。
+ *
+ * ⚠️ 为什么必须手写而不能用正则：`/-{2,}\s*$/` **没有左锚定**，贪婪量词 + 可选空白 + `$`
+ *    在**失配**时要对每个起始位置各回溯一遍，退化成 O(n²)。而词元长度无上界、内容完全
+ *    由 AI 生成的命令决定，本判据又在词法器的**每一段**、`pushHeadLabels` 的**每个 head
+ *    位置**都会经 `labelTokenIsQuotedLiteral` 走到。实测（本机 Node v24.19，取多次最小值）：
+ *      · 纯正则 n=8k/16k/32k/64k → 56.2/221.5/904.0/3536.5 ms（倍率 ≈4.0，标准平方）；
+ *        以连字符结尾（快速命中）时 0.0015–0.0120 ms/次。
+ *      · 端到端 `segmentLabel(['my tools/' + '-'.repeat(n) + 'x'])` 同量级
+ *        （54.0/217.8/875.7/3518.8 ms）；`assessCommand` 单次 n=100k（命令 98 KB）→ 8632 ms。
+ *      · 放大器 `find . -exec sudo "<病态词元>" {} +` 以 ` ; ` 连接 n 段（词元
+ *        `"my tools/" + "-"*8192 + "x"`）：n=25/50/100 → 1460/2904/5806 ms，
+ *        同形 ASCII 对照 7.3/12.5/29.2 ms（约 200 倍）。触发面**不依赖引号**（双引号、
+ *        单引号、pwsh 反引号转义空格、bash 反斜杠转义空格四种形态各 n=40k 均 ≈1.4 s）。
+ *    判定卡死则 `tools/pre-execute` 不返回、审批弹窗不出现 —— 本文件在 `globMatch`、
+ *    `flagEmbeddedPath` 两处已明确处置过同类缺陷（留有「旧实现组合爆炸/挂死」注释），
+ *    这里是第三处，写法与它们同一种（线性反向扫描）。
+ *    修好后实测：n=64000 时 `segmentLabel` 由 3518.8 ms 降到 0.27 ms；同一病态词元
+ *    （n=100k）的 `assessCommand` 由 8632 ms 降到 1.67 ms。判定结果对拍分歧 **0 格**。
+ *
+ * 等价性（是证明，不是近似）：设 `end` = 剥掉尾部 `\s` 后的下标，`start` = 从 `end` 往前
+ * 数的连字符串起点。正则命中于 `i` ⟺ `text[i…end]` 全是连字符（≥ `min` 个）且
+ * `text[end…]` 全是空白 ⟺ `start ≤ i`；而 `i` 处必须先是连字符，若 `i < start` 则
+ * `text[i]` 不是连字符（`start` 是连续段的左端）⇒ `i = start`。
+ * 故「命中 ⟺ `end - start >= min`，且命中下标恒为 `start`」—— 与 `.exec()` 的 `index` 同值。
+ *
+ * ⚠️ 空白用 `\s` **逐字符**判，不要换成 `trimEnd()`：两者在本机 Node 下实测集合相同
+ *    （25 个字符），但那是实现细节而非语言保证；判据按原文写，不引入第二套空白定义。
+ *
+ * @param {string} text 待判文本
+ * @param {number} min 连字符串的最少个数（`/-{2,}\s*$/` 取 2，`/-+\s*$/` 取 1）
+ * @returns {number} 命中时返回匹配起始下标（= `.exec()` 的 `index`），否则 -1
+ */
+function trailingDashRunAt(text, min) {
+  let end = text.length
+  while (end > 0 && /\s/.test(text.charAt(end - 1))) end -= 1
+  let start = end
+  while (start > 0 && text.charCodeAt(start - 1) === 45) start -= 1   // 45 = '-'
+  return end - start >= min ? start : -1
+}
+
+/**
+ * `PWSH_ACCESSOR_TAIL` 里那条「下标访问」支（`(?<!\.)\[[^\]]*\]$`）的**线性**判定。
+ *
+ * ⚠️ 为什么必须手写而不能用正则：`\[[^\]]*\]$` **没有左锚定**，失配时对每个起始位置
+ *    各回溯一遍，退化成 O(n²)。与 `trailingDashRunAt` 上面那条注释同一个坑（这是第四处，
+ *    另两处是 `globMatch` 与 `flagEmbeddedPath`）。
+ *    实测（本机 Node v24.19，取多次最小值）：孤立正则 n=8k/16k/32k/64k →
+ *    14.7/57.5/229.6/919.4 ms（倍率 ≈4.0，标准平方）；端到端
+ *    `decomposeCommand('"x"' + '['*n + '`\n', 'pwsh')` 同量级 18.9/230.9/926.3 ms
+ *    （HEAD 该形态 1.1/1.0/1.2 ms —— HEAD 走 bash 命令替换分支、根本不做词元判据，
+ *    故这是第十轮引入的**真回归**）。放大器 `find . -exec … ' ; '` 连接 n 段时 n=1600
+ *    （19 KB）→ **31 秒**。判定卡死则 `tools/pre-execute` 不返回、审批弹窗不出现。
+ *
+ * 等价性（是证明，不是近似）：设 `n = text.length`。该支要求
+ *   ① 尾部恰是一个 `]`（`\]$`），且 ② 存在一个 `[`，它**不在** `.` 之后（`(?<!\.)`），
+ *      且 `[ … ]` 之间不含 `]`（`[^\]]*`）—— 即该 `[` 必须落在**最后一个** `]` 之后。
+ * 故：末字符不是 `]` ⇒ 恒不命中；否则取 `c` = 倒数第二个字符起往前找的最后一个 `]`
+ * （= 最后一个满足 `i < n-1` 的 `]`，没有则 -1），再线性扫 `c+1 … n-2` 找第一个
+ * 「前一字符不是 `.`」的 `[`。两处扫描都只前进不回头，整体 O(n)。
+ *
+ * ⚠️ 不要图省事改成 `[^\[\]]*`：那会改变语义 —— `"_.xx][xx.[x]"` / `"x[a0.[.]"` 这类
+ *    嵌套形态由 true 变 false（仲裁实测分歧 **0.3996%**）。
+ *
+ * ⚠️ 上面那两处扫描现由**形态影子**的两格增量维护（`lastOpenIdx` = 最近一个
+ *    「前一字符不是 `.`」的 `[`；`closeBeforeLast` = `word[0 .. len-2]` 里最近一个 `]`），
+ *    判据即 `bracketAccessorTailOf`：末字符是 `]` 且 `lastOpenIdx > closeBeforeLast`。
+ *    这与本函数的线性扫描**同判据**（`c` 就是 `closeBeforeLast`，扫的就是
+ *    `c+1 … n-2` 里第一个满足条件的 `[`，取「最近一个」与取「第一个」在「都在 `c` 之后」
+ *    的前提下同值）。穷举对拍见测试文件（419330 格分歧 0）。
+ */
+
+// ── pwsh 词元「形态影子」：`pwshEscapeBoundaryAt` 的 O(1) 判据 ──────────────────────
+//
+// ⚠️ **为什么不能直接读 `wordText`**（与 `globMatch` / `flagEmbeddedPath` /
+//    `trailingDashRunAt` 同族，这是第五处）：`wordText += s`
+//    在 V8 里只建 **rope（O(1)）**，而**任何内容读取**（正则、下标、`slice`）都必须先把
+//    rope 扁平化成连续串（**O(n) 拷贝**）。续行守卫在**每个** pwsh 反引号处都要问一次
+//    词元形态，于是整段分解退化为 O(n²)。
+//    实测靶形态 `-x` + (`` ` `` + `a`)×n（Parameter 词元一路增长）：
+//      n = 4k / 8k / 16k / 32k / 64k → **14.5 / 56.7 / 220 / 867 / 3451 ms**
+//      （倍率 3.92 / 3.88 / 3.94 / 3.98，**严格平方**），而 HEAD 同形态
+//      0.20 / 0.28 / 0.55 / 1.13 / 2.29 ms（倍率 ≈2，线性）—— 放大 **1500 倍**。
+//      真实入口 `assessCommand` 同形态 n=16k 为 221 ms；`-Path` / `-Recurse` /
+//      `-LiteralPath` 等**任何** Parameter 前缀 + 若干 `` ` ``+字母 即可触发，
+//      **不需要畸形输入**。判定卡死 ⇒ `tools/pre-execute` 不返回、审批弹窗不出现。
+//
+// 修法与 `segEndsWithSpace` / `segLastIsQuote` **同一手法**：把「必须读整串才能回答的问题」
+// 换成随追加**增量更新**的 O(1) 标量。影子与正则**同源** —— 每个字符类都由 `PWSH_*`
+// 正则本身在**定长探针串**上求值后建成查找表（`CHAR_CLASS`），不另写一份字符类。
+//
+// ⚠️ 影子必须与 `wordText` **严格同步**：追加只走 `addWord()`、复位只走 `resetWord()`
+//    （`decomposeCommand` 内那两个唯一入口）。漏一处即与词元分叉 —— 判据直接错。
+
+/** 字符类位（`CHAR_CLASS` 的取值）。 */
+const CC_PARAM_FIRST = 1   // `PWSH_PARAMETER_TOKEN` 的首字符类 `[?A-Za-z_]`
+const CC_PARAM_BODY = 2    // `PWSH_PARAMETER_TOKEN` 的词身类
+const CC_COLON_BODY = 4    // `PWSH_PARAMETER_COLON_TAIL` 的词身类 `[A-Za-z0-9_/-]`
+const CC_WORD = 8          // `\w`（`PWSH_ACCESSOR_TAIL` 用的那个类）
+const CC_ALPHA_U = 16      // `[A-Za-z_]`（`PWSH_ACCESSOR_TAIL` 的 `.Name` / `::name` 支）
+const CC_SPACE = 32        // `\s`（`pwshEscapeBoundaryAt` 的 `/\s$/` 支）
+
+/**
+ * `0..127` 的字符类查找表 —— **由上面那些正则逐码生成**，故字符类仍只有一份定义
+ * （探针串是定长的，每个码一次，模块加载时算完）。
+ *
+ * 为什么必须是查找表而不是每次调 `test`：本表在**每个追加字符**上被读（见 `pushWordShape`），
+ * 而正则调用有固定开销 —— 逐字符调 `test` 会把判定热路径拖慢一个量级。
+ *
+ * ⚠️ `\w` 与 `[A-Za-z_]` 这两格也**由 `PWSH_ACCESSOR_TAIL` 本身**探出来（不手抄类）。
+ *    三支里只有第一支 `(?<!\.)\.[A-Za-z_]\w*$` 能被这两种探针命中，故探针串都刻意
+ *    不含 `:`（第三支要 `::`）、末字符都不是 `.`（第二支要 `(?<!\.)\.$`）：
+ *      · `'.' + ch + 'a'` ⇒ 命中 ⟺ `ch ∈ [A-Za-z_]`（`.` 只在串首 ⇒ `(?<!\.)` 成立；
+ *        `ch` 若不在该类则第一支在第二个字符处即失配）；
+ *      · `'.a' + ch + 'a'` ⇒ 命中 ⟺ `ch ∈ \w`，**唯一例外是 `ch === '.'`** ——
+ *        那时探针串是 `.a.a`，第二个 `.` 自己就能充当第一支的那个 `.`（它前面是 `a`、
+ *        满足 `(?<!\.)`）⇒ 恒命中。故 `.` 必须**显式排除**（它是唯一一个既能当
+ *        「分支自己的 `.`」、又能出现在尾部的字符）。
+ *    这两种探针的逐码结果已与 `\w` / `[A-Za-z_]` 对拍一致（各 128 码，0 分歧）。
+ *
+ * ⚠️ `\s` **不是**纯 ASCII（还有 `\u00a0` `\u1680` `\u2000-\u200a` `\u2028` `\u2029`
+ *    `\u202f` `\u205f` `\u3000` `\ufeff`），故它单独走 `NON_ASCII_SPACE`，且那一份同样是
+ *    **由 `/\s/` 正则本身扫出来**的（不手抄字符表 —— 抄一份就是同一概念写两遍）。
+ */
+const CHAR_CLASS = (() => {
+  const t = new Uint8Array(128)
+  for (let c = 0; c < 128; c += 1) {
+    const ch = String.fromCharCode(c)
+    let bits = 0
+    if (PWSH_PARAMETER_TOKEN.test('-' + ch)) bits |= CC_PARAM_FIRST
+    if (PWSH_PARAMETER_TOKEN.test('-a' + ch)) bits |= CC_PARAM_BODY
+    if (PWSH_PARAMETER_COLON_TAIL.test('-a' + ch + ':')) bits |= CC_COLON_BODY
+    if (ch !== '.' && PWSH_ACCESSOR_TAIL.test('.a' + ch + 'a')) bits |= CC_WORD
+    if (PWSH_ACCESSOR_TAIL.test('.' + ch + 'a')) bits |= CC_ALPHA_U
+    if (/\s/.test(ch)) bits |= CC_SPACE
+    t[c] = bits
+  }
+  return t
+})()
+
+/**
+ * `>= 128` 里属于 `\s` 的码元 —— 由 `/\s/` 扫整个 BMP 得到（不手抄字符表，见上）。
+ * 只在「词元末字符是非 ASCII」时被查一次（每个追加字符至多一次）。
+ */
+const NON_ASCII_SPACE = (() => {
+  const s = new Set()
+  const re = /\s/g
+  const CHUNK = 4096
+  for (let base = 128; base < 0x10000; base += CHUNK) {
+    const n = Math.min(CHUNK, 0x10000 - base)
+    let chunk = ''
+    for (let i = 0; i < n; i += 1) chunk += String.fromCharCode(base + i)
+    re.lastIndex = 0
+    let m = re.exec(chunk)
+    while (m !== null) {
+      s.add(base + m.index)
+      re.lastIndex = m.index + 1
+      m = re.exec(chunk)
+    }
+  }
+  return s
+})()
+
+/** 单个 UTF-16 码元是否属于某个字符类。 */
+const charHas = (code, bit) => code >= 0 && (code < 128
+  ? (CHAR_CLASS[code] & bit) !== 0
+  : bit === CC_SPACE && NON_ASCII_SPACE.has(code))
+
+/**
+ * 空词元形态影子的**唯一一份**默认值表（字段说明见上；`-1` 一律表示「不存在」）。
+ *
+ * ⚠️ 构造侧（`newWordShape`）与复位侧（`resetWordShape`）**必须**共用这一张表：
+ *    两处各抄一份时，本影子以后**加字段**必然漏掉其中一处 —— 漏构造侧是 `undefined`
+ *    参与比较，漏复位侧更糟：**上一个词元的残值跨词元泄漏到下一个词元**（复位漏一格
+ *    ⇒ 新词元带着旧词元的 `lastOpenIdx` / `cLast` 等），而 `pwshEscapeBoundaryAt`
+ *    正是逐格读这些字段判「反引号前面那个词元完结到什么级别」⇒ 续行切分结论直接错。
+ *    这与 `paramTokenWithNext` 那处的处置**同源**（那里用 `Object.assign(t, s)` 整体覆盖，
+ *    就是为了加字段时自动跟上）；此处同样整体覆盖，不再逐字段抄。
+ *    实测：漏掉复位侧任一格时，测试套件**全部 exit 0 全绿**（无断言守护），
+ *    而漏 `lastOpenIdx` 一格即让 12 格判定由 `deny` 变 `allow`。
+ */
+const EMPTY_WORD_SHAPE = {
+  len: 0,
+  c0: -1, c1: -1, cLast: -1, cSecondLast: -1,
+  bodyOk: true, colonOk: true,
+  runW: 0, runFirst: -1, preRun: -1, prePreRun: -1,
+  dblColonPrev: -1,
+  lastOpenIdx: -1, lastCloseAny: -1, closeBeforeLast: -1,
+}
+
+/** 建一个空的词元形态影子（字段说明见上；`-1` 一律表示「不存在」）。 */
+function newWordShape () {
+  return Object.assign({}, EMPTY_WORD_SHAPE)
+}
+
+/** 复位（`wordText = ''` 的同步动作）。 */
+function resetWordShape (s) {
+  Object.assign(s, EMPTY_WORD_SHAPE)
+}
+
+/**
+ * 追加**一个 UTF-16 码元**（`addWord` 逐码调用）。
+ *
+ * 每条更新都由 `pwshEscapeBoundaryAt` 那几个判据的等价性反推而来（穷举对拍见测试文件）：
+ *   · `bodyOk` / `colonOk` —— 新进入「中间段 `2 .. len-2`」的下标是 `L-1`（旧末字符），
+ *     它存在当且仅当 `L-1 >= 2`（即 `L >= 3`），故只在 `L >= 3` 时收窄；
+ *   · `runW` / `runFirst` / `preRun` / `prePreRun` —— 末尾 `\w` 连续段的长度、段首字符、
+ *     段前两字符（`PWSH_ACCESSOR_TAIL` 的三支只看这四格）；
+ *   · `dblColonPrev` —— 追加出 `::` 的那一刻记下**它前面**那个字符（`::name` 支的
+ *     `(?<!\.)` 要看它）；之后段内继续追加不影响它（`::` 的位置已固定）；
+ *   · `lastOpenIdx` —— 最近一个「前一字符不是 `.`」的 `[`（即 `(?<!\.)\[`；`L === 0`
+ *     时 `oldLast` 为 `-1`，自动满足「前面没有字符」）；
+ *   · `lastCloseAny` / `closeBeforeLast` —— 全词 / `word[0 .. len-2]` 里最近一个 `]`。
+ *     `closeBeforeLast` 的新值恰是**追加前**的 `lastCloseAny`（新词的 `0 .. len-2`
+ *     就是旧词全体）⇒ 这两条赋值**有先后顺序要求**，不得调换。
+ */
+function pushWordShape (s, code) {
+  const L = s.len
+  const oldLast = s.cLast
+  const oldSecondLast = s.cSecondLast
+  if (L === 0) s.c0 = code
+  else if (L === 1) s.c1 = code
+  s.cSecondLast = oldLast
+  s.cLast = code
+  if (L >= 3) {
+    s.bodyOk = s.bodyOk && charHas(oldLast, CC_PARAM_BODY)
+    s.colonOk = s.colonOk && charHas(oldLast, CC_COLON_BODY)
+  }
+  if (charHas(code, CC_WORD)) {
+    if (s.runW === 0) { s.runFirst = code; s.preRun = oldLast; s.prePreRun = oldSecondLast }
+    s.runW += 1
+  } else {
+    s.runW = 0
+    s.runFirst = -1
+    s.preRun = -1
+    s.prePreRun = -1
+  }
+  if (code === 58 && oldLast === 58) s.dblColonPrev = oldSecondLast   // 58 = ':'
+  if (code === 91 && oldLast !== 46) s.lastOpenIdx = L                // 91 = '['，46 = '.'
+  s.closeBeforeLast = s.lastCloseAny
+  if (code === 93) s.lastCloseAny = L                                 // 93 = ']'
+  s.len = L + 1
+}
+
+/** `PWSH_PARAMETER_TOKEN.test(word)` —— 由影子 O(1) 回答。 */
+function paramTokenOf (s) {
+  if (s.len < 2 || s.c0 !== 45 || !charHas(s.c1, CC_PARAM_FIRST)) return false   // 45 = '-'
+  return s.len < 3 || (s.bodyOk && charHas(s.cLast, CC_PARAM_BODY))
+}
+
+/** `PWSH_PARAMETER_COLON_TAIL.test(word)`。 */
+function colonTailOf (s) {
+  return s.len >= 3 && s.c0 === 45 && charHas(s.c1, CC_ALPHA_U) && s.colonOk && s.cLast === 58
+}
+
+/**
+ * `PWSH_ACCESSOR_TAIL.test(word)`（三支逐条对应，见该常量的说明）。
+ *
+ * `/(?<!\.)(?:\.[A-Za-z_]\w*|(?<!\.)\.|::[A-Za-z_]\w*)$/` 的三支都**只能**落在末尾
+ * `\w` 连续段上（`\w*` 必须一路吃到 `$`），故段首位置唯一：`L - runW`。于是
+ * 「段前那个字符」就是 `preRun`、再前一个是 `prePreRun` —— 两支各自只差这一点。
+ */
+function accessorTailOf (s) {
+  if (s.runW >= 1 && charHas(s.runFirst, CC_ALPHA_U)) {
+    // `\.[A-Za-z_]\w*$`：`.` 紧贴段首，且它前面不是 `.`
+    if (s.preRun === 46 && s.prePreRun !== 46) return true
+    // `::[A-Za-z_]\w*$`：`::` 紧贴段首，且 `::` 前面不是 `.`
+    if (s.preRun === 58 && s.prePreRun === 58 && s.dblColonPrev !== 46) return true
+  }
+  // `(?<!\.)\.$`
+  return s.cLast === 46 && s.cSecondLast !== 46
+}
+
+/** `bracketAccessorTailAt(word)`（线性版，见该函数）。 */
+function bracketAccessorTailOf (s) {
+  return s.cLast === 93 && s.lastOpenIdx > s.closeBeforeLast   // 93 = ']'
+}
+
+/**
+ * `word.charCodeAt(word.length - 1) === 58 && PWSH_PARAMETER_TOKEN.test(word.slice(0, -1))`
+ * —— 即「去掉末字符后仍是一个整词 Parameter」。
+ *
+ * 去尾后长度是 `len-1`，其词身段是 `2 .. len-2`，**正好**是 `bodyOk` 覆盖的那一段
+ * （这正是影子里存 `bodyOk` 而不是「含末字符」那一段的原因）。
+ */
+function paramColonTailOf (s) {
+  if (s.len < 3 || s.cLast !== 58 || s.c0 !== 45 || !charHas(s.c1, CC_PARAM_FIRST)) return false
+  return s.bodyOk
+}
+
+/** `paramTokenWithNext` 的暂存影子（模块级复用，免每次分配）。 */
+const SCRATCH_SHAPE = newWordShape()
+
+/**
+ * `PWSH_PARAMETER_TOKEN.test(word + next)` —— `readPwshEscape` 的 `'segment'` 支用它。
+ *
+ * ⚠️ **不得直接写 `PWSH_PARAMETER_TOKEN.test(word + next)`**：`word` 是 `wordText`，读它
+ *    要先把 rope 扁平化（O(n)），而本判据在**每个**落在 Parameter 词元内的反引号处求值，
+ *    词元又随 `` ` ``+字母 一路增长 ⇒ Σ O(i) = **O(n²)**（缺陷 2 的第二处，见影子那段说明）。
+ *    实测只把本行改成 O(1) 后，`-x` + (`` ` ``+`a`)×n 由 220 ms 降到 112 ms（n=16k，
+ *    另一半平方在 `pwshEscapeBoundaryAt`），两处都改才回到线性。
+ *
+ * 等价性不是近似：影子与 `PWSH_PARAMETER_TOKEN` **逐格等价**（穷举 419330 格分歧 0），
+ * 故「把 `next` 追加到影子上再问」与「把 `next` 拼到 `word` 上再跑正则」恒同值 ——
+ * 且这里**不依赖**「调用方已保证 `word` 本身命中」这条跨函数不变量（那会让本判据在
+ * `pwshEscapeBoundaryAt` 改动时静默漂移）。复制字段数是固定的 ⇒ O(1)。
+ *
+ * @param {object} s 当前词元的形态影子
+ * @param {number} code 紧跟反引号那个字符的码元
+ * @returns {boolean} `word + next` 是否仍是一个整词 Parameter
+ */
+function paramTokenWithNext (s, code) {
+  const t = SCRATCH_SHAPE
+  // ⚠️ 用 `Object.assign` 而不是逐字段抄：本影子以后**加字段**时，逐字段抄会静默漏掉
+  //    新字段（读到上一轮的残值）⇒ 判据漂移。整体覆盖则新字段自动跟上。
+  Object.assign(t, s)
+  pushWordShape(t, code)
+  return paramTokenOf(t)
+}
+
+/**
+ * 反引号（pwsh 转义符）**前面**那个词元完结到什么级别 —— 续行判据的**唯一实现**。
+ *
+ * 三态（完整实测论证见主循环里那段「已完结的完整词元 ⇒ 必须切 / 首字符是普通字符 ⇒ 必须粘住」）：
+ *   · `'segment'` —— 整词 Parameter（`-NoNewline` / `-Recurse` / `-Path$p` …）：`[Parser]` 报
+ *     **2 条 PipelineAst**（第二行是**新命令**）⇒ 调用方必须 `flushSegment()`；
+ *   · `'word'`    —— 其余**已完结**词元（`-Confirm:` / `$x.Name` / `"abc"` / `@(x)` / 孤立 `)` `}`）：
+ *     `LineContinuation`（**词元**边界、同一条语句）⇒ `flushWord()`；
+ *     也包含**没有词元在写**（`word === ''`）这一格 —— 反引号落在空白 / 行首 / 操作符之后，
+ *     同样是词元边界（`flushWord()` 在那种状态下是空操作，只顺带复位 `tokenTyped`，
+ *     而那正是既有设计要求的复位点）。归到本态而不是 `'none'` 是**必需的**：CRLF 支要
+ *     按它区分「词元内」与「词元边界」（见下）。
+ *   · `'none'`    —— 词元**还在写**（裸词 / 简单变量 / `abc]` / `a.b` / `x$y.y`）：反引号是
+ *     **字面**字符，两行粘住。
+ *
+ * ⚠️ **两个消费方共用这一份判据**（本文件反复记录过「同一概念两处各写一份必然漂移」那类缺陷）：
+ *   ① 主循环的续行守卫 —— 据此决定「切段 / 切词 / 什么都不切」（用 `level`）；
+ *   ② `readPwshEscape` 的 **CRLF 支** —— 据此决定 `` ` ``+`\r\n` 是**整体续行**还是
+ *      「字面 CR + 真换行符」（用 `open`）。
+ *   两个字段**同源同判据**（同一套正则），只是回答的问题不同：`level` 问「词元完结到什么
+ *   级别」，`open` 问「反引号是否落在**未完结**词元内」（PS 只在前者成立时把 `` ` ``+`\r`
+ *   当转义、把 `\n` 留给换行符）。实测两处**确实不同值**的两族（下面 `closedLoose` 那两种
+ *   形态）：既有三段式对它们给 `'none'`（段级行为是既有的，不得改动），而它们其实是
+ *   **已完结**词元 ⇒ `open` 必须为 false。
+ *
+ * 词法状态由调用方**显式传入**：`index` 是 `for` 循环内的绑定，而本函数定义在循环外
+ * （为一次判定在每次迭代里新建闭包不值得），故不能靠闭包取用。
+ *
+ * ⚠️ 词元形态**不读 `wordText`**，只读调用方同步维护的**形态影子** `shape`（见
+ *    `newWordShape` 那段说明）：直接对 `wordText` 跑正则要先把 rope 扁平化（O(n)），
+ *    而本函数在**每个** pwsh 反引号处被调用 ⇒ O(n²)。影子与那几个正则**逐格等价**
+ *    （穷举 419330 格分歧 0，见测试文件），且每个字符类都由正则本身生成，不是另写一份。
+ *
+ * @param {object} shape 当前词元的形态影子（`wordShape`，与 `wordText` 严格同步）
+ * @param {boolean} typed 当前词元是否以 typed 构造开头（`tokenTyped`）
+ * @param {boolean} lastIsQuote 段文本末字符是不是引号（`segLastIsQuote`）
+ * @param {number} groupClose 最近一个分组块收尾符的下标（`lastGroupClose`）
+ * @param {number} at 反引号在 `input` 里的下标
+ * @returns {{level: 'segment'|'word'|'none', open: boolean}} 完结级别 + 反引号是否在未完结词元内
+ */
+function pwshEscapeBoundaryAt(shape, typed, lastIsQuote, groupClose, at) {
+  if (shape.len === 0) return { level: 'word', open: false }   // 没有词元在写 ⇒ 词元边界（见该态说明）
+  if (paramTokenOf(shape)) return { level: 'segment', open: true }
+  const closed = colonTailOf(shape)
+    // 下标访问支走影子的两格（`lastOpenIdx` / `closeBeforeLast`，见 `bracketAccessorTailOf`）；
+    // 引号支走 O(1) 标记（见 `segLastIsQuote` / `PWSH_QUOTED_TAIL`）—— 两处都不得改回
+    // 直接对 `word` / `segText` 跑正则（前者 O(n²)，后者触发 rope 扁平化）。
+    // ⚠️ 现在前两支也走影子（`accessorTailOf` / `bracketAccessorTailOf`），理由同上。
+    || (typed && (accessorTailOf(shape) || bracketAccessorTailOf(shape) || lastIsQuote))
+    || groupClose === at - 1
+  if (closed) return { level: 'word', open: false }
+  // 尾部挂着**转义空白**（`$x.Name ` / `-Confirm: `：反引号转义出的那个空白把词元终结了）
+  // 或**反引号已并入参数名的 Parameter 冒号形**（`-x`:`：PS 在冒号处终结该词元，实测
+  // `Parameter[-x`:]` + `LineContinuation`）：两者 PS 都判**词元边界**。
+  // ⚠️ 既有三段式对它们给 `'none'` —— 那是**段级**既有行为，本次不动（改它会改 LF/CR 语料）；
+  //    但 `open` 必须为 false，否则 CRLF 支会把 `` ` ``+`\r` 当转义、把 `\n` 留成真换行，
+  //    凭空多切一段（实测新引入 18 格反向误差）。
+  const closedLoose = charHas(shape.cLast, CC_SPACE) || paramColonTailOf(shape)
+  return { level: 'none', open: !closedLoose }
+}
+
+/**
+ * 「这个词元是不是**引号包裹的字符串字面量**」—— label 提取的入口守卫之一。
+ *
+ * ── 判据：含空白 + 含路径分隔符 + 不以路径形态开头 + 剥路径后 basename 仍非命令名，
+ *    且**适用范围**为「连字符串 + 空白开头 + 连字符串收尾」**或**「装饰性开栏 + 装饰性收栏」
+ * 四格判据 + 两格适用范围（① 自带开栏/收栏两半），缺一不可，每一格都有实测反例：
+ *   · 适用范围①「连字符串 + 空白开头」（`/^-+\s/`）**且「连字符串收尾」**—— 它是**守卫的
+ *     适用范围**，不是判据的一部分：把守卫收窄到它本来要拦的那一族（`"--- 编码/换行校验 ---"`、
+ *     `"-- 步骤 1/3 --"` 这类以连字符串开头、紧跟空白、**又以连字符串收尾**的分隔注释串），
+ *     其余含空格的相对路径一律放行。故放最前。
+ *     ⚠️ 收栏那一半是**本轮补的**（与②对齐）：此前①只要「连字符串 + 空白开头」，比②宽半格，
+ *     于是「目录名本身就是连字符串 + 空格」的真实命令被整族判成引号串 —— `"--- x/My App"`、
+ *     `"- x/My App"`、`"-- x/My App"`、`"---- x/My App"`、`"--- x/My Tool.exe"`、
+ *     `"--- tools/My App"` 这六个词元 basename 都不以连字符串收尾，`fenced === false`，
+ *     **只**被①拦下。实测两向（本机 pwsh，`& '--- x/My App'` 等经 PATHEXT 解析 rc=0）：
+ *       大分类 allow + `my app *`=deny  → HEAD **deny**(exception) → PRE **allow**(category)
+ *       大分类 ask  + `my app *`=allow → HEAD **allow**(exception) → PRE **ask**(category)
+ *     两半必须**同时**成立才进判据：少了收栏那半是上面那个 fail-open，少了开栏那半则
+ *     `"-x/rm ---"` 这类真实命令被误伤（见下②）。
+ *     为什么**不是**「trim 后以 `-` 开头」（第三轮的写法）：后者漏掉「`-` 开头的**目录** +
+ *     含空格 basename」整族（`"-x/My Tool.exe"`、`"-rf/My Tool.exe"`、`"-x/hello world"`、
+ *     `"-x y/My App"`）—— 它们**确实**以 `-` 开头、`/\s/` 也确实为真，于是照样被判成引号串
+ *     → label 变空 → `unparsable → destructive=false → 落大分类`。这一族与
+ *     `"Program Files/My Tool.exe"` 是**同一个缺陷**（HEAD 都给得出 `my tool`），只是目录名
+ *     以 `-` 开头才漏网。真实可执行性本机 pwsh 实测（rc=0，无害替代目标）：
+ *     `-x/rm.cmd`、`-x/My Tool.cmd`、`.\-x\My Tool.cmd`、`-x y/rm`、`.\-x y\rm.cmd`
+ *     都真的跑起来了；`"-x/My Tool.exe"` 形态由 PATHEXT 解析到 `-x\My Tool.cmd`。
+ *     判别特征：真实目录名紧跟连字符串的必是字母/数字（`-x`、`-rf`、`-x y`），
+ *     而分隔线的连字符串后面才是空白（`--- `）。
+ *     ⚠️ 但**这条判别特征只对「连字符串后紧跟空白」的子族成立**，本轮补了适用范围②（见下）：
+ *     该族里还有「连字符串后**不跟空白**、空白落在 basename 里」的子族（`---编码/换行校验 ---`），
+ *     汉字/字母紧跟连字符串，`/^-+\s/` 原理上区分不了它。
+ *     ⚠️ 不要退回「以 `-` 开头」，也不要换成「第一个分隔符之前就有空白」：后者对
+ *     `"-x y/My Tool.exe"`（目录段与 basename 都含空格）仍判真，实测那一格在三态下
+ *     HEAD=deny(exception) → PRE/NOW **allow(category)**（fail-open，两门方言各一格）。
+ *     ⚠️ 判据用 `t.trim()` 而不是 `t`：词法器**保留**引号内的首尾空白
+ *     （实测 `"  --- 编码/换行校验 ---"` → 词元 `  --- 编码/换行校验 ---`），
+ *     不 trim 时前导空白让 `/^-+\s/` 失配 ⇒ 该形态 label 变 `换行校验 ---`（假候选复活）。
+ *   · 适用范围②「装饰性开栏 + 装饰性收栏」（详见函数体末段）—— 开栏 = 连字符串后
+ *     跟的不是 ASCII 字母/数字、也不是路径分隔符；收栏 = **剥路径后的 basename** 以
+ *     连字符串收尾。它管① 漏掉的那个子族（连字符串后**不跟空白**、空白落在 basename 里，
+ *     `---编码/换行校验 ---`），**不可省**：`"-x/rm ---"` 的 basename 同样
+ *     以连字符串收尾，但它是真实可执行文件（实测 `-x/rm ---.cmd` rc=0），少了开栏那一格
+ *     会把 A 族误判成引号串 ⇒ fail-open。
+ *   · 去掉「含空白」—— `a/b/c`（相对路径命令）被误伤；
+ *   · 去掉「含分隔符」—— `"reg delete" HKLM\X /f` 的 `reg delete`（引号包裹的
+ *     **两词命令名**，54D 语料钉着它）被误伤；
+ *   · 去掉「不以路径形态开头」—— `"C:/Program Files/My Tool.exe"`（引号包裹的
+ *     **路径形态命令名**，54D 同语料）被误伤；
+ *   · 去掉「剥路径后仍非命令名」—— 只按「含空白 + 含分隔符 + 不以路径形态开头」判，
+ *     会把 `"my tools/rm.exe" -rf /data`、`"Program Files/rm.exe" -rf /`、
+ *     `"my dir/Remove-Item.exe" -Recurse -Force C:/Windows` 这类**含空格的相对路径
+ *     命令**判成字符串字面量（`looksLikeExplicitPath` 不认相对路径开头）→ label 变空
+ *     → 段级 `unparsable` → 破坏性子设置与全部例外匹配双双跳过 → 落大分类。
+ *     实测（bash 与 pwsh 两门方言）HEAD 均为 ask/deny，只按前三格判时一律变 **allow**，
+ *     用户显式 `rm *`=deny 例外同样被绕过；反向也误伤 `"my scripts/build.ps1" -Clean`
+ *     （用户配 `build *`=allow 时由 allow 变 ask，例外失效、反复弹窗）。
+ * 故最后一格按**剥路径后的 basename** 判，而非在原词元上做前置否决。
+ * ⚠️ 上面列的四条是**判据说明用的反例**，它们本身**不在**测试语料里 —— 曾有一版注释
+ *    声称「四条反例已钉进 AJ 组」，实测为假：把这最后一格整条删掉（判据退化成
+ *    「含空白 + 含分隔符 + 非显式路径即引号串」）时，AJ 组**只有**本轮补的
+ *    `"a b/reg delete" HKLM\X /f` 与 `"-x/reg delete" HKLM\X /f` 两格会红灯
+ *    （见 `test/shell-parse.mjs` AJ 组「真命令名被守卫误伤」那一趟）。
+ *    即上面那四条形态**确实没有**断言守护，不要按旧注释以为它们已被钉住。
+ *
+ * 命中形态就是用户实测的那一条：`"--- 编码/换行校验 ---"` —— 词法器剥掉引号后
+ * 留下含空格与 `/` 的整串，`commandNameOf` 取最后一个 `/` 之后得到 `换行校验 ---`，
+ * 弹窗据此给出「允许此项」按钮，而写进配置的例外**永不命中**。
+ *
+ * ⚠️ **坏字符判据只落在剥路径之后的 basename 上，不落在原词元上**：若落在
+ * **原始词元**上会误伤真实命令 —— `$x/rm -rf /etc`、`$env:TEMP/rm.exe -rf /etc`、
+ * `C:/my=dir/rm.exe -rf /etc` 的 `$` 与 `=` 都在**路径前缀**里，那些是货真价实的命令
+ * （实测：对原始词元跑 `BAD_LABEL_CHARS` 会让这一族在八档全 deny 下由 deny 变 **allow**，
+ * 是新开的 fail-open）。`segmentLabelFrom` 里另有一句同口径的 `BAD_LABEL_CHARS.test(head)`。
+ *
+ * 残余（有意保留，如实记录）。守卫的适用范围是上面那**两格**（连字符串 + 空白开头 +
+ * 连字符串收尾 / 装饰性开栏 + 装饰性收栏），两格之外一律放行，故残余范围**比原先更大**，
+ * 如实列出四类：
+ *   ① **不含路径分隔符**的引号串 —— 在词元粒度上与真命令名不可区分：词法器剥引号后，
+ *      `"hello"` 与 `hello`、`"--- encoding check ---"` 与同名可执行文件，交到这里的
+ *      都是同一个字符串（后者由 `segmentLabelFrom` 的前导 `-` 守卫拦下）。
+ *   ② **含分隔符但不以 `-` 开头**的引号串（`"a b/hello world"`）—— 与 A 族
+ *      `"my tools/My App"`（真实可执行的含空格相对路径命令）**逐字同形**，词元粒度上
+ *      无法区分，二者只能同判。这是**固有**的不可区分性，不是本守卫的疏漏：
+ *      按「basename 含空白即引号串」判会误伤 A 族（fail-open，见上），
+ *      按「放行」判则本形态多一个候选按钮 —— 两害相权取后者，且它与 HEAD 同值。
+ *   ③ 含分隔符、以 `-` 开头，但剥路径后 basename 恰是**已知命令名 / 两词命令名**
+ *      （`"a b/reg delete"`）—— 见下，那是有意的取舍（B 族不得回退）。
+ *   ④ 含分隔符、以 `-` 开头，且空白落在**目录段**（`"-x/My App"`）—— 与 ② 同族、
+ *      同为**固有**的不可区分性：它与真实可执行的 `"-x/My Tool.exe"` 在词元粒度上
+ *      只差 basename 里那几个字符，而后者按 PATHEXT 真能解析到 `-x\My Tool.cmd`。
+ *      本守卫对整族放行（判假），故这一形态多一个候选按钮 —— 与 HEAD 同值。
+ * 要堵 ①②必须让词法器把「引号状态」随词元一起交回（`words` 是 `string[]`，改结构会波及
+ * 全部消费方），代价与收益不成比例；且它们的危害只是弹窗多一个用户不会点的按钮，
+ * 不构成授权面问题（写下的例外永不命中、命令照旧弹窗，用户看得见，不会被静默放行）。
+ *
+ * @param {string} text 词元**原文**（未经 `commandNameOf` 剥离）
+ * @returns {boolean} 为真表示该词元是引号包裹的字符串字面量
+ */
+function labelTokenIsQuotedLiteral(text) {
+  const t = String(text == null ? '' : text)
+  if (!t) return false
+  if (!/\s/.test(t) || !/[\\/]/.test(t)) return false
+  // 显式路径形态早退（`"C:/Program Files/rm.exe"`、`"./my tools/rm.exe"`）：
+  // 它们**是**命令，剥路径后 basename 含空白也不得拒。
+  if (looksLikeExplicitPath(t)) return false
+  // 其余按**剥路径后的 basename**判「是否仍是合法命令名」：`x/my tools` 剥完是
+  // `my tools`（含空白、且不是已知命令名）→ 判真（引号串）；而 `my tools/rm.exe`
+  // 这类**相对路径命令**剥完是 `rm.exe` → 合法命令名 → 判假（不是字符串字面量），守卫放行。
+  //   （上面第一例一度误写成 `my tools/rm.exe` —— 那个剥完是 `rm`，不是 `my tools`，
+  //    举错了例子；判据本身没变，这里只把例子改对。）
+  //
+  // ⚠️ 「basename 含空白」**单独不足以判引号串**（本轮修复）：`DESTRUCTIVE_LABELS` 里
+  //     有**两词命令名**（`reg delete`），路由器命令的 label 本来就拼成两词，含空白是
+  //     **正常形态**而不是「引号串」的特征。于是「含空格的相对路径 + 两词命令名」被误判：
+  //       `"a b/reg delete" HKLM\X /f`   → head = `reg delete` → 误判引号串 → label 变空
+  //       `-x/reg delete HKLM\X /f`      → 同上（剥路径后 basename 就是 `reg delete`）
+  //       `"-x/reg delete" HKLM\X /f`    → 同上
+  //     ⇒ 段级 `unparsable` ⇒ labels 为空 ⇒ `destructive=false` ⇒ 破坏性子设置与全部
+  //     例外匹配双双跳过 ⇒ 落大分类。实测（大分类 allow + reg 档 deny）：
+  //     三格 bash / pwsh **HEAD=deny → 只加引号守卫时 allow**（共 8 格，见对拍）。
+  //     该形态真实可执行：bash 实测 `"a b/reg delete" HKLM/X /f` 真的执行了
+  //     `a b/reg delete`（无害替代目标，rc=0）。
+  //     故「含空白」这一格必须再排除**已知的多词命令名**（判据直接问 `DESTRUCTIVE_LABELS`，
+  //     不另写第二份两词表 —— 那正是本文件反复警告的漂移源）。
+  //     ⚠️ 作者注释声明的残余范围（「**不含**路径分隔符的引号串」）并未覆盖此形态：
+  //     它含分隔符，走的是本行而不是上面那条早退。
+  // ⚠️ **守卫只对「trim 后以连字符串 + 空白开头」（`/^-+\s/`）的词元成立**（该轮修复；
+  //    ⚠️ 后续又补了「且连字符串收尾」那一半，见下适用范围①——本段只记该轮收窄的来由）──
+  // 上面那格「剥路径后 basename 仍非命令名」此前对**所有**含空白 + 含分隔符的词元生效，
+  // 于是「含空格的相对路径 + basename 既非破坏性命令名、也非两词命令名」被整族误判成
+  // 字符串字面量：`"Program Files/My Tool.exe" -rf ./x` → head = `my tool` → 判真 → label 变空
+  // ⇒ 段级 `unparsable` ⇒ labels 为空 ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配
+  // 双双跳过 ⇒ 落大分类。实测（相对 HEAD 是本轮改动引入的**回归**，HEAD 该函数不存在、
+  // `segmentLabelFrom` 直接取 `commandNameOf` 得到 `my tool`）：
+  //     `"Program Files/My Tool.exe" -rf ./x`  → HEAD `my tool` / 只加引号守卫时 **`` 空串**
+  //     `"build tools/my script.ps1"`          → 同上
+  //     `"my tools/My App"`                    → 同上（本机 pwsh 真能执行：PATHEXT 解析到 `My App.cmd`）
+  // 危害**双向**，两向都实测（大分类 ask + 为该命令写的 allow 例外 / 大分类 allow + 显式 deny 例外）：
+  //     fail-closed：HEAD allow(source=exception) → 空 label 时 **ask(source=category)**
+  //                  —— 用户写的 allow 例外失明、不再产出候选按钮、反复弹窗；
+  //     fail-open  ：HEAD deny(source=exception)  → 空 label 时 **allow(source=category)**
+  //                  —— 用户显式写的拒绝规则被静默绕过（这一向是真正的授权面问题）。
+  // 故判据先收窄到「trim 后以 `-` 开头」—— 那正是本守卫本来要拦的假候选族
+  // （`"--- 编码/换行校验 ---"` / `"--- encoding check ---"`，以 `-` 开头的分隔注释串）。
+  // ⚠️ 但**只收窄到这一格并不够**（本轮修复）：该族里还有「`-` 开头的**目录** + 含空格的
+  //    basename」——`"-x/My Tool.exe"`、`"-rf/My Tool.exe"`、`"-x/hello world"`、
+  //    `"-x y/My App"` 同样以 `-` 开头、同样含空白，于是照样被判成引号串。它们与
+  //    `"Program Files/My Tool.exe"` 是**同一个缺陷**（HEAD 都给得出 `my tool`），只是
+  //    目录名以 `-` 开头才漏过了上一轮那格。实测（无害替代目标，两门方言）：
+  //      · 大分类 allow + 八档全 deny（无例外）：HEAD/PRE 由 `my tool` 变 `` 空串；
+  //      · 大分类 ask + allow 例外 `my tool *`：HEAD allow(source=exception) →
+  //        PRE **ask(source=category)**（fail-closed：例外失明、反复弹窗）；
+  //      · 大分类 allow + deny 例外 `my tool *`：HEAD deny(source=exception) →
+  //        PRE **allow(source=category)**（fail-open：用户显式写的拒绝被静默绕过）。
+  //    故本轮把适用范围换成**「连字符串 + 空白」开头**（`/^-+\s/`）—— 真实目录名紧跟
+  //    连字符串的必是字母/数字（`-x`、`-rf`、`-x y`），而分隔线的连字符串后面才是空白。
+  //    ⚠️ 中间试过一版「第一个分隔符之前就有空白」，它对 `"-x y/My Tool.exe"`（目录段与
+  //    basename 都含空格）仍判真，实测那格 HEAD=deny(exception) → PRE/NOW **allow**，
+  //    已否决并订正为现在这版。
+  // ⚠️ 四条**已被实测否决**的替代修法，不要采用：
+  //   ① 「带可执行扩展名即放行」只修 `.exe`/`.ps1`，修不了无扩展名形态（`"my tools/My App"`
+  //      仍为空，而它在本机 pwsh 下真能执行）；
+  //   ② 「让 `looksLikeExplicitPath` 认相对路径」会连带改动 blast / 命令头等分类器路径，扩散过大；
+  //   ③ 「改宽判据」会与 `"a b/reg delete"` 族冲突（上一轮刚修好）；
+  //   ④ 「适用范围再加『剥路径后 basename 不以 `-` 开头』」**修不了本族**（实测，机制与直觉
+  //      相反，如实记录）：该格对 `-x/rm` 与 `"-x/My Tool.exe"` 的判定**完全相同** ——
+  //      两者剥完都是 `rm` / `my tool`，**都不以 `-` 开头**，故这一格根本区分不了它们。
+  //      它真正排除的只有 basename 恰以 `-` 开头的极小一撮（`-x/-weird`），对本族零作用：
+  //      实测该方向下 A 族五格（`"-x/My Tool.exe"`、`"-x/My App"`、`"-rf/My Tool.exe"`、
+  //      `"-x/hello world"`、`"-x y/My App"`）**label 仍为空**，缺陷原样保留；
+  //      而 `-x/rm` / `-rf/rm` / `-x/reg delete` 也**没有**回退（它们走的是同一条放行路径）。
+  //      即该方向既没修好缺陷、也没破坏上一轮的修复，属**判据没对准缺陷**，不要采用。
+  //      真正的区分点见下：**收栏**（basename 是否以连字符串收尾）配**开栏**形态，
+  //      与 basename 是不是已知命令名无关。
+  //   ⑤ 单用「剥路径后 basename 以连字符串收尾」而**不带开栏那一格**（本轮实测否决）：
+  //      它对 `"-x/rm ---"` 与 `"---编码/换行校验 ---"` 的判定**完全相同**（两者剥完都收尾于
+  //      `---`），于是把 A 族同形的真实可执行文件一并判成引号串 —— 实测 `-x/rm ---.cmd`
+  //      在本机 pwsh 下真能执行（rc=0，无害替代目标），判真会让 label 变空 ⇒ fail-open
+  //      （大分类 allow + `rm *`=deny 时 HEAD/PRE 均为 deny → 该方向变 **allow**）。
+  // ⚠️ 判据用 `t.trim()`：词法器**保留**引号内的首尾空白（实测 `"  --- 编码/换行校验 ---"`
+  //     → 词元 `  --- 编码/换行校验 ---`），不 trim 时前导空白让 `/^-+\s/` 失配、
+  //     该形态 label 变 `换行校验 ---`（假候选复活，实测）。
+  // 适用范围**两格**（满足其一即进入判据）：
+  //   ① 「**连字符串 + 空白**开头」**且**「**连字符串收尾**」（`/^-+\s/` + 线性收栏扫描）
+  //      —— `--- 标题 ---` 这类分隔注释串。
+  //      ⚠️ 收栏那一格是**本轮补的**：缺它则「目录名本身就是连字符串 + 空格」的真实命令
+  //      （`"--- x/My App"`、`"- x/My App"`、`"-- x/My App"`、`"---- x/My App"`、
+  //      `"--- x/My Tool.exe"`、`"--- tools/My App"`）被整族判成引号串 —— 它们
+  //      `tailAt < 0`（basename 不以连字符串收尾）、`fenced === false`，**只**被①拦下。
+  //      即①此前比②**宽半格**，本轮是与②**对齐**（同一语义），不是新增判据。
+  //   ② 「**装饰性开栏 + 装饰性收栏**」—— 开栏 = 连字符串开头、后面不紧跟路径分隔符、
+  //      且**不是**「`-` + 字母/数字」的真实目录名（`-x`、`-rf`、`-x y`）；收栏 =
+  //      **剥路径后的 basename** 以连字符串收尾，**且剥掉收栏后剩下的不是命令名**
+  //      （`…换行校验 ---`、`…my check ---` 剥完是 `换行校验` / `my check`，都不是命令名；
+  //      而 `--x/rm ---` 剥完是 `rm`，是 —— 故它不算收栏，见下）。
+  //
+  // ⚠️ ② 是**本轮补的**，缺它则整族漏回假候选（本轮缺陷，实测）：① 只认「连字符串后
+  //     **紧跟空白**」，而这一族的空白落在 **basename 里**、连字符串后面紧跟的是字母或汉字
+  //     （`---编码/换行校验 ---`、`---encoding/my check ---`、`--note/my check ---`、
+  //     `-编码/换行校验 ---`，以及 pwsh 的 `` "`n---编码/换行校验 ---`n" ``），
+  //     于是① 失配、守卫整族放行 ⇒ label 非空 ⇒ 弹窗产出假候选（label 对真实命令
+  //     `matchCommand` 命中数 0 ⇒ 用户写的例外永不命中，而 `alreadyInProject` 已把它当
+  //     「用户已表态」⇒ 按钮消失、命令照旧弹窗，用户既没放行成功、也再没有按钮可点）。
+  //     真正的区分点是**收栏**（basename 自身以连字符串收尾），不是「连字符串后面跟什么」——
+  //     上一版注释自称「真实目录名紧跟连字符串的必是字母/数字」，但 `---编码` 恰恰就是
+  //     汉字紧跟连字符串，故 `/^-+\s/` 原理上区分不了这一子族。
+  //
+  // ⚠️ 开栏那一格**不能省**（只按「basename 以连字符串收尾」判会 fail-open）：`"-x/rm ---"`
+  //     的 basename 同样以连字符串收尾，而它剥路径后是**真实可执行文件** —— 实测（无害
+  //     替代目标，本机 pwsh，临时目录内）`-x/rm ---.cmd` 真的跑起来了（rc=0，PATHEXT 解析），
+  //     即它与 A 族 `"-x/My Tool.exe"` 同族、只是 basename 尾巴多几个连字符。少了开栏条件，
+  //     它会被判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+  //     落大分类，用户显式写的 `rm *`=deny 例外随之失明（实测：大分类 allow + `rm *`=deny
+  //     时 HEAD/PRE 均为 **deny** → 少了开栏条件变 **allow**，fail-open）。
+  //     故开栏判据取「连字符串开头、后面不紧跟路径分隔符、且不是『`-` + 字母/数字』的
+  //     真实目录名」：`-x`、`-rf`、`-x y` 这些真实目录名紧跟的是字母/数字，被排除；
+  //     `---编码`、`--note`、`-编码` 才落入。
+  //     ⚠️ 这一格**只对 `dash === 1` 成立**（本轮修复）：`dash > 1` 时 `next` 必然是
+  //     `-` 而不是目录名首字符，信息量为零。此前写作 `dash > 1 || !/[A-Za-z0-9]/.test(next)`，
+  //     即 `dash > 1` 时**整格恒真**、把这一格短路掉 —— 于是「2+ 连字符开头的真实目录 +
+  //     收栏 basename」（`"--x/rm ---"`、`"--tools/Remove-Item ---"`、`"--bin/del ---"`、
+  //     `"--x y/rm ---"`、`"--9/rm ---"`）整族被判成引号串 ⇒ label 变空 ⇒ 段级
+  //     `unparsable` ⇒ `destructive=false` ⇒ 落大分类，用户显式写的 `rm *`=deny 例外
+  //     随之失明。实测（无害替代目标，TEMP 内，PATHEXT 解析，rc=0）：本机 pwsh
+  //     `& "--x/rm ---"`、`& "--x y/rm ---"`、`& "--x/tool ---"` 都真的跑起来了
+  //     （`--x\rm ---.cmd` 等），故这一族与 `"-x/rm ---"` 同族、是真命令。
+  //     三态对拍（大分类 allow + `rm *`=deny，bash/pwsh 各一格）：
+  //       HEAD=deny → PRE=allow → 修复后=deny（label 由 `""` 回到 `rm ---`）。
+  //     故本轮把 `dash > 1` 那半段的判据换成**收栏剥除后的残名**（见下），而不是恒真。
+  //     另排除「连字符串后**紧跟路径分隔符**」（`-/rm ---`、`--/rm ---`）：那说明连字符串
+  //     本身是**目录名**（目录就叫 `-` 或 `--`），不是装饰性开栏 —— 这两格 HEAD/PRE
+  //     都给得出 `rm ---`，不收窄会白白多丢 20 格保护（实测）。
+  //     ⚠️ 收栏那一格**也必须带「剥掉收栏后不是命令名」**：`"--x/rm ---"` 的 basename
+  //     同样以连字符串收尾，但它剥完是 `rm` —— 真实命令名。少了这格，上面那族会**再次**
+  //     被判成引号串（实测：只放开开栏而不带这格，`"--x/rm ---"` label 仍为空）。
+  //     判据取「剥掉收栏后**仍是可打印 ASCII 的单个词**」即视为命令名（`rm`、`tool`、
+  //     `reg delete` 都命中；`换行校验`、`my check`、`编码 check` 因含非 ASCII 或空白而不命中）。
+  //     不另写命令名白名单：`DESTRUCTIVE_LABELS` 只覆盖破坏性命令，非破坏性的真实命令
+  //     （`--x/tool ---`、`--x/git ---`）会漏；「是不是命令名」在这里的正解是**词形**
+  //     （无空白、无不可打印字符），不是「在不在某张表里」。
+  // 为什么不是「以 `-` 开头」：后者会把「`-` 开头的目录」整族误伤（见上）。
+  //
+  // ── ⚠️ 残余范围是**两类**（不要读成「只限非 ASCII 残名」—— 含空格的**纯 ASCII** 残名同样中招）──
+  //    剥掉收栏后的**残名**含空白**或**含非 ASCII，都过不了「是命令名」那一格，于是被判成
+  //    装饰性收栏 ⇒ 引号串 ⇒ label 变空：
+  //      · 残名**含空白**（纯 ASCII）：`"--x/my tool ---"`、`"--x/a b ---"`、`"--x/My Tool ---"`
+  //      · 残名**含非 ASCII**：`"--x/换行校验 ---"`、`"--x/工具 ---"`
+  //    两类都是**真实可执行文件**（与上面 `"--x/rm ---"` 同族，TEMP 内 PATHEXT 解析实测 rc=0），
+  //    危害同族：label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类，用户为该命令
+  //    写的 deny 例外随之失明。实测（最坏配置：大分类 allow + 八档全 allow + 该命令 deny 例外）：
+  //    上面五个形态 × bash/pwsh 两门方言共 10 格，**全部** HEAD=deny → NOW=allow（真 fail-open）。
+  //    ⚠️ 含空格的**纯 ASCII** 残名比非 ASCII 名**常见得多**（`"--x/my tool ---"` 与刚修好的
+  //    `"-x/my tool ---"` 只差一个连字符），故不要把残余读窄成「只限非 ASCII 名」。
+  //    ⚠️ 该残余**不是第六轮引入**：第五轮（`dash > 1` 短路那版）下残余族同样为空，第六轮
+  //    既未引入也未修复；但**相对 HEAD 属本次未提交改动引入**（HEAD 该格非空，
+  //    `"--x/my tool ---"` HEAD=`my tool ---`），且它**没有语料守护**。
+  //    ⚠️ **无任何词法判据能分开两族**：残余族与守卫要防的装饰串族在词元粒度上**逐字同形** ——
+  //    `dash` 数、`next` 字符、残名含空白三维全同（`"--x/my tool ---"` 真命令
+  //    vs `"--x/my check ---"` 装饰串，判据读到的每一维取值都相同）。六轮所加的每一格判据都在
+  //    这个**不含区分信息**的空间里搬动分界线，继续加格子只会修好一族又在同族另一格露口子 ——
+  //    故这里判定为「**不值得继续修补**」，**不是「待修」、不是 TODO**；要真正分开只能引入
+  //    「该路径在文件系统里是否真实存在」这类判据，而本文件是**纯函数**（不依赖 DSH 运行时），
+  //    代价远高于收益。
+  //    ⚠️ 本条评述只针对 **`--` 开头目录**那一残余族（`--x/my tool ---`，`tailAt >= 0`、
+  //    走 `fenced` / `bareIsCommand`）。「**目录名本身就是连字符串 + 空格**」那一族
+  //    （`--- x/My App`）与它**路径分离**：那族 `tailAt < 0`、`fenced === false`，**只**被
+  //    适用范围①拦下，故由①的收栏格修好（见下），不在「不值得继续修补」之列。
+  //    触发面**四重叠加**：`--` 开头目录 + 含空格或非 ASCII 名 + basename 以 `---` 收尾
+  //    + 用户为该命令写了 deny 例外。
+  const s = t.trim()
+  const head = commandNameOf(t)
+  let dash = 0
+  while (dash < s.length && s.charCodeAt(dash) === 45) dash += 1   // 45 = '-'
+  const next = s.charAt(dash)
+  // 「真实目录名开栏」：`dash === 1` 且紧跟 ASCII 字母/数字（`-x`、`-rf`、`-x y`）。
+  // ⚠️ `dash === 1` 这一半**不能省**：上一版把它写成 `dash > 1 || !/[A-Za-z0-9]/.test(next)`，
+  //    即 `dash > 1` 时整格恒真、把这一格短路掉 —— 于是「2+ 连字符开头的真实目录 + 收栏
+  //    basename」（`"--x/rm ---"`、`"--tools/Remove-Item ---"`、`"--bin/del ---"`、
+  //    `"--x y/rm ---"`、`"--9/rm ---"`）整族被判成引号串（见上，本轮缺陷）。
+  // ⚠️ 反过来也不能**只**留 `!/[A-Za-z0-9]/.test(next)`：`dash > 1` 时 `next` 是目录名首字符，
+  //    `--note`、`--encoding` 这些**装饰性开栏**首字符同样是字母，一刀切会让
+  //    `"--note/my check ---"`、`"---encoding/my check ---"` 整族漏回假候选（实测）。
+  //    故 `dash > 1` 时不按首字符判，改由下面的**收栏 + 残名**判（那里才有区分力）。
+  const plainDirLead = dash === 1 && /[A-Za-z0-9]/.test(next)
+  const decorLead = dash > 0 && next !== '/' && next !== '\\' && !plainDirLead
+  // 装饰性收栏：basename 以连字符串收尾，**且剥掉收栏后剩下的不是命令名**。
+  //   `"--x/rm ---"`    剥完 `rm`          → 是命令名 ⇒ **不是**装饰性收栏（真命令，放行）
+  //   `"--x/reg delete ---"` 剥完 `reg delete` → 两词命令名 ⇒ 同上
+  //   `"---编码/换行校验 ---"` 剥完 `换行校验`   → 含非 ASCII ⇒ 装饰性收栏（判引号串）
+  //   `"---encoding/my check ---"` 剥完 `my check` → 含空白 ⇒ 装饰性收栏
+  // 「是命令名」= 单个可打印 ASCII 词（无空白、无控制/非 ASCII 字符）**或**在
+  // `DESTRUCTIVE_LABELS` 里。为什么必须带上后者：那张表里有**两词命令名**（`reg delete`），
+  // 它含空白、过不了「单个词」那格，而它确实是命令名（该表是全文件唯一的命令名权威来源，
+  // 不另写第二份两词表 —— 那正是本文件反复警告的漂移源）。
+  // 为什么不反过来写成「在 DESTRUCTIVE_LABELS 里才算命令名」：那张表只收**破坏性**命令，
+  // `--x/tool ---`、`--x/git ---` 这些非破坏性的真实命令会漏判成引号串（实测，label 变空
+  // ⇒ 同一条 fail-open 链）。「是不是命令名」在这里的正解是**词形**，不是「在不在某张表里」。
+  // ⚠️ 这里与下面的①都必须走 `trailingDashRunAt`（**线性反向扫描**），不要写回正则：
+  //    未锚定的 `/-{2,}\s*$/` 失配时是 O(n²)（实测数字见该函数的注释），而 `head` 是
+  //    词元原文、长度无上界、内容由 AI 生成的命令决定。
+  //    ⚠️ 也**不要**把它「锚定」成 `/^-{2,}\s*$/` 了事：`tail.index` 参与 `bare` 的计算，
+  //    不是可以随手锚定的中间变量 —— 锚定版让 `--note/my check ---` 这类词元的
+  //    `bare` 由 `''` 变回 `my check ---`（`fenced` 随之翻转），实测 85068 形态的对拍中
+  //    740 格全部方向为「拦→放行」，并直接弄红测试套件。
+  const tailAt = trailingDashRunAt(head, 2)
+  const bare = tailAt >= 0 ? head.slice(0, tailAt).trim() : ''
+  const bareIsCommand = /^[\x21-\x7E]+$/.test(bare) || DESTRUCTIVE_LABELS.has(bare)
+  const fenced = decorLead && tailAt >= 0 && !bareIsCommand
+  // 适用范围两格（满足其一即进入判据）：
+  //   ① 「**连字符串 + 空白**开头」**且**「**连字符串收尾**」**且**「**残名不是
+  //      破坏性命令名**」—— 分隔注释串（`--- 标题 ---`）。
+  //      ⚠️ 收栏那一格是**本轮补的**：此前①只要求「连字符串 + 空白开头」，比②**宽半格**，
+  //      于是「目录名本身就是连字符串 + 空格」的真实命令被整族判成引号串：
+  //      `"--- x/My App"`、`"- x/My App"`、`"-- x/My App"`、`"---- x/My App"`、
+  //      `"--- x/My Tool.exe"`、`"--- tools/My App"` —— 这些词元 `tailAt < 0`
+  //      （basename 不以连字符串收尾）、`fenced === false`，**只**被①这一格拦下。
+  //      实测（本机 pwsh，PATHEXT 解析，`& '--- x/My App'` 等 rc=0，真能执行）：
+  //        大分类 allow + `my app *`=deny  → HEAD=**deny** → PRE=**allow**（真 fail-open）
+  //        大分类 ask  + `my app *`=allow → HEAD=**allow** → PRE=**ask**（例外失明、反复弹窗）
+  //      故①与②本就该是**同一语义**（装饰性开栏 + 装饰性收栏），这里是与②**对齐**，
+  //      不是新增一格。实测对拍（60984 格判据面笛卡尔积，变体 = ①不带收栏的修改前语义）：
+  //      「放宽 3744 格 / 收紧 0 格」，放宽格去重后 624 个形态、**全部** basename 不以
+  //      连字符串收尾（即真命令族）；放宽格中端到端动作比修改前更宽的 320 格，
+  //      **全部** HEAD=allow（= 恢复 HEAD 语义，相对 HEAD 的新放宽为 0）。
+  //      ⚠️ 第三格（残名不是破坏性命令名）是**本轮补的**：只补收栏那一格是「只补了一半」——
+  //      「目录名＝连字符串+空格 + basename 以连字符串收尾 + 残名 ∈ `DESTRUCTIVE_LABELS`」
+  //      这一子族（`"--- x/rm ---"`、`"- x/del ---"`、`"---- x/rmdir ---"`、`"--- x/format ---"`）
+  //      仍被①整族判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+  //      破坏性判定与用户例外双双失效。它与②**未对齐**：② 对同一残名走 `fenced`
+  //      （`bareIsCommand` 为真 ⇒ `fenced === false`）判「是命令名」放行，① 却判「是装饰性
+  //      收栏」拦下 —— 同一残名两条路径判定相反（实测 `"--- x/rm ---"` 与 `"--x/rm ---"`）。
+  //      补的正是②**已经用了七轮**的那个判据（`DESTRUCTIVE_LABELS.has(bare)`，即
+  //      `bareIsCommand` 内部那一半），不新增格子、不新增表、不新增分支，与本轮「①与②对齐」
+  //      是同一意图的补完。实测对拍（7123 格语料，三态 HEAD/PRE/NOW）：①-a 族
+  //      「PRE=""→NOW≠"" 1342 格、非空→空 0 格、值变 0 格」，且这 1342 格**全部**与 HEAD 同值。
+  //      ⚠️ **不要**改用 `!bareIsCommand`（候选A）：那会复活装饰串假候选 —— `"-- 步骤 1/3 --"`、
+  //      `"-- 1/3 --"`、`"--- a/b ---"`、`"-- x/3 --"` 等**13 格**装饰串的残名 `3`/`b`/`1`
+  //      同样是单 ASCII 词，`bareIsCommand` 为真、被放行（实测候选A 13 格 / 候选B 0 格）。
+  //      ⚠️ 已知残余（**不要试图一并修**）：残名 ∉ `DESTRUCTIVE_LABELS` 且为单 ASCII 词的
+  //      子族（`"--- x/git ---"`、`"--- x/tool ---"`、`"--- x/3 ---"`）与装饰串残名**逐字同形**，
+  //      词法上不可区分，已判定并入已忽略族，保持现状不动。
+  //      ⚠️ 相邻子族「**单连字符收栏**」（`"--- x/rm -"`、`"--- x/del -"`、`"--- x/rmdir -"`、
+  //      `"--- x/format -"`、`"--- tools/rm -"`、`"--- x y/rm -"`，即 basename 以**单个**
+  //      连字符收尾、剥掉后残名 ∈ `DESTRUCTIVE_LABELS`）：它**与 ①-a 同族、同一条 fail-open
+  //      链**，只是 min 值不同 —— **不是**「候选B 覆盖面之外的相邻子族」那种一直如此的边界。
+  //      它是**守卫第一版引入**、**第八轮未覆盖**、**相对 HEAD 的真回归**：HEAD 认得出命令名
+  //      （`"--- x/rm -"` HEAD=`rm -`），PRE 起为空（⇒ 段级 `unparsable` ⇒ `destructive=false`
+  //      ⇒ 用户例外失明）。成因是**①的收栏判据用 min=1，而 `bare` 取自 `trailingDashRunAt(head, 2)`
+  //      （min=2）**：单连字符收栏时后者返回 -1 ⇒ `bare === ''` ⇒ `DESTRUCTIVE_LABELS.has('')`
+  //      为 false ⇒ 第八轮补的第三个合取项在该子族是**重言式**（恒真、等于没补）—— 同一个
+  //      条件的两半用了两把尺子。故这里另算一个 **min=1 的残名**（`bareAt1`）与①的收栏对齐；
+  //      实测该子族 label 恢复非空且与 HEAD 同值（放宽格中与 HEAD 不同值者 0 格）。
+  //      ⚠️ 成因②（**basename 整个是连字符串**，如 `"--- x/--"`、`"--- x y/---"`）**无需处理**：
+  //      那族 `tailAt = 0` ⇒ `bare === ''` ⇒ `bareIsCommand === false` ⇒ `fenced === true`，
+  //      本格不被拦下；**且** `bareAt1` 同样为 `''`、不在 `DESTRUCTIVE_LABELS` 里 ⇒ ① 的
+  //      第三个合取项也为真 ⇒ 同样不被拦下。即它被 `fenced` 与 ①第三格**双路径冗余覆盖**，
+  //      实测三态（HEAD/PRE/NOW）逐格同值、零变化，故本次不必也不该为它加任何判据。
+  //      ⚠️ 举例只用**含空白**的形态：`"--x/--"`、`"-x/---"` 这类**不含空白**的形态在守卫
+  //      第一格（`!/\s/.test(t) || !/[\\/]/.test(t)` 即早退）就返回 false 了，**根本走不到**
+  //      本格，拿它们当「成因②」的例子会把下一个读者引到错误的位置。
+  //   ② 「装饰性开栏 + 装饰性收栏」（见上 `decorLead` / `fenced`）。
+  //   ① 的收栏那一格必须与②**同一套线性写法**：照抄正则 `/-+\s*$/` 会与上面那个正则
+  //   **同类**（同一张「未锚定贪婪量词 + 可选空白 + `$`」的写法），在
+  //   「含分隔符 + 连字符串+空白开头」的病态输入上叠加。实测 `'- /' + '-'*n + 'x'`：
+  //   n=8k/16k/32k → 正则收栏版 52.8/220.9/888.1 ms（与修改前 56.3/220.0/864.4 ms 同量级），
+  //   而线性版 0.076/0.104/0.121 ms；判定等价性在 20328 格上分歧 0。
+  const tail1At = trailingDashRunAt(head, 1)   // ⚠️ min=1：与①的收栏判据**同一把尺子**
+  const bareAt1 = tail1At >= 0 ? head.slice(0, tail1At).trim() : ''
+  if (!(/^-+\s/.test(s) && trailingDashRunAt(s, 1) >= 0 && !DESTRUCTIVE_LABELS.has(bareAt1)) && !fenced) return false
+  return !head || (/\s/.test(head) && !DESTRUCTIVE_LABELS.has(head)) || BAD_LABEL_CHARS.test(head)
+}
+
+/**
+ * 「这个词元是**赋值**（`NAME=value` / `$name=value`）」—— label 提取的另一条入口判据。
+ *
+ * ⚠️ 与 `LEAD_ASSIGN` **不同**：那个不认 `$` 前缀（`unwrapWordsFrom` 用它剥的是
+ * **shell 风格**的赋值），而 PowerShell 的赋值恰恰写作 `$d=…`。两处判据服务的对象不同
+ * （一个管「剥前缀」，一个管「认命令名」），故各自成表而不是硬凑成一张。
+ *
+ * ⚠️ 本常量（`LABEL_ASSIGN`，认 `$` 前缀的宽口径）**当前已无消费方** —— 它是
+ * 「bash 侧认 `NAME=`」的**错口径**：bash 的赋值前缀不允许 `$`（`$A=/bin/rm` 展开成
+ * `=/bin/rm`，是真命令）。bash 分支已改用 `LEAD_ASSIGN`（见 `bashLeftIsAssign` 的
+ * 缺陷 3 实测表）。保留常量只是不扩大本次改动面，**不要**再把它接回 label 判据。
+ *
+ * ── ⚠️ 这条判据**必须带方言维度**（本轮修法的核心）────────────────────────────────
+ * 同一个形态在两门方言里**语义相反**，故**不存在**一个不分方言的正确判据：
+ *
+ *   · **bash**：`NAME=value` 是赋值（`LEAD_ASSIGN` 的口径，值可含 `/`）⇒ 不执行任何命令。
+ *   · **pwsh**：赋值**必须**写作 `$name=…`；**不带 `$` 的 `NAME=…` 是真命令**。
+ *
+ * 本机 PS 5.1 实测（`[Parser]::ParseInput`，与「实执行」双向确认）：
+ *     `A=/bin/rm`              → PipelineAst、**cmdAst=1**、assignAst=0
+ *     `my=dir/rm`              → PipelineAst、**cmdAst=1**、assignAst=0
+ *     `FOO=/usr/local/bin/myapp` → PipelineAst、**cmdAst=1**、assignAst=0
+ *     `$d='X:/ws/x'`           → AssignmentStatementAst、cmdAst=0、**assignAst=1**
+ *   实执行（无害替代目标，临时目录内建 `A=\bin\rm.cmd` / `my=dir\rm.cmd` /
+ *   `FOO=\usr\local\bin\myapp.cmd` / `x=1\diskpart.cmd` 后 `& '<原文>'`）：
+ *     `A=/bin/rm` / `my=dir/rm` / `FOO=/usr/local/bin/myapp` / `x=1/diskpart`
+ *     **四个全部 RAN=True、rc=0** —— 即 pwsh 侧它们是**真会跑起来**的命令。
+ *
+ * 故：bash 侧用 `LEAD_ASSIGN`（认 `NAME=`，**不认 `$` 前缀** —— `$A=/bin/rm` 在 bash 下
+ * 展开成 `=/bin/rm`、是真命令，见 `bashLeftIsAssign` 的缺陷 3 实测表），pwsh 侧用
+ * `LABEL_ASSIGN_PWSH`（只认 `$NAME=`）。
+ * 不分方言一刀切会让**其中一门方言必然判错**：按 bash 判 ⇒ pwsh 侧真命令 label 变空 ⇒
+ * 段级 `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置与**全部例外匹配**双双跳过 ⇒
+ * 落大分类（**fail-open**，实测大分类 allow + 八档全 deny 下由 deny 变 allow）。
+ */
+const LABEL_ASSIGN = /^\$?[A-Za-z_][A-Za-z0-9_]*=/
+// pwsh 侧同一判据的**左半**：赋值必须带 `$`（见上「PS 5.1 实测」）。不带 `$` 的
+// `NAME=…` 在 pwsh 里是命令名的一部分，交给下面的 `commandNameOf` 正常剥路径取 label。
+// ⚠️ 只认左半**不够**（本轮修法）：右侧是裸词/路径时它仍是**真命令**，见下。
+const LABEL_ASSIGN_PWSH = /^\$[A-Za-z_][A-Za-z0-9_]*=/
+
+/**
+ * pwsh 侧「`$NAME=右侧` 到底是不是**真赋值**」的判据（`LABEL_ASSIGN_PWSH` 的**右半**）。
+ *
+ * ── 为什么只看左半不够（本轮缺陷 1，相对 HEAD 的真回归）─────────────────────────
+ * 本机 PS 5.1 官方解析器实测（`[Parser]::ParseInput` + `FindAll(CommandAst)`，逐条跑过）：
+ *     `$A=/bin/rm`              → PipelineAst、**cmdAst=1**、命令名 `/bin/rm`
+ *     `$A=C:\Windows\System32\rm.exe` → cmdAst=1
+ *     `$A=./rm` / `$A=/bin/dd`  → cmdAst=1
+ *     `$A=rm` / `$A=abc`        → cmdAst=1
+ *     `$A=$env:TEMP/x`          → cmdAst=1、命令名 `x`
+ *     `$A=1/rm`                 → cmdAst=1、命令名 `rm`
+ *   即 `$NAME=` 的右侧是**裸词 / 路径**时，PS 把它当**命令**执行，不是赋值。
+ *   只按左半判 ⇒ 整段判「没有命令要执行」⇒ label 空 ⇒ 段级 `unparsable` ⇒
+ *   `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
+ *   实测（大分类 allow + 八档全 deny，无用户例外）：8 格 HEAD=deny → NOW=allow；
+ *   例外 `rm *`=deny 时同 8 格 HEAD=deny → NOW=allow。
+ *   ⚠️ HEAD **没有**这道守卫（`segmentLabel(['$A=/bin/rm'])` = `'rm'`），是 PRE 引入的回归。
+ *
+ * ── 判据（右侧形态白名单，方向 fail-closed）──────────────────────────────────
+ * 只有右侧**确实是值**时才判赋值；其余一律不拦，交给 `commandNameOf` 剥路径取 label。
+ * 白名单逐条来自上表实测的 **cmdAst=0** 那一列：
+ *     `$A=1` / `$A=3.14` / `$A=.5` / `$A=1kb` / `$A=0x10` / `$A=1e5` / `$A=1..5` / `$A=1+2`
+ *     `$A=$OTHER` / `$A=$null` / `$A=$true` / `$A=$A.foo` / `$A=$A::foo` / `$A=${env:TEMP}`
+ *     `$A='X:/ws/x'` / `$A="X:/ws/x"` / `$A=-1` / `$A=+1` / `$A=-$A` / `$A=+$A` / `$A=--1`
+ *     `$A=(1)` / `$A=(1+2)` / `$A=@(1,2)` / `$A=@{a=1}` / `$A=[int]1` / `$A=[int]` / `$A=!$true`
+ *     `$A=`（空右侧：实测是 `ErrorStatementAst`，判「认不出」是保守方向）
+ *   收敛成：空 / 引号开头 / `$ ( @ [ ! , .` / 数字 / `-`·`+`·`~` 后跟值起始字符。
+ * ⚠️ 「右侧含路径分隔符」单独排除：`$A=$env:TEMP/x` 与 `$A=1/rm` 实测都是 **cmdAst=1**
+ *    （变量或数字后面拼上路径就成了命令名）。引号串里的 `/` 不算 —— 上一条先返回。
+ *
+ * ── 为什么要读**段原文**（`SEG_TEXT`）而不是词元 ────────────────────────────────
+ * 词法器**剥引号**后，`$d='X:/ws/x'`（赋值）与 `$d=X:/ws/x`（真命令）的词元**逐字相同**
+ * （实测都是 `$d=X:/ws/x`）—— 词元粒度上不可区分，原文里那对引号是唯一判据。
+ * 该形态是用户真实弹窗缺陷的钉桩（写下的例外永不命中），不能为了修缺陷 1 把它回退。
+ * 无原文戳时（手搓的词元数组、`unwrapWords` 的 slice 视图）退化为「只用词元判」，
+ * 方向仍是 fail-closed（认不出 ⇒ 不产出候选按钮，命令照旧弹窗）。
+ *
+ * @param {string[]} words 段词元数组（可能带 `SEG_TEXT` 戳）
+ * @param {string} token 剥完前缀后的命令头词元（守卫已保证它是段内**唯一**词元）
+ * @returns {boolean} 为真表示这是真赋值（没有命令要执行）
+ */
+function pwshRightIsValue(words, token) {
+  const raw = Array.isArray(words) ? words[SEG_TEXT] : undefined
+  const text = typeof raw === 'string' && raw ? raw : String(token == null ? '' : token)
+  const m = LABEL_ASSIGN_PWSH.exec(text)
+  if (!m) return false
+  const right = text.slice(m[0].length).replace(/^\s+/, '')
+  if (!right) return true
+  const c = right[0]
+  // 引号串：**必须最先判**（引号内可以含 `/`，而下面那条分隔符判据会把它误判成命令）
+  if (c === "'" || c === '"') return true
+  if (/[\\/]/.test(right)) return false
+  if (c >= '0' && c <= '9') return true
+  // `$` 变量 / `(` 子表达式 / `@` 数组与哈希 / `[` 类型字面量 / `!` 非 / `,` 一元逗号 / `.5`
+  if ('$(@[!,.'.indexOf(c) !== -1) return true
+  // `-1` / `+1` / `~1` / `--1` / `-$A` 是值；而 `-abc` / `+abc` 实测 cmdAst=1（命令）。
+  // ⚠️ 本格**恒真**（本轮缺陷 4：代码真值缺陷、非行为缺陷）：外层守卫已保证
+  //    `c ∈ {-,+,~}`，而 `right[0]` 就是 `c` 本身、必然命中紧随其后的必选字符类
+  //    `[-+~$(@[!,.0-9]`（可选组 `[-+~]?` 的字符集是它的**真子集**，恒可省略）。
+  //    故下面的 `return false` 在本分支**永不进入**，等价于直接 `return true`。
+  //    实测行为不可观测（恒 false 变体 81 词元 × 2 方言 × 4 观测点分歧 0），
+  //    故只做等价化简，**不为它补断言**。
+  if (c === '-' || c === '+' || c === '~') return true
+  return false
+}
+
+/**
+ * bash 侧「`NAME=右侧` 到底是不是**真赋值**」的判据（`LEAD_ASSIGN` 的补充条件）。
+ *
+ * ── 为什么只看词元不够（本轮缺陷，相对 HEAD 的真 fail-open）────────────────────────
+ * 词法器**剥引号**后，`'A=/bin/rm'`（整体引号）与 `A=/bin/rm`（无引号）的词元**逐字相同**
+ * （实测都是 `A=/bin/rm`）—— 词元粒度上不可区分，原文里那对引号是唯一判据。
+ *
+ * bash 实测（Git Bash 5.3.15，临时目录内建 `A=/bin/rm` 可执行文件，整行**写进文件再
+ * source**（故赋值语义与真跑一致），RAN 证据写进独立日志（不受该行自身重定向影响））：
+ *     `A=/bin/rm`     → **不执行任何命令**，`A` 被设为 `/bin/rm`      ⇒ 真赋值
+ *     `'A=/bin/rm'`   → **真的执行了**该路径文件（rc=0），`A` 仍 unset ⇒ 真命令
+ *     `"A=/bin/rm"`   → 同上（**引号改变语义**：`NAME=` 不再被识别为赋值前缀）
+ *     `A='/bin/rm'`   → 真赋值（引号只包住**值**，名字与 `=` 仍是字面量）
+ *     `'A'=/bin/rm` / `A'='/bin/rm` / `A''=/bin/rm` / `''A=/bin/rm`
+ *     / `\A=/bin/rm` / `A\=/bin/rm` / `'A='/bin/rm` / `'A=''/bin/rm'` → **全是真命令**
+ *   即：**`NAME=` 整段必须是字面量（未加引号、未转义）才算赋值前缀**。
+ * 只按词元判 ⇒ 引号形态被判成赋值 ⇒ label 空 ⇒ 段级 `unparsable` ⇒ `destructive=false`
+ * ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
+ * 实测三态（大分类 allow + 八档全 deny）：HEAD=deny → PRE=allow → 未修时 **allow**。
+ *
+ * ── 判据（段原文里存在**词首且非重定向目标位**的字面 `NAME=`）─────────────────────
+ * 取词元上 `LEAD_ASSIGN` 已匹配出的字面前缀（如 `A=`），在**段原文**里逐处 `indexOf`，
+ * 命中处的**前一字符是空白（或该处就是段首）**、**且向前跳过空白后不落在操作符上**，
+ * 才算数 —— 那正是 bash 认赋值前缀的位置。
+ * 于是前缀重定向形态仍判赋值（实测真值都是赋值，四格全对）：
+ *     `> /tmp/x A=1` / `2>/dev/null A=1` / `> '/tmp/z z' A=1` / `A=1 > /tmp/x`
+ * 而引号/转义插进名字或 `=` 时，字面 `NAME=` 在原文里**要么根本不存在**
+ * （`'A=/bin/rm'` 里 `A=` 的前一字符是 `'`，不是空白），**要么前一字符是引号或反斜杠**
+ * （`A'='/bin/rm`、`A\=/bin/rm`）—— 两种都不满足「词首」，判「不是赋值」。
+ * **重定向目标位**那一格（`'A=/bin/rm' > A=x`）由「操作符」那半格拦下，见函数体内说明。
+ *
+ * ⚠️ 判据只用「字面前缀 + 词首位置」，**不做「原文偏移 + 词元长度」的切片**：
+ * 词法器会**拼接**词元（`'A=''/bin/rm'` 的词元是 `A=/bin/rm`，而它在原文里
+ * `indexOf` 返回 -1、长度差 4），段原文与词元之间**没有保序的字符对应**，
+ * 按长度切片会切错位置、切出错误的判据对象。
+ *
+ * ⚠️ 无原文戳时（`rawCommandNamesInto` 的文本粗提、手搓的词元数组）判「**不是**赋值」
+ * —— 见函数体内「本轮缺陷 2 的修法」那一段。方向 fail-closed（保留命令名只收紧不放宽）。
+ * 载荷族（`segmentLabelsCore` 的 `-exec`）**不经过本函数**：`segmentLabelFrom` 的守卫是
+ * `if (w.length === 1 && …)`，而载荷族的词元数组长度是完整段长。实测（本机插桩计数）：
+ * 32 格载荷语料（`-exec` / `-execdir` / `-ok` × `{} ;` / `{} +` × 两门方言 × 4 种载荷）
+ * 调用次数 **0**，且 HEAD / PRE / NOW 三态分歧 **0**、三种单缺陷修法在载荷族上分歧 **0**。
+ *
+ * @param {string[]} words 段词元数组（可能带 `SEG_TEXT` 戳）
+ * @param {string} token 命令头词元（守卫已保证它是段内**唯一**词元）
+ * @returns {boolean} 为真表示这是真赋值（没有命令要执行）
+ */
+function bashLeftIsAssign(words, token) {
+  // ⚠️ 判据对象是 `LEAD_ASSIGN`（**不认 `$` 前缀**），不是 `LABEL_ASSIGN`（本轮缺陷 3 的修法）。
+  //    bash 的赋值前缀不允许 `$`：`$A=/bin/rm` 会先把 `$A` 展开成**空串**，词成了
+  //    `=/bin/rm` —— 那是一次**真命令**执行。Git Bash 5.3.15 实测（`mktemp -d` 内建
+  //    `=/bin/rm` / `X=/bin/rm` 可执行文件，整行**写进文件再 source**，故赋值语义与真跑
+  //    完全一致；RAN 证据写进独立日志，不受该行自身重定向影响）：
+  //        `unset A; $A=/bin/rm`  → **RAN[=/bin/rm]**（A 仍 unset）      ⇒ 真命令
+  //        `A=X;     $A=/bin/rm`  → **RAN[X=/bin/rm]**                    ⇒ 真命令
+  //        `unset A; $A=ver`      → rc=127（`=ver` 不存在）               ⇒ 真命令
+  //        `unset A; $A='/bin/rm'` / `$A="/bin/rm"` → **RAN[=/bin/rm]**   ⇒ 真命令
+  //        `$_A=/bin/rm` / `$A_1=/bin/rm` / `$BIN=/usr/bin/rm` / `$CMD=/bin/dd`
+  //                              → **全部 RAN**                          ⇒ 真命令
+  //        `2>/dev/null $A=/bin/rm` → **RAN[=/bin/rm]**（先前被误判为「破坏」的那一格，
+  //                                   其实是 stderr 文本探针被 `2>/dev/null` 吞掉的伪影）
+  //        对照 `A=/bin/rm`（字面量）→ **RAN=<none>**、`A` 被设为 `/bin/rm` ⇒ 真赋值
+  //    带 `$` 前缀的 `LABEL_ASSIGN` 会把上面整族判成赋值 ⇒ label 空 ⇒ 段级 `unparsable`
+  //    ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
+  //    实测（大分类 allow + 八档全 deny）端到端 14/14 格 HEAD=deny → PRE=**allow**。
+  const m = LEAD_ASSIGN.exec(String(token))
+  if (!m) return false
+  const raw = Array.isArray(words) ? words[SEG_TEXT] : undefined
+  // ── 无原文戳 → 判「**不是**赋值」（本轮缺陷 2 的修法，方向与原先相反）────────────────
+  // 原先这里写 `return true`（退化到「只用词元判」），而 `rawCommandNamesInto` 走的正是
+  // 这条路径：它把原文按 `/[\n\r;|&(){}<>]+/` 切分、`tokens` 是**自建的新数组**（:4880），
+  // 上面没有词法器的 `SEG_TEXT` 戳 ⇒ 该函数**恒走退化支**。
+  // 而词法器会**拼接**词元（`''A=/bin/rm` 的 token 是 `A=/bin/rm`，与无引号逐字相同），
+  // 文本路径却看到原文 `''A=/bin/rm` ⇒ 旧判据判「非赋值」是**对的**；但无戳时它退回
+  // 「只看词元」⇒ 判成赋值 ⇒ 认不出 `rm`。
+  // 后果（整行 `ok:false` 路径与 opaque 段并集路径上丢命令名 ⇒ 用户显式 deny 例外与
+  // 破坏性子设置双双失明，fail-open）。Git Bash 实测（同上手法，真值列）：
+  //     `''A=/bin/rm <<EOF…EOF`          → **RAN[A=/bin/rm]**       ⇒ 真命令（HEAD=deny）
+  //     `A=/bin/rm>out rm -rf /etc <<EOF`→ 真命令（`rm` 在原文里）  ⇒ HEAD=deny
+  //     `BIN=/usr/bin/rm; $BIN -rf / <<EOF` → 真命令（`$BIN` 展开） ⇒ HEAD=deny
+  //     `chmod 777 /etc/passwd $(A=/bin/rm)` / `shutdown /s $(A=/bin/rm)` ⇒ 真命令
+  //     ⚠️ 纯 `A=/bin/rm <<EOF…EOF` 在 bash 下**确是赋值**（RAN=<none>），但它**不走这条
+  //        路径**：带戳主路径照旧判赋值（label 空），此处只影响「无戳」的文本粗提路径。
+  // 方向 fail-closed：不判赋值 ⇒ **保留**命令名 ⇒ 该名字只会让更多档参与「取最严」、
+  // 让用户写下的 deny 例外照常命中，绝不放宽任何东西。
+  // 实测（本机三态对拍，1830 格含两门方言、真值按 Git Bash 实测表逐格标注）：
+  // PRE→NOW 放宽 0 / 收紧 353；真值=COMMAND 的 1539 格里 NOW=allow 的 360 格与 HEAD、PRE
+  // **逐格相同**（即本次未新增任何「真命令却放行」）。
+  if (typeof raw !== 'string' || !raw) return false
+  const nameEq = m[0]
+  for (let at = raw.indexOf(nameEq); at !== -1; at = raw.indexOf(nameEq, at + nameEq.length)) {
+    if (at === 0 || /\s/.test(raw.charAt(at - 1))) {
+      // ── 词首命中还不够：**重定向目标位**的 `NAME=` 不是赋值前缀（本轮缺陷 1 的修法）───
+      // 判据原先只问「段原文里**任何位置**有没有前一字符是空白的字面 `NAME=`」，而重定向
+      // 目标位恰好就是这个位置 ⇒ `'A=/bin/rm' > A=x` 这类**真命令**被整段判成赋值。
+      // Git Bash 实测（同上手法；`A=x` 等目标文件已在 cwd 内建好，故重定向本身会成功）：
+      //     `'A=/bin/rm' > A=x`        → **RAN[A=/bin/rm]** ⇒ 真命令
+      //     `> A=x 'A=/bin/rm'`        → **RAN[A=/bin/rm]** ⇒ 真命令（重定向在命令词之前）
+      //     `'A=/bin/rm' >| A=x` / `2>` / `&>` / `<>` / `3>` / `>>` / `2>>` / `&>>` / `<`
+      //                                → **全部 RAN**       ⇒ 真命令（`> A=` 那格因目标是
+      //                                  已存在的目录而 rc=1，但**命令同样被启动**）
+      //     `'A=/bin/rm' > A=1` / `> A=` → **RAN[A=/bin/rm]** ⇒ 真命令
+      //     `$( A=x ) 'A=/bin/rm'`      → **RAN[A=/bin/rm]** ⇒ 真命令
+      //     `echo hi > A=x; 'A=/bin/rm'`→ **RAN[A=/bin/rm]** ⇒ 真命令
+      //     ⚠️ `{ A=x; } 'A=/bin/rm'` 在 bash 里是**语法错误**（rc=2，命令未启动）——
+      //        但解析器认不出它，该格落大分类，两侧一致，不在本判据的可达面上。
+      // 判据：命中处向前跳过空白，若落在**操作符字符类**上，则该处不是赋值前缀。
+      // ⚠️ 字符类必须是**完整操作符集** `[\n\r;|&(){}<>]`，不能只判 `>` / `<`：只判
+      //    `>`/`<` 的简化版在三族上仍有残留（本机实测，命令词侧取整体引号 `NAME=path`）：
+      //      · `>|`  —— 前一字符是 `|`，不在 `>`/`<` 里；
+      //      · `{ A=x; }` / `$( A=x )` —— 前一字符是 `{` / `(`（**开**括号，不是闭括号；
+      //        取 `SEG_TEXT` 戳逐格实测，命中处的前一非空白字符确为 `{` / `(` ——
+      //        原写 `}` / `)` 与实测不符，已按实测订正）。
+      //    简化版：33 格真值表错 **2**、1092 格枚举里 **66** 格与 HEAD 不同
+      //    （`>|` 22 + 分组 22 + 命令替换 22，三族各占 22 格）；
+      //    完整字符类：真值表错 **0/33**、同一枚举 HEAD≠修法 = **0**、两套件全绿。
+      // 真赋值正例**必须**保持判赋值（实测真值都是赋值，RAN=<none>）：
+      //     `> /tmp/x A=1` / `2>/dev/null A=1` / `> '/tmp/z z' A=1` / `A=1 > /tmp/x`
+      //     / `A=/bin/rm > A=x`（`A=` 在段首、`A=x` 在 `>` 之后 —— 前者命中即返回真）
+      // ── 前提：命中处**之前**不能已有 opaque 构造占住命令词位（本轮缺陷 4 的修法）────
+      // 上面那两格判据（词首 + 非重定向目标位）对**带具名目标的重定向**仍不够：`> out A=x`
+      // 里 `A=` 的前一非空白字符是目标词 `out` 的 `t`，**不是**操作符 ⇒ 判「是赋值」。
+      // 单看这一格是对的（`> out A=x` 在 bash 下确是真赋值，实测 `A` 被设为 `x`）；
+      // 但**同一段里若命令词位已被 opaque 构造占据**，该 `NAME=path` 在 bash 里是**真命令**，
+      // 而词元数组只剩 1 个词元 ⇒ 进得了 `segmentLabelFrom` 的 `w.length === 1` 守卫
+      // ⇒ 整段判「没有命令要执行」。
+      // Git Bash 5.3.15 实测（marker 真被执行、rc=0、`X` 仍 unset ⇒ **真命令**）：
+      //     `$(true) > out X=/bin/marker` / `$(true) >out …` / `$(true) 2> out …`
+      //     / `$(true) > out > out2 …` / `` `true` > out … `` / `$(true) >> out …`
+      //     / `$(true) >| out …` / `$(true) &> out …` / `$(true) < out …`
+      //     / `> out $(true) X=/bin/marker`（opaque 在目标**之后**、命令词位）
+      //       → **全部 RAN[X=/bin/marker]**、`X` 仍 unset ⇒ 真命令
+      // 对照（真值仍是**赋值**，故判据不得误伤）：
+      //     `> out X=/bin/marker`（无 opaque）→ `X=/bin/marker`（赋值，marker **未**执行）
+      //     `> $(true) X=/bin/marker`（opaque 在**重定向目标位**）→ 同上，真赋值
+      //       （只有 `ambiguous redirect` 警告，重定向失败但赋值照做）
+      //     `X=1 $(true)`（赋值在 opaque **之前**）→ `X=1` ⇒ 真赋值
+      // ⇒ 判据必须是「命中处之前有**命令词位**的 opaque 构造」，**不是**「段里有 opaque」。
+      // `SEG_OPAQUE_AT` 正是词法器按 `pending === undefined` 记下的那个位置（见其说明）。
+      // 方向 fail-closed：不判赋值 ⇒ **保留**命令名 ⇒ 更多档参与「取最严」、用户写下的
+      // deny 例外照常命中，绝不放宽任何东西。
+      const opaqueHeadAt = words[SEG_OPAQUE_AT]
+      if (typeof opaqueHeadAt === 'number' && opaqueHeadAt < at) return false
+      // ── 前提 ②：命中处**之前**不能已有 opaque 构造占过**重定向目标位**（本轮缺陷 1 的修法）──
+      // 上面那条只覆盖「opaque 在**命令词位**」，而本缺陷的形态里 opaque 落在**重定向目标位**
+      // （`pending !== undefined`）⇒ 按设计**不记** `SEG_OPAQUE_AT`。可是这种构造**不产出词元**，
+      // 于是 `flushWord` 的 `pending = undefined` 复位被跳过：命令词被**吞进 `writeTargets`**、
+      // `words` 里只剩 `A=/bin/rm` 一个词元 ⇒ 进得了 `segmentLabelFrom` 的 `w.length === 1`
+      // 守卫 ⇒ 上面两条判据（词首 + 非操作符位）**双双成立**（`A=` 前是真空白、前驱非空白
+      // 字符是目标词的末字符）⇒ 判「是赋值」⇒ label 空 ⇒ 段级 `unparsable` ⇒
+      // `destructive=false` ⇒ 破坏性子设置与全部例外失配 ⇒ 落大分类（**fail-open**）。
+      // Git Bash 5.3.15 实测（`mktemp -d` 内建 stub、整行写文件再 source、stub 写独立日志）：
+      //     `> $(mktemp) r"m" A=/bin/rm` → **RAN[rm]**、`A` 仍 unset ⇒ 真命令
+      //     `> out A=/bin/rm`            → 无 RAN、`A=/bin/rm`        ⇒ 真赋值（对照）
+      // ⚠️ 对照例子取 `> out A=/bin/rm`（**无 opaque 构造**）：两者 `words` **逐字相同**
+      //    （都是 `["A=/bin/rm"]`），差别只在词法器戳下的 `SEG_OPAQUE_TARGET` 有没有
+      //    （前者 =2、后者缺席）⇒ label 相反（`rm` vs `""`）—— 这正是本判据要区分的对照。
+      //    ⚠️ 这句原先点名的对照是 `> $(true) X=/bin/marker`，**与实测不符**：那一格
+      //    `words` 是**空数组**（`X=/bin/marker` 被吞进 `writeTargets`），与上面那条
+      //    `["A=/bin/rm"]` **不同形** ⇒ 拿它当对照会让人误以为「words 相同」这个前提不成立。
+      //    （该格本身仍是有用的真赋值样本，见 `test/shell-parse.mjs` AL 组，只是不适合当
+      //    「words 逐字相同」的对照。）
+      // ⚠️ 判据**只看 `SEG_OPAQUE_TARGET` 是否存在**，**不做位置比较**（本轮修法 Z：
+      //    上一批写的 `&& opaqueTargetAt < at` 已撤回）。撤回的理由是**实测**的，不是取舍：
+      //    加位置比较会与下面那条 `k < 0` 判据**交互**出一个 48 格的 fail-open 族 ——
+      //    `NAME=path` 在**段首**（`at === 0`）时 `k = at - 1 = -1`，于是：
+      //        `FOO=/usr/bin/rm 2> $(mktemp) marker`  → at=0、OT=19
+      //        ⇒ 「19 < 0」**恒假** ⇒ 本判据**根本没被咨询** ⇒ 落到 `k < 0` ⇒ `return true`
+      //        ⇒ 判赋值 ⇒ label 空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+      //          破坏性子设置与全部例外失配 ⇒ 落大分类（**fail-open**）。
+      //    Git Bash 5.3.15 实测（只 stub 破坏性命令、**不** stub `mktemp`/`true`；整行在
+      //    子 shell 里 eval、stub 写独立日志）：该族 **48 格真值全部 COMMAND**（`ran=Y`），
+      //    而带位置比较时 NOW 全部 `allow`、纯布尔时全部 `deny`（与 HEAD 一致）。
+      //    ⚠️ 任何「在 `OT` 判据**内部**再加条件」的收窄都救不了这一族 —— 根因是它
+      //    **没被咨询**（`oT < at` 为假），不在判据内部。实测两个变体均失败：
+      //      · 变体 X（记 tail 词元数）：`> $(mktemp) r"m" A=/bin/rm` 被误伤（`"rm"` → `""`）；
+      //      · 变体 Y（记 swallowedIsFirst）：48 格族**完全没修好**（label 仍 `""`）。
+      //    ⚠️ 那么「位置比较」当初想挡的 `A=/bin/marker > $(true)`（真值 ASSIGN）呢？
+      //    实测该行整行 `ok:false`（reason: `a redirection has no target`）⇒ `OT` 恒
+      //    `undefined` ⇒ **根本不走这条路径** ⇒ 那条收窄**从来没挡住过它**，只带来了
+      //    上面那 48 格 fail-open。故撤回它**不引入任何新过收**（实测 Z 更松 = 0 格）。
+      //    ⚠️ 与 `opaqueHeadAt` 那条判据的**差别在此**：`SEG_OPAQUE_AT` 记的是「命令词位的
+      //    opaque」，判定侧要问「命中处**之前**有没有」⇒ 必须带 `< at`；而本戳记的是
+      //    「opaque 占过**重定向目标位**」这一**段级事实**（见 `SEG_OPAQUE_TARGET` 的说明），
+      //    它一旦成立就说明本段的命令词位已被顶掉，与 `NAME=` 落在哪个下标无关。
+      const opaqueTargetAt = words[SEG_OPAQUE_TARGET]
+      if (typeof opaqueTargetAt === 'number') return false
+      // ── 前提 ③：占目标位的 opaque 构造**带内联程序**时同样不是赋值（本轮批次 A 的修法）──
+      // 上面两条判据都**不过问构造里装了什么**，而下面这一族里装的是**真会执行的载荷**：
+      //     `> $(sh -c "rm -rf /tmp/zzz") > out A=/bin/rm`
+      // Git Bash 5.3.15 实测（载荷无害化为 stub，只写独立日志）：**stub 被调用**、`A` 仍
+      // unset ⇒ 真命令；HEAD 给 `deny`，而仅靠上面两条的标记链给 `allow`（**fail-open**）。
+      // ⚠️ 本前提**不能**并入上面那条：`SEG_OPAQUE_TARGET` 在「被吞的词是赋值词」时**故意
+      //    不成立**（`> $(mktemp) A=/bin/rm B=/bin/rm` 真值 ASSIGN），而本前提要覆盖的
+      //    正是「构造带载荷」—— 两者的判据对象不同（一个是位置事实、一个是构造内容）。
+      // ⚠️ 顺序无妨（两条都是 `return false`），但**必须并列存在**：删掉上面那条会让
+      //    `> $(mktemp) r"m" A=/bin/rm` 回退，删掉本条的后果见下。
+      // ⚠️ 本戳在 `noteOpaqueText` 里记，**不受「新重定向作废未定案候选」那处影响** —— 原因见
+      //    `SEG_OPAQUE_PAYLOAD` 的说明（定案分支在本族里根本不会执行）。
+      if (words[SEG_OPAQUE_PAYLOAD] === 1) return false
+      let k = at - 1
+      while (k >= 0 && /\s/.test(raw.charAt(k))) k -= 1
+      if (k < 0 || !/[\n\r;|&(){}<>]/.test(raw.charAt(k))) return true
+    }
+  }
+  return false
+}
+
+// ── 段词元数组上的**方言戳** ─────────────────────────────────────────────────────
+// 存在的理由：方言维度必须一路透传到 `segmentLabelFrom` 的那条赋值守卫，而**消费侧并不
+// 总能显式传方言** —— `index.js` 的候选生成（`segmentLabel(seg.words)`）、破坏性判定
+// （`isDestructiveSegment(seg.words)`）与例外标注（`canCarryDestructivePayload(seg.words)`）
+// 拿到的只是**段词元数组**，它们不知道方言，也不该为此各存一份（那正是本文件反复修的
+// 「同一份知识写两遍必然漂移」）。
+//
+// 而**词法器是唯一确知方言的地方**（`decomposeCommand(source, shell)` 的第二个形参），
+// 故由它在产出段时把方言戳在词元数组上，消费侧原样把数组传回来即可 —— 零接口变更。
+//
+// ⚠️ 用 **Symbol** 而不是普通属性/`defineProperty`：`Object.keys` / `JSON.stringify` /
+// 展开 / `for…in` / 深比较**都看不到** Symbol 键，故 `seg.words` 对既有全部消费方
+// （含 `test/regressions.mjs` 的结构断言与快照）**逐字不变**；且 `words[k] = sh` 是
+// 普通赋值，没有 `defineProperty` 的每次调用开销（词法器在判定热路径上）。
+// ⚠️ 数组的 `slice` / `concat` **不复制** Symbol 键 —— 故只在「原数组」上取戳；
+// `segmentLabelFrom` 内部的两条 opaque 出口都直接返回 `''`，不受影响。
+const SEG_SHELL = Symbol('dshSegmentShell')
+
+// ── 段词元数组上的**原文戳** ─────────────────────────────────────────────────────
+// 存在的理由（本轮缺陷 1 的右半）：pwsh 侧 `$NAME=右侧` 的**引号**是「真赋值 vs 真命令」
+// 的唯一判据，而词法器剥引号后两者的词元**逐字相同**（实测 `$d='X:/ws/x'` 与
+// `$d=X:/ws/x` 的词元都是 `$d=X:/ws/x`）—— 词元粒度上不可区分，只有段原文还留着引号。
+// 与 `SEG_SHELL` 同一手法（Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 /
+// `for…in` / 深比较全部不可见，故 `seg.words` 对既有消费方逐字不变）。
+// ⚠️ 与 `SEG_SHELL` 的**一处差别**：`seg.text` 是 `segText.trim()` 的结果，而词元在
+//    `segText` 里是**原文**（引号保留）—— 故两者同源、只是 trim 与否，判据只用前缀，
+//    不受 trim 影响。`slice` / `concat` 同样不复制 Symbol 键，消费侧必须传**原数组**。
+const SEG_TEXT = Symbol('dshSegmentText')
+
+// ── 段词元数组上的 **opaque 起点戳** ─────────────────────────────────────────────
+// 存**段原文里第一个 opaque 构造的起始下标**（无构造时缺席）。与 `SEG_SHELL` / `SEG_TEXT`
+// 同一手法（Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 / `for…in` / 深比较全部
+// 不可见，故 `seg.words` 对既有消费方逐字不变）。
+//
+// 存在的理由（本轮缺陷 4 的修法）：`bashLeftIsAssign` 判「`NAME=` 是不是赋值前缀」时，
+// 除了「词首 + 非重定向目标位」，还缺一个前提 —— **命令词位没被 opaque 构造占据**。
+// 反例（Git Bash 5.3.15 实测，marker 真被执行、rc=0、`X` 仍 unset ⇒ **真命令**）：
+//     `$(true) > out X=/bin/marker` → RAN[X=/bin/marker]
+// 该段词元数组只剩 `['X=/bin/marker']`，`X=` 在原文里前面是空白、跳过空白落在目标词
+// `out` 的 `t` 上（不是操作符）⇒ 现行判据判「是赋值」⇒ label 空 ⇒ 段级 `unparsable`
+// ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外失配 ⇒ 落大分类（**fail-open**）。
+//
+// ⚠️ 为什么**不能**直接问 `seg.opaque`：那是**段级第一个原因字符串**（如
+//    `'command substitution cannot be read statically'`），只回答「有没有」、**判不了位置**
+//    —— 而本判据要的正是「命中处**之前**有没有」。`seg.opaqueTexts` 虽是数组，但要拿它
+//    在段原文里 `indexOf` 反推位置，那等于把「原文与构造的对应关系」再算一遍（该数组记的是
+//    构造原文、不含下标，且**同一个构造可以重复出现**，`indexOf` 只能给首个命中）。
+//    故由**唯一确知位置**的词法器在产出段时把下标戳下，判定侧 O(1) 直读。
+// ⚠️ 下标是**段原文**（`SEG_TEXT`，即 `segText.trim()`）坐标系里的值，与 `bashLeftIsAssign`
+//    里 `raw.indexOf(nameEq)` 的坐标系**同一个** —— 两者都取自 `words[SEG_TEXT]`。
+const SEG_OPAQUE_AT = Symbol('dshSegmentOpaqueAt')
+
+// ── 段词元数组上的 **opaque 占过重定向目标位** 戳（粘性）──────────────────────────
+// 存**段原文里第一个「占过重定向目标位」的 opaque 构造**的起始下标；没有时缺席。
+// 与 `SEG_SHELL` / `SEG_TEXT` / `SEG_OPAQUE_AT` 同一手法（Symbol 键对 `Object.keys` /
+// `JSON.stringify` / 展开 / `for…in` / 深比较全部不可见）。
+//
+// 存在的理由（本轮缺陷 1 的修法）：`SEG_OPAQUE_AT` 只记「**命令词位**的 opaque 构造」，
+// 而本缺陷的形态里 opaque 构造落在**重定向目标位**（`pending !== undefined`）⇒ 按设计
+// **不记** `SEG_OPAQUE_AT`。可是这种构造**不产出词元**（`$( )` / 反引号 / 分组块都只
+// `pushText`），于是 `flushWord` 的 `pending = undefined` 复位被**跳过**：命令词被
+// **吞进 `writeTargets`**，`words` 里只剩 `A=/bin/rm` 一个词元 ⇒ 进得了
+// `segmentLabelFrom` 的 `w.length === 1` 守卫 ⇒ `bashLeftIsAssign` 判「是赋值」。
+// Git Bash 5.3.15 实测（`mktemp -d` 内建 stub、整行写文件再 source、stub 写独立日志）：
+//     `> $(mktemp) r"m" A=/bin/rm`  → **RAN[rm]**、`A` 仍 unset ⇒ 真命令
+//     `> out A=/bin/rm`             → 无 RAN、`A=/bin/rm`        ⇒ 真赋值（对照）
+// 两者 `words` **逐字相同**（都是 `["A=/bin/rm"]`；`writeTargets` 分别是 `["rm"]` 与
+// `["out"]`），差别只在**本戳有没有**（前者 =2、后者缺席）⇒ label 相反（`rm` vs `""`），
+// 故判据必须落在「本段有没有 opaque 构造占过重定向目标位」这条**只有词法器知道**的信息上。
+// ⚠️ 对照原先写的是 `> $(true) X=/bin/marker`，**与实测不符**：那一格 `words` 是**空数组**
+//    （`X=/bin/marker` 被吞进 `writeTargets`）⇒ 与上面那条不同形，当「words 逐字相同」的
+//    对照会误导（详见 `bashLeftIsAssign` 里同一论证处的说明）。
+//
+// ⚠️ 必须是**粘性**的（不在遇到新重定向时复位，见 `noteOpaqueTarget`）：
+//    形如 `> $(mktemp) r"m" A=/bin/rm > out2` 的尾部还有重定向，复位式标记会漏掉它们
+//    （实测：复位式只修好 57/169，粘性修好 169/169）。
+// ⚠️ 与 `SEG_OPAQUE_AT` 的**一处关键差别**：那个戳的判据带位置比较（`< at`），本戳**不带**
+//    —— 判定侧只问「有没有」（`typeof … === 'number'`）。理由是**实测**的：
+//      · `SEG_OPAQUE_AT` 记的是「**命令词位**的 opaque」，判定侧要问「命中处**之前**有没有」
+//        ⇒ 必须比较位置；
+//      · 本戳记的是「本段有 opaque 构造**占过重定向目标位**」这一**段级事实**，它一旦成立
+//        就说明命令词位已被顶掉，与 `NAME=` 落在哪个下标**无关**。
+//    上一批曾给它加过位置比较（动机是挡 `A=/bin/marker > $(true)`，真值 ASSIGN），
+//    **该收窄已撤回**，两条实测理由：
+//      ① 它**从来没挡住过**那个形态 —— 该行整行 `ok:false`（`a redirection has no target`）
+//         ⇒ 本戳恒 `undefined` ⇒ 根本不走这条路径；
+//      ② 它自己引入 **48 格 fail-open**（`NAME=path` 在段首时 `at === 0`、`k === -1`，
+//         「OT < 0」恒假 ⇒ 本判据没被咨询 ⇒ 落到 `k < 0` 无条件判赋值）。详见
+//         `bashLeftIsAssign` 里那段说明。
+//    故本戳虽仍记**下标**（词法器本就持有该位置，记下来比布尔更省一次判断，且日后若真需要
+//    位置信息不必再改词法器），但**判定侧当前不做位置比较**。
+const SEG_OPAQUE_TARGET = Symbol('dshSegmentOpaqueTarget')
+
+// ── 段词元数组上的 **占目标位的 opaque 构造带内联程序** 戳 ─────────────────────────
+// 存 `1`（命中时）／缺席（未命中）。与 `SEG_SHELL` / `SEG_TEXT` / `SEG_OPAQUE_AT` /
+// `SEG_OPAQUE_TARGET` 同一手法（Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 /
+// `for…in` / 深比较全部不可见，故 `seg.words` 对既有消费方逐字不变）。
+//
+// 存在的理由（本轮批次 A 的修法）：`SEG_OPAQUE_TARGET` 只回答「opaque 构造**占过**重定向
+// 目标位」，而它**从不过问那个构造里装了什么** —— 于是下面这一族被静默放行：
+//     `> $(sh -c "rm -rf /tmp/zzz") > out A=/bin/rm`
+// 该行 bash 真值是**真命令**且**载荷真的执行**（Git Bash 5.3.15 实测：无害 stub 被调用、
+// `A` 仍 unset）；HEAD 给 `deny`，而第 7/8 圈的标记链给 `allow`（**fail-open**）。
+//
+// ⚠️ 为什么不能「在**定案**时加一问」（这是本缺陷最容易走错的地方）：
+//    定案发生在 `flushWord`，而「新重定向作废未定案候选」那处（`>` 分支里
+//    `opaqueTargetSwallow = false` 那一行）会**先把
+//    `opaqueTargetSwallow` 置 false** —— 上面那一行里 `$(sh -c …)` 之后紧跟 `> out`，
+//    于是**定案根本不会发生**（时序：`noteOpaqueTarget` 置位 → `noteOpaqueText` 记文本 →
+//    `>` 分支作废 `swallow` ⇒ `flushWord` 的定案分支不执行）。故任何「在定案处加判据」
+//    的修法**一行都不会执行**。
+// ⚠️ 所以本戳在 `noteOpaqueText` 里记 —— 那一刻 `opaqueTargetSwallow` **仍为 true**
+//    （`>` 分支尚未到达），是唯一还能拿到「这个构造正占着目标位」的时机；且本戳**不参与
+//    定案**、不受那处作废影响，判定侧与 `SEG_OPAQUE_TARGET` **并列**读它。
+// ⚠️ 判据复用 `nestedInlineProgram` **单点**（不另写一份「什么算内联程序」）：
+//    本文件反复记录的那类缺陷正是「同一份知识写两遍必然漂移」。
+//
+// ⚠️ **已知边界（刻意不扩，勿为它叠第二层判据）**：**首词认不出解释器的族** ——
+//    ① 管道 `… | sh`：`> $(base64 -d x | sh) > out A=/bin/rm` 本戳**不覆盖**。剥定界符后
+//       分段是 `[["base64","-d","x"],["sh"]]`，第二段只有 `["sh"]` 一个词元、
+//       `nestedInlineProgram('sh', ['sh'])` = **false**（`-c` 缺席），第一段首词是 `base64`
+//       ⇒ 两段都不命中。Git Bash 5.3.15 实测该形态**载荷确实执行**
+//       （`> $(echo bWFya2Vy | base64 -d | sh) > out A=/bin/rm` → stub 被调用、`A` 仍 unset）。
+//    ② 变量头 `$SHELL -c` / `${SHELL} -c`：`headCommandNameOf` 取到的是**变量名**而非
+//       解释器名 ⇒ 同根因（首词认不出）。
+//    ③ 分段里**只有单名、没有 `-c`** 的形态（`$(true; sh)` 这类）：`nestedInlineProgram`
+//       要求内联程序标志在场，故同样不命中。
+//    ⇒ 三族**同一个根因**：判据以「首词是解释器名」为前提，而这三族里首词要么是别的命令、
+//      要么是变量、要么解释器名根本没带程序标志。
+//    ⚠️ 要覆盖它们得动 `nestedInlineProgram` 的语义（那是**承重函数**，`assessCommand` 的
+//      `unparsable` 判定与 index.js 的候选守卫都在用），收益（多覆盖几族）与风险
+//      （改语义影响既有 5000+ 格对拍面）不成比例 ⇒ 记为已知残余。
+//      ⚠️ 本标注已**扩写**为「首词认不出解释器的族」（第 11 圈），以免下次复审把
+//      ②③ 两族当新发现重复上报。
+const SEG_OPAQUE_PAYLOAD = Symbol('dshSegmentOpaquePayload')
+
+/**
+ * 方言归一化：**显式实参 > 词元数组上的戳 > `'bash'`**。
+ *
+ * 默认 `'bash'` 与文件内既有口径一致（`decomposeCommand` / `assessCommand` 都写
+ * `shell === 'pwsh' ? 'pwsh' : 'bash'`），且对**手搓的裸词元数组**（测试里大量存在）
+ * 保持「按 bash 判赋值」的既有行为 —— 那是保守方向（认不出 ⇒ 不产出候选按钮）。
+ */
+function shellOfWords(words, shell) {
+  if (shell === 'pwsh' || shell === 'bash') return shell
+  if (Array.isArray(words)) {
+    const s = words[SEG_SHELL]
+    if (s === 'pwsh' || s === 'bash') return s
+  }
+  return 'bash'
+}
+
 // `decomposeCommand` 对「整行没有任何命令」返回的 reason。单独抽成常量是因为
 // `assessCommand` 要按它把 code 分成 'empty' 与 'unparsable' 两种 —— 这两者排查方向不同
 // （前者是调用方发了空串，后者是解析器覆盖不足），不该混成一个标注。
@@ -400,6 +1771,14 @@ function matchAt(re, input, index) {
  * 这是修好「命令名提取器认不出路径形态」的关键 —— 旧实现显式丢弃任何含 `:` `\` `/` 的词元，
  * 于是 `C:\Windows\System32\rm.exe -rf x`、`/usr/bin/rm -rf x`、`./rm -rf x` 全部提取为空，
  * 破坏性判定对它们完全不设防。
+ *
+ * ── ⚠️ 入口守卫在**调用方**（`segmentLabelFrom`），不在本函数 ──────────────────────
+ * 本函数**不得**加「坏字符即拒绝」的守卫：它同时被 blast / 命令头判据当**分类器**用，
+ * 而那些路径上有**刻意**依赖「赋值词元也解析出名字」的既有口径 —— 实测钉在 60j5：
+ *     `sudo A=/bin/rm`  的 tiers/blast 必须与 `sudo rm` 逐字同值（`outside,priv`）
+ * 即 `commandNameOf('A=/bin/rm') === 'rm'` 是**承重**的。label 侧要拒绝的是「这个词元
+ * 根本不是命令」，而分类器侧要的是「这个词元里的命令名是什么」—— 两个问题不同，
+ * 判据因此不能共用一处（这正是本轮第一版把守卫放错位置、弄红 14 组断言的原因）。
  */
 function commandNameOf(text) {
   let t = String(text == null ? '' : text).trim()
@@ -734,8 +2113,8 @@ function unwrapWordsFrom(current, start) {
  *   · PowerShell 关键字（foreach/if/…）继续向后找真正的命令
  *   · 认不出（变量开头、纯表达式、空段、wrapper 形态读不懂）→ 返回 ''
  */
-export function segmentLabel(words) {
-  return segmentLabelFrom(words, 0)
+export function segmentLabel(words, shell) {
+  return segmentLabelFrom(words, 0, shell)
 }
 
 /**
@@ -752,14 +2131,89 @@ export function segmentLabel(words) {
  *
  * @param {string[]} words 段词元
  * @param {number} start 命令头起点下标（0 = 与 `segmentLabel` 逐字同值）
+ * @param {'pwsh'|'bash'} [shell] 方言（决定赋值判据，见 `LABEL_ASSIGN` 的说明）
  * @returns {string} label（认不出时为空串）
  */
-function segmentLabelFrom(words, start) {
+function segmentLabelFrom(words, start, shell) {
+  const sh = shellOfWords(words, shell)
   const u = unwrapWordsFrom(Array.isArray(words) ? words : [], start)
   if (u.opaque) return ''
   const w = u.words
   let idx = u.base
   if (idx >= w.length) return ''
+  // ── 入口守卫：引号字符串字面量 / 纯赋值段，都不是命令（本轮修复）────────────────
+  // 判据必须落在**原始词元**上、且在 `commandNameOf` **剥路径之前** —— 后者的剥离是
+  // 无条件的（取最后一个分隔符之后的部分），于是 `"--- 编码/换行校验 ---"` 的引号与
+  // `$d='X:/ws/demo/_tmp/file-test'` 的 `$` `=` 都被连路径前缀一起切掉了。
+  // 实测（用户真实弹窗，三个都产出了「允许此项」按钮，而写下的例外**永不命中**；
+  // 路径已脱敏，结构逐字保留）：
+  //     `$d='X:/ws/demo/_tmp/file-test'` → label `file-test`      （真值：赋值，无命令）
+  //     `FOO=/usr/local/bin/myapp`       → label `myapp`          （真值：**bash** 赋值，无命令）
+  //     `"--- 编码/换行校验 ---"`         → label `换行校验 ---`   （真值：字符串字面量）
+  // 危害不止「多一个按钮」：`alreadyInProject` 会把写下的例外当作「用户已表态」，
+  // 于是按钮消失、命令照旧弹窗 —— 用户既没放行成功、也再没有按钮可点。
+  //
+  // ⚠️ **赋值那一条必须带方言维度**（本轮修法）：`FOO=/usr/local/bin/myapp` 只在 **bash**
+  // 下是赋值；**pwsh 下它是真命令**（赋值必须写 `$FOO=…`）。本机 PS 5.1 实测
+  // `[Parser]::ParseInput('FOO=/usr/local/bin/myapp')` → `cmdAst=1`、`assignAst=0`，
+  // 且建好 `FOO=\usr\local\bin\myapp.cmd` 后 `& 'FOO=/usr/local/bin/myapp'` **RAN=True**。
+  // 故按方言取判据；不分方言一刀切会让 pwsh 侧真命令的 label 变空 ⇒ 段级 `unparsable`
+  // ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（fail-open）。
+  //
+  // ⚠️ 两条判据的位置**不同**，不能混成一条：
+  //   · 引号字面量是**词元级**（`labelTokenIsQuotedLiteral`）—— 只看当前这个词元；
+  //   · 赋值是**段级** —— `sudo A=/bin/rm` 的 `A=/bin/rm` 是赋值词元，但它**不是**
+  //     命令头（命令头是 `sudo`），故不能按词元拒绝；而 `$d='…'` / `FOO=/…` 那两条
+  //     是**整个段只有一个赋值词元**（没有任何命令要执行），这才该判「认不出」。
+  //     60j5 把 `sudo A=/bin/rm` 的 tiers 钉成与 `sudo rm` 同值，正是这条边界的守卫。
+  //     ⚠️ 「没有任何命令要执行」只在 **bash** 成立：pwsh 下 `FOO=/…` 有命令要执行。
+  if (labelTokenIsQuotedLiteral(w[idx])) return ''
+  // ⚠️ pwsh 侧必须走**两侧**判据（`LABEL_ASSIGN_PWSH` 的左半 + `pwshRightIsValue` 的右半）：
+  //    只看左半会把 `$A=/bin/rm` 这类**真命令**判成赋值 ⇒ label 空 ⇒ 段级 `unparsable`
+  //    ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（fail-open）。
+  //    见 `pwshRightIsValue` 里 PS 5.1 官方解析器的实测表。
+  // ⚠️ bash 侧同样**不能只看词元**（本轮修复）：`'A=/bin/rm'`（整体引号）的词元与无引号的
+  //    `A=/bin/rm` 逐字相同，而 bash 真值前者是**真命令**（实测真的执行了该路径文件、
+  //    `A` 仍 unset）。故 bash 分支也必须带原文维度，见 `bashLeftIsAssign` 的实测表。
+  //    ⚠️ 两个分支的判据对象**相反**（pwsh 读原文是找「引号在」，bash 读原文是找
+  //    「引号不在」），故各自成函数、不得合并 —— 合并必然让其中一门方言判错。
+  //    ⚠️ 两侧的判据正则也不同：pwsh 用 `LABEL_ASSIGN_PWSH`（只认 `$NAME=`），bash 用
+  //    `LEAD_ASSIGN`（**不认 `$` 前缀**，见 `bashLeftIsAssign` 的缺陷 3 说明）。
+  if (w.length === 1 && (sh === 'pwsh' ? pwshRightIsValue(words, w[0]) : bashLeftIsAssign(words, w[0]))) return ''
+  // 前导 `-` 的**原始**词元不是命令名，是**选项**。
+  //
+  // 为什么单列这一条：`"--- encoding check ---"` 这类字符串不含路径分隔符，上面那条
+  // 引号判据（要求「含分隔符」）**拦不住**它，于是整串成了 label、弹窗给出「允许此项」
+  // 按钮 —— 而那样一条例外永不命中（同名可执行文件不存在）。
+  //
+  // ⚠️ 判据必须落在**原始词元**上，不能落在 `commandNameOf` 剥完的结果上：
+  //     `./-foo` 剥路径后是 `-foo`，那是**合法**的可执行文件（`./` 前缀正是调用它的
+  //     正确写法），不能因为剥完以 `-` 开头就拒掉；只有用户**裸写** `-…` 时，
+  //     shell 才把它当选项而不是命令名。
+  //
+  // ⚠️ 判据还必须**同时要求不含路径分隔符**（本轮修复）：「`-` 开头 **且含分隔符**」的
+  //     `-x/rm`、`-rf/rm`、`--force/rm` 是**真实可执行的相对路径命令**（目录名以 `-`
+  //     开头），不是选项。实测（无害替代目标，临时目录内）：
+  //       pwsh：`-x/Remove-Item -Recurse -Force C:/Windows` → 真的执行了
+  //             `-x\Remove-Item.cmd`（裸写与 `&` 两种写法都执行，rc=0）
+  //       bash：`"a b/reg" delete HKLM/X /f` → 真的执行了 `a b/reg`（rc=0）；
+  //             裸写 `-x/rm …` 在 bash 里会被当成自己的选项（rc=2），但**引号包裹**
+  //             与「含空格的相对路径」两种写法照常执行 —— 故这一族不能整体判「认不出」。
+  //     只按「以 `-` 开头」判会让这一族 label 变空 ⇒ 段级 `unparsable` ⇒
+  //     `segmentLabelsCore` 的 labels 为空 ⇒ `destructive=false` ⇒ 破坏性子设置与
+  //     全部例外匹配双双跳过 ⇒ 落大分类。实测（大分类 allow + 八档逐档 deny）：
+  //       `-x/rm -rf /etc`、`-rf/rm -rf /`、`-x/reg delete HKLM\X /f`、`-a/taskkill`、
+  //       `-a/chmod`、`-x/del`、`-x/stop-process`、`-x/format C:`、`-x/diskpart`
+  //       一律 HEAD=deny → 只加 `-` 守卫时变 **allow**（bash / pwsh 两门方言、
+  //       `timeout 5 …` / `A=1 …` / `sudo A=1 …` / `"-x/rm" …` 等前缀形态共 44 格）。
+  //     含分隔符时交给下面的 `commandNameOf` 剥路径判定（`-x/rm` → `rm`），
+  //     与 `./-foo` / `X:/-foo` / `/usr/bin/-foo` 走同一条路径。
+  //
+  // 方向 fail-closed：判「认不出」只是不产出候选按钮，命令照旧弹窗，不会静默放行。
+  //     ——但**这一格不成立**：label 为空会连带关掉破坏性子设置（见上），
+  //     故判据必须收窄到「裸选项」，不能覆盖真实可执行的相对路径命令。
+  const rawHead = String(w[idx])
+  if (/^-/.test(rawHead) && !/[\\/]/.test(rawHead)) return ''
   let head = commandNameOf(w[idx])
   if (!head || BAD_LABEL_CHARS.test(head)) return ''
   // 语句关键字：向后找真正的命令。**必须循环**，因为跳过一个关键字后遇到的可能是
@@ -882,7 +2336,7 @@ const FIND_DELETE_FLAG = '-delete'
  *   一处**——`out` / `widened` 的写入全部经 `addLabel` / `addWidened` 单点）。详见
  *   `pushHeadLabels` 的说明。
  */
-function headLabelAt(w, start, addWidened, addLabel, headPrefix) {
+function headLabelAt(w, start, addWidened, addLabel, headPrefix, shell) {
   // ── 复用 `pushHeadLabels`（**不另写一份前缀链推进**）────────────────────────────────
   // 这正是发现 1 的修法：载荷族的命令名提取必须与主路径**同源**，否则「命令头到哪儿」
   // 与「labels 有哪些」必然再次分叉。`pushHeadLabels` 的语义恰好两件事都做：
@@ -972,7 +2426,7 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix) {
   // ⚠️ 方向是**收紧**：只让载荷族少写一个畸形名，主路径（`segmentLabelsCore` 的调用点）不经
   // 本函数，故 `segmentLabel` / `commandHeadEnd` 的既有行为逐字不变。
   if (BAD_LABEL_CHARS.test(cn)) return ''
-  const head = pushHeadLabels(w, st, addWidened, addLabel, true, headPrefix)
+  const head = pushHeadLabels(w, st, addWidened, addLabel, true, headPrefix, shell)
   if (!head || PH(head)) return ''
   // 兜底：链尾 label（可能被 `headWordOnly` 截断，也可能是 `pushHeadLabels` 推进后才认出的名字）
   // 同样不得是畸形名 —— 与 HEAD 的 `break` 语义对齐，也与上面那道前置守卫同源。
@@ -1078,7 +2532,7 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix) {
  * 删掉是**零行为变更**：本函数未导出、无 `arguments` / `.apply(` / `.call(`（全 0，
  * 无动态逃逸），4 个调用点的实参恒为 function（见下），故形参位与实参位的对应关系不变。
  */
-function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix) {
+function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix, shell) {
   // `addWidened` = `segmentLabelsCore` 的 O(1) 写入单点（同时维护 `widened` 数组与其并行
   // `Set`，见那里的发现 2 说明）。**直接当函数用**：本函数未导出、独立调用方为零，
   // 四个调用点（`:948` / `:1445` / `:1581` / `:1597`）的实参恒为 function。
@@ -1394,7 +2848,9 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
   // 两个写入点拿到的都是这个已截断的值（**不是**由调用方的 `addLabel` 包装取首词：
   // 那个描述已失效，且 `addLabel` 是 `out` 的单点写入器，不该再叠一层语义）。
   // 主路径（`segmentLabelsCore` 那一支）不传，故 `reg delete` 的粒度照旧。
-  const headRaw = segmentLabelFrom(w, i)
+  // ⚠️ `shell` 必须透传：链尾 label 与主 label 走的是**同一道赋值守卫**，漏传会让
+  //    `find . -exec A=/bin/rm {} ;` 这类载荷在 pwsh 侧仍被误判成赋值（与主路径分叉）。
+  const headRaw = segmentLabelFrom(w, i, shell)
   const head = headWordOnly ? String(headRaw).split(' ')[0] : headRaw
   // 认不出（`su root` 只有操作数、`su -c C:/Windows` 的值是目标）→ 保持原行为，不扩展。
   if (!head || head === first) return first
@@ -1421,8 +2877,8 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
  * 让调用方各自取 `segmentLabel` 的主 label 会漏掉合成 label（`find -delete` → `rm`）
  * 与提权前缀扩展（`sudo kill` → 额外一个 `kill`），正是本函数存在的意义。
  */
-export function segmentLabels(words) {
-  return segmentLabelsCore(words).labels
+export function segmentLabels(words, shell) {
+  return segmentLabelsCore(words, shell).labels
 }
 
 /**
@@ -1456,8 +2912,12 @@ export function segmentLabels(words) {
  * 两个集合由本函数**单点产出**，故这条不变量只能在这里被观测 —— 测试必须能同时拿到
  * `labels` 与 `widened`，`segmentLabels` 只交回前者。
  */
-export function segmentLabelsCore(words) {
-  const main = segmentLabel(words)
+export function segmentLabelsCore(words, shell) {
+  // 方言归一化**一次**，此后本函数体内全部调用都显式透传它 —— 赋值守卫在 `segmentLabelFrom`
+  // 里，而载荷族（`headLabelAt` → `pushHeadLabels`）会绕过 `segmentLabel` 直接调下标内核，
+  // 漏传任何一处都会让「主 label 有、载荷 label 无」（或反之）在 pwsh 侧重新分叉。
+  const sh = shellOfWords(words, shell)
+  const main = segmentLabel(words, sh)
   const out = main ? [main] : []
   // 仅由「提权前缀之后」得来的名字。**与 out 分开维护**：见上面那段 allow 方向的安全说明。
   const widened = []
@@ -1539,7 +2999,7 @@ export function segmentLabelsCore(words) {
     // 故守卫**不可能**跳过本会扩展的段；`su` / `runas` 的排除仍在函数内部（单一来源）。
     if (PRIV_PREFIXES[main] === 1) {
       const at = w.findIndex((t) => commandNameOf(t) === main)
-      if (at >= 0) headLabel = pushHeadLabels(w, at, addWidened, addLabel)
+      if (at >= 0) headLabel = pushHeadLabels(w, at, addWidened, addLabel, undefined, undefined, sh)
     }
   }
   // ── find 分支的闸门必须看**命令头 label**，不是段首 label（发现 1）────────────────
@@ -1675,7 +3135,7 @@ export function segmentLabelsCore(words) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(firstTok) && WRAPPERS[commandNameOf(firstTok)] !== 1) {
       // 快路径：首个词元不是赋值前缀、也不是 wrapper。仍然要推进**提权前缀链**
       // （`-exec sudo kill` / `-exec su root kill`）—— 判据与主路径同源，且是纯下标推进。
-      headLabelAt(w, j + 1, addWidened, addLabel, headPrefixOf)
+      headLabelAt(w, j + 1, addWidened, addLabel, headPrefixOf, sh)
     } else {
       // 慢路径：首个词元是赋值前缀或 wrapper，必须先剥掉它们（`-exec env sudo kill`、
       // `-exec timeout 5 sudo kill`）再推进前缀链。
@@ -1691,7 +3151,7 @@ export function segmentLabelsCore(words) {
       // 见该函数的说明）。opaque 与「剥到空」两种出口照旧 `continue`。
       const u2 = unwrapWordsFrom(w, j + 1)
       if (u2.opaque || u2.base >= w.length) continue
-      headLabelAt(w, u2.base, addWidened, addLabel, headPrefixOf)
+      headLabelAt(w, u2.base, addWidened, addLabel, headPrefixOf, sh)
     }
   }
   return { labels: out, widened, widenedSet }
@@ -1717,9 +3177,11 @@ export function isDestructiveLabel(label) {
  * 通配（index.js 的「破坏性命令不给通配候选」）要堵的那个洞，只是换了个命令族。
  *
  * @param {string[]} words 段词元（与 assessCommand 的 seg.words 同源）
+ * @param {'pwsh'|'bash'} [shell] 方言；缺省时取词元数组上的**方言戳**（见 `SEG_SHELL`），
+ *   再无则按 `'bash'` —— 故 `index.js` 只需原样传 `seg.words` 即可拿到正确方言。
  */
-export function isDestructiveSegment(words) {
-  return segmentLabels(words).some((l) => isDestructiveLabel(l))
+export function isDestructiveSegment(words, shell) {
+  return segmentLabels(words, shell).some((l) => isDestructiveLabel(l))
 }
 
 // 提权命令的「带值选项」：`-u FOO` 里的 FOO 是值不是命令。
@@ -3285,7 +4747,7 @@ export function isPayloadCarrierLabel(label) {
  *
  * @param {string[]} words 段词元
  */
-export function canCarryDestructivePayload(words) {
+export function canCarryDestructivePayload(words, shell) {
   const w = Array.isArray(words) ? words : []
   if (!w.length) return false
   // ① 段首命令名（**未剥 wrapper**）：`env *`、`xargs *`、`find *` 的载荷族正是段首那个名字。
@@ -3296,7 +4758,7 @@ export function canCarryDestructivePayload(words) {
   // ② 剥掉 wrapper/赋值后的全部 label：覆盖 `FOO=1 find *`、语句关键字之后等形态，
   //    以及 `find / -delete` 这类合成 label（`-delete` 合成 `rm`，命中破坏性名单）。
   let names = []
-  try { names = segmentLabels(w) } catch (e) { return false }
+  try { names = segmentLabels(w, shell) } catch (e) { return false }
   return names.some((l) => {
     const n = String(l || '').trim().toLowerCase()
     return PAYLOAD_CARRIERS[n] === 1 || isDestructiveLabel(n)
@@ -3613,6 +5075,47 @@ export function rawCommandNames(text) {
   // 去重集合无原型：键是 label（来自命令文本）。用 `{}` 时 `constructor` / `__proto__`
   // 这类名字恒判「已见过」而被丢弃 —— 它们恰是本函数要抓出来的命令名。
   const seen = Object.create(null)
+  rawCommandNamesInto(text, 'bash', out, seen)
+  return out
+}
+
+/**
+ * `rawCommandNames` 的**带方言姊妹出口**（本轮缺陷 2 的修法）。
+ *
+ * 保留 `rawCommandNames(text)` 的单参签名与调用点字面形态不变（`test/regressions.mjs`
+ * 有三条结构断言把签名行与「opaque 段并集那一行」逐字锁定），方言维度由本出口承担。
+ *
+ * @param {string} text 原文
+ * @param {'pwsh'|'bash'} [shell] 方言（决定赋值判据，见 `rawCommandNamesInto`）
+ * @returns {string[]} 去重后的命令名（顺序与 `rawCommandNames` 同）
+ */
+export function rawCommandNamesWithShell(text, shell) {
+  const out = []
+  const seen = Object.create(null)
+  rawCommandNamesInto(text, shell === 'pwsh' ? 'pwsh' : 'bash', out, seen)
+  return out
+}
+
+/**
+ * `rawCommandNames` 族的**单一实现**（带方言维度）—— 两个出口都只是它的薄壳，
+ * 故「文本粗提」这件事只有一份判据。
+ *
+ * ── 为什么必须带方言（本轮缺陷 2：PRE 引入、第二批未修，相对 HEAD 是真回归）──────
+ * 本函数走的是**文本**：下面 `tokens` 是它自己 `split` 出来的新数组，上面没有词法器的
+ * 方言戳（`SEG_SHELL`），故方言只能由调用方显式传进来。而赋值守卫是**方言相对**的
+ * （见 `LABEL_ASSIGN` 的说明）——按 bash 判会让 **pwsh 侧藏在 opaque 构造里的靶形态**
+ * 认不出命令名，于是破坏性判定与 deny 例外双双失明（**fail-open**）：
+ *     `echo $(A=/bin/rm)` / `(A=/bin/rm)` / `{ A=/bin/rm; }` / `` echo `A=/bin/rm` ``
+ *   实测（大分类 allow + 八档全 deny，两门方言共 96 格）：HEAD=deny → PRE=NOW=**allow**。
+ *   ⚠️ bash 侧该形态**本来就没有命令要执行**（`$(A=/bin/rm)` 是赋值），label 为空是对的
+ *   —— 故方言按出口分列，而不是让 bash 侧跟着变。
+ *
+ * @param {string} text 原文
+ * @param {'pwsh'|'bash'} shell 方言（决定赋值判据）
+ * @param {string[]} out 累加器（去重后的命令名，按出现次序）
+ * @param {Record<string, number>} seen 去重集合（**必须无原型**，见 `rawCommandNames` 的说明）
+ */
+function rawCommandNamesInto(text, shell, out, seen) {
   // 丢掉 heredoc 正文（`<<TAG` 之后到终止符之间的内容是数据，不是命令 —— 见函数注释）
   const body = stripHeredocBody(String(text == null ? '' : text))
   // 命令替换（`$(...)` 与反引号）**必须先于引号剥离**处理。
@@ -3659,7 +5162,13 @@ export function rawCommandNames(text) {
     // 注意**不要**按 heredoc 标签过滤名字：标签与真命令同名是合法的
     //（`rm -rf /x <<rm` 的标签就叫 rm），过滤会把真命令一起丢掉（漏判方向是放行）。
     // 正文与终止符已经在上面按位置切掉了，标签本身不会作为片段出现。
-    const labels = segmentLabels(tokens)
+    // ⚠️ 方言**必须显式传**（本轮缺陷 2 的修法）：`tokens` 是本函数自己 `split` 出来的
+    //    新数组，上面没有词法器的方言戳（`SEG_SHELL`），不传就退回 `'bash'` ——
+    //    而 pwsh 侧藏在 opaque 构造里的靶形态（`echo $(A=/bin/rm)` / `(A=/bin/rm)` /
+    //    `` echo `A=/bin/rm` ``）在 bash 判据下是**赋值** ⇒ 认不出命令名 ⇒ 破坏性判定
+    //    与 deny 例外双双失明（fail-open，实测 HEAD=deny → PRE=**allow**）。
+    //    bash 侧该形态**本来就没有命令要执行**（`$(A=/bin/rm)` 是赋值），label 为空是对的。
+    const labels = segmentLabels(tokens, shell)
     for (const name of labels) {
       if (!name || seen[name]) continue
       seen[name] = 1
@@ -3697,6 +5206,132 @@ function readExpansion(input, index, shell) {
   }
   const m = matchAt(shell === 'pwsh' ? PWSH_EXPANSION : BASH_EXPANSION, input, index)
   return m === undefined ? '$' : m
+}
+
+/**
+ * 读一个 PowerShell 转义（反引号 + 一个字符），返回 `{ raw, value, continuation }`。
+ *
+ * `raw` 是**原文**（含反引号，供 segText 保留用户写法）、`value` 是**转义后的真实字符**
+ * （供 wordText —— 判定与 label 要按实际执行的命令看）、`continuation` 表示这是续行。
+ *
+ * 返回 `null` = 这不是一个合法转义（按 `ok:false` 处理，fail-closed）。
+ *
+ * ⚠️ 转义表 `PWSH_ESCAPES` 的说明里有逐格实测值；本函数只负责「查表 / 续行 / 行尾 / 未知」四分：
+ *   · 表内命中          → `value` = 表里的字符；
+ *   · `` ` `` + 换行     → `continuation`（**不产生词元**，把两行接起来）；
+ *   · 其余（含未知字母） → `value` = **该字符本身**（`` `z `` → `z`，实测如此，
+ *     与 bash 的 `\z` → `\z` **不同构** —— 这正是不能照搬 bash 分支的原因）。
+ *
+ * ⚠️ `` ` `` + `\r\n` 要整体吃掉：CRLF 换行在 Windows 上由 AI 生成时很常见，
+ * 只吃 `` ` ``+`\r` 会把 `\n` 留成下一轮的分段符，凭空多切一段。
+ *
+ * ⚠️ 但**词元内**（`ctx === 'bareword'`）恰恰相反：PS 只把 `` ` ``+`\r` 当转义（字面 CR），
+ *    `\r\n` 里的那个 `\n` **仍是换行符**（`NewLine` ⇒ 语句边界）。官方解析器实测：
+ *      `Write-Output abcz` + `` ` `` + **CRLF** + `zd`
+ *        → `Generic[abcz`<CR>]` + `NewLine[<LF>]` + `Identifier[zd]`，**stmts=2**（切开）
+ *      `Write-Output abcz` + `` ` `` + **LF**   + `zd`
+ *        → **一个** `Generic[abcz`<LF>zd]`，stmts=1（粘住）
+ *      `Write-Output abcz` + `` ` `` + **CR**   + `zd`
+ *        → **一个** `Generic[abcz`<CR>zd]`，stmts=1（粘住）
+ *    故 `ctx === 'bareword'` 时 CR 支只吃 `` ` ``+`\r`、`value` 取 `'\r'`，把 `\n` 留给主循环
+ *    的换行分支去切语句。缺这一支时 CRLF 形态下两行粘成一个词元，第二行的破坏性命令
+ *    不再单独判档 —— 实测（大分类 allow + `wide`=deny + 用户 deny 例外 `remove-item *`）
+ *    由 `deny` 变 **`allow`**（fail-open）。
+ *
+ * ── Parameter 词元内：反引号是**字面字符**，不是转义符（本轮修复）──────────────────
+ * `ctx === 'parameter'` 时直接返回字面反引号（`value` 也是反引号）。官方解析器实测
+ * （AST 的 `CommandParameterAst.Argument.Value` 是求值后的真值，token 表看不出差别）：
+ *      `Write-Output -xz` + `` ` `` + `n` + `zd` → 参数名 `-xz`nzd`（反引号与 `n` **都原样保留**）
+ *      `Write-Output abcz` + `` ` `` + `n` + `zd` → 词元求值 `abcz<LF>zd`（反引号消失、`n` → LF）
+ * 即**表内字符在 Parameter 词元内同样不转义**，故本支必须排在查表之前，且不能按
+ * 「表内 / 表外」分（那会漏掉 `` `n `` 这一族）。判据 `PWSH_PARAMETER_TOKEN` 由调用方算好传入。
+ *
+ * ── 行尾反引号：**紧贴词元是字面字符，另起词元才是语法错误**（本轮修复）──────────
+ * 这里此前一律返回 `null`（当语法错误），**过严** —— 于是「反引号在行尾」的合法命令
+ * 整行 `ok:false`，而 `ok:false` 路径只认 deny 例外，用户配的 allow/ask 例外集体失明
+ * （与本轮修的那个缺陷同一种失效模式，只是触发条件换成了行尾）。
+ *
+ * 官方解析器逐格实测（`[Parser]::ParseInput` + 实际求值）：
+ *     `` `date` ``      → 词元 `date` + **字面反引号**，求值 `date` + `` ` ``  ✅ 合法
+ *     `Write-Output abc` `` ` `` → 词元 `abc`` `` `，求值 `abc` + `` ` ``       ✅ 合法
+ *     其余全部（`abc,` / `abc;` / `abc|` / `abc&` / `abc{` / `abc(` / `abc)` / `abc}` /
+ *     `abc"` / `abc'` / 空白后 / 行首 / **引号内**）→ `IncompleteString`（真错误）
+ * 即判据是「反引号**紧贴**在词元字符之后」：前一字符存在且不是**词元分隔符**
+ * （空白、`;` `|` `&` `(` `)` `{` `}` `,` 与引号）时，它是**字面反引号**。
+ * ⚠️ `[` `]` 不在分隔符集里 —— 实测 `abc]`+`` ` `` 合法（词元 `abc]`` `` `）。
+ *
+ * ⚠️ **引号内**没有这条规则：`"abc` + `` ` `` 实测是 `TerminatorExpectedAtEndOfString`
+ * （字符串没闭合），故 `inQuote` 为真时行尾反引号一律算错误。两个上下文判据不同，
+ * 靠调用方传入的 `inQuote` 区分，而不是在函数里猜。
+ *
+ * @param {string} input 命令行
+ * @param {number} index 反引号的下标
+ * @param {boolean} [inQuote] 是否在双引号内（判据不同，见上）
+ * @param {{level: string, open: boolean}} [boundary] `pwshEscapeBoundaryAt` 的结果
+ *   （**单一判据**，见该函数说明）：`level === 'segment'` = 反引号落在 Parameter 词元内
+ *   （是字面字符，见上）；`open === true` = 词元**未完结**（`` ` ``+CRLF 只吃 CR，见上）；
+ *   其余（词元边界处 / 引号内）`` ` ``+换行一律整体续行。
+ * @param {object} [shape] 当前词元的**形态影子**（`wordShape`，与 `wordText` 严格同步）
+ *   —— 只有 `'segment'` 支用它：判「反引号后面那个字符是否仍构成参数名」
+ *   （`paramTokenWithNext`，见上）。⚠️ 不传 `wordText` 本身：那会把 rope 扁平化，O(n²)。
+ * @returns {{raw: string, value: string, continuation: boolean}|null}
+ */
+function readPwshEscape(input, index, inQuote, boundary, shape) {
+  const next = input[index + 1]
+  const open = boundary !== undefined && boundary !== null && boundary.open === true
+  // ⚠️ `next !== undefined` **必须**在条件里（本轮修复）：行尾反引号（`next === undefined`）
+  //    走下面那条**行尾分支**（按 `PWSH_TOKEN_BREAK` 判「紧贴词元 ⇒ 字面反引号 / 否则语法错误」），
+  //    不能落进本支。缺这一格时下面 `paramTokenWithNext` 会拿到 `undefined` —— 那时旧实现
+  //    求值的是 `PWSH_PARAMETER_TOKEN.test(word + undefined)`（**字符串拼接**），
+  //    把字面量 `undefined` 连同反引号一起写进词元文本：
+  //      `Remove-Item -Recurse` + `` ` `` → 词元 `-Recurse`undefined`（PS 真值是 `-Recurse`` `` `）
+  //    实测 34 格中 **32 格**末词元与 `[Parser]` 真值不符，且 `wordText` / `segText` 双双被污染。
+  //    后果是**用户显式写的精确 deny 例外失配**（例外 = 该命令原文时 PRE `deny` → `allow`，
+  //    实测 5/5 格），同时面板候选值（用 `seg.text`）落盘成含 `undefined` 的模式，
+  //    而 `matchCommand(真实原文, 污染串)` = false ⇒ 该例外**永不命中真实命令**（死规则）。
+  if (boundary && boundary.level === 'segment'
+    && next !== undefined && next !== '\n' && next !== '\r') {
+    // Parameter 词元内：反引号是**字面字符**。后面那个字符归谁，由**同一个** `PWSH_PARAMETER_TOKEN`
+    // 回答 —— 「`word + next` 还算不算一个合法 Parameter 词元」：
+    //   · 还算（`<` `>` `n` `a` `]` `$` … 都是参数名字符）⇒ 两个字符**都**留在词元里。
+    //     官方解析器实测：`cmd /c ver -x` + `` ` `` + `<` + `` ` `` + LF + `RemoveXyz`
+    //       → `Parameter[-x`<`]` + `NewLine[<LF>]` + `Identifier[RemoveXyz]`、**stmts=2**。
+    //     只吃反引号会让 `<` 落进重定向分支 ⇒ 两行被粘成一段（实测新引入 12 格反向误差）。
+    //   · 不再算（`;` `|` `&` `,` `.` `[` `(` 空白 …）⇒ **只吃反引号**，该字符留给主循环按
+    //     正常运算符处理。实测 `cmd /c ver -x` + `` ` `` + `;` + `` ` `` + LF + `RemoveXyz`
+    //       → `Parameter[-x`]` + **`Semi[;]`** + `LineContinuation` + `Identifier[RemoveXyz]`、`stmts=2`
+    //     —— `;` **仍是真语句分隔符**；把它当「转义的一部分」吞掉会让第二行的破坏性命令与
+    //     第一行同判（实测由 `deny` 变 **`allow`**，fail-open）。
+    // 用 `PWSH_PARAMETER_TOKEN` 自身做这个判定，是为了**不另写一份参数名字符类**
+    // （本文件反复记录过「同一概念两处各写一份必然漂移」那类缺陷）—— 现由形态影子承担
+    // （`paramTokenWithNext`，逐格等价，见该函数），**不得**改回 `word + next`（O(n²)）。
+    // 表内字符同样不转义（实测 `Write-Output -xz` + `` ` `` + `n` + `zd` 的参数名是 `-xz`nzd`，
+    // 而普通词元同形态求值成 `abcz<LF>zd`）⇒ 本支必须排在查表之前，且不能按「表内 / 表外」分。
+    // ⚠️ 换行**不**走本支：`` ` ``+换行在 PS 里同样是真换行（`Parameter[-NoNewline`]` + `NewLine`），
+    //    由下面的续行分支处置（调用方 `flushSegment()` 后整体吞掉）—— 那一族改前就是对的。
+    return paramTokenWithNext(shape, next.charCodeAt(0))
+      ? { raw: '`' + next, value: '`' + next, continuation: false }
+      : { raw: '`', value: '`', continuation: false }
+  }
+  if (next === undefined) {
+    if (inQuote) return null
+    const prev = input[index - 1]
+    if (prev === undefined || PWSH_TOKEN_BREAK.test(prev)) return null
+    return { raw: '`', value: '`', continuation: false }
+  }
+  if (next === '\n') return { raw: '`\n', value: '\n', continuation: true }
+  if (next === '\r') {
+    // 词元**未完结**（`open`）PS 只把 `` ` ``+`\r` 当转义（字面 CR），`\r\n` 里的 `\n` **仍是**
+    // 换行符（`NewLine` ⇒ 语句边界，实测 `stmts=2`）。故这里只吃 `` ` ``+`\r`、`value` 取
+    // `'\r'`，把 `\n` 留给主循环的换行分支去切语句。
+    // 其余上下文（词元边界 / 引号内）`` ` ``+`\r\n` 是**整体**续行，必须一起吃掉
+    // ——只吃 `` ` ``+`\r` 会把 `\n` 留成下一轮的分段符，凭空多切一段。
+    if (open) return { raw: '`\r', value: '\r', continuation: true }
+    const raw = input[index + 2] === '\n' ? '`\r\n' : '`\r'
+    return { raw, value: '\n', continuation: true }
+  }
+  const mapped = PWSH_ESCAPES[next]
+  return { raw: '`' + next, value: mapped === undefined ? next : mapped, continuation: false }
 }
 
 /** 从 start（指向 open 字符）跳到配对的 close，返回 close 的下标；找不到返回 -1。 */
@@ -3886,8 +5521,40 @@ export function decomposeCommand(source, shell) {
   let readTargets = []
   let segText = ''
   let wordText = ''
+  // 词元形态**影子**：`wordText` 的 O(1) 派生状态，供 `pwshEscapeBoundaryAt` /
+  // `readPwshEscape` 判词元形态（**不得**直接读 `wordText` —— rope 扁平化致 O(n²)，
+  // 见 `newWordShape` 那段说明）。⚠️ 必须与 `wordText` **严格同步**：
+  // 追加只走 `addWord()`、复位只走 `resetWord()`（本函数内两个唯一入口）。
+  const wordShape = newWordShape()
   let started = false
   let dynamic = false
+  // 「当前词元的**首个**字符是不是 typed 构造（引号串 / 变量展开 / `$( )` / `( )` / `{ }`）」
+  // —— 只供反引号续行守卫判「前一个词元是否已完结的完整词元」用（见 `PWSH_ACCESSOR_TAIL`）。
+  //
+  // 为什么必须有它，而不能只看词元尾部：`$x.Name` 与 `a.b` 的尾部**同形**（都命中
+  // `PWSH_ACCESSOR_TAIL`），但官方解析器实测前者是 `LineContinuation`（切开）、后者是
+  // **一个** `Generic` 词元（粘住）—— 唯一差别就是首个字符。少这一维会多切 `a.b` / `x$y.y`
+  // 族（新误报），少 `PWSH_ACCESSOR_TAIL` 那一维会漏掉 `$x.Name` 族（fail-open）。
+  //
+  // 置位点：各 typed 入口在**词元首**（`!started`）时置位 —— `x$y.y` 的 `$y` 不在词元首，
+  // 故不置位（与 PS 实测一致）。复位点：`flushWord()`（**含 `!started` 的早退路径** ——
+  // `(Get-Item x) .Name` 里 opaque 构造不设 `started`，只在早退里复位才能挡住泄漏）。
+  let tokenTyped = false
+  // 最近一个**分组块**（`( … )` / `{ … }`，含 `@( )` / `@{ }` 前缀形）的**收尾符在 `input` 里的
+  // 下标**；没有分组块时为 -1。只供反引号续行守卫判「反引号是不是紧贴着一个已完结的分组块」。
+  //
+  // ⚠️ 为什么必须是**位置**，而不是「词元尾部是不是 `)` / `}`」：分组块只写 `segText`、
+  //    **不写 `wordText`**（见分组分支），于是 `wordText` 里只剩词元首的前缀（`@` / `a` /
+  //    `Get-Item`），两个尾部判据**都看不到它** —— 这一族因此回退成「粘住」。实测前缀形
+  //    `@(x)` / `a(x)` / `@{a=1}`：`words` 由 `['Remove-Item','-Recurse','-Force','@','C:/Windows']`
+  //    变成 `['Remove-Item','-Recurse','-Force','@C:/Windows']`（`blast` 由 `system` 掉成
+  //    `unknown` ⇒ 破坏性子设置与 deny 例外双双失明）。
+  //    而**裸判 `segText` 尾部是不是 `)` / `}` 会误伤**：`${x}` / `${a}${b}` 的尾部同样是 `}`，
+  //    但官方解析器实测它们是**一个** `Generic` 词元（粘住，见下方 B 族）。位置判据天然区分
+  //    两者 —— `${…}` 走变量分支，**从不**写本变量。
+  //    也不需要任何复位点：它是 `input` 的绝对下标，`index` 一前进等式自然不成立
+  //    （`(x)y` / `@(x)z` / `(x)${y}` 三个粘住族即由此自动排除）。
+  let lastGroupClose = -1
   let segDynamic = false
   let segOpaque = null
   // opaque 构造的**原文**（`$( … )` / 反引号 / `( … )` / `{ … }` 整块，含定界符），按出现次序。
@@ -3901,6 +5568,40 @@ export function decomposeCommand(source, shell) {
   // ⚠️ 与 `segOpaque`（只记**第一个**原因）不同，这里是**全部**构造：一段里可以出现多个
   // （`rm -rf ./x $(a) $(rm -rf /)`），漏记任何一个都可能漏掉真正的载荷。
   let segOpaqueTexts = []
+  // 段原文里**第一个「命令词位」opaque 构造**的起始下标；没有时为 -1。
+  //
+  // 存在的理由（见 `SEG_OPAQUE_AT` 的说明）：`bashLeftIsAssign` 要问「`NAME=` 命中处
+  // **之前**是不是已经有 opaque 构造占掉了命令词位」—— 那是**位置**信息，只有词法器知道。
+  //
+  // ⚠️ 「命令词位」的判据是 `pending === undefined`（没有等着目标的重定向）。
+  //    这一条**不可放宽成「段里任何 opaque 构造」**：
+  //    `> $(true) A=1` 里 `$(true)` 是**重定向目标**，该行在 bash 下仍是**真赋值**
+  //    （Git Bash 5.3.15 实测：`A` 被设为 `1`、无 RAN，只有 `ambiguous redirect` 警告），
+  //    按「任何位置」记会把这一族**真赋值**误判成真命令（引入新过收）。
+  //    ⚠️ 判据**不能**再加 `!started`（本轮订正：原措辞与 `noteOpaqueHead` 处的说明
+  //    互相矛盾，且**按原措辞改会把真命令判成赋值**）：引号分支（`'` / `"`）在读到
+  //    引号时就置 `started = true`，而引号里的 opaque 构造仍属**命令词位** ——
+  //    加上 `!started` 会让 `"$(sh -c 'rm -rf /tmp/zzz')"2> out A=/bin/rm` 的 label
+  //    由 `"rm"` 掉成 `""` ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置
+  //    与全部例外失配 ⇒ 落大分类（fail-open；`test/shell-parse.mjs` 的 AL 组会红）。
+  //    判据与 `noteOpaqueHead` 处**同口径**：只有 `pending === undefined`。
+  let segOpaqueHeadAt = -1
+  // 段原文里**第一个「占过重定向目标位」的 opaque 构造**的起始下标（候选）；没有时为 -1。
+  // 与上面那个的差别是**粘性**（不在遇到新重定向时复位）—— 见 `SEG_OPAQUE_TARGET` 的说明。
+  let segOpaqueTargetCand = -1
+  // 上面那个候选**定案**后的值（-1 = 未定案 / 不成立）。
+  // 定案判据：opaque 占住目标位之后产出的**第一个真词元不是赋值词** —— 只有那时它才真的
+  // 顶掉了命令词位。反例（Git Bash 5.3.15 实测真值 **ASSIGN**，`A`/`B` 都被设上、无 RAN）：
+  //     `> $(mktemp) A=/bin/rm B=/bin/rm`  → 被吞的是 `A=/bin/rm`，是**赋值词** ⇒ 不顶掉
+  //     `> $(mktemp) A=1 B=2`              → 同上
+  // 若不看这一点（纯「占过目标位」即定案），这一族会被误判成真命令（新过收，实测 32 格）。
+  let segOpaqueTargetAt = -1
+  // 本词元是「紧跟在一个占住目标位的 opaque 构造之后」产出的第一个真词元 ⇒ 它的赋值性
+  // 决定上面那个候选能不能定案。由 `noteOpaqueTarget` 置位、`flushWord` 消费并复位。
+  let opaqueTargetSwallow = false
+  // 「本段有 opaque 构造**占着重定向目标位、且该构造是嵌套解释器带内联程序**」——
+  // 段级、**不参与定案**、不受「新重定向作废未定案候选」那处影响（见 `SEG_OPAQUE_PAYLOAD` 的说明）。
+  let segOpaquePayloadInline = false
   let pending
   let nextOp = 'start'
   // 「最后那个 `&` 前面**有内容**吗」—— 供行尾悬空检查区分「合法的异步列表收尾」与
@@ -3951,24 +5652,80 @@ export function decomposeCommand(source, shell) {
   // 实测真实命令形态：`git add` 带 20000 个文件参数（399 KB）→ 1049 ms（改标记后 ~20 ms）。
   // 这是每次工具调用都要跑的判定热路径，词元数由 AI 生成的命令决定，不是理论问题。
   let segEndsWithSpace = true
+  // 段文本**末字符是不是引号**（`"` / `'`）—— 语义等价于 `PWSH_QUOTED_TAIL.test(segText)`。
+  // 与上面 `segEndsWithSpace` **同一个理由、同一个手法**（那是第一处，这是第二处）：
+  // 直接读 `segText` 会触发 rope 扁平化，而本标记在反引号续行守卫里被**每个「反引号+换行」**
+  // 读到一次 —— 实测 `'New-Item -Path $base' + ('`\n  -Name $n<i>')*N`（N=8k/16k/32k）
+  // 由 20.2/365.1/1749.6 ms 降到 6.0/4.8/10.9 ms。
+  //
+  // 三个写入点，与 `segText` 严格同步（漏一个就会与正则判据分叉）：
+  //   · `pushText`  —— 段文本唯一的追加口，取 `s` 的**末字符**（空串时保持原值：`segText`
+  //     不变，末字符自然也不变）；
+  //   · `pushSpace` —— 追加的是空格，**必须复位**（否则 `"abc" -Force ` 这种尾随空白会
+  //     让标记停在 `true`，而 `segText` 的末字符已是空格 ⇒ 分叉）；
+  //   · `flushSegment` —— 与 `segText = ''` 同步复位。
+  // 初值与 `segEndsWithSpace` 同理：空段「末字符是引号」为假。
+  let segLastIsQuote = false
 
-  const pushText = (s) => { segText += s; segEndsWithSpace = false }
+  const pushText = (s) => {
+    segText += s
+    segEndsWithSpace = false
+    // 末字符是不是引号 —— 判据原文即 `PWSH_QUOTED_TAIL`，此处只把它跑在刚追加的 `s` 上
+    // （与跑在 `segText` 上恒同值，但不触发 rope 扁平化，见该常量的说明）。
+    if (s) segLastIsQuote = PWSH_QUOTED_TAIL.test(s)
+  }
+
+  // `wordText` 的**唯一两个写入口**（影子与它严格同步，见 `wordShape` 的说明）。
+  //
+  // ⚠️ 不要绕过它们直接 `wordText += …` / `wordText = ''`：影子会与词元分叉，而
+  //    `pwshEscapeBoundaryAt` 直接读影子 ⇒ 判据错。逐字符入口的调用方传的是
+  //    **单个 UTF-16 码元**（`next` / `char` / `esc.value` 都是单字符），多字符块
+  //    （`raw` / `expansion`）由 `addWord` 自己拆 —— 拆分只发生在**追加点**，
+  //    故不需要在别处再拆一次。
+  const addWord = (s) => {
+    wordText += s
+    for (let i = 0; i < s.length; i += 1) pushWordShape(wordShape, s.charCodeAt(i))
+  }
+  const resetWord = () => {
+    wordText = ''
+    resetWordShape(wordShape)
+  }
   // 引号外的空白归一化为单个空格：例外匹配用的是段全文，`git  status`（双空格）
   // 不该因为排版差异匹配不上用户写的 `git status`。引号内的空白原样保留。
   const pushSpace = () => {
-    if (segText && !segEndsWithSpace) { segText += ' '; segEndsWithSpace = true }
+    if (segText && !segEndsWithSpace) {
+      segText += ' '
+      segEndsWithSpace = true
+      segLastIsQuote = false   // 追加的是空格 ⇒ 段末字符不再是引号（见 `segLastIsQuote`）
+    }
   }
 
   const flushWord = () => {
-    if (!started) return
+    // ⚠️ 复位必须在 `!started` 的**早退之前**：`(Get-Item x) .Name` 的 opaque 构造不设
+    // `started`，若只在正常路径复位，`tokenTyped` 会跨过空白泄漏到下一个词元上。
+    if (!started) { tokenTyped = false; return }
     const w = wordText
+    // ── opaque 占目标位的**定案**（本轮缺陷 1 的修法）────────────────────────────────
+    // opaque 构造**不产出词元**，故「占住重定向目标位」之后产出的**第一个真词元**就是
+    // 它顶掉的那个位置上的词。只有该词**不是赋值词**时，命令词位才真的被它顶掉。
+    // 反例（Git Bash 5.3.15 实测真值 **ASSIGN**，`A`/`B` 都被设上、无 RAN、rc=0）：
+    //     `> $(mktemp) A=/bin/rm B=/bin/rm` → 被吞的是赋值词 ⇒ 命令词位**没有**被顶掉
+    // 正例（同法实测真值 **COMMAND**，RAN[rm]）：
+    //     `> $(mktemp) rm A=/bin/rm`         → 被吞的是命令词 ⇒ 顶掉了命令词位
+    // ⚠️ 判据复用模块级 `LEAD_ASSIGN` **单点**（与 `bashLeftIsAssign` 的入口同源），
+    //    不在这里另写一份「什么算赋值词」。
+    if (opaqueTargetSwallow) {
+      opaqueTargetSwallow = false
+      if (segOpaqueTargetAt < 0 && !LEAD_ASSIGN.test(String(w))) segOpaqueTargetAt = segOpaqueTargetCand
+    }
     if (pending === 'write') writeTargets.push(w)
     else if (pending === 'read') readTargets.push(w)
     else words.push(w)
     pending = undefined
-    wordText = ''
+    resetWord()
     started = false
     dynamic = false
+    tokenTyped = false
   }
 
   // 「本段到目前为止有没有内容」—— **单一实现**，两个调用方问的是同一个问题：
@@ -4002,6 +5759,27 @@ export function decomposeCommand(source, shell) {
     const text = segText.trim()
     const hasContent = segHasContent()
     if (hasContent) {
+      // ── 方言戳：词法器是**唯一确知方言**的地方，故由它把方言记在词元数组上 ──────────
+      // 消费侧（`index.js` 的候选生成 / 破坏性判定 / 例外标注）只拿得到 `seg.words`，
+      // 而赋值守卫**必须带方言维度**（见 `LABEL_ASSIGN` 的说明）—— 在这里戳一次，
+      // 那三条路径原样把数组传回 `segmentLabel` / `isDestructiveSegment` /
+      // `canCarryDestructivePayload` 即可拿到正确的方言，**零接口变更**。
+      // Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 / `for…in` 全部不可见，
+      // 故 `seg.words` 对既有消费方逐字不变（见 `SEG_SHELL` 的说明）。
+      words[SEG_SHELL] = sh
+      // 原文戳（见 `SEG_TEXT` 的说明）：pwsh 侧 `$NAME=右侧` 的引号只在原文里，
+      // 词法器是唯一持有它的地方。与 `SEG_SHELL` 同一处戳、同一份可见性纪律。
+      words[SEG_TEXT] = text
+      // opaque 起点戳（见 `SEG_OPAQUE_AT` 的说明）：`bashLeftIsAssign` 要问「命中处**之前**
+      // 有没有 opaque 构造」，而这是**位置**信息 —— 只有词法器知道，故在这里戳一次。
+      // 无构造时**不戳**（保持缺席，消费侧 `undefined` 即「没有」）。
+      if (segOpaqueHeadAt >= 0) words[SEG_OPAQUE_AT] = segOpaqueHeadAt
+      // opaque 占重定向目标位的粘性戳（见 `SEG_OPAQUE_TARGET` 的说明）：与上一条同一处戳、
+      // 同一份可见性纪律；无构造时**不戳**（保持缺席，消费侧 `undefined` 即「没有」）。
+      if (segOpaqueTargetAt >= 0) words[SEG_OPAQUE_TARGET] = segOpaqueTargetAt
+      // opaque 占目标位**且带内联程序**的戳（见 `SEG_OPAQUE_PAYLOAD` 的说明）：
+      // 与上一条同一处戳、同一份可见性纪律；未命中时**不戳**。
+      if (segOpaquePayloadInline) words[SEG_OPAQUE_PAYLOAD] = 1
       segments.push({
         op: nextOp,
         text,
@@ -4019,18 +5797,116 @@ export function decomposeCommand(source, shell) {
     segText = ''
     // 与 segText 同步重置：新段还没有任何内容，pushSpace 的「已有内容才补空格」判据靠它
     segEndsWithSpace = true
+    // 同上：新段的末字符不是引号（与 `segLastIsQuote` 的初值一致）
+    segLastIsQuote = false
     segDynamic = false
     segOpaque = null
     segOpaqueTexts = []
+    segOpaqueHeadAt = -1
+    segOpaqueTargetCand = -1
+    segOpaqueTargetAt = -1
+    opaqueTargetSwallow = false
+    segOpaquePayloadInline = false
     pending = undefined
     nextOp = 'start'
     return hasContent
   }
 
   const markOpaque = (reason) => { if (segOpaque === null) segOpaque = reason }
+  // 记下**命令词位**的第一个 opaque 构造在段原文里的起始下标（见 `SEG_OPAQUE_AT` 的说明）。
+  //
+  // ⚠️ 判据**只有** `pending === undefined`（此刻没有等着目标的重定向），**不能**再要求
+  //    `!started`：引号分支（`'` / `"`）在读到引号时就置 `started = true`，而引号里的
+  //    opaque 构造仍属**命令词位**。加上 `!started` 会让 `"$(true)" > out X=/bin/rm`
+  //    漏记（实测真值 COMMAND：`X` 仍 unset），而该形态正是本缺陷的同族。
+  //    `pending` 由 `flushWord` 在消费掉重定向目标后复位，故 `> "$(true)" X=…` 里
+  //    `$(true)` 仍在目标位上（`pending === 'write'`）⇒ 不记 ⇒ 保持判赋值（真值 ASSIGN）。
+  // 只记**第一个**：`bashLeftIsAssign` 问的是「命中处之前有没有」，多记无益。
+  const noteOpaqueHead = () => {
+    if (segOpaqueHeadAt < 0 && pending === undefined) segOpaqueHeadAt = segText.length
+  }
   // 记下 opaque 构造的原文（见 `segOpaqueTexts` 的说明）。与 `markOpaque` **分开**：
   // 前者只认第一个原因（段级语义），本函数每个构造都要记（判定侧要逐块查载荷）。
-  const noteOpaqueText = (raw) => { if (raw) segOpaqueTexts.push(String(raw)) }
+  //
+  // ── 顺带判「占目标位的构造是不是嵌套解释器带内联程序」（第 9 圈批次 A 的修法）──────────
+  // ⚠️ 守卫**只**要 `pending !== undefined`（此刻有等着目标的重定向），**不能**再要求
+  //    `!started` —— 这条与 `noteOpaqueHead` 处（见那条的说明）**同一个理由、同一个失效链**，
+  //    而本判据第 9 圈初版**又犯了同一个错**（该警告当时只被 `noteOpaqueHead` 遵守）。
+  //    引号分支（`'` / `"`）在读到引号时就置 `started = true`，而引号里的 opaque 构造
+  //    仍占着**重定向目标位**。加上 `!started` 会让下面这一族**永远进不了判据**：
+  //      `> "$(sh -c "…")" > out A=/bin/rm`（`$()` 落在引号内、仍在目标位上）
+  //    Git Bash 5.3.15 实测（载荷无害化为 stub）：**载荷真的执行**（RAN[marker]）、
+  //    `A` 仍 unset ⇒ 真命令，而加 `!started` 时判 `allow`（fail-open）。
+  // ⚠️ 本判据**不复用 `noteOpaqueTarget`**：它要的只是「此刻构造在目标位上」这个**瞬时**
+  //    事实，而 `noteOpaqueTarget` 会**顺带置位** `segOpaqueTargetCand` / `opaqueTargetSwallow`
+  //    （那是 `SEG_OPAQUE_TARGET` 的候选机制，语义是「被吞的词不是赋值词 ⇒ 命令词位被顶掉」）
+  //    —— 反引号构造**产出词元**（`addWord(raw)` + `started = true`），不是「吞掉词元」
+  //    那一族，套用会让 `> \`true\` > out A=/bin/rm`（真值 **ASSIGN**）被定案成真命令
+  //    （**新过收**，实测）。故这里只借**同一个条件**、不借副作用。
+  // ⚠️ 必须在本函数里判、**不能**挪到 `flushWord` 的定案处：`opaqueTargetSwallow` 此刻
+  //    仍为 true，而「新重定向作废未定案候选」那处会在此**之后**把它置 false ——
+  //    `> $(sh -c "…") > out A=/bin/rm` 里构造后紧跟 `>`，定案分支**根本不会执行**。
+  //    见 `SEG_OPAQUE_PAYLOAD` 的说明（那里有时序推演）。
+  // ⚠️ 判据复用 `nestedInlineProgram` **单点**，且**入参构造与既有调用点同源**（第 10 圈
+  //    修法 U 订正了三处不同源、第 11 圈修法 W 订正了第四处，见下）—— 既有调用点
+  //    （`assessCommand` 与 index.js 候选守卫）拿到的 `label` 与 `words` 是
+  //    **词法器产出 + 已剥引号 + 已归一化**的形态：
+  //      · **切分**必须走 `splitQuotedTokens`（引号感知），不能 `split(/\s+/)`：
+  //        朴素切分**不剥引号** ⇒ 当**标志词元自身**被引号包裹时（`sh "-c" x` /
+  //        `"sh" -c x`）`INLINE_PROGRAM_FLAG` 不命中。⚠️ 注意**只有那一族**失效 ——
+  //        朴素切分对 `sh -c x`（标志不带引号）**同样命中**，且它的首词仍是 `sh`
+  //        （带引号的是**第二**个词元）⇒ 不是「首词错」，是「标志词元没剥引号」。
+  //        变异实测：`splitQuotedTokens → split(/\s+/)` 在 420 条定向语料上 **9 格 label 翻转**。
+  //      · **首词**必须归一化（剥路径/后缀 + 小写），**承重的是 `headCommandNameOf`**
+  //        （穿过 wrapper / 提权前缀取真命令头）：`/bin/sh` / `env sh` / `nohup sh` 这些
+  //        拼写由它单独处理正确。⚠️ 反向对照实测：只留 `commandNameOf(rawHead)` 会
+  //        在 244 格定向语料上让 **28 格** label 由 `rm` 掉成 `""` ⇒ 它是承重项。
+  //      · **兜底 `|| commandNameOf(rawHead)`** 是**防御性对齐**，不是必要项：
+  //        `headCommandNameOf` 的两条返回路径都返回 `commandNameOf` 派生的名字 ⇒
+  //        「主路径为空 ⇒ 兜底必空」在当前实现下成立（实测 V1 留兜底 vs V2 删兜底在
+  //        764 条语料 × 2 方言 = 1528 格上**同值 0 分歧**）。保留它的理由是「删的收益是 0
+  //        （只少 1 行）而留的风险也不是 0（两条路径取值实测有 120/1528 的差异面、
+  //        今天仅因主路径恒非空而被掩盖）」。
+  //      · `rawHead` 的**剥外层引号正则**同样保留、但**既非「恒 no-op」也非必要**：
+  //        穷举段首词元（字符集含引号、长度 ≤4）实测 **2640 个中 366 个被它改变**
+  //        （故不是恒 no-op），但其中导致 `nestedInlineProgram` **判定不同的 = 0**。
+  //        保留它是因为方向正确（把 `"sh"` 归一成 `sh`）。
+  //      · **必须遍历 `segs` 的**全部分段****（第 11 圈修法 W）：本文件既有的 opaque 载荷
+  //        机制（`rawCommandNames`）扫的就是**所有**分片 —— 实测 `rawCommandNames('$(true; sh -c "x")')`
+  //        = `["true","sh"]`，即**既有机制本来就看得到 `sh`**。只取 `segs[0]` 会让
+  //        `> $(true; sh -c "…") > out A=/bin/rm` 这一族漏判（真值 **COMMAND**、载荷真执行，
+  //        Git Bash 5.3.15 实测 `RAN[marker]`、`A` 仍 unset），而 HEAD 给 `deny`
+  //        ⇒ 那是**真 fail-open**、不是「不可区分边界」。
+  //      ⚠️ **已知边界（如实记录，勿为它加判据）**：遍历分段后仍有两族认不出 ——
+  //        ① **首词认不出解释器**：管道 `… | sh`（分段是 `[["base64","-d","x"],["sh"]]`，
+  //           第二段只有 `["sh"]` 一个词元、`nestedInlineProgram('sh',['sh'])` = false
+  //           —— `-c` 缺席）、变量头 `$SHELL -c` / `${SHELL} -c`（`headCommandNameOf`
+  //           取到的是变量名而非解释器名）；真值这两族**载荷会执行**。
+  //        ② **短路族会过收**：`$(true || sh -c …)` / `$(false && sh -c …)` 真值 **ASSIGN**
+  //           （短路）却判 deny —— **但 HEAD 也是 deny**（逐格同值）⇒ 恢复的是 HEAD 既有
+  //           行为、非新引入的过收，方向 fail-closed。
+  //           ⚠️ **不要试图按连接符区分**：`splitQuotedTokens` 丢掉了连接符信息，而
+  //           `cd /tmp && sh -c …` 这类 `&&` 形态真值是 **COMMAND**（`cd` 成功时）⇒
+  //           按连接符一刀切会把它一起漏掉 —— 那是在**没有区分信息的空间里继续加格子**。
+  //      ⚠️ **不改 `nestedInlineProgram` 的语义**（承重函数：`assessCommand` 的
+  //        `unparsable` 与 index.js 候选守卫都在用；`SEG_OPAQUE_PAYLOAD` 的说明里有
+  //        同一族的边界记录）—— 只在**调用处**归一化入参。
+  const noteOpaqueText = (raw) => {
+    if (!raw) return
+    const s = String(raw)
+    segOpaqueTexts.push(s)
+    if (!segOpaquePayloadInline && pending !== undefined) {
+      const inner = stripOpaqueDelimiters(s)
+      if (inner) {
+        for (const parts of splitQuotedTokens(inner)) {
+          if (parts.length === 0) continue
+          const rawHead = String(parts[0]).replace(/^["']|["']$/g, '')
+          const head = headCommandNameOf(parts) || commandNameOf(rawHead)
+          if (head && nestedInlineProgram(head, parts)) { segOpaquePayloadInline = true; break }
+        }
+      }
+    }
+  }
 
   // ── opaque 构造是否可以充当**当前待读重定向的目标**（bash 语法真值，`bash -n` 实测）──
   // 判据只在「本段正等着一个重定向目标、且还没产出任何词元」时才有意义 ——
@@ -4048,10 +5924,36 @@ export function decomposeCommand(source, shell) {
   //
   // ⚠️ 本函数**只**在 `pending !== undefined && !started` 时写入：`started` 为真意味着
   // 重定向目标已经产出（或该构造是命令参数），与「无目标」无关，不得参与。
+  //
+  // ── 顺带记下**粘性**位置戳 `segOpaqueTargetAt`（本轮缺陷 1 的修法）────────────────
+  // 判据与 `redirectOpaqueTarget` 完全同源（同一次调用、同一个守卫），故在同一处写，
+  // 不另开一份「什么算占了目标位」的判据（本文件反复记录的那类缺陷正是两处各写一份）。
+  // 与那个三态的**唯一差别**是**粘性**：三态会在遇到新重定向时被复位（`>` 分支），
+  // 而本标记一旦**定案**就保留到段尾 —— 见 `SEG_OPAQUE_TARGET` 的说明（复位式只修好
+  // 57/169，粘性修好 169/169）。
+  //
+  // ⚠️ 这里记的是**候选**，不是定案：本函数只确知「opaque 占住了重定向目标位」，
+  //    而「**命令词位**是否因此被占据」还要看 opaque **之后第一个真词元**是不是赋值词 ——
+  //    该词元要到 `flushWord` 才产出，故定案在那边做（见 `flushWord` 里的说明）。
   const noteOpaqueTarget = (isWord) => {
     if (pending === undefined || started) return
     if (!isWord) redirectOpaqueTarget = 'not-word'
     else if (redirectOpaqueTarget === 'none') redirectOpaqueTarget = 'word'
+    // 只记**第一个**（与 `noteOpaqueHead` 同一纪律）：粘性标记只需回答「**有没有**」，
+    // 与下标无关（见 `SEG_OPAQUE_TARGET` 的说明 —— 本戳的**读侧不做位置比较**）。
+    // ⚠️ 这句曾经写成「判定侧问的是『命中处**之前**有没有』」—— 那是从 `noteOpaqueHead`
+    //    抄过来的，而**只对那个戳成立**：`SEG_OPAQUE_AT` 的读侧确实带 `< at`
+    //    （`bashLeftIsAssign` 里那行），本戳的读侧是纯 `typeof … === 'number'`
+    //    （第 8 圈修法 Z 撤回位置比较之后如此）。按抄来的那句理解并给读侧加回位置比较，
+    //    实测会让 117/227 格行为改变、`test/shell-parse.mjs` FAIL(1)，且方向是
+    //    **fail-open**（label 由 `rm` 掉成 `""`）—— 正是修法 Z 撤回的那个族。
+    // ⚠️ 位置仍取 `segText.length`（此刻构造尚未 `pushText`，故正是它的起始下标）：
+    //    读侧当前不用它，但词法器本就持有该值，记下来比布尔省一次判断，日后若真需要
+    //    位置信息也不必再改词法器。
+    if (segOpaqueTargetCand < 0) segOpaqueTargetCand = segText.length
+    // 置位「下一个真词元要定案」——即使候选已经记过（粘性），**每个**占位构造都要重新置位：
+    // `> $(a) A=1 > $(b) B=2` 里第二个 `$(b)` 之后同样有一个词元被吞。
+    opaqueTargetSwallow = true
   }
   // 花括号是**分组**（不可作重定向目标）还是**字面词 / 花括号展开**（可作）：
   // bash 的分组要求「以 `;` 或换行收尾」，否则整个 `{…}` 只是一个词 —— `bash -n` 实测：
@@ -4184,7 +6086,7 @@ export function decomposeCommand(source, shell) {
     if (quote === 'single') {
       pushText(char)
       if (char === "'") { quote = undefined; continue }
-      wordText += char
+      addWord(char)
       continue
     }
 
@@ -4195,24 +6097,45 @@ export function decomposeCommand(source, shell) {
         if (next === undefined) return { ok: false, reason: 'the command line ends inside an escape' }
         if ('\\"$`\n'.includes(next)) {
           pushText(char + next)
-          wordText += next
+          addWord(next)
           index += 1
           continue
         }
         pushText(char)
-        wordText += char
+        addWord(char)
         continue
       }
-      if (char === '`') {
+      // ── pwsh 转义（反引号）：**读得出**，故不标 opaque ────────────────────────────
+      // 必须在 `char === '"'` 之前：`` `" `` 是**字面双引号**，不结束字符串
+      // （官方解析器实测 `"a`"b"` 是**一个** StringExpandable 词元）。
+      // 也必须在下面那条 bash 命令替换分支之前 —— 反引号在 pwsh 里**不是**命令替换定界符。
+      if (sh === 'pwsh' && char === '`') {
+        const esc = readPwshEscape(input, index, true)
+        if (esc === null) return { ok: false, reason: 'the command line ends inside an escape' }
+        // 行尾字面反引号（`` `abc` `` 的收尾那个）：进词元，不进 segText 的转义处理
+        if (esc.continuation) { pushText(esc.raw); index += esc.raw.length - 1; continue }
+        // segText 保留**用户写的原文**（例外匹配的对象是原文，与 bash 的 `\x` 分支同处置），
+        // wordText 收**转义后的真实字符**（判定与 label 要按实际执行的命令看）。
+        pushText(esc.raw)
+        addWord(esc.value)
+        index += esc.raw.length - 1
+        continue
+      }
+      // ⚠️ 到这里 `char === '`'` 只可能是 **bash** 的命令替换定界符（pwsh 已在上一个分支返回）。
+      // 与引号外那条同处置：显式写方言守卫，且 `markOpaque` 不再带方言三元 ——
+      // 那个三元在此处的 else 臂**恒不可达**（pwsh 走不到这里），留着等于给「两处各判一次
+      // 方言」留了个假入口，正是本文件反复警告的那种双份判据。
+      if (sh === 'bash' && char === '`') {
         const end = input.indexOf('`', index + 1)
         if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
-        markOpaque(sh === 'bash' ? 'command substitution cannot be read statically' : 'PowerShell escape sequences cannot be read statically')
+        markOpaque('command substitution cannot be read statically')
+        noteOpaqueHead()
         // 原文同时进 wordText：若替换式就是段首词，label 会因含反引号而被判「认不出」
         // （BAD_LABEL_CHARS），方向 fail-closed；不写 wordText 则会产出一个空词元。
         const raw = input.slice(index, end + 1)
         noteOpaqueText(raw)
         pushText(raw)
-        wordText += raw
+        addWord(raw)
         index = end
         continue
       }
@@ -4223,6 +6146,7 @@ export function decomposeCommand(source, shell) {
           const end = skipBalanced(input, index + 1, '(', ')')
           if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
           markOpaque('command substitution cannot be read statically')
+          noteOpaqueHead()
           const sub = input.slice(index, end + 1)
           noteOpaqueText(sub)
           pushText(sub)
@@ -4230,7 +6154,7 @@ export function decomposeCommand(source, shell) {
           continue
         }
         pushText(expansion)
-        wordText += expansion
+        addWord(expansion)
         segDynamic = true
         // 当前词元含变量展开 → 标记为「动态」。这个标记供下面 `2>` 的 fd 号判定使用：
         // `echo $N> f` 里的 `$N` 是**词元**（值为 N 的展开），不是 fd 号，不能当 `2>` 那样丢掉。
@@ -4242,7 +6166,7 @@ export function decomposeCommand(source, shell) {
         continue
       }
       pushText(char)
-      wordText += char
+      addWord(char)
       continue
     }
 
@@ -4299,8 +6223,8 @@ export function decomposeCommand(source, shell) {
       continue
     }
 
-    if (char === "'") { pushText(char); quote = 'single'; started = true; continue }
-    if (char === '"') { pushText(char); quote = 'double'; started = true; continue }
+    if (char === "'") { pushText(char); quote = 'single'; if (!started) tokenTyped = true; started = true; continue }
+    if (char === '"') { pushText(char); quote = 'double'; if (!started) tokenTyped = true; started = true; continue }
 
     // ── 转义：bash 用 `\`，pwsh 用反引号 ──
     if (sh === 'bash' && char === '\\') {
@@ -4309,18 +6233,167 @@ export function decomposeCommand(source, shell) {
       index += 1
       if (next === '\n') continue
       pushText('\\' + next)
-      wordText += next
+      addWord(next)
       started = true
       continue
     }
-    if (char === '`') {
+    // ── pwsh 转义（反引号）：与 bash 的 `\` 分支**同构**，只是一张不同的转义表 ─────────
+    //
+    // ── 为什么必须在这里拦下（本轮修复，用户实测）────────────────────────────────
+    // 此前反引号**没有方言守卫**，无条件落进下面那条「bash 命令替换」分支去找**配对**反引号。
+    // 于是 pwsh 的转义符被当成 bash 的定界符，后果由**反引号个数的奇偶**决定：
+    //
+    //     0 个 → ok:true   1 个 → **ok:false**   2 个 → ok:true   3 个 → **ok:false**
+    //
+    // 用户两条命令各只有 1 个（`"`n--- … ---"`），整行 `ok:false`。而 `ok:false` 路径
+    // **只认 deny 例外**（见 `assessCommand` 的整行分支）—— 用户配的 23 条 allow 例外
+    // 与全部 ask 例外在这一行上**集体失明**。实测（command=allow + 例外 `Remove-Item *`=ask）：
+    //     带 1 个反引号 → **allow**（用户的确认规则被静默绕过，fail-open）
+    //     不带反引号     → ask   ✅
+    // 而 PowerShell 官方解析器对同两条命令报 **0 错误**、共 4 / 6 条语句 —— 它们完全合法。
+    //
+    // 方向：本分支把「读不懂」变成「读得懂」，故**只会让判定回到段级路径**，
+    // 而段级路径比整行路径**更严**（认全部例外、认全部档位）。不会放宽任何东西。
+    if (sh === 'pwsh' && char === '`') {
+      // 词法上下文由**调用方**给出（判据本体是 `pwshEscapeBoundaryAt`，单一实现）：
+      //   · `level === 'segment'` —— 反引号落在一个 Parameter 词元内：PS 把它当**字面字符**，
+      //     既不转义（连 `` `n `` 都原样保留）、也**不吞掉后面的运算符**。缺这一支时
+      //     `cmd /c ver -x` + `` ` `` + `;` + `` ` `` + NL + `Remove-Item …` 的 `;` 被吞进
+      //     词元，第二行的破坏性命令与第一行同判 ⇒ 实测由 `deny` 变 **`allow`**（fail-open）。
+      //   · `open === true` —— 反引号落在一个**未完结**词元内：`` ` ``+CRLF 只吃 CR。
+      //   · 否则（词元边界处）—— `` ` ``+换行一律整体续行。
+      const boundary = pwshEscapeBoundaryAt(wordShape, tokenTyped, segLastIsQuote, lastGroupClose, index)
+      const esc = readPwshEscape(input, index, false, boundary, wordShape)
+      if (esc === null) return { ok: false, reason: 'the command line ends inside an escape' }
+      // 续行（`` ` `` + 换行）：本分支**一律**把它当续行消费（`pushText(esc.raw)`，两行接成
+      // 一条命令），差别只在「要不要在这里切一刀」—— 这一刀由下面的守卫决定。
+      // 官方解析器实测：`Get-ChildItem `+NL+`  -LiteralPath .` 的 token 里有一个
+      // `LineContinuation`，且反引号前面是**空白**（前一个词元早已完结）⇒ 真续行、不切。
+      //
+      // ⚠️ 但「前一个词元**已经完结**」时，反引号是**字面**字符，这一刀必须切 —— 判据的
+      //    维度是**词元**（`wordText` / `tokenTyped`），**不是**「反引号前一个字符是不是
+      //    分隔符」（那是本轮订正的错误判据，见下）。注意 `readPwshEscape` 判「行尾反引号是
+      //    字面字符还是语法错误」用的是 `PWSH_TOKEN_BREAK`（**字符**维度）—— 那处是对的
+      //    （行尾没有「下一个词元」可言），**两处判据不同维度，不得互相套用**。
+      //    官方解析器实测（无 CR，逐条看过 token 表）：
+      //      `Remove-Item -Force "C:/Windows"` + `` ` `` + NL + `-Confirm:$false`
+      //        → `StringExpandable["C:/Windows"]` **`LineContinuation`** `Parameter[-Confirm:]` …
+      //          ⇒ 两行是**两个**词元（`-Confirm:` 是新词元的开头）
+      //      `Remove-Item -Force C:/Windows` + `` ` `` + NL + `-Confirm:$false`
+      //        → **一个** `Generic[C:/Windows`+NL+`-Confirm:$false]`（裸词后是**字面**反引号）
+      //    缺这一格时引号串与下一行被粘成一个词元 `C:/Windows-Confirm:$false`，`blast` 由
+      //    `system` 掉成 `unknown`、档位由 `wide` 掉成 `unknown` ⇒ 破坏性子设置与 deny
+      //    例外双双失明。实测（本机三态对拍，bash/pwsh 各格）：
+      //      大分类 allow + `wide`=deny                 → HEAD `deny` → PRE **`ask`**（降级）
+      //      大分类 allow + `wide`=deny + `unknown`=allow → HEAD `deny` → PRE **`allow`**（静默放行）
+      //      对照（无反引号）：HEAD / PRE / NOW 均 `deny`；修复后两条 fail-open 均回到 `deny`
+      //      （blast 回到 `system`、档位回到 `wide`）。
+      //    ⚠️ **判据的维度是「前一个词元是否已完结的完整词元」，不是「前一个字符是不是分隔符」**
+      //    （本轮订正）。旧判据用 `PWSH_TOKEN_BREAK.test(input[index - 1])`（前**一字符**），
+      //    而该集合只含 `\s;|&(){},'"` —— 字母 / 数字 / `]` / `.` 都不在里面，于是下列形态
+      //    被误判成续行、两行粘成一个词元。官方解析器 + 实参绑定逐格实测（无 CR）：
+      //
+      //      ── A. 已完结的完整词元 ⇒ **必须切**（旧判据全部漏判，是真 fail-open）──
+      //      · **Parameter 词元**（`-NoNewline` / `-Recurse` / `-NoEnumerate` / `-Verbose`）：
+      //        token 是 `Parameter[-NoNewline`]`（反引号**并进参数名**）、**没有** LineContinuation，
+      //        但 `[Parser]` 报 **2 条 PipelineAst** = **语句边界**。实参绑定是决定性证据：
+      //        `& probe.ps1 -NoNewline` + `` ` `` + NL + `C:/Windows2` → `N=1`、
+      //        `A[0]=[-NoNewline`]`，随后 `C:/Windows2` 被当作**新命令**执行
+      //        （`The term 'C:/Windows2' is not recognized…`）。⇒ 用 `flushSegment()`。
+      //        ⚠️ 这里**只能**是 `flushSegment()`：改用 `flushWord()` 实测端到端**仍然 `allow`**
+      //        （两行同段 ⇒ 第二行的破坏性命令与第一行同判），等于没修。
+      //      · **成员 / 下标 / 静态成员访问**（`$x.Name` / `$a[0]` / `$h["k"]` / `$env:TEMP.Length`
+      //        / `"abc".Length` / `(Get-Item x).Name` / `$x[0].Name` / `(gci x)[0]`）：
+      //        官方解析器实测是 `LineContinuation`，与空格形**逐字同值**（同一条语句）。
+      //        ⇒ 用 `flushWord()`，且判据必须与 `tokenTyped` **合取**（见 `PWSH_ACCESSOR_TAIL`）。
+      //      · `-Confirm:` 这类**带冒号收尾**的 Parameter：同样是 `LineContinuation`、
+      //        **同一条语句** ⇒ `flushWord()`。它与整词 Parameter 的差别正是本修法的核心：
+      //        **Parameter 族是语句边界，`-Confirm:` 是词元边界**，两者不同级。
+      //      · **分组块**（`( … )` / `{ … }`，含 `@( … )` / `@{ … }` 前缀形：`@(x)` / `@(1)` /
+      //        `@($x)` / `@("a")` / `@(Get-Item x)` / `@()` / `@{a=1}` / `@{}` / `@{a=1;b=2}` /
+      //        `a(x)` / `a{b}` / `x{y}` / `x(y)` / `a(1)` / `a(Get-Item x)` / `(x)` / `{x}` /
+      //        `Get-Item(x)` / `((x))` / `$(x)` / `a{}{}` …，**含段首无前缀形态**）：
+      //        官方解析器实测 token 表是 `… RParen[)] LineContinuation[`<NL>] Generic[C:/Windows]`、
+      //        `stmts=1`；实参绑定 `& probe @(1)` + `` ` `` + NL + `ZZZ` → **N=2**（`A[1]=ZZZ`），
+      //        与空格形 `@(1) ZZZ` 的 N=2 **同值** ⇒ 同样是 `LineContinuation`（词元边界、同一条语句），
+      //        而不是 Parameter 族那样的语句边界。⇒ 用 `flushWord()`。
+      //        ⚠️ 判据必须是**位置**（`lastGroupClose === index - 1`），不能对 `segText` 裸判
+      //        `/[)}]$/`：后者会命中 `${x}` / `${a}${b}`（PS 实测**粘住**，见 B 族），
+      //        而位置判据自动排除它们（`${…}` 走变量分支、不写 `lastGroupClose`），
+      //        也自动排除 `(x)y` / `@(x)z` / `(x)${y}`（PS 实测粘住 —— 收尾符之后还有字符）。
+      //
+      //      ── B. 首字符是普通字符 ⇒ **必须粘住**（旧判据此处本就正确，不得改动）──
+      //      裸词 `C:/Windows`、简单变量 `$TARGET` / `$x` / `${x}` / `$env:TEMP`、`abc]`、`a.b`、
+      //      `x$y.y`：官方解析器实测都是**一个** `Generic` 词元（反引号是**字面**字符）。
+      //      ⚠️ 尤其不得把 `$TARGET` 这类**简单变量**切开 —— 那是把方向从 fail-open 翻成误报。
+      //      `x$y.y` 同理：`$y` 不在词元首，故 `tokenTyped` 不置位（PS 实测粘住）。
+      //      分组块的**粘住**子族同理（PS 实测 `Generic[y`+NL+`…]`，反引号是字面字符）：
+      //      `(x)y` / `a(x)y` / `a{b}y` / `@(x)z` / `(x)${y`+`}` / `(x)$y` / `x )y` ——
+      //      它们的收尾符**不紧贴**反引号，故位置判据不命中。
+      //
+      //    ⚠️ **残余（本轮未修，见下方各自条目）**：`${x}` / `${a}${b}` / `(x)${y}` 单独出现时
+      //    PS 粘住而本实现切开（**既有反向误差**，非本次引入）；`${x}` + `::y` 是上一轮修法
+      //    **新引入**的 1 格反向误差；「引号串 + `:y` / `-y` / `]` / `[` / `::`」族 PS 判
+      //    `LineContinuation`（词元边界），而本实现按语句切分 —— 那是另一套机制，不在本次范围。
+      //    ⚠️ 重定向目标处的续行（`"5">out.txt` + `` ` `` + NL + `…`）PS 判**粘住**，
+      //    本实现（改前改后）判词元边界 —— 同属**既有反向误差**（见 fd 号分支的说明）。
+      //    ⚠️ 引号**内**的那处（`readPwshEscape(input, index, true)` 的调用点）**不要动**：
+      //    引号内 PS 判据不同，且文件里已论证过（`"a`"b"` 是一个 `StringExpandable` 词元）。
+      if (esc.continuation) {
+        // 前一个词元的**整词文本**（`wordText`，不是 `input[index - 1]`）—— 判据取词元维度。
+        // 三段式：语句边界 → 词元边界 → 真续行（什么都不切）。判据本体是
+        // `pwshEscapeBoundaryAt`（**单一实现**：CRLF 支也要问同一个问题，见该函数说明），
+        // 且**只在本分支问一次** —— `boundary` 就是本分支开头算好的那一个，五个输入
+        // （`wordShape` / `tokenTyped` / `segLastIsQuote` / `lastGroupClose` / `index`）
+        // 在两次调用之间一个都没被修改（`readPwshEscape` 全程只读、不写传入的 shape）。
+        //
+        // ⚠️ **语句边界处不得把续行标记写进任何段**（本轮修复，用户实测）。此前这里是
+        //    「先 `flushSegment()` 再 `pushText(esc.raw)`」的**无条件**写法，于是 `` ` ``+换行
+        //    被记到**下一个段**（它真正续行的那一段已经切走了），且 `nextOp` 没置 `'newline'`
+        //    ⇒ 新段仍带 `'start'`。实测（pwsh，`cmd /c ver -x` + `` ` `` + LF + `Remove-Item …`）：
+        //      输入                op          段 text
+        //      `` ` `` + **LF**    `start`❌   `` `\nRemove-Item -Recurse -Force C:/Windows ``（污染）
+        //      `` ` `` + **CRLF**  `newline`✅ `Remove-Item -Recurse -Force C:/Windows`（干净）
+        //    两者是**同一条命令**（`[Parser]` 对 LF / CRLF 都给 `Parameter[-x`]` + 2 条
+        //    PipelineAst），判定的段文本却不同 ⇒ 用户手写的**干净精确 deny 例外失明**：
+        //      大分类 allow + 八档全 allow + 例外 `Remove-Item -Recurse -Force C:/Windows`=deny
+        //        `` ` ``+LF   → **allow**（段文本带着 `` ` ``+换行，例外匹配不上）
+        //        `` ` ``+CRLF → deny（e1）   裸 LF → deny（e1）   `;` → deny（e1）   `&&` → deny（e1）
+        //    另一个后果是弹窗标签：`start` 的语义是**首段**，出现在第 2 段（`index.js` 的
+        //    「段 N <op>」）自相矛盾。
+        //    修法与**本函数 CRLF 支**、以及 **bash** 的 `\`+换行 处置一致（续行符不保留）：
+        //    实测 `rm -rf /tmp/pgx >\<NL>&2` 的段文本是 `rm -rf /tmp/pgx >&2`。
+        //    ⚠️ 另一变体「先 `pushText` 再 flush」也能消掉 text 污染，但会把标记留在**上一段**
+        //    （`cmd -x``` ），与 CRLF 支不一致，**不要用**。
+        if (boundary.level === 'segment') {
+          flushSegment()
+          // 与换行分支（`flushSegment()` 后紧跟的那行）同口径：新段由**换行**开始。
+          nextOp = 'newline'
+        } else {
+          pushText(esc.raw)
+          if (boundary.level === 'word') flushWord()
+        }
+        index += esc.raw.length - 1
+        continue
+      }
+      pushText(esc.raw)
+      addWord(esc.value)
+      started = true
+      index += esc.raw.length - 1
+      continue
+    }
+    // ⚠️ 到这里 `char === '`'` 只可能是 **bash** 的命令替换定界符（pwsh 已在上一个分支返回）。
+    // 显式写出方言守卫而不是靠「上面拦住了」：本分支的语义是 bash 专有的，
+    // 而它此前**没有**守卫 —— 那正是上面那个缺陷的成因，不该再留一次同样的机会。
+    if (sh === 'bash' && char === '`') {
       const end = input.indexOf('`', index + 1)
       if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
-      markOpaque(sh === 'bash' ? 'command substitution cannot be read statically' : 'PowerShell escape sequences cannot be read statically')
+      markOpaque('command substitution cannot be read statically')
+      noteOpaqueHead()
       const raw = input.slice(index, end + 1)
       noteOpaqueText(raw)
       pushText(raw)
-      wordText += raw
+      addWord(raw)
       started = true
       index = end
       continue
@@ -4333,6 +6406,7 @@ export function decomposeCommand(source, shell) {
         const end = skipBalanced(input, index + 1, '(', ')')
         if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced quote' }
         markOpaque('command substitution cannot be read statically')
+        noteOpaqueHead()
         noteOpaqueTarget(true)
         const sub = input.slice(index, end + 1)
         noteOpaqueText(sub)
@@ -4341,7 +6415,9 @@ export function decomposeCommand(source, shell) {
         continue
       }
       pushText(expansion)
-      wordText += expansion
+      addWord(expansion)
+      // 变量展开在**词元首** ⇒ typed 词元（`$x.Name` 族据此切开；`x$y.y` 不置位）
+      if (!started) tokenTyped = true
       started = true
       segDynamic = true
       dynamic = true
@@ -4352,7 +6428,8 @@ export function decomposeCommand(source, shell) {
       const m = matchAt(CMD_VARIABLE, input, index)
       if (m !== undefined) {
         pushText(m)
-        wordText += m
+        addWord(m)
+        if (!started) tokenTyped = true
         started = true
         segDynamic = true
         dynamic = true
@@ -4466,8 +6543,19 @@ export function decomposeCommand(source, shell) {
       }
       // `2>` 里的 `2` 是 fd 号不是词元；但引号/变量/通配形态的 `2` 是真词元
       if (started && !dynamic && /^[0-9]+$/.test(wordText)) {
-        wordText = ''
+        resetWord()
         started = false
+        // ⚠️ 本分支**绕过 `flushWord()`**（它只清 `wordText` / `started`），故必须自己复位
+        // `tokenTyped` —— 漏了它，标记会跨过重定向泄漏到**目标**上：`"5">out.txt` 的 `out.txt`
+        // 会被 `PWSH_ACCESSOR_TAIL` 的 `\.[A-Za-z_]\w*$` 误判成成员访问 ⇒ 多切一刀。
+        // 实测（`"5">out.txt` + 反引号 + NL + `Remove-Item …`）：
+        //   `writeTargets` 由 `['out.txtRemove-Item']` 变成 `['out.txt']`，第二行另起一段；
+        //   官方解析器实测该行是**一个** `Generic[out.txt`+NL+`Remove-Item]`（**粘住**）
+        //   ⇒ 这一刀是**误切**，且方向是放宽：`category=deny` + `destructive={wide:allow}`
+        //   实测由 `deny` 变 **`allow`**。
+        //   ⚠️ 复位后回到「粘住」，那是**既有的**反向误差（PRE 同值），不是本次引入的；
+        //   要连它一起修得另立判据（重定向目标处的续行语义），不在本次范围。
+        tokenTyped = false
       } else {
         flushWord()
       }
@@ -4483,6 +6571,14 @@ export function decomposeCommand(source, shell) {
       pending = char === '>' ? 'write' : 'read'
       // 新开一个待读目标 ⇒ 上一个重定向的 opaque 结论作废（见 `redirectOpaqueTarget` 的注释）
       redirectOpaqueTarget = 'none'
+      // ⚠️ 同上，但只作废**尚未定案**的候选（本轮缺陷 1 的修法）：`opaqueTargetSwallow`
+      //    仍为真意味着上一个 opaque 构造占的那个目标位**还没被任何词元消费**就被本次
+      //    新重定向取代了 ⇒ 它没有顶掉任何词元，命令词位自然也未被它占据。
+      //    实测（Git Bash 5.3.15，真 `mktemp`）：`> $(true) > out A=/bin/rm` → `A` 被设为
+      //    `/bin/rm`、无 RAN、rc=1 ⇒ **真赋值**；不作废会把它误判成真命令（新过收）。
+      //    ⚠️ **已定案**的 `segOpaqueTargetAt` 不在这里复位 —— 那正是「粘性」的承重之处
+      //    （`> $(mktemp) r"m" A=/bin/rm > out2` 这类尾部还有重定向的形态靠它才修得好）。
+      if (opaqueTargetSwallow) { opaqueTargetSwallow = false; segOpaqueTargetCand = -1 }
       index += op.length - 1
       continue
     }
@@ -4492,7 +6588,8 @@ export function decomposeCommand(source, shell) {
     // 把它当展开会让常规只读巡检无法进行。
     if (char === '{' && input[index + 1] === '}' && !started && (input[index + 2] === undefined || /\s/.test(input[index + 2]))) {
       pushText('{}')
-      wordText = '{}'
+      resetWord()
+      addWord('{}')
       started = true
       index += 1
       continue
@@ -4502,6 +6599,7 @@ export function decomposeCommand(source, shell) {
       const end = skipBalanced(input, index, char, close)
       if (end < 0) return { ok: false, reason: 'the command line ends inside an unbalanced group' }
       markOpaque('shell grouping or brace expansion cannot be read statically')
+      noteOpaqueHead()
       noteOpaqueText(input.slice(index, end + 1))
       // `(` 分支必须再分一次：**进程替换** `>( )` / `<( )` 是可作词的（见 `parenIsProcessSub`），
       // 而**子 shell** `( )` 不可作词。少了这一分，`>(tee log)` 会被记成 `not-word`
@@ -4510,20 +6608,31 @@ export function decomposeCommand(source, shell) {
       noteOpaqueTarget(char === '{'
         ? !braceIsCommandGroup(input.slice(index + 1, end))
         : parenIsProcessSub(input, index))
+      // 分组块在**词元首** ⇒ typed 词元（`(Get-Item x).Name` 族据此切开）
+      if (!started) tokenTyped = true
       pushText(input.slice(index, end + 1))
+      // 记下收尾符位置，供反引号续行守卫判「紧贴着一个已完结的分组块」（见 `lastGroupClose`）
+      lastGroupClose = end
       index = end
       continue
     }
     if (char === ')' || char === '}') {
       markOpaque('shell grouping or brace expansion cannot be read statically')
+      noteOpaqueHead()
       // 孤立 `}` 是普通词（可作目标），孤立 `)` 不可能合法（见 `noteOpaqueTarget` 的注释）
       noteOpaqueTarget(char === '}')
       pushText(char)
+      // 与分组块分支同处置：孤立闭合符同样在 `PWSH_TOKEN_BREAK` 里，故第十轮前**也是切开的**。
+      // 官方解析器实测 `abc)` + `` ` `` + NL + `C:/Windows` → `Identifier[abc] RParen[)]`
+      // `LineContinuation`（词元边界；该行另有 1 处 `UnexpectedToken`，但 token 表与
+      // `a)` / `a}` / `abc}` 同形）。少了本行，这一族在第十轮由「切开」回退成「粘住」——
+      // 与分组块族同一条根因、同一个方向（fail-open）。
+      lastGroupClose = index
       continue
     }
 
     pushText(char)
-    wordText += char
+    addWord(char)
     started = true
   }
 
@@ -5359,9 +7468,13 @@ function destructiveHeadReadable(seg) {
   // `assessCommand` 的 `tierSetOf` 调用），故真实路径上恒生效。
   const texts = seg && Array.isArray(seg.opaqueTexts) ? seg.opaqueTexts : null
   if (texts) {
+    // 方言取自词元数组上的戳（`SEG_SHELL`）：本函数只拿到 `seg`，而 `seg.words` 是词法器
+    // 盖过戳的那一份（生产路径恒如此）。不传方言会让 pwsh 侧构造里的靶形态按 bash 判
+    // ⇒ 认不出真命令 ⇒ 本判据误判「段首就是全部载荷」（fail-open，见 `rawCommandNamesWithShell`）。
+    const segSh = shellOfWords(w)
     for (const raw of texts) {
       let names = null
-      try { names = rawCommandNames(raw) } catch (e) { names = null }
+      try { names = segSh === 'pwsh' ? rawCommandNamesWithShell(raw, segSh) : rawCommandNames(raw) } catch (e) { names = null }
       if (!names) continue
       for (const n of names) { if (isDestructiveLabel(n)) return false }
     }
@@ -6939,6 +9052,38 @@ export function blastRadiusOfCommandPattern(words, opts) {
 }
 
 /**
+ * 剥掉 opaque 构造的**外层定界符**，返回其中的正文（剥不出时返回空串）。
+ *
+ * 存在的理由（本轮批次 A 的修法）：词法器把整个构造的**原文**（含定界符）交给
+ * `noteOpaqueText`，而 `nestedInlineProgram` 要的是「命令 + 词元数组」——
+ * 直接拿 `$(sh -c "…")` 去问，首词会是 `$(sh` 而不是 `sh`，判据恒假。
+ * 故先把定界符剥掉再问，**不**在调用处另写一份「什么算解释器」。
+ *
+ * 覆盖四种定界符（与词法器里产生 opaque 构造的分支一一对应）：
+ *   `$( … )` / `` ` … ` `` / `( … )` / `{ … }`
+ * ⚠️ 只剥**成对**的外层：`$(a) $(b)` 这类多构造文本由调用方逐个传（`noteOpaqueText`
+ *    本就是每个构造调一次），故这里不做切分。
+ * ⚠️ **本函数只判首尾字符，不做任何配对检查**（`$(a) $(b)` 这类文本若整串传进来，
+ *    首字符 `$`、末字符 `)`，会被剥成 `a) $(b` —— 但那不是本函数的输入形态）。
+ *    成对性由**词法器**保证：它先 `skipBalanced` 成功跳过配对（`end >= 0`）才会调
+ *    `noteOpaqueText`，故传进来的原文首尾必然成对。这里**不**用 `skipBalanced`
+ *    重做一遍配对检查 —— 那既多余，也会与调用方对「输入是什么」的约定重复一份。
+ *
+ * @param {string} raw opaque 构造原文
+ * @returns {string} 剥掉定界符后的正文（未命中任何定界符时返回空串）
+ */
+function stripOpaqueDelimiters(raw) {
+  const s = String(raw).trim()
+  if (s.length < 2) return ''
+  const first = s.charAt(0)
+  const last = s.charAt(s.length - 1)
+  if (first === '$' && s.charAt(1) === '(' && last === ')') return s.slice(2, -1).trim()
+  if ((first === '(' || first === '{') && last === (first === '(' ? ')' : '}')) return s.slice(1, -1).trim()
+  if (first === '`' && last === '`' && s.length > 1) return s.slice(1, -1).trim()
+  return ''
+}
+
+/**
  * 该段是否为「嵌套解释器带内联程序」——程序正文是另一门语言，读不懂。
  *
  * 导出给 index.js 的候选生成复用：候选守卫必须与判定侧同源，否则会产出
@@ -7176,7 +9321,14 @@ export function assessCommand(source, shell, hooks) {
     let reason = c.reason
     let ruleId = null
     if (code !== 'empty') {
-      const names = rawCommandNames(String(source == null ? '' : source))
+      // 方言维度（本轮缺陷 2 的修法）：`rawCommandNames` 只收文本、内部按 bash 判赋值，
+      // 而赋值判据是**方言相对**的（见 `rawCommandNamesWithShell`）——pwsh 侧不传方言
+      // 会让构造里的靶形态（`echo $(A=/bin/rm)`）认不出命令名 ⇒ 用户显式写的 deny
+      // 例外被静默绕过（fail-open）。这条路径**只认 deny**（收紧方向），故传方言安全。
+      // ⚠️ else 分支保持 `rawCommandNames(...)` 的字面形态：`test/regressions.mjs` 的
+      //    结构断言要求它出现在 `if (!d.ok) {` 之后（见 `rawCommandNamesWithShell`）。
+      const src = String(source == null ? '' : source)
+      const names = sh === 'pwsh' ? rawCommandNamesWithShell(src, sh) : rawCommandNames(src)
       // ① deny 例外（最高优先，用户显式拒绝）
       let denied = false
       if (h.matchException) {
@@ -7390,12 +9542,23 @@ export function assessCommand(source, shell, hooks) {
     // 再拿原文粗提只会引入噪音（`git log --format=...` 之类参数里的词）。
     // 方向始终 fail-closed：多提几个名字只会让 deny 例外与破坏性名单更容易命中，不会放宽。
     if (seg.opaque) {
-      const extra = rawCommandNames(seg.text)
-      if (extra.length) {
+      // 方言**一次取定**：`rawCommandNamesWithShell` 就是那个带方言维度的出口，两门方言各取各的。
+      //
+      // 原先写「先按 bash 算一份、pwsh 时再整体覆盖」，那份中间结果在 pwsh 路径上是**死值** ——
+      // 而 `rawCommandNamesInto` 是这条路径上最重的一步（剥 heredoc 正文 + 剥单引号 +
+      // 逐字符扫出命令替换并递归展开 + 按分隔符 `split` + 每片一次 `segmentLabels`），
+      // 等于把同一份原文白解析了两遍。实测 pwsh `echo $(…)` ×13000 单段（143 KB）：
+      // 37.6 ms → 18.4 ms（相对同形 bash 对照 ×2.01 → ×0.97）；真实形态 5.7 KB 同为两倍量级。
+      //
+      // 取值与旧写法**逐字相同**：pwsh 支取的就是同一个调用；bash 支的
+      // `rawCommandNamesWithShell(t, 'bash')` 与 `rawCommandNames(t)` 是**同一个**内部调用
+      // —— 两个出口都只是 `rawCommandNamesInto(text, 'bash', …)` 的薄壳。
+      const names = rawCommandNamesWithShell(seg.text, sh)
+      if (names.length) {
         // 无原型：键是 label（来自命令文本），`{}` 会让原型属性名恒判「已见过」而漏合并。
         const seen = Object.create(null)
         const merged = []
-        for (const l of labels.concat(extra)) { if (l && !seen[l]) { seen[l] = 1; merged.push(l) } }
+        for (const l of labels.concat(names)) { if (l && !seen[l]) { seen[l] = 1; merged.push(l) } }
         labels = merged
       }
     }
@@ -7549,7 +9712,14 @@ export function assessCommand(source, shell, hooks) {
     else if (action === 'ask') anyAsk = true
     else if (action === 'inherit') anyInherit = true
 
-    out.push({ op: seg.op, text: seg.text, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers })
+    // `words` / `opaque` 随段一起交回：判定内部已经算出了它们（`segmentLabelsCore(seg.words)`
+    // 就在上面几行），而**消费侧此前拿不到** —— 宿主生成弹窗候选时只能把同一条命令
+    // 再 `decomposeCommand` 一遍，于是同一条命令被解析两次、两次的段各带一半字段
+    // （判定那份有 action 没有 words，分解那份有 words 没有 action）。
+    // 后果是候选侧**无法知道某一段已经被放行**：`Get-ChildItem *` 已配成 allow 时，
+    // 弹窗仍然给出 `get-childitem *` 候选，点一次就往配置里再写一条语义重复的例外。
+    // 交回 words 后消费侧不必再解析，判定与候选看到的是**同一批段对象**。
+    out.push({ op: seg.op, text: seg.text, words: seg.words, opaque: seg.opaque, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers })
   }
 
   // fail-closed 合并：拒绝面取并集、放行面取交集。

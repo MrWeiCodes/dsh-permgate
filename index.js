@@ -4180,12 +4180,67 @@ export default {
       return out({ action: fb.mode, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
     }
 
+    // 段级判定摘要：把「哪一段被拦、命中哪一档」讲清楚。
+    //
+    // ── 它为什么**不再进弹窗的 reason** ──────────────────────────────────────
+    // 这段摘要原本拼进弹窗 reason，于是弹窗上同时出现两个「段」的口径：
+    //   · reason 里的「—— 分段：Get-Location」   —— 只列**非 allow** 的段（1 段）
+    //   · 参数区的「段 1 / 段 2 ; / 段 3 |」      —— 列**全部**段（3 段）
+    // 同屏一个说 1 段、一个说 3 段，审批人只能读成判定自相矛盾（实测截图）。
+    // 而参数区已经把每段逐行列出、还带段号与引出它的操作符，弹窗侧这段摘要纯属重复。
+    //
+    // ── 两个消费方（都不经弹窗的 reason）────────────────────────────────────
+    //   · 决策日志（设置页「最近决策」，`recordDecision`）—— 那里没有参数区，
+    //     reason 是**唯一**的线索，故摘要必须在这里，事后才能看出「是哪一段、哪一档」；
+    //   · **直接拒绝**时回给 AI 的那条 reason（`pre-execute` 的 `d.action === 'deny'`
+    //     出口）—— 那条路径**没有弹窗**，AI 拿不到任何参数区，摘要同样是唯一线索。
+    // ⚠️ 两者共用**同一个** `segmentSummary`，不是各拼一次：口径分叉时「AI 收到的理由」
+    //    与「日志记的理由」会不一致，而它们本该回答同一个问题。
+    // ⚠️ 唯一**不**带摘要的是**弹窗**那条 reason（用户就在看参数区，见上）。
+    //
+    // 总量上限：decisions 是 MAX_DECISIONS 条的环形缓冲，段数随命令行数线性增长，
+    // 不截断时一条 2000 行的脚本会让单条 reason 达到 ~160 KB（中英各一份）。
+    const SEG_SUMMARY_MAX_PARTS = 5
+    const SEG_SUMMARY_MAX_CHARS = 300
+    function segmentSummary(d) {
+      const base = d && d.reason
+      // reason 是 bi() 对象（分类/例外分支）或裸字符串（超时补记那条）。
+      // 后者没有 segments，也不需要摘要 —— 原样返回。
+      if (!base || typeof base !== 'object') return base || ''
+      const segs = (d.segments || []).filter((s) => s.action !== 'allow')
+      if (!segs.length) return base
+      const partsOf = (lang) => {
+        const parts = []
+        for (const s of segs.slice(0, SEG_SUMMARY_MAX_PARTS)) {
+          const tag = codeLabel(s.code)
+          // 档位标签必须一并带上（§8.2 的 23d）：决策记录是事后追溯「为什么问这一次」的
+          // 唯一入口，而只记 code 时八档的摘要**完全一样**（全是「破坏性命令」）——
+          // 用户看不出到底是 wide 还是 priv 那一档在管，也就不知道该去调哪个开关。
+          const tiers = (s.tiers || []).map((x) => tierLabel(x)).filter(Boolean).map((x) => L(x, lang)).join('')
+          const t = s.text.length > 80 ? s.text.slice(0, 80) + '…' : s.text
+          const note = (tag ? L(tag, lang) : '') + tiers
+          parts.push(t + (note ? '（' + note + '）' : ''))
+        }
+        // 省略提示必须给出**还有几段**：只写「…」会让看日志的人以为已经看全了。
+        // 它必须在**硬截断之后**再拼：曾经先 push 提示、再对整串按 300 字符截断，
+        // 而提示位于串尾、最先被吃掉 —— 实测 8 段各 75 字符时中英两版都不含提示，
+        // 恰好违背了「不能让人以为已经看全」的初衷。
+        const rest = segs.length - parts.length
+        const more = rest > 0 ? (lang === 'en' ? ' … +' + rest + ' more' : ' …另有 ' + rest + ' 段') : ''
+        let joined = parts.join(lang === 'en' ? ' ; ' : ' ；')
+        const budget = Math.max(40, SEG_SUMMARY_MAX_CHARS - more.length)
+        if (joined.length > budget) joined = joined.slice(0, budget) + '…'
+        return (lang === 'en' ? ' — segments: ' : ' —— 分段：') + joined + more
+      }
+      return bi(base.zh + partsOf('zh'), base.en + partsOf('en'))
+    }
+
     function recordDecision(d, exec) {
       // code 一并留痕：它是「为什么问这一次」的机器可读答案（destructive / unparsable /
       // write-outside / segment-* ），与 reason 那种人读长文本互补。
       // 此前 commandDecision 已经把 code 放进返回值，但这里没写 —— 注释声称「决策日志记 code」
       // 而日志里没有这个字段，属于写了没人读的死数据。
-      decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, code: d.code || null, reason: d.reason || '' })
+      decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, code: d.code || null, reason: segmentSummary(d) })
       if (decisions.length > MAX_DECISIONS) decisions.splice(0, decisions.length - MAX_DECISIONS)
     }
 
@@ -4205,6 +4260,23 @@ export default {
       return dir + '/*'
     }
 
+    /**
+     * 命令例外的**判重键**（读侧 alreadyInProject 与写侧 addProjectException 共用这一份）。
+     *
+     * 为什么需要它：判重此前写的是 `r.match === value` —— **大小写敏感的精确比较**，
+     * 而例外真正生效的匹配走 `matchCommand`，那个函数两侧都 `toLowerCase()`（大小写不敏感）。
+     * 两套口径不一致的后果是**同一条例外能存两份**：
+     *   用户面板里写 `Get-ChildItem *`，弹窗候选值是 `get-childitem *`（segmentLabel 输出全小写），
+     *   `'Get-ChildItem *' === 'get-childitem *'` 为 false ⇒ 判重不命中 ⇒ 按钮照常产出；
+     *   点一次后 `addProjectException` 的写侧判重同样不命中 ⇒ 再 push 一条 `get-childitem *`。
+     * 配置里于是出现两条 matchCommand 语义**完全等价**的例外，用户看不出为什么要两条。
+     *
+     * 归一方式与 `matchCommand` 同源：只做小写折叠（它自己就是这么比的），
+     * **不 trim**——matchCommand 也不 trim，这里多剥一层会让「带前导空格的模式」在
+     * 判重时被视为与不带空格的那条相同，而实际匹配行为并不相同（口径再次分叉）。
+     */
+    function cmdExcKey(s) { return String(s == null ? '' : s).toLowerCase() }
+
     function alreadyInProject(value, kind, catKey, root) {
       const proj = projectBlock(root)
       if (!proj) return false
@@ -4215,7 +4287,8 @@ export default {
       const decided = (r) => r.action !== 'ask'
       if (kind === 'command') {
         const cat = proj.command
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && r.match === value))
+        const key = cmdExcKey(value)
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && cmdExcKey(r.match) === key))
       }
       if (kind === 'path' && catKey && EXC_CATS.indexOf(catKey) !== -1) {
         const cat = proj[catKey]
@@ -4322,7 +4395,7 @@ export default {
       // 见 blastRadiusOf 的注释（`rmdir /s /q B:\` 与删一个普通目录在判定链上完全一样）。
       return {
         action: a.action,
-        reason: bi('执行命令' + describeSegments(a, 'zh') + exZh, 'Run command' + describeSegments(a, 'en') + exEn),
+        reason: bi('执行命令' + exZh, 'Run command' + exEn),
         note: exNote(a),
         ruleId: a.matched,
         cat: 'command',
@@ -4355,43 +4428,6 @@ export default {
       return worst
     }
 
-    // 段级判定摘要（弹窗与拒绝文案共用）：把「哪一段为什么被拦」讲清楚。
-    // 只列**非 allow** 的段 —— 全部列出会把日常的多段命令刷成一屏。
-    //
-    // 总量必须设上限：reason 会被 recordDecision 写进 decisions 环形缓冲（MAX_DECISIONS 条），
-    // 再经 statusView 的 recentDecisions 下发给 AI。段数随命令行数线性增长，
-    // 不截断时一条 2000 行的脚本会让单条 reason 达到 ~160 KB（中英各一份）、
-    // 环形缓冲膨胀到 MB 级 —— 而这段文字的实际用途只是「让审批人一眼看出是哪一段被拦」。
-    const SEG_SUMMARY_MAX_PARTS = 5
-    const SEG_SUMMARY_MAX_CHARS = 300
-    function describeSegments(a, lang) {
-      const segs = (a.segments || []).filter((s) => s.action !== 'allow')
-      if (!segs.length) return ''
-      const parts = []
-      for (const s of segs.slice(0, SEG_SUMMARY_MAX_PARTS)) {
-        const tag = codeLabel(s.code)
-        // 档位标签同样进决策日志（§8.2 的 23d）：决策记录是事后追溯「为什么问这一次」的
-        // 唯一入口，而只记 code 时八档的摘要**完全一样**（全是「破坏性命令」）——
-        // 与弹窗那条是同一个问题，只是看到的时机不同（弹窗在当下，日志在事后）。
-        const tiers = (s.tiers || []).map((x) => tierLabel(x)).filter(Boolean).map((x) => L(x, lang)).join('')
-        const t = s.text.length > 80 ? s.text.slice(0, 80) + '…' : s.text
-        const note = (tag ? L(tag, lang) : '') + tiers
-        parts.push(t + (note ? '（' + note + '）' : ''))
-      }
-      // 省略提示必须给出**还有几段**：只写「…」会让审批人以为已经看全了。
-      // 注意它必须在**硬截断之后**再拼：曾经先 push 提示、再对整串按 300 字符截断，
-      // 而提示位于串尾、最先被吃掉 —— 实测 8 段各 75 字符时中英两版都不含提示，
-      // 恰好违背了「不能让审批人以为已经看全」的初衷。
-      const rest = segs.length - parts.length
-      const more = rest > 0 ? (lang === 'en' ? ' … +' + rest + ' more' : ' …另有 ' + rest + ' 段') : ''
-      // 分段展示：`git status && rm -rf x` 被拦时，用户要能一眼看出是哪一段
-      let joined = parts.join(lang === 'en' ? ' ; ' : ' ；')
-      // 给省略提示预留长度，保证截断后它仍完整可见
-      const budget = Math.max(40, SEG_SUMMARY_MAX_CHARS - more.length)
-      if (joined.length > budget) joined = joined.slice(0, budget) + '…'
-      return (lang === 'en' ? ' — segments: ' : ' —— 分段：') + joined + more
-    }
-
     function buildCandidates(entry) {
       // 候选的判重、路径规范化与「工作区外」判定都必须基于**审批发起时**的项目根
       // （entry.projRoot 快照），不能用当前会话的根：弹窗可能挂起很久，期间用户会切会话，
@@ -4403,13 +4439,20 @@ export default {
       const push = (label, value, kind, writes, hint) => out.push({ id: 'c' + Math.random().toString(36).slice(2, 8), label, value, kind, writes: Array.isArray(writes) ? writes : [{ cat: entry.cat, kind, value }], ...(hint ? { hint } : {}) })
       const t = (zh, en) => (uiLang === 'en' ? en : zh)
       if (entry.kind === 'command' && entry.value) {
-        // 候选与判定同源：同一份 decomposeCommand + segmentLabel（见 §3.7「单一来源」），
-        // 且**方言也同源** —— 判定侧按 SHELL_OF_TOOL[exec.name] 取方言，这里曾经硬编码 'bash'，
-        // 于是 pwsh 工具下两侧对同一条命令的分段结果不同（bash 词法器把 `\` 当转义符）：
+        // 候选与判定同源：**直接用判定算出的段**（entry.segments，assessCommand 的产物），
+        // 不再自己 decomposeCommand 一遍（见 §3.7「单一来源」）。
+        //
+        // 为什么必须是同一份对象而不是「同一次调用的两次结果」：判定那份段带 action/code/tiers，
+        // 分解那份带 words —— 两次解析各持一半信息，候选侧因此**看不见 action**。
+        // 实测后果：用户已把 `Get-ChildItem *` 配成 allow，`Get-Location ; Get-ChildItem -Force
+        // | Select-Object Mode,Length,Name` 仍产出 `get-childitem *`、`select-object *` 两个候选
+        // （前者还与既有例外大小写不同、判重不命中），点一次就多写一条语义重复的例外。
+        //
+        // 方言同源这件事随之自动成立（段就是判定按 SHELL_OF_TOOL 分解出来的）——
+        // 历史上这里曾硬编码 'bash'，pwsh 工具下两侧分段不同：
         //   `.\scripts\build.ps1 -Clean` 候选 label 成了 `.scriptsbuild`（写下的例外永不命中）；
         //   `Remove-Item -Recurse -Force B:\Temp\` 在 bash 下直接 ok:false（一个候选都不产出）。
-        const shell = SHELL_OF_TOOL[entry.tool] || 'bash'
-        const d = decomposeCommand(String(entry.value), shell)
+        const d = { ok: entry.segments.length > 0, segments: entry.segments }
         // 判重集合用 **Object.create(null)**，不能用 `{}`：键 `val` 来自命令文本，
         // 而对象字面量继承 Object.prototype —— `seen['constructor']`、`seen['toString']`、
         // `seen['valueOf']`、`seen['__proto__']` 全部恒为真值，那些候选会被**静默丢弃**，
@@ -4420,6 +4463,13 @@ export default {
         if (d.ok) {
           for (const seg of d.segments) {
             const label = segmentLabel(seg.words)
+            // ★ 已放行的段不生成候选。
+            //
+            // 这一段判定结果是 allow（用户例外 / 破坏性子设置 / 分类默认值任一放行），
+            // 而它出现在弹窗里的唯一理由是**别的段**需要审批。给它一个「允许此项」按钮
+            // 是把「已经被放行的东西」再授权一遍 —— 点了就多一条语义重复的例外。
+            // 方向上也说不通：用户要拒绝这一段的话，该用的是「拒绝」而不是加 allow 例外。
+            if (seg.action === 'allow') continue
             // 读不懂的段不生成候选：给一个「允许 $(任意代码) *」的按钮等于给用户一把
             // 看起来能解决问题、实际把授权面开得极大的钥匙（判定侧也不会采纳它）。
             //
@@ -4644,6 +4694,16 @@ export default {
           // 与 reason 分开存、不进 reason —— 它是给人看的信息，不是回给 AI 的拒绝理由。
           blast: d.blast || null,
           reason: d.reason || bi('', ''),
+          // 判定算出的段（含每段的 action/code/tiers 与 words）。存下来是为了让
+          // buildCandidates **消费判定结果**，而不是把同一条命令再解析一遍。
+          //
+          // 此前 entry 上没有这个字段，于是候选侧唯一能拿到的分段信息来自它自己那次
+          // decomposeCommand —— 那份段**没有 action**，候选侧因此不知道某一段已经被放行：
+          // 用户早已配好 `Get-ChildItem *`=allow，弹窗仍给出 `get-childitem *` 候选，
+          // 点一次就往配置里再写一条语义重复的例外（matchCommand 大小写不敏感，两条等效）。
+          //
+          // 不进 /permgate/pending 的下发白名单（见那里的投影）：它只服务宿主内部的候选生成。
+          segments: Array.isArray(d.segments) ? d.segments : [],
           intent: taskText || describeIntent(exec, d),
           ts: Date.now(),
           candidates: [],
@@ -4827,7 +4887,8 @@ export default {
         if (kind === 'command' && cat === 'command') {
           const c = block.command || freshCategory('command', target === 'project')
           if (!c.exceptions) c.exceptions = []
-          const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)
+          const key = cmdExcKey(value)
+          const idx = c.exceptions.findIndex((r) => cmdExcKey(r.match) === key && r.action === decision)
           if (idx !== -1) {
             const hit = c.exceptions[idx]
             textPatch(hit)
@@ -4869,7 +4930,12 @@ export default {
       const count = c.exceptions.length - kept.length
       c.exceptions = kept
       // 同值、方向相反的条目可能仍然留在列表里并继续生效：回传给 UI 提示，避免用户以为已彻底清除
-      const remaining = kept.filter((r) => r[key] === value).length
+      // 「同值」必须与读侧 alreadyInProject、写侧 addProjectException 同源（命令分类走 cmdExcKey，
+      // 因为例外真正生效的 matchCommand 大小写不敏感）。这里若退回裸 `r[key] === value`，删掉
+      // `Get-ChildItem *` 时配置里等价的 `get-childitem *` 会被算成「没有剩余」→ UI 清掉提示，
+      // 而那条等价例外仍在生效：用户以为授权收紧了，实际没有。
+      const same = key === 'match' ? (a, b) => cmdExcKey(a) === cmdExcKey(b) : (a, b) => a === b
+      const remaining = kept.filter((r) => same(r[key], value)).length
       return { removed: true, count, remaining, exception: target }
     }
 
@@ -6427,7 +6493,11 @@ export default {
           }
           if (out.kind !== 'allow') return { kind: 'deny', reason: out.reason || (uiLang === 'en' ? 'User denied' : '用户拒绝') }
         } else if (d.action === 'deny') {
-          return { kind: 'deny', reason: L(d.reason, uiLang) }
+          // 判定直接拒绝（没有弹窗）时，AI 拿到的就是这条 —— 它是 AI 唯一的线索，
+          // 故带上段摘要（「哪一段、命中哪一档」）。与决策日志同一份 segmentSummary，
+          // 不是两处各拼一次：口径分叉时「AI 收到的理由」与「日志记的理由」会不一致，
+          // 而两者本该回答同一个问题。
+          return { kind: 'deny', reason: L(segmentSummary(d), uiLang) }
         }
         // 放行（或询问允许）后：写类工具 + 工作区外 + 沙箱受限 → 原生升级审批 → 临时放开
         flushStaleUpgrades()

@@ -1053,7 +1053,7 @@ ok('「整个目录」同时写目录闸与自身分类的 glob', src.includes("
 // 防回退：缩略图像素上限、落盘分类/类型自洽、reason 前缀跟随决定闸、read 复用预检单点
 ok('缩略图有像素/边长上限（16MP / 4096），尺寸未知时一律不内联', src.includes('const IMAGE_MAX_PIXELS = 16 * 1000 * 1000') && src.includes('const IMAGE_MAX_DIM = 4096') && src.includes('const pixelOver = !!(sizeKnown && (') && src.includes('if (!sizeKnown) { out.sizeUnknown = true; return out }'))
 ok('拒绝候选不落 directory 例外（单点过滤，候选与旧形态共用）', src.includes('const writeException = (cat, kind, value, decision)') && src.includes("if (decision === 'deny' && cat === 'directory') return") && (src.match(/writeException\(/g) || []).length === 2 && !src.includes("w.cat === 'directory') continue"))
-ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => r\.match === value && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value, rootKey) })') && src.includes('const item = build({ match: value })'))
+ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => cmdExcKey\(r\.match\) === key && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value, rootKey) })') && src.includes('const item = build({ match: value })'))
 // 原本计数为 2（面板路由 + perm_add_exception 工具）；工具移除后只剩面板路由这一处
 ok('例外写入统一走 addProjectException（不再尾部 push）', (src.match(/addProjectException\(a\.category|addProjectException\(args\.category/g) || []).length === 1 && !src.includes('block[a.category].exceptions.push(e)') && !src.includes('block[args.category].exceptions.push(e)'))
 ok('含通配符/.. 的原文不生成目录 glob 候选（守卫作用于原始值）', src.includes('const hasParentSeg =') && src.includes('const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)'))
@@ -1064,7 +1064,7 @@ ok('整读后直接用整份缓冲嗅探', src.includes('sniffImage(whole || hea
 ok('不可达的 directory else-if 候选分支已删除', !src.includes("else if (entry.cat === 'directory')"))
 ok('范围说明下移到候选小字（hint），标题下只留一句话', !src.includes('允许时同时写入') && src.includes("t('工作区外访问目录 + '") && src.includes("t('工作区外访问文件 + '") && cli.includes("'app.cand.hint': '点亮条目后点「允许 / 拒绝」即写入当前项目例外。'") && cli.includes('c.hint ? React.createElement'))
 ok('拒绝态收起 allow 勾选、取消时恢复并清快照（不再只是置灰变浅）', cli.includes('const [denySaved, setDenySaved]') && cli.includes('const snap = denySaved[p.id]') && cli.includes('setDenySaved(Object.assign({}, denySaved, { [p.id]: snap }))') && cli.includes('if (snap && Object.keys(snap).length) setSel(Object.assign({}, sel, snap))') && (cli.match(/delete rest\[p\.id\]/g) || []).length === 2 && cli.includes('RADIO_DISABLED_CSS') && !cli.includes('const muted = v ==='))
-ok('同向去重按「同值 + 同向」判定（方向交替不再累积）', src.includes('const idx = c.exceptions.findIndex((r) => pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision)') && src.includes('const idx = c.exceptions.findIndex((r) => r.match === value && r.action === decision)'))
+ok('同向去重按「同值 + 同向」判定（方向交替不再累积）', src.includes('const idx = c.exceptions.findIndex((r) => pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision)') && src.includes('const idx = c.exceptions.findIndex((r) => cmdExcKey(r.match) === key && r.action === decision)'))
 ok('拒绝只提交 deny 方向规则，服务端二次拦截', cli.includes('const pickedDenyRules = (p) => pickedRules(p).filter((r) => r.decision === \'deny\')') && cli.includes("decide(p.id, 'deny', pickedDenyRules(p), reason || undefined)") && cli.includes('const enterDeny = (p) =>') && src.includes("if (!allow && r.decision === 'allow') continue"))
 ok('hasGlobMeta 只拦 * 与 ?（[ ] 是字面量）', src.includes('const hasGlobMeta = (p) => /[*?]/.test(String(p || \'\'))'))
 ok('例外落盘校验分类与类型自洽', src.includes("if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1)") && src.includes("if (kind === 'command' && cat === 'command')") && src.includes('if (!p) return false'))
@@ -1118,6 +1118,9 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
       "function normAbsPath(p, root) { const s = norm(p); return /^([a-zA-Z]:|\\/)/.test(s) ? s : norm(root) + '/' + s }",
       "function pathKey(p, root) { return normPathKey(normAbsPath(p, root)) }",
       "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
+      // 判重键与 addProjectException 同源：从源码抽真身，不在这里手抄一份
+      // （手抄会让「实现改了、测试还按旧口径跑」这种情况静默通过）。
+      sliceFn3('cmdExcKey'),
       "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
       "function ensureProject(root) { if (!config.projects[root]) { config.projects[root] = { custom: [] }; for (const c of EXC_CATS) config.projects[root][c] = freshCategory(c, true) } return config.projects[root] }",
       sliceFn3('addProjectException'),
@@ -1149,6 +1152,18 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
     const cmdSeq = (A.cfg().global.command.exceptions || []).map((e) => e.match)
     ok('★★ addProjectException：命令例外同样追加在末尾',
       JSON.stringify(cmdSeq) === JSON.stringify(['rm -rf ./build', 'git status']), JSON.stringify(cmdSeq))
+    // ④ ★★ 命令例外的判重**大小写不敏感**（与 matchCommand 的生效口径同源）
+    //
+    // 行为断言，不是源码文本匹配 —— 后者在 M3 变异（改回 `r.match === value`）下**存活**（实测）。
+    // 场景取自真实弹窗：面板里写的是 `Get-ChildItem *`，而弹窗候选值是 `get-childitem *`
+    // （segmentLabel 输出全小写）。判重若大小写敏感，就会再 push 一条 matchCommand 语义
+    // **完全等价**的例外，用户看到两条一模一样的规则、不知道为什么要两条。
+    A.add('command', 'command', 'Get-ChildItem *', 'allow', R, { target: 'global' })
+    const beforeCI = (A.cfg().global.command.exceptions || []).length
+    A.add('command', 'command', 'get-childitem *', 'allow', R, { target: 'global' })
+    const afterCI = (A.cfg().global.command.exceptions || []).length
+    ok('★★ addProjectException：命令例外判重大小写不敏感（不再写入语义重复的第二条）',
+      afterCI === beforeCI, 'before=' + beforeCI + ' after=' + afterCI + ' ' + JSON.stringify((A.cfg().global.command.exceptions || []).map((e) => e.match)))
   }
 }
 // ★★ 遮蔽标注（exceptionShadow）：面板要能告诉用户「你刚加的这条没生效」。
@@ -2084,12 +2099,17 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   ok('★ describeIntent 与判定同源（同一份 decomposeCommand + 同一方言）',
     /function describeIntent\(exec, d\) \{[\s\S]{0,900}?decomposeCommand\(v, SHELL_OF_TOOL\[exec\.name\] \|\| 'bash'\)/.test(src)
     && /function describeIntent\(exec, d\) \{[\s\S]{0,900}?d\.segments/.test(src))
-  // ★ buildCandidates 走 segmentLabel 且方言与判定同源（entry.tool 派生，不再硬编码 'bash'）
+  // ★ buildCandidates 消费**判定算出的段**，不再自己 decomposeCommand 一遍
+  //
+  // 判据从「调了 segmentLabel + 按 entry.tool 取方言」改为「直接用 entry.segments」：
+  // 前者只保证两侧**同源**（同一次调用的结果），不保证两侧**同一份**——
+  // 实测的后果是候选侧拿到的段没有 action，于是已放行的段照样给候选按钮。
+  // 方言同源由「段就是判定分解出来的」自动成立，不再需要这里断言 SHELL_OF_TOOL。
   //
   // 用**函数体提取**而不是固定字符窗口：窗口宽度是脆的 —— 函数里加一段注释就会把
   // 后面的锚点挤出窗口，断言变成假红（实测踩过）。这里只需要「同一函数体内同时出现
-  // 这三件事」，切片到函数结束即可。
-  ok('★ buildCandidates 与判定同源（segmentLabel + 按 entry.tool 取方言）',
+  // 这两件事」，切片到函数结束即可。
+  ok('★ buildCandidates 消费判定段（不重新解析，故 action 可见）',
     (function () {
       const s = src.indexOf('function buildCandidates(')
       if (s < 0) return false
@@ -2099,9 +2119,22 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
         if (src[k] === '{') d++
         else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(s, k + 1); break } }
       }
-      return body.includes('segmentLabel(seg.words)')
-        && body.includes('decomposeCommand(String(entry.value), shell)')
-        && body.includes("SHELL_OF_TOOL[entry.tool] || 'bash'")
+      return body.includes('const d = { ok: entry.segments.length > 0, segments: entry.segments }')
+        && body.includes('segmentLabel(seg.words)')
+        // 反向：不得再出现第二次分解（那正是本次要消除的双份解析）
+        && !body.includes('decomposeCommand(')
+    })())
+  // ★ 已放行的段不产出候选（否则「已经被放行的东西」会被再授权一遍，多写一条重复例外）
+  ok('★★ buildCandidates 跳过 action=allow 的段',
+    (function () {
+      const s = src.indexOf('function buildCandidates(')
+      if (s < 0) return false
+      let d = 0
+      for (let k = src.indexOf('{', s); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1).includes("if (seg.action === 'allow') continue") }
+      }
+      return false
     })())
   // ★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）
   ok('★ 无通配符例外走词边界精确（不得回退到 indexOf 子串）',
@@ -2257,8 +2290,13 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   ok('★★ command -v/-V 判为查询而非执行（不误判被查询的名字）',
     /if \(name === 'command' && \(token === '-v' \|\| token === '-V'\)\) return \{ words: current, opaque: true \}/.test(sp))
   // ★★ opaque 段必须用原文并集提取命令名（否则 opaque 里藏的命令逃过破坏性判定）
-  ok('★★ opaque 段用 rawCommandNames 并集提取（提不出词元 / 命令藏在构造里 两种都堵）',
-    /if \(seg\.opaque\) \{[\s\S]{0,300}?const extra = rawCommandNames\(seg\.text\)/.test(sp))
+  // 锚点按**新写法**取（方言一次取定）：原先把锚点钉在「先按 bash 算一份」的那一行上，
+  // 而那一行在 pwsh 路径上是死值（被整体覆盖）—— 同一份原文被白解析两遍（×1.83）。
+  // 这里改钉「只有一次提取、且方言随段走」的形态，守护的原意不变：
+  // 不得退回「先按 bash 算再覆盖」的冗余写法，也不得漏掉 opaque 段的并集提取。
+  ok('★★ opaque 段用 rawCommandNamesWithShell 并集提取（提不出词元 / 命令藏在构造里 两种都堵）',
+    /if \(seg\.opaque\) \{[\s\S]{0,900}?const names = rawCommandNamesWithShell\(seg\.text, sh\)/.test(sp)
+    && !sp.includes('const extra = rawCommandNames(seg.text)'))
   // ★★ segmentLabel 的关键字跳过必须循环（`case x in a) rm …` / `then nohup rm …`）
   ok('★★ segmentLabel 关键字跳过是循环（关键字后可能又是关键字或 wrapper）',
     /for \(let guard = 0; guard < 8; guard \+= 1\) \{[\s\S]{0,200}?if \(!STATEMENT_KEYWORDS\[head\]\) break/.test(sp))
@@ -2327,9 +2365,11 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
       return body.includes('const seen = Object.create(null)') && !body.includes('const seen = {}')
     })())
   // ★ opaque 段并集去重的集合无原型
+  // 锚点随并集那一行同步换到**新写法**（方言一次取定，见 shell-parse.js 该处注释）：
+  // 断言的仍是「去重集合用 Object.create(null)」这件事，只是起点跟着并集那行走。
   ok('★★ opaque 段 label 并集的去重集合无原型（Object.create(null)）',
     (function () {
-      const i = sp.indexOf('const extra = rawCommandNames(seg.text)')
+      const i = sp.indexOf('const names = rawCommandNamesWithShell(seg.text, sh)')
       if (i < 0) return false
       return sp.slice(i, i + 400).includes('const seen = Object.create(null)')
     })())
@@ -2922,12 +2962,15 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     cli.includes("'panel.subMismatch'")
     && cli.includes("T('panel.subMismatch')\n\t\t\t\t\t.replace('{cat}', modeLabel(catMode))\n\t\t\t\t\t.replace('{sub}', modeLabel(sub))\n\t\t\t\t\t.replace('{tier}', tierLabel || '')")
     && (cli.match(/'panel\.subMismatch':/g) || []).length === 2)
-  // ★ 省略提示必须在硬截断**之后**拼（否则它位于串尾、最先被吃掉）。
-  // 反例：把 `more` 改回先 push 进 parts 再整串截断，本条即失败。
-  ok('★ 分段摘要的「另有 N 段」提示不被 300 字符硬截断吞掉',
-    /const more = rest > 0 \?/.test(src)
-    && /const budget = Math\.max\(40, SEG_SUMMARY_MAX_CHARS - more\.length\)/.test(src)
-    && /return \(lang === 'en' \? ' — segments: ' : ' —— 分段：'\) \+ joined \+ more/.test(src))
+  // ★ 段摘要不得拼进**弹窗**的 reason（弹窗与参数区重复，且口径不同：摘要只列非 allow 段、
+  //   参数区列全部段 —— 同屏出现「分段：1 段」与「段 1/2/3」会让审批人以为判定自相矛盾）。
+  // 摘要本身保留，服务两个**没有参数区**的消费方：决策日志（recordDecision）与
+  // 「直接拒绝」时回给 AI 的那条 reason（pre-execute 的 deny 出口）。
+  // 反例：把 segmentSummary 调回 `reason: bi('执行命令' + ...)` 那一行 —— 本条即失败。
+  ok('★ 段摘要不拼进弹窗 reason（只服务决策日志与直接拒绝的 AI 理由）',
+    src.includes('function segmentSummary(')
+    && !/reason: bi\('执行命令'[^\n]*segmentSummary/.test(src)
+    && /reason: segmentSummary\(d\)/.test(src))
   // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
   // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次
   // （写成 `<=` 时，大分类 deny + 子设置 ask 不提示，反而在子设置更严时提示）。
@@ -7649,8 +7692,18 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     // 条件必须仍是 `> 1`（改成 >= 1 会让 label 从「命令」变成「段 1」，措辞反而变差）
     /if \(segs && segs\.length > 1\) \{/.test(src)
     && /const nt = segs && segs\.length === 1 \? noteOf\(segs\[0\]\) : ''/.test(src))
+  // ★ 23d 决策日志摘要同样追加档位标签（可追溯）
+  //
+  // 摘要的落点从 reason 挪到了决策日志（segmentSummary），理由见该函数注释：
+  // 弹窗侧参数区已逐段渲染，reason 再带一份「只列非 allow 段」的摘要会与参数区
+  // （列全部段）在同屏给出两个不同的段数。日志侧没有参数区，摘要仍是唯一线索。
+  // 反例：把 tierLabel 那一行删掉 —— 八档在日志里退化成同一个「破坏性命令」，本条失败。
   ok('★★ 23d 决策日志摘要同样追加档位标签（可追溯）',
-    /const tiers = \(s\.tiers \|\| \[\]\)\.map\(\(x\) => tierLabel\(x\)\)/.test(src))
+    /const tiers = \(s\.tiers \|\| \[\]\)\.map\(\(x\) => tierLabel\(x\)\)/.test(src)
+    // 且它必须真的接在 recordDecision 上（写好了却没人调 = 死代码）
+    && /reason: segmentSummary\(d\)/.test(src)
+    // 反向：reason 本身不得再拼摘要（弹窗与参数区重复的那一处）
+    && !/reason: bi\('执行命令' \+ segmentSummary/.test(src))
   // ★ 52c 的宿主侧对照：`codeLabel` 的语义未扩（档位走独立的 tierLabel，不塞进 code）
   // 用**行为**断言而不是源码文本：`sp` 是 shell-parse 的**模块对象**（不是源码字符串），
   // 对它跑正则会得到 "Cannot convert object to primitive value"（实测踩过）。

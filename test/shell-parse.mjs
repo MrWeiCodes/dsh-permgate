@@ -45,6 +45,37 @@ const group = (t) => console.log('\n— ' + t)
 const HOME = 'C:/Users/me'
 const WS = 'X:/ws'
 
+// ── 性能断言的**单点计时器**（本文件 9 处倍率断言共用）────────────────────────────
+//
+// 为什么必须单点：这 9 处（54m / 54m2 / 54v / 54w / 54A / 54B / 54C…）此前各自手写
+// 「预热一次 + 循环 3 次取 min」，而**取样 3 次太少**是它们共同的假红来源：
+// 实测 `su (/reg --config)*n` 的比值分布（40 轮）——
+//   k=3  → p95=1.82、max=**3.00**（恰好越过 3.0 阈值，实测红过）
+//   k=7  → p95=1.26、max=1.29（0/40 越界）
+//   k=15 → p95=1.21、max=1.22
+// 真实倍率约 1.18（线性，正确），k=3 时的越界纯粹是单次 GC/调度抖动被 `Math.min`
+// 漏掉 —— 3 次里只要有一次被抖动打中，min 就救不回来，而分母 s4000 只有 ~0.009 ms，
+// 抖动的**绝对**幅度虽小（p90 是 min 的 4 倍），落到比值上却是成倍的。
+//
+// 取 k=7：分布已收敛（max 1.29，离阈值 3.0 有 2.3 倍余量），而总耗时只增加 4 次调用
+// （每次 ~0.01–0.09 ms，可忽略）。**不取更大**是因为 k≥15 的收敛收益已趋平（1.21 vs 1.26），
+// 没有必要为噪声多付一倍时间。
+//
+// `fn` 由调用方传闭包（各自构造词元数组），故这里不做记忆化 —— 记忆化会让
+// 「构造开销」被排除在外，而某些断言恰恰要测构造后的整体耗时。
+const PERF_SAMPLES = 7
+function timeBest(fn) {
+  fn()   // 预热（JIT）
+  let best = Infinity
+  for (let k = 0; k < PERF_SAMPLES; k += 1) {
+    const t0 = process.hrtime.bigint()
+    fn()
+    const dt = Number(process.hrtime.bigint() - t0) / 1e6
+    if (dt < best) best = dt
+  }
+  return best
+}
+
 // ── 判定钩子：模拟真实配置 ────────────────────────────────────────────────────
 // 默认形态：用户配了 23 条 allow 例外（全是命令前缀 + ` *`），command 分类默认 ask，
 // destructive 子设置默认 ask。这与用户当前真实配置同形。
@@ -96,6 +127,40 @@ const neverAllow = (label, cmd, shell, opts) => {
   ok(label + ' 【' + cmd.replace(/\n/g, '\\n') + '】', r.action !== 'allow', 'action=' + r.action + ' code=' + r.code)
   return r
 }
+
+// ── 「藏命令的构造」方言矩阵（**单一来源**，AA / AB / AC 三组共用）────────────────────
+//
+// ⚠️ **反引号不是 pwsh 的命令替换定界符** —— 它是 pwsh 的**转义符**。AA / AB / AC 三组
+// 此前都把 `BT + c + BT` 当成「四种构造」之一去测**全部四个** (shell, platform) 组合，
+// 于是对 pwsh 断言「`` `rm -rf X `` 必须 deny」—— 而实测那条命令**根本不执行 rm**：
+//
+//   官方解析器 + 实际执行（PowerShell 5.1，逐条跑过）：
+//     `` `rm -rf X ``                        → 词元 `<CR>m`（`` `r `` = CR 转义）→ 命令不存在，**不执行 rm**
+//     `` `kill 1234 ``                       → 词元 `kill`（`` `k `` 未知转义 = 字面 k）→ **会执行 kill**
+//     `` `Remove-Item -Recurse -Force X ``   → 词元 `Remove-Item`（`` `R `` 未知转义）→ **会执行**
+//     反引号在 bash 里同样写法               → **真命令替换**，`rm` 会执行
+//
+// 即「反引号能藏命令」这条性质**只对 bash 成立**：pwsh 侧藏命令的是
+// `$( )` / `( )` / `{ }` / `@( )`（四种实测**全部** deny 且三档齐全），
+// 而反引号在 pwsh 侧的真危险形态是**未知转义**那一族 —— 名字被保留、真会执行，
+// 且只在**命令位**成立（`Write-Output `` `Remove-Item `` 只是把它当参数打印，不执行）。
+// 那一族由 AA 组 ② 尾单独钉住。
+//
+// 拿 bash 的构造集去测 pwsh，得到的红是**假红**（断言了一条不存在的执行语义），
+// 不是解析器缺陷 —— 这正是本矩阵存在的理由。与 Z2 组「尾部 `&` 按方言分列」同法。
+const BT = String.fromCharCode(96)
+const OPAQUE_FORMS = {
+  bash: [['$( )', (c) => '$(' + c + ')'], ['( )', (c) => '(' + c + ')'],
+    ['{ }', (c) => '{ ' + c + '; }'], ['反引号', (c) => BT + c + BT]],
+  pwsh: [['$( )', (c) => '$(' + c + ')'], ['( )', (c) => '(' + c + ')'],
+    ['{ }', (c) => '{ ' + c + '; }'], ['@( )', (c) => '@(' + c + ')']],
+}
+// pwsh 侧「反引号 + **未知**转义」= 反引号被丢掉、真命令名被保留 —— 真会执行的那一族。
+// 已知转义（`n `r `t `0 `a `b `e `f `v）产出控制字符，命令名被改坏、不执行（实测）。
+const PWSH_ESCAPED_NAMES = [BT + 'Remove-Item -Recurse -Force C:/Windows', BT + 'kill 1234']
+// 分隔符语料（AA / AB / AC 三组同值，故单点定义）：覆盖「构造独立成段」与「构造挂在
+// 分隔符之后」两族 —— 后者是「藏起来的命令被当成下一段」的漏网形态。
+const SEPS = ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']
 
 // ═════════════════════════════════════════════════════════════════════════════
 group('0. 分解器基础：段 / 词元 / 重定向 / opaque')
@@ -5277,15 +5342,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const timeSegLabels = (n) => {
       const w = buildPerf(n)
-      segmentLabels(w)   // 预热（JIT）
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => segmentLabels(w))
     }
     const p4000 = timeSegLabels(4000)
     const p8000 = timeSegLabels(8000)
@@ -5300,15 +5357,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const timePlain = (n) => {
       const w = buildPlain(n)
-      segmentLabels(w)
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => segmentLabels(w))
     }
     const q8000 = timePlain(8000)
     // ── 同族的**路径形态**路由器名（`/reg`）也必须是线性 ────────────────────────────
@@ -5325,15 +5374,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const timeSlash = (n) => {
       const w = buildSlash(n)
-      segmentLabels(w)
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => segmentLabels(w))
     }
     const s4000 = timeSlash(4000)
     const s8000 = timeSlash(8000)
@@ -5380,15 +5421,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const timeDashSlash = (n) => {
       const w = buildDashSlash(n)
-      segmentLabels(w)
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => segmentLabels(w))
     }
     const d4000 = timeDashSlash(4000)
     const d8000 = timeDashSlash(8000)
@@ -5425,15 +5458,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const timeChain = (n) => {
       const w = buildChain(n)
-      segmentLabels(w)   // 预热（JIT）
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => segmentLabels(w))
     }
     const c4000 = timeChain(4000)
     const c8000 = timeChain(8000)
@@ -5447,6 +5472,144 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       && buildChain(4000).length === 4002,
       JSON.stringify({ c4000: +c4000.toFixed(3), c8000: +c8000.toFixed(3), chainRatio: +chainRatio.toFixed(2),
         labels8000: segmentLabels(buildChain(8000)), tokens: buildChain(4000).length }))
+  }
+  // ── 54F：pwsh 反引号续行守卫的**下标支**必须是线性（本轮修复：`\[[^\]]*\]$` 无左锚定）──
+  // 判据本体是 `PWSH_ACCESSOR_TAIL` 里那条「下标访问」支（`(?<!\.)\[[^\]]*\]$`）。它**没有
+  // 左锚定**，失配时对每个起始位置各回溯一遍 ⇒ O(n²)。触发形态是「长未闭合 `[` 词元 +
+  // 反引号 + 换行」——`'"x"' + '['*n + '`\n'`。实测（本机 Node v24.19，取多次最小值）：
+  //   端到端 `decomposeCommand` n=8k/16k/32k/64k → 15.0/58.0/231.2/922.1 ms（倍率 ≈4.0）；
+  //   HEAD 同形态 0.3/0.4/0.9/1.2 ms（HEAD 走 bash 命令替换分支、根本不做词元判据，
+  //   故这是第十轮引入的**真回归**）。放大器 `find . -exec … ' ; '` 连接 n 段病态词元时
+  //   n=100（800 KB）→ 1548 ms，而 HEAD 28.3 ms。判定卡死则 `tools/pre-execute` 不返回、
+  //   审批弹窗不出现 —— 与 `globMatch` / `flagEmbeddedPath` / `trailingDashRunAt` 同族。
+  // 修法是手写线性判定（`bracketAccessorTailAt`），**必须与原正则等价**（不是近似）。
+  //
+  // 判据用倍率（n 翻倍时线性 ≈×2、平方 ≈×4，取 ×3.0 分界）+ 绝对上限，与 54m/54v 同范式。
+  // ⚠️ n 取 16000/32000 而不是 4000/8000：平方实现在 4000 档只有 ~3.7 ms，
+  //    与线性的绝对值差得不够开，倍率噪声占比大；16k/32k 档平方实现是 231 ms 量级，
+  //    与线性（1 ms 量级）差两个数量级，判据稳。
+  {
+    const buildBracket = (n) => '"x"' + '['.repeat(n) + BT + '\n'
+    const timeBracket = (n) => timeBest(() => decomposeCommand(buildBracket(n), 'pwsh'))
+    const b16000 = timeBracket(16000)
+    const b32000 = timeBracket(32000)
+    const bracketRatio = b32000 / Math.max(b16000, 0.001)
+    // 对照（防空转）：构造的确实是「引号串 + n 个 `[` + 反引号 + 换行」的 n+3 长度形态
+    // 对照（防过度收紧）：同一判据在**正常**下标访问形态上仍必须命中（不得为线性而丢功能）
+    const normal = decomposeCommand('Remove-Item -Force $arr[0]' + BT + '\n-Confirm:$false', 'pwsh')
+    ok('★★ 54F 长未闭合 `[` 词元的续行判定必须线性（本轮：`\\[[^\\]]*\\]$` 无左锚定致 O(n²)）',
+      b32000 < 300 && bracketRatio < 3.0
+      // 对照（防空转）：长度真的是 n+5（`"x"` + n 个 `[` + 反引号 + 换行），
+      // 且该形态不返回 ok:false（走了判据才可能平方）
+      && buildBracket(32000).length === 32000 + 5
+      && decomposeCommand(buildBracket(32000), 'pwsh').ok === true
+      // 对照（防过度收紧）：正常下标访问族仍按词元边界切开
+      && normal.ok === true && normal.segments.length === 1
+      && normal.segments[0].words.indexOf('-Confirm:$false') !== -1,
+      JSON.stringify({ b16000: +b16000.toFixed(3), b32000: +b32000.toFixed(3),
+        ratio: +bracketRatio.toFixed(2), len: buildBracket(32000).length,
+        normal: normal.ok ? normal.segments[0].words : normal.reason }))
+  }
+  // ── 54G：`PWSH_QUOTED_TAIL` 的判定**不得读 `segText`**（本轮修复：rope 反复扁平化）──
+  // 判据本体是续行守卫里的「词元尾部是不是闭合引号」。它一度写成
+  // `PWSH_QUOTED_TAIL.test(segText)`，而 `segText += s` 在 V8 里**只建 rope（O(1)）**，
+  // 任何内容读取（含正则）都必须先把 rope 扁平化成连续串（**O(n) 拷贝**）——
+  // 于是每个「反引号 + 换行」都触发一次全长拷贝，整段分解退化为 O(n²)。
+  // 这正是本文件 `segEndsWithSpace` 那条注释里写明的坑（那是第一处，这是第二处）。
+  // 实测形态 `'New-Item -Path $base' + ('`\n  -Name $n<i>')*N`（AI 生成多行 pwsh 的常见写法）：
+  //   端到端 `decomposeCommand` N=8k/16k/32k → 20.0/381.7/1766.0 ms（HEAD 2.2/3.5/7.2 ms）；
+  //   真实入口 `assessCommand` N=32000（520 KB）→ **1752 ms**（HEAD 59 ms）。
+  // 修法是与 `segEndsWithSpace` **同一手法**的 O(1) 增量标记 `segLastIsQuote`
+  // （在 `pushText` 里判刚追加的 `s`，并在 `pushSpace` / `flushSegment` 复位）。
+  //
+  // ⚠️ 这条修法**不改变任何判定结果**（穷举 111 万格 + 语料对拍分歧 0），故**只有性能断言
+  //    能守住它** —— 实测把该处改回 `PWSH_QUOTED_TAIL.test(segText)`，本文件其余断言
+  //    与 regressions/smoke **全绿**。没有本组时这个 O(n²) 会静默回来（第十轮已发生过一次）。
+  {
+    const buildLines = (n) => {
+      let c = 'New-Item -Path $base'
+      for (let i = 0; i < n; i += 1) c += BT + '\n  -Name $n' + i
+      return c
+    }
+    const timeLines = (n) => timeBest(() => decomposeCommand(buildLines(n), 'pwsh'))
+    const l16000 = timeLines(16000)
+    const l32000 = timeLines(32000)
+    const linesRatio = l32000 / Math.max(l16000, 0.001)
+    // 对照（防过度收紧）：该形态的判定结果必须仍然正确 —— 行尾是**变量**（裸词族）⇒ 粘住，
+    // 故只应有 1 段、且最后那个 `-Name $nN` 与下一行同属一个词元。为线性而丢判定即失败。
+    const dLines = decomposeCommand(buildLines(200), 'pwsh')
+    ok('★★ 54G `PWSH_QUOTED_TAIL` 判定不得读 `segText`（本轮：rope 扁平化致 O(n²)）',
+      l32000 < 300 && linesRatio < 3.0
+      // 对照（防空转）：长度真的是 `20 + Σ(12 + i 的位数)`（`New-Item -Path $base` 20 字符 +
+      // 每轮 12 字符固定开销 + 行号位数），N=32000 时为 532910（约 520 KB），
+      // 且不返回 ok:false
+      && buildLines(32000).length === 532910
+      && decomposeCommand(buildLines(32000), 'pwsh').ok === true
+      // 对照（防过度收紧）：行尾变量是**粘住族** ⇒ 1 段（判定结果不得为性能让路）
+      && dLines.ok === true && dLines.segments.length === 1
+      && dLines.segments[0].words.indexOf('-Name') !== -1,
+      JSON.stringify({ l16000: +l16000.toFixed(3), l32000: +l32000.toFixed(3),
+        ratio: +linesRatio.toFixed(2), len: buildLines(32000).length,
+        segs: dLines.ok ? dLines.segments.length : dLines.reason }))
+  }
+  // ── 54H：pwsh 词元形态判定**不得读 `wordText`**（本轮修复：rope 反复扁平化致 O(n²)）──
+  // 判据本体是 `pwshEscapeBoundaryAt` 的第一句 `PWSH_PARAMETER_TOKEN.test(word)`（含 `*`
+  // 量词 + `$` 锚，命中时需扫完整个词元）。它此前对 `wordText` **直接跑正则**，而
+  // `wordText += s` 在 V8 里只建 rope（O(1)），**任何内容读取**（正则、下标、`slice`）
+  // 都必须先把 rope 扁平化成连续串（O(n) 拷贝）—— 于是每个「落在 Parameter 词元内的
+  // 反引号」都触发一次全长拷贝，整段分解退化为 O(n²)。
+  //
+  // 这与 `segEndsWithSpace`（第一处）、`segLastIsQuote`（第二处，见 54G）、
+  // `bracketAccessorTailAt`（第三处，见 54F）是**同族**，本处是第四处。
+  //
+  // 触发形态**不需要畸形输入**：`-x` + (`` ` `` + `a`)×n —— `a` 是参数名字符 ⇒ 反引号被
+  // 并进参数名、词元一路增长。`-Path` / `-Recurse` / `-LiteralPath` 等**任何** Parameter
+  // 前缀同样成立。实测（本机 Node v24.19，取多次最小值）：
+  //   端到端 `decomposeCommand` n=4k/8k/16k/32k/64k → **14.5/56.7/220/867/3451 ms**
+  //   （倍率 3.92/3.88/3.94/3.98，**严格平方**）；HEAD 同形态 0.20/0.28/0.55/1.13/2.29 ms
+  //   （倍率 ≈2，线性）—— 放大 **1500 倍**。真实入口 `assessCommand` 同形态 n=16k → 221 ms。
+  //   判定卡死则 `tools/pre-execute` 不返回、审批弹窗不出现。
+  // 修法是与前两处**同一手法**的 O(1) 增量标记（`wordShape` / `pushWordShape`）：
+  // 随每次追加增量更新词元形态，判据不再读 `wordText`。
+  //
+  // ⚠️ 这条修法**不改变任何判定结果**（影子与那几个正则穷举 419330 格分歧 0，
+  //    随机语料 12 万格分歧 0），故**只有性能断言能守住它** —— 实测把判据改回读
+  //    `wordText`（变异 M2）本文件其余断言与 regressions/smoke **全绿**。
+  //    没有本组时这个 O(n²) 会静默回来。
+  //
+  // 判据用倍率（n 翻倍时线性 ≈×2、平方 ≈×4，取 ×3.0 分界）+ 绝对上限，与 54F/54G 同范式。
+  // ⚠️ n 取 16000/32000 而不是 4000/8000：平方实现在 4000 档只有 ~14 ms，
+  //    与线性的绝对值差得不够开，倍率噪声占比大；16k/32k 档平方实现是 220/867 ms 量级，
+  //    与线性（1 ms 量级）差两个数量级，判据稳。
+  {
+    const buildParam = (n, prefix) => prefix + (BT + 'a').repeat(n)
+    const timeParam = (n, prefix) => timeBest(() => decomposeCommand(buildParam(n, prefix), 'pwsh'))
+    const p16000 = timeParam(16000, '-x')
+    const p32000 = timeParam(32000, '-x')
+    const paramRatio = p32000 / Math.max(p16000, 0.001)
+    // 真实前缀形态同样必须线性（`-Path` 是 AI 生成 pwsh 里最常见的写法之一）
+    const p16000Path = timeParam(16000, '-Path')
+    const p32000Path = timeParam(32000, '-Path')
+    const pathRatio = p32000Path / Math.max(p16000Path, 0.001)
+    // 对照（防空转）：构造的确实是「前缀 + n 个 `` `a ``」的 n*2+len(prefix) 长度形态，
+    // 且该形态不返回 ok:false（走了判据才可能平方）
+    const dParam = decomposeCommand(buildParam(32000, '-x'), 'pwsh')
+    // 对照（防过度收紧）：同一判据在**正常**形态上仍必须正确 —— Parameter 词元内的反引号
+    // 仍是字面字符（`;` 不吞、`a` 并进参数名），不得为线性而丢判定
+    const dSem = decomposeCommand('cmd /c ver -x' + BT + 'a' + BT + ';' + BT + '\n' + 'RemoveXyz', 'pwsh')
+    ok('★★ 54H pwsh 词元形态判定不得读 `wordText`（本轮：rope 扁平化致 O(n²)）',
+      p32000 < 300 && paramRatio < 3.0 && p32000Path < 300 && pathRatio < 3.0
+      // 对照（防空转）：长度真的是 `2 + 2n`，且不返回 ok:false
+      && buildParam(32000, '-x').length === 32000 * 2 + 2
+      && dParam.ok === true
+      // 对照（防过度收紧）：Parameter 词元内的反引号语义不变 —— 反引号与 `a` **都**并进
+      // 参数名（`-x`a`），且后面的 `;` 仍是真的语句分隔符（不得为线性而吞掉）
+      && dSem.ok === true && dSem.segments.length === 2
+      && dSem.segments[0].words.indexOf('-x' + BT + 'a' + BT) !== -1,
+      JSON.stringify({ p16000: +p16000.toFixed(3), p32000: +p32000.toFixed(3),
+        ratio: +paramRatio.toFixed(2), pathRatio: +pathRatio.toFixed(2),
+        len: buildParam(32000, '-x').length,
+        sem: dSem.ok ? dSem.segments.map((s) => s.words) : dSem.reason }))
   }
   // ── 54f：`find -exec` 一族的判定必须是**线性**的（发现 2 的性能守卫）──────────────
   // `isUnknownTierSegment` 曾在 **label 循环内**调 `hasNoOperand(w, opts)` 与 diskpart 的
@@ -5474,16 +5637,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       const o = tierOpts('posix')
       const b = blastRadiusOfSegment(w, o)
       const lb = segmentLabels(w)
-      // 预热一次（JIT），再取三次最小值 —— 单次计时在共享机器上抖得厉害
-      tierSetOf({ words: w, blast: b }, lb, o)
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        tierSetOf({ words: w, blast: b }, lb, o)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
+      return timeBest(() => tierSetOf({ words: w, blast: b }, lb, o))
     }
     const t4000 = timeTierSet(4000, 'diskpart')
     const t8000 = timeTierSet(8000, 'diskpart')
@@ -7550,17 +7704,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       for (let i = 0; i < n; i += 1) w.push('-exec', 'echo', '{}', '+')
       return w
     }
-    const timeLabels = (w) => {
-      segmentLabels(w)   // 预热（JIT）
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        segmentLabels(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
-    }
+    const timeLabels = (w) => timeBest(() => segmentLabels(w))
     const d4000 = timeLabels(buildDistinct(4000))
     const d8000 = timeLabels(buildDistinct(8000))
     const ratioD = d8000 / Math.max(d4000, 0.001)
@@ -7718,17 +7862,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       for (let i = 0; i < n; i += 1) w.push('-exec', 'env', 'sudo', 'cmd' + i, '{}', '+')
       return w
     }
-    const timeDestructive = (w) => {
-      isDestructiveSegment(w)   // 预热（JIT）
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        isDestructiveSegment(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
-    }
+    const timeDestructive = (w) => timeBest(() => isDestructiveSegment(w))
     const p4000 = timeDestructive(buildPrefixed(4000))
     const p8000 = timeDestructive(buildPrefixed(8000))
     const ratioP = p8000 / Math.max(p4000, 0.001)
@@ -7782,17 +7916,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       for (let i = 0; i < n; i += 1) w.push('-exec', inner)
       return w
     }
-    const timeSeg54C2 = (w) => {
-      isDestructiveSegment(w)   // 预热（JIT）
-      let best = Infinity
-      for (let k = 0; k < 3; k += 1) {
-        const t0 = process.hrtime.bigint()
-        isDestructiveSegment(w)
-        const dt = Number(process.hrtime.bigint() - t0) / 1e6
-        if (dt < best) best = dt
-      }
-      return best
-    }
+    const timeSeg54C2 = (w) => timeBest(() => isDestructiveSegment(w))
     // 三种点名形态：`sudo` / `sudo time`（wrapper+关键字） / `su -`（提权前缀带选项）
     const n4000 = timeSeg54C2(buildNoName(4000, 'sudo'))
     const n8000 = timeSeg54C2(buildNoName(8000, 'sudo'))
@@ -9414,7 +9538,6 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
   //   ⑤ 承重格：`diskpart /s a.txt` 恰好 `['unknown']`（「替换」语义保住）；
   //   ⑥ 不变量：`tiers` 不得出现重复项（整行分支去重 push 的形态断言）。
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier, rest) => {
       const t = {}
       for (const k of TIERS) t[k] = k === tier ? 'deny' : (rest || 'allow')
@@ -9433,15 +9556,18 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
     const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
 
     // ① 发现 1：`inside=deny` + 其余七档 allow —— opaque 段里的破坏性命令必须 deny 且含 inside
+    //    ⚠️ 构造集**按方言取**（`OPAQUE_FORMS`，见文件头）：pwsh 的第四种构造是 `@( )`，
+    //       不是反引号 —— 反引号在 pwsh 里是转义符，`` `rm `` 求值为 `<CR>m`、**不执行 rm**。
+    //       另加一个方言中立的分组写法 `ForEach-Object { … }`（两侧都真会执行）。
     const dsInside = dsOnly('inside')
-    const insideForms = []
-    for (const mk of [(c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => '$(' + c + ')',
-      (c) => BT + c + BT, (c) => 'ForEach-Object { ' + c + ' }']) {
-      for (const sep of ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']) {
-        insideForms.push(sep + mk('rm -rf ./build'))
-      }
+    const insideFormsOf = (sh) => {
+      const out = []
+      for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) out.push(sep + mk('rm -rf ./build'))
+      for (const sep of SEPS) out.push(sep + 'ForEach-Object { rm -rf ./build }')
+      return out
     }
-    for (const c of insideForms) for (const [sh, pl] of SHP) {
+    const insideForms = SHP.flatMap(([sh]) => insideFormsOf(sh))
+    for (const [sh, pl] of SHP) for (const c of insideFormsOf(sh)) {
       const r = judge(c, sh, pl, dsInside)
       const t = flatTiers(c, sh, pl, dsInside)
       if (r.action !== 'deny') bad.push(['发现1 未 deny', c, sh, pl, r.action, t.join('+')])
@@ -9453,43 +9579,83 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
     }
 
     // ② 发现 2：`wide=deny` + 其余七档 allow —— 同一构造的四种写法必须逐字同值
+    //    ⚠️ 四种写法**按方言取**（`OPAQUE_FORMS`）：bash 的第四种是反引号命令替换，
+    //       pwsh 的第四种是 `@( )` —— 拿反引号去测 pwsh 会因「`` `rm `` 不执行 rm」而假红。
     const dsWide = dsOnly('wide')
-    const four = (c) => [
-      'Write-Output $(' + c + ')', 'Write-Output (' + c + ')',
-      'Write-Output {' + c + '}', 'Write-Output ' + BT + c + BT,
-    ]
     const keyOf = (c, sh, pl) => {
       const r = judge(c, sh, pl, dsWide)
       return r.action + '|' + flatTiers(c, sh, pl, dsWide).join('+')
     }
     for (const c of ['rm -rf C:/Windows', 'rm -rf ./build', 'rm -rf /', 'rm -rf ../other', 'rm -rf $TARGET']) {
       for (const [sh, pl] of SHP) {
-        const ks = four(c).map((x) => keyOf(x, sh, pl))
+        const ks = OPAQUE_FORMS[sh].map(([, mk]) => keyOf('Write-Output ' + mk(c), sh, pl))
         if (new Set(ks).size !== 1) bad.push(['发现2 四写法分叉', c, sh, pl, ks.join('  vs  ')])
-        // 反引号形态（原漏网者）必须 deny 且含 wide
-        const bt = 'Write-Output ' + BT + c + BT
-        if (judge(bt, sh, pl, dsWide).action !== 'deny') bad.push(['发现2 反引号未 deny', bt, sh, pl])
-        if (flatTiers(bt, sh, pl, dsWide).indexOf('wide') === -1) bad.push(['发现2 反引号缺 wide 档', bt, sh, pl])
       }
     }
-    // 反引号在管道/包装位置同样不得漏网
+    // 反引号在管道/包装位置同样不得漏网 —— **bash 侧**（那里的反引号是真命令替换）
     for (const c of ['echo a | Write-Output ' + BT + 'rm -rf C:/Windows' + BT,
       'echo a | ' + BT + 'rm -rf C:/Windows' + BT,
       'Write-Output ' + BT + 'rm -rf C:/Windows' + BT]) {
-      for (const [sh, pl] of SHP) {
+      for (const [sh, pl] of SHP.filter(([s]) => s === 'bash')) {
         if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['发现2 反引号位置形态未 deny', c, sh, pl])
+      }
+    }
+    // ── pwsh 侧的真危险形态：反引号 + **未知转义**（名字被保留、真会执行）──────────────
+    // 只在**命令位**成立：`Write-Output `` `Remove-Item `` 只是把名字当参数打印，不执行。
+    // 故这里用命令位语料（行首 / 管道后），判据取**平台中立**的那条不变量：
+    //     未知转义 ⇒ 反引号被丢掉 ⇒ 判定必须与**不带反引号的同名命令**逐字相同
+    // （实测 64/64 同值）。不写死「必须 deny 且含 wide」—— `C:/Windows` 在 posix 下
+    // 本就是 `outside` 而非 `wide`（系统目录名单按平台分列），写死会把平台差异误报成缺陷。
+    for (const esc of PWSH_ESCAPED_NAMES) {
+      const plain = esc.slice(1)   // 去掉开头的反引号 = 同一个命令名
+      for (const c of [esc, 'echo a | ' + esc]) {
+        const p = c.replace(esc, plain)
+        for (const pl of ['win32', 'posix']) {
+          for (const tier of TIERS) {
+            const ds = dsOnly(tier)
+            const a = judge(c, 'pwsh', pl, ds), b = judge(p, 'pwsh', pl, ds)
+            if (a.action !== b.action || flatTiers(c, 'pwsh', pl, ds).join('+') !== flatTiers(p, 'pwsh', pl, ds).join('+')) {
+              bad.push(['发现2 pwsh 未知转义与同名裸命令判定分叉（' + tier + '=deny）', c, 'vs', p, pl,
+                a.action + '|' + flatTiers(c, 'pwsh', pl, ds).join('+'), b.action + '|' + flatTiers(p, 'pwsh', pl, ds).join('+')])
+            }
+          }
+          // 防空转：这条**转义形态**必须真的被判成破坏性 —— 至少存在某一档 deny 能拦住它。
+          // 不写死「wide」：`C:/Windows` 在 win32 是 wide、在 posix 是 outside（系统目录
+          // 名单按平台分列），`kill` 走的是 proc。逐档扫一遍即可覆盖三者且与平台无关。
+          // 缺了这条，「与裸命令同值」在**两侧同时认不出**时也会通过（等价但空转）。
+          if (!TIERS.some((tier) => judge(c, 'pwsh', pl, dsOnly(tier)).action === 'deny')) {
+            bad.push(['发现2 pwsh 未知转义形态没有任何档能拦住（空转）', c, pl])
+          }
+        }
       }
     }
 
     // ④ 反向核查（必须 0 误伤）：合法常用命令仍恰好 `['unknown']`
+    //    ⚠️ 反引号那格**按方言分列**：bash 的反引号是**命令替换**（opaque → 替换语义 → unknown），
+    //       pwsh 的反引号是**转义**（`` `date` `` 就是字面参数 `date`` `` ` ``，不构成构造），
+    //       故它必须与**裸命令**同值（`./build` 的半径 = inside），而不是 unknown。
     const dsAny = dsOnly('wide')  // 最严的「只 wide deny」配置，最容易被误伤
-    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'rm -rf ./build ' + BT + 'date' + BT,
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)',
       'chmod 777 ./{a,b}.sh', 'rm -rf ./{a,b}/x', 'rm -rf {a,b}', 'rm -rf $TARGET']) {
       for (const [sh, pl] of SHP) {
         const t = flatTiers(c, sh, pl, dsAny)
         if (t.indexOf('inside') !== -1) bad.push(['误伤：合法命令被并 inside', c, sh, pl, t.join('+')])
         if (t.indexOf('wide') !== -1) bad.push(['误伤：合法命令被并 wide', c, sh, pl, t.join('+')])
         if (t.join('+') !== 'unknown') bad.push(['合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
+      }
+    }
+    // bash：反引号命令替换 → opaque → 恰好 unknown（与 `$( )` 同口径）
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'bash')) {
+      const c = 'rm -rf ./build ' + BT + 'date' + BT
+      const t = flatTiers(c, sh, pl, dsAny)
+      if (t.join('+') !== 'unknown') bad.push(['bash 反引号命令替换档位变化', c, sh, pl, t.join('+')])
+    }
+    // pwsh：反引号转义 → **与裸命令同值**（多一个字面参数不得改变档位）
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'pwsh')) {
+      const withEsc = flatTiers('rm -rf ./build ' + BT + 'date' + BT, sh, pl, dsAny).join('+')
+      const bare = flatTiers('rm -rf ./build', sh, pl, dsAny).join('+')
+      if (withEsc !== bare) {
+        bad.push(['pwsh 转义参数改变了档位（应与裸命令同值）', 'rm -rf ./build `date`', sh, pl, 'esc=' + withEsc, 'bare=' + bare])
       }
     }
 
@@ -9540,7 +9706,6 @@ group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃�
   // → **allow**（tiers=`['unknown','priv']`）；修复后 → deny
   // （tiers=`['wide','unknown','inside','priv']`）。
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier) => {
       const t = {}
       for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'
@@ -9552,42 +9717,61 @@ group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃�
     const bad = []
     const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
     const PRIVS = ['sudo', 'doas', 'su', 'pkexec', 'runas', 'gsudo']
-    // 四种构造写法（与 AA 组的 `four` 同源）
-    const MK = [(c) => '$(' + c + ')', (c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => BT + c + BT]
-    const SEPS = ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']
 
     // ① 6 提权前缀 × 4 构造 × 7 分隔符 × 4 (shell,platform) —— `wide=deny` 下必须 deny
     //    且含 `wide`；`inside=deny` 下必须 deny 且含 `inside`。
+    //    ⚠️ 构造集**按方言取**（`OPAQUE_FORMS`，与 AA 组同源）：pwsh 的第四种是 `@( )`，
+    //       不是反引号 —— 反引号在 pwsh 里是转义符，`` sudo `rm -rf X `` 的命令名是
+    //       `<CR>m`，**sudo 不会执行 rm**（实测），拿它断言 deny 是假红。
     const dsWide = dsOnly('wide'), dsInside = dsOnly('inside')
     let n1 = 0
-    for (const p of PRIVS) for (const mk of MK) for (const sep of SEPS) {
+    for (const [sh, pl] of SHP) for (const p of PRIVS) for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) {
       const c = sep + p + ' ' + mk('rm -rf C:/Windows')
-      for (const [sh, pl] of SHP) {
-        n1 += 1
-        const tw = flat(c, sh, pl, dsWide)
-        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['提权+opaque 未 deny（wide=deny）', c, sh, pl, tw.join('+')])
-        if (tw.indexOf('wide') === -1) bad.push(['提权+opaque 缺 wide 档', c, sh, pl, tw.join('+')])
-        const ti = flat(c, sh, pl, dsInside)
-        if (judge(c, sh, pl, dsInside).action !== 'deny') bad.push(['提权+opaque 未 deny（inside=deny）', c, sh, pl, ti.join('+')])
-        if (ti.indexOf('inside') === -1) bad.push(['提权+opaque 缺 inside 档', c, sh, pl, ti.join('+')])
+      n1 += 1
+      const tw = flat(c, sh, pl, dsWide)
+      if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['提权+opaque 未 deny（wide=deny）', c, sh, pl, tw.join('+')])
+      if (tw.indexOf('wide') === -1) bad.push(['提权+opaque 缺 wide 档', c, sh, pl, tw.join('+')])
+      const ti = flat(c, sh, pl, dsInside)
+      if (judge(c, sh, pl, dsInside).action !== 'deny') bad.push(['提权+opaque 未 deny（inside=deny）', c, sh, pl, ti.join('+')])
+      if (ti.indexOf('inside') === -1) bad.push(['提权+opaque 缺 inside 档', c, sh, pl, ti.join('+')])
+    }
+    // ①′ pwsh 侧「提权前缀 + 反引号未知转义」—— 名字被保留、真会执行，必须拦得住。
+    //     判据取**平台中立**的那条：与「提权前缀 + 同名裸命令」逐字同值
+    //     （不写死「必须含 wide」—— `C:/Windows` 在 posix 下本就是 outside）。
+    for (const p of PRIVS) for (const esc of PWSH_ESCAPED_NAMES) {
+      const plain = esc.slice(1)
+      for (const pl of ['win32', 'posix']) {
+        for (const tier of TIERS) {
+          const ds = dsOnly(tier)
+          const full = p + ' ' + esc, bare = p + ' ' + plain
+          if (judge(full, 'pwsh', pl, ds).action !== judge(bare, 'pwsh', pl, ds).action ||
+            flat(full, 'pwsh', pl, ds).join('+') !== flat(bare, 'pwsh', pl, ds).join('+')) {
+            bad.push(['提权+pwsh 未知转义与同名裸命令分叉（' + tier + '=deny）', full, 'vs', bare, pl,
+              flat(full, 'pwsh', pl, ds).join('+'), flat(bare, 'pwsh', pl, ds).join('+')])
+          }
+        }
+        // 防空转：提权 + 转义形态必须真的被判成破坏性（至少一档能拦），否则上面的
+        // 「同值」在两侧同时认不出时也会通过。
+        if (!TIERS.some((tier) => judge(p + ' ' + esc, 'pwsh', pl, dsOnly(tier)).action === 'deny')) {
+          bad.push(['提权+pwsh 未知转义形态没有任何档能拦住（空转）', p + ' ' + esc, pl])
+        }
       }
     }
 
     // ② 与**无前缀**的同形命令逐字同值（提权前缀不得让判定分叉）
-    for (const mk of MK) for (const sep of SEPS) {
+    //    ⚠️ 构造集按方言取（`OPAQUE_FORMS`），理由同 ①。
+    for (const [sh, pl] of SHP) for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) {
       const bare = sep + mk('rm -rf C:/Windows')
-      for (const [sh, pl] of SHP) {
-        const kb = judge(bare, sh, pl, dsWide).action + '|' + flat(bare, sh, pl, dsWide).join('+')
-        for (const p of PRIVS) {
-          const c = sep + p + ' ' + mk('rm -rf C:/Windows')
-          const k = judge(c, sh, pl, dsWide).action + '|' + flat(c, sh, pl, dsWide).join('+')
-          // 提权形态**另含** priv 档，故只要求动作一致 + 半径三档一个不少
-          if (judge(c, sh, pl, dsWide).action !== judge(bare, sh, pl, dsWide).action) {
-            bad.push(['提权形态与无前缀形态动作分叉', c, 'vs', bare, sh, pl, k, kb])
-          }
-          for (const want of ['wide', 'unknown', 'inside']) {
-            if (flat(c, sh, pl, dsWide).indexOf(want) === -1) bad.push(['提权形态缺 ' + want + ' 档', c, sh, pl, flat(c, sh, pl, dsWide).join('+')])
-          }
+      const kb = judge(bare, sh, pl, dsWide).action + '|' + flat(bare, sh, pl, dsWide).join('+')
+      for (const p of PRIVS) {
+        const c = sep + p + ' ' + mk('rm -rf C:/Windows')
+        const k = judge(c, sh, pl, dsWide).action + '|' + flat(c, sh, pl, dsWide).join('+')
+        // 提权形态**另含** priv 档，故只要求动作一致 + 半径三档一个不少
+        if (judge(c, sh, pl, dsWide).action !== judge(bare, sh, pl, dsWide).action) {
+          bad.push(['提权形态与无前缀形态动作分叉', c, 'vs', bare, sh, pl, k, kb])
+        }
+        for (const want of ['wide', 'unknown', 'inside']) {
+          if (flat(c, sh, pl, dsWide).indexOf(want) === -1) bad.push(['提权形态缺 ' + want + ' 档', c, sh, pl, flat(c, sh, pl, dsWide).join('+')])
         }
       }
     }
@@ -9611,12 +9795,24 @@ group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃�
       }
     }
     // ④ 反向核查：合法常用命令仍恰好 `['unknown']`（与 AA 组 ④ 同判据）
-    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'rm -rf ./build ' + BT + 'date' + BT,
+    //    ⚠️ 反引号那格按方言分列，理由同 AA 组 ④（bash 是命令替换、pwsh 是转义）。
+    for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)',
       'chmod 777 ./{a,b}.sh', 'rm -rf $TARGET']) {
       for (const [sh, pl] of SHP) {
         const t = flat(c, sh, pl, dsWide)
         if (t.join('+') !== 'unknown') bad.push(['误伤：合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
       }
+    }
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'bash')) {
+      const c = 'rm -rf ./build ' + BT + 'date' + BT
+      if (flat(c, sh, pl, dsWide).join('+') !== 'unknown') {
+        bad.push(['误伤：bash 反引号命令替换档位变化', c, sh, pl, flat(c, sh, pl, dsWide).join('+')])
+      }
+    }
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'pwsh')) {
+      const withEsc = flat('rm -rf ./build ' + BT + 'date' + BT, sh, pl, dsWide).join('+')
+      const bare = flat('rm -rf ./build', sh, pl, dsWide).join('+')
+      if (withEsc !== bare) bad.push(['pwsh 转义参数改变了档位（应与裸命令同值）', sh, pl, 'esc=' + withEsc, 'bare=' + bare])
     }
     // ⑤ 防空转：`destructiveHeadReadable` 的提权排除**不得**影响段级 blast 判据 ——
     //    `sudo rm -rf /` 的半径仍须是 drive-root（`:6763-6766` 的现值依赖）。
@@ -9654,26 +9850,24 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
   //     echo a | (kill 1234)       → **allow** tiers=['unknown','proc']      ❌
   // 修法：门控增加第三项 `opaqueHiddenPayload`（= `seg.opaque && !destructiveHeadReadable(seg)`）。
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
     const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
     const judge = (cmd, sh, pl, ds) => assessCommand(cmd, sh, withDs(ds, { platform: pl }))
     const flat = (cmd, sh, pl, ds) => [].concat(...(judge(cmd, sh, pl, ds).segments || []).map((s) => s.tiers || []))
     const bad = []
     const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
-    const MK = [(c) => '$(' + c + ')', (c) => '(' + c + ')', (c) => '{ ' + c + '; }', (c) => BT + c + BT]
-    const SEPS = ['', 'echo a | ', 'echo a && ', 'echo a || ', 'echo a & ', 'echo a ; ', 'echo a\n']
     const dsWide = dsOnly('wide'), dsInside = dsOnly('inside'), dsOutside = dsOnly('outside')
 
     // ① 发现 2：诱饵目标（可读、且其自身半径档为 outside / wide） × 4 构造 × 7 分隔符
     // ⚠️ 诱饵档位**按平台实测取值**，不写死：`/etc/hosts` 在 win32 下是普通外部路径
     //    （outside），在 posix 下是**系统目录**（system → wide）；`~/notes.txt` 两侧都是
     //    outside。断言「诱饵那一档必须保留」时要用实测值，否则会把平台差异误报成缺陷。
+    // ⚠️ 构造集**按方言取**（`OPAQUE_FORMS`，与 AA/AB 同源）：pwsh 的第四种是 `@( )`。
     let n2 = 0
-    for (const bait of ['/etc/hosts', '~/notes.txt']) for (const mk of MK) for (const sep of SEPS) {
+    for (const [sh, pl] of SHP) for (const bait of ['/etc/hosts', '~/notes.txt']) for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) {
       const c = sep + 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
-      for (const [sh, pl] of SHP) {
-        n2 += 1
+      n2 += 1
+      {
         const tw = flat(c, sh, pl, dsWide)
         if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['诱饵形态未 deny', c, sh, pl, tw.join('+')])
         for (const want of ['wide', 'unknown', 'inside']) {
@@ -9700,9 +9894,9 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
     }
     // ② 诱饵档位**不触发**的四种目标：不得凭空多档（它们自身已归 wide/unknown，
     //    或 blast 为 null 时走 `!seg.blast` 那条既有判据）—— 只断言「不得比修复前更松」
-    for (const bait of ['C:/Windows/x', 'B:/', '$T', './build']) for (const mk of MK) for (const sep of SEPS) {
+    for (const [sh, pl] of SHP) for (const bait of ['C:/Windows/x', 'B:/', '$T', './build']) for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) {
       const c = sep + 'cat ' + bait + ' ' + mk('rm -rf C:/Windows')
-      for (const [sh, pl] of SHP) {
+      {
         const tw = flat(c, sh, pl, dsWide)
         if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['诱饵（不触发档）形态未 deny', c, sh, pl, tw.join('+')])
         for (const want of ['wide', 'unknown', 'inside']) {
@@ -9712,18 +9906,17 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
     }
 
     // ③ 发现 3：8 个纯组档命令 × 4 构造 × 7 分隔符 —— `wide=deny` 下必须 deny 且含 wide
+    //    ⚠️ 构造集按方言取（`OPAQUE_FORMS`），理由同 ①。
     const GROUP_CMDS = ['kill 1234', 'pkill', 'reboot', 'shutdown /s', 'taskkill /im x.exe',
       'stop-computer', 'reg delete HKCU\\X /f', 'stop-process -Id 1']
     let n3 = 0
-    for (const g of GROUP_CMDS) for (const mk of MK) for (const sep of SEPS) {
+    for (const [sh, pl] of SHP) for (const g of GROUP_CMDS) for (const [, mk] of OPAQUE_FORMS[sh]) for (const sep of SEPS) {
       const c = sep + mk(g)
-      for (const [sh, pl] of SHP) {
-        n3 += 1
-        const tw = flat(c, sh, pl, dsWide)
-        if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['组档+opaque 未 deny', c, sh, pl, tw.join('+')])
-        for (const want of ['wide', 'unknown', 'inside']) {
-          if (tw.indexOf(want) === -1) bad.push(['组档+opaque 缺 ' + want + ' 档', c, sh, pl, tw.join('+')])
-        }
+      n3 += 1
+      const tw = flat(c, sh, pl, dsWide)
+      if (judge(c, sh, pl, dsWide).action !== 'deny') bad.push(['组档+opaque 未 deny', c, sh, pl, tw.join('+')])
+      for (const want of ['wide', 'unknown', 'inside']) {
+        if (tw.indexOf(want) === -1) bad.push(['组档+opaque 缺 ' + want + ' 档', c, sh, pl, tw.join('+')])
       }
     }
     // ④ 反向核查（必须 0 误伤）：**无 opaque** 的纯组档命令不得凭空多出 wide/inside
@@ -9747,12 +9940,24 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
       }
     }
     // ⑦ 合法常用命令仍恰好 `['unknown']`（发现 2/3 都不得误伤这一族）
+    //    ⚠️ 反引号那格按方言分列，理由同 AA 组 ④（bash 是命令替换、pwsh 是转义）。
     for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'chmod 777 ./{a,b}.sh',
-      'rm -rf $TARGET', 'rm -rf ./build ' + BT + 'date' + BT]) {
+      'rm -rf $TARGET']) {
       for (const [sh, pl] of SHP) {
         const t = flat(c, sh, pl, dsWide)
         if (t.join('+') !== 'unknown') bad.push(['误伤：合法命令档位变化（应为恰好 unknown）', c, sh, pl, t.join('+')])
       }
+    }
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'bash')) {
+      const c = 'rm -rf ./build ' + BT + 'date' + BT
+      if (flat(c, sh, pl, dsWide).join('+') !== 'unknown') {
+        bad.push(['误伤：bash 反引号命令替换档位变化', c, sh, pl, flat(c, sh, pl, dsWide).join('+')])
+      }
+    }
+    for (const [sh, pl] of SHP.filter(([s]) => s === 'pwsh')) {
+      const withEsc = flat('rm -rf ./build ' + BT + 'date' + BT, sh, pl, dsWide).join('+')
+      const bare = flat('rm -rf ./build', sh, pl, dsWide).join('+')
+      if (withEsc !== bare) bad.push(['pwsh 转义参数改变了档位（应与裸命令同值）', sh, pl, 'esc=' + withEsc, 'bare=' + bare])
     }
 
     ok('★★ AC 诱饵目标（' + n2 + ' 格）与纯组档段（' + n3 + ' 格）不得丢失 wide/inside',
@@ -9880,7 +10085,6 @@ group('AF. opaque 构造作重定向目标：不得被粘性标记误判为「�
   // 由 `redirectOpaqueTarget`（三态 'none' / 'word' / 'not-word'）精确判 —— 逐重定向记录，
   // 故 `echo a $(b) > & c` 这类「opaque 在 `>` **之前**」的形态不会被误放行。
   {
-    const BT = String.fromCharCode(96)
     const dsOnly = (tier) => { const t = {}; for (const k of TIERS) t[k] = k === tier ? 'deny' : 'allow'; return t }
     const withDs = (ds, opts) => Object.assign(hooks(Object.assign({ category: 'allow' }, opts || {})), { destructive: () => ds })
     const bad = []
@@ -10948,6 +11152,1491 @@ group('AI. `RADIUS_TIERS_WHEN_UNREADABLE` 三档逐档承重（发现：`unknown
 }
 
 
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假候选 label')
+{
+  // 本组钉的是**用户真实弹窗里看到的两件事**（截图为证），二者此前都没有任何断言守护：
+  //
+  // ① **反引号让整行 `ok:false`** —— 用户两条命令各含一个 `` `n ``（`"`n--- … ---"`），
+  //    弹窗因此**完全不分段**。根因：词法器里 `\` 转义有 bash 方言守卫，而反引号分支
+  //    **没有**，于是 PowerShell 的转义符被无条件当成 bash 的命令替换定界符去**找配对**。
+  //    后果由反引号**个数的奇偶**决定 —— 这正是本组 ① 要钉死的指纹。
+  // ② **假候选 label** —— `$d='…'` / `FOO=/…` / `"--- 编码/换行校验 ---"` 三条都被
+  //    当成命令名给出「允许此项」按钮，而写下的例外**永不命中**。根因：`commandNameOf`
+  //    的路径剥离是**无条件**的，而 `BAD_LABEL_CHARS` 检查的是**切完的结果**，
+  //    坏字符只要在最后一个分隔符之前就被连前缀一起切掉了。
+  {
+    const BT = String.fromCharCode(96)
+    const bad = []
+    const NL = '\n'
+    // 用户两条命令（**已脱敏**：真实个人目录换成合成路径 `X:/ws/demo`，结构逐字保留）
+    const D = "'X:/ws/demo/_tmp/file-test'"
+    const U1 = 'Write-Output "' + BT + 'n--- 编码/换行校验 ---' + BT + 'n"' + NL +
+      '$d=' + D + NL +
+      'New-Item -ItemType Directory -Force -Path $d | Out-Null'
+    const U2 = 'Write-Output "' + BT + 'n--- 编码/换行校验 ---' + BT + 'n"' + NL +
+      '$d=' + D + NL +
+      'Set-Content -LiteralPath (Join-Path $d ' + "'a.txt'" + ') -Value "hi"' + NL +
+      'Get-Content -LiteralPath (Join-Path $d ' + "'a.txt'" + ') | Format-Table'
+
+    // ── ① 反引号不得让整行失败；分段必须正常 ──────────────────────────────────
+    for (const [n, c, wantSegs] of [['命令1', U1, 4], ['命令2', U2, 5]]) {
+      const d = decomposeCommand(c, 'pwsh')
+      if (d.ok !== true) bad.push(['反引号致整行 ok:false（缺陷①未修）', n, JSON.stringify(d.reason)])
+      else if (d.segments.length !== wantSegs) {
+        bad.push(['分段数不符', n, 'want=' + wantSegs, 'got=' + d.segments.length,
+          JSON.stringify(d.segments.map((s) => s.text))])
+      }
+    }
+    // 奇偶性指纹：0…6 个反引号**一律** ok:true（旧缺陷下奇数是 false）
+    for (let k = 0; k <= 6; k += 1) {
+      const c = 'Write-Output "x' + (BT + 'n').repeat(k) + '"'
+      const d = decomposeCommand(c, 'pwsh')
+      if (d.ok !== true) bad.push(['反引号个数的奇偶性未消除', k + ' 个', JSON.stringify(d.reason)])
+    }
+    // 反向：bash 侧反引号**仍是**命令替换（方言矩阵的另一格不得被误伤）
+    for (const c of ['echo ' + BT + 'date' + BT, 'rm -rf ./build ' + BT + 'date' + BT]) {
+      const d = decomposeCommand(c, 'bash')
+      if (d.ok !== true) bad.push(['bash 反引号命令替换被误伤', c, JSON.stringify(d.reason)])
+      const seg = d.ok ? d.segments[0] : null
+      if (!seg || !seg.opaque) bad.push(['bash 反引号未标 opaque', c, JSON.stringify(seg && seg.opaque)])
+    }
+    // 反向：pwsh 侧**真语法错误**仍须 ok:false（fail-closed 不得被放宽）
+    //   实测官方解析器：空白后的孤立反引号 / 引号内未闭合 → `IncompleteString`
+    for (const c of ['Get-ChildItem ' + BT, 'Write-Output "abc' + BT, 'echo a ; ' + BT]) {
+      const d = decomposeCommand(c, 'pwsh')
+      if (d.ok !== false) bad.push(['pwsh 真语法错误被放宽（应 ok:false）', c, JSON.stringify(d)])
+    }
+    // 反向：pwsh 侧**合法**的行尾紧贴反引号仍须 ok:true（`` `date` `` 收尾那个是字面反引号）
+    for (const c of ['Write-Output abc' + BT, BT + 'date' + BT]) {
+      const d = decomposeCommand(c, 'pwsh')
+      if (d.ok !== true) bad.push(['pwsh 行尾字面反引号被误判为错误', c, JSON.stringify(d.reason)])
+    }
+
+    // ── ①′ 引号外的 `` ` `` + 换行：切不切，判据是「**前一个词元**是否已完结」──────────
+    // ⚠️ 旧判据取错了维度：用「反引号**前一个字符**是不是词元分隔符」（`PWSH_TOKEN_BREAK`，
+    //    只含 `\s;|&(){},'"`），于是字母 / 数字 / `]` / `.` 收尾的词元全部漏判。官方解析器
+    //    `[Parser]::ParseInput` + 实参绑定逐格实测（无 CR，逐条看过 token 表）：
+    //
+    //      ── A. 已完结的完整词元 ⇒ 必须切（旧判据全部漏判 = 真 fail-open）──
+    //      · **Parameter 词元**（`-NoNewline` / `-Recurse` / `-NoEnumerate` / `-Verbose` /
+    //        `-Force` / `-WhatIf`）：token 是 `Parameter[-NoNewline`]`（反引号**并进参数名**）、
+    //        **没有** LineContinuation，但 `[Parser]` 报 **2 条 PipelineAst** = **语句边界**。
+    //        实参绑定是决定性证据：`& probe.ps1 -NoNewline` + `` ` `` + NL + `C:/Windows2`
+    //        → `N=1`、`A[0]=[-NoNewline`]`，随后 `C:/Windows2` 被当作**新命令**执行
+    //        （`The term 'C:/Windows2' is not recognized…`）。⇒ 必须 `flushSegment()`。
+    //        ⚠️ 改用 `flushWord()` 实测端到端**仍然 `allow`**（两行同段），等于没修。
+    //      · **成员 / 下标 / 静态成员访问**（`$x.Name` / `$a[0]` / `$h["k"]` /
+    //        `$env:TEMP.Length` / `"abc".Length` / `(Get-Item x).Name`）：官方解析器实测是
+    //        `LineContinuation`，与空格形**逐字同值**（同一条语句）⇒ `flushWord()`。
+    //      · `-Confirm:` 这类**带冒号收尾**的 Parameter：同样是 `LineContinuation`、
+    //        **同一条语句** ⇒ `flushWord()`。它与整词 Parameter 的差别正是修法的核心：
+    //        **Parameter 族是语句边界，`-Confirm:` 是词元边界**，两者不同级。
+    //
+    //      ── B. 首字符是普通字符 ⇒ 必须粘住（旧判据此处本就正确，不得改动）──
+    //      裸词 `C:/Windows`、简单变量 `$TARGET` / `$x` / `${x}` / `$env:TEMP`、`abc]`、
+    //      `a.b`、`x$y.y`：官方解析器实测都是**一个** `Generic` 词元（反引号是**字面**字符）。
+    //      ⚠️ 不得把 `$TARGET` 这类简单变量切开 —— 那是把方向从 fail-open 翻成误报。
+    //
+    // 缺 A 族时两行被粘成一个词元 `C:/Windows-Confirm:$false` / `-NoNewlineC:/Windows2`，
+    // `blast` 由 `system` 掉成 `unknown`、档位由 `wide` 掉成 `unknown` ⇒ 破坏性子设置与
+    // deny 例外双双失明：
+    //   大分类 allow + `wide`=deny                 → HEAD `deny` → 无守卫时 **`ask`**（降级）
+    //   大分类 allow + `wide`=deny + `unknown`=allow → HEAD `deny` → 无守卫时 **`allow`**（静默放行）
+    //   对照（无反引号）：HEAD / PRE / NOW 均 `deny`。
+    // ⚠️ 没有本组时，把守卫那行删掉（= 回退本轮修法）本组**仍全绿**（实测变异 M1）——
+    //    故这是**必需**语料。A 族与 B 族**都必须钉**：只钉 A 会让「切过头」无声通过，
+    //    只钉 B 会让 fail-open 无声通过。
+    {
+      const NL = '\n'
+      // 引号串之后 —— 换行是**词元边界**（`-Confirm:` 单独成词元）
+      for (const c of ['Remove-Item -Recurse -Force "C:/Windows"' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Recurse -Force "C:/Windows"' + BT + '\r\n-Confirm:$false']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w.indexOf('-Confirm:$false') === -1) {
+          bad.push(['反引号+换行未切词元（引号外，紧贴引号串）', c, JSON.stringify(w)])
+        }
+      }
+      // 成员 / 下标访问族之后 —— 同一条语句内的**词元边界**（`-Confirm:` 单独成词元）。
+      //   官方解析器实测这一族与引号串同为 `LineContinuation`（逐字同值），旧判据全部漏判。
+      for (const c of ['Remove-Item -Force $item.FullName' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force $arr[0]' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force "C:/Windows".Length' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force (Get-Item C:/Windows).FullName' + BT + NL + '-Confirm:$false',
+        // ⚠️ 本轮的**下标支**改成了手写线性判定（`bracketAccessorTailAt`，见该函数说明）——
+        //    它若写错会**改语义**（不是只改性能）。这两格钉的正是「不得图省事改成
+        //    `[^\[\]]*`」那一族：官方解析器实测 `$v_.xx][xx.[x]` / `$vx[a0.[.]` 的方括号
+        //    内容是**嵌套/含 `[`** 的，`[^\[\]]*` 口径会让这一族由「切开」退回「粘住」
+        //    （实测词元由 `[…,'$v_.xx][xx.[x]','-Confirm:$false']` 变成
+        //    `[…,'$v_.xx][xx.[x]-Confirm:$false']`）。
+        //    ⚠️ 实测这两个**词元级**差异在全部八档 × 多种配置下 action 均不翻转
+        //    （粘住后目标仍是动态词元 ⇒ blast 两侧同为 unknown），故它不是 fail-open 面，
+        //    但它是**判据等价性**面：改法只有这一种写法能同时满足「线性」与「与原正则等价」。
+        'Remove-Item -Force $v_.xx][xx.[x]' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force $vx[a0.[.]' + BT + NL + '-Confirm:$false']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w.indexOf('-Confirm:$false') === -1) {
+          bad.push(['反引号+换行未切词元（成员/下标访问族）', c, JSON.stringify(w)])
+        }
+      }
+      // **Parameter 词元**之后 —— 换行是**语句边界**（`[Parser]` 报 2 条 PipelineAst，
+      //   第二行的裸词成为**新命令**）。⚠️ 判据是**段数**（`flushSegment`），不是词元数：
+      //   写成「`-Confirm:$false` 是否单独成词元」会漏掉本族（本族第二行是裸词、不是参数）。
+      for (const c of ['Write-Host -NoNewline' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows',
+        'Get-ChildItem -Recurse' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows']) {
+        const d = decomposeCommand(c, 'pwsh')
+        if (!d.ok || d.segments.length !== 2) {
+          bad.push(['反引号+换行未切语句（Parameter 族）', c,
+            JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // **带冒号收尾的 Parameter**（`-WhatIf:` / `-Confirm:` / `-ErrorAction:`）—— 与整词
+      //   Parameter **不同级**：官方解析器实测 `Parameter[-WhatIf:]` + **`LineContinuation`**
+      //   = **词元边界、同一条语句**（`stmts=1`）。这一格正是本修法的核心区分所在，
+      //   且**与上面的 Parameter 族互为反向**：把两者合并成同一条判据，必然错一族。
+      for (const c of ['Remove-Item -Recurse -Force -WhatIf:' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Recurse -Force -Confirm:' + BT + NL + '-Confirm:$false']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!d.ok || d.segments.length !== 1 || !w || w.indexOf('-Confirm:$false') === -1) {
+          bad.push(['冒号收尾 Parameter 未按词元边界切开', c,
+            JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // ── Parameter 词元的**字符类宽度**（本轮修复：旧字符类窄 17 格）─────────────────
+      // 判据「`-x<c>y` + 反引号 + 换行 是**语句边界**（`stmts=2`、第二行独立执行）」，由
+      // `PWSH_PARAMETER_TOKEN` 的字符类决定。旧字符类 `[A-Za-z_]` / `[A-Za-z0-9_/-]`
+      // 实测漏判 16 格词身 + 1 格首字符（`?`）、误判 0 格 —— 端到端是**真 fail-open**：
+      // 实测 `cmd /c ver -Path$p` + 反引号 + NL + `Remove-Item -Recurse -Force C:/Windows`
+      // 在大分类 allow 下旧字符类给 **`allow`**（第二行被吞成第一行的参数、不再单独判档），
+      // 用户显式配的 deny 例外 `remove-item *` 下同样 `allow`。
+      // ⚠️ 没有本组时，把字符类改回 `[A-Za-z_][A-Za-z0-9_/-]*` 本组**不红**
+      // （实测变异：该形态全库零覆盖）—— 故这是**必需**语料。
+      // 逐格真值由官方解析器 33..126 两轮扫描得到（token 表 + `PipelineAst` 语句数），
+      // 故这里按**字符类**钉而不是抽样：漏掉任意一格都说明字符类又窄了。
+      for (const w of ['-Path$p', '-Filter*', '-Name$n', '-Include*',   // AI 生成 pwsh 的常见写法
+        '-x!y', '-x~y', '-x\\y', '-x]y', '-x^y', '-x=y', '-x+y', '-x@y', '-x`y', '-x0y',
+        '-?y']) {                                                       // 首字符 `?`（PS 实测 STMT）
+        const c = 'cmd /c ver ' + w + BT + NL + 'Remove-Item -Recurse -Force C:/Windows'
+        const d = decomposeCommand(c, 'pwsh')
+        if (!d.ok || d.segments.length !== 2) {
+          bad.push(['Parameter 词元字符类过窄（未判成语句边界）', w,
+            JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // 反向：**粘住族**必须仍是一段（PS 实测 `Parameter[-x`]` + `Generic[y`+NL+`…]` 粘成一个
+      //   词元；`-1` / `-` / `--force` 根本不是 Parameter）。
+      //   ⚠️ 这一半与上面同等重要：字符类「扩宽」时最容易连带把粘住族一起吞进来
+      //   （实测把 `[` `.` `:` `,` 加进去即误判）。
+      for (const w of ['-x[y', '-x.y', '-x:y', '-x,y', '-1', '-', '--force']) {
+        const c = 'cmd /c ver ' + w + BT + NL + 'Remove-Item -Recurse -Force C:/Windows'
+        const d = decomposeCommand(c, 'pwsh')
+        if (!d.ok || d.segments.length !== 1) {
+          bad.push(['Parameter 词元字符类过宽（粘住族被误切）', w,
+            JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // ⚠️ 这里**不**钉 COLON 族（`-x!y:` / `-x$y:`）：实测本次修复前后**同值**（两个常量都
+      //   不命中 ⇒ 都走真续行），钉了只是把「本实现与 PS 有别」这一**既有**反向误差焊进测试
+      //   （PS 实测那两格是 `Parameter[-x!y:]` + `LineContinuation`，本实现判成一个词元）。
+      //   本次的约束「不要顺手扩 COLON 族」由代码里两个常量**分开**来保证 ——
+      //   要钉也该钉那条常量的**行为**，而它现在的行为本身就不等于 PS 真值，没有可钉的判据。
+      // 端到端授权方向：这一族不得让 deny 失明（判据取「不得为 allow」，与上文同风格）
+      {
+        const dsWideDeny = Object.assign({}, hooks({ category: 'allow' }), { destructive: () => ({ wide: 'deny' }) })
+        const dsWideDenyUnknownAllow = Object.assign({}, hooks({ category: 'allow' }),
+          { destructive: () => ({ wide: 'deny', unknown: 'allow' }) })
+        const excDeny = Object.assign({}, hooks({ category: 'allow', exceptions: ['remove-item *'], excAction: 'deny' }))
+        for (const [cn, h] of [['wide=deny', dsWideDeny], ['wide=deny+unknown=allow', dsWideDenyUnknownAllow],
+          ['例外 remove-item * = deny', excDeny]]) {
+          for (const w of ['-Path$p', '-Filter*', '-Name$n', '-Include*']) {
+            const c = 'cmd /c ver ' + w + BT + NL + 'Remove-Item -Recurse -Force C:/Windows'
+            const a = assessCommand(c, 'pwsh', h).action
+            if (a === 'allow') bad.push(['Parameter 字符类过窄致 deny 被静默绕过（fail-open）', cn, w, a])
+          }
+        }
+      }
+      // 反向：**裸词**后是字面反引号 —— 两行仍属**同一个**词元（官方解析器实测 `Generic`，
+      //   即不得把 `-Confirm:$false` 切成独立词元）
+      for (const c of ['Remove-Item -Recurse -Force C:/Windows' + BT + NL + '-Confirm:$false',
+        // ⚠️ 简单变量 / `${x}` / `abc]` / `a.b` / `x$y.y` 与裸词同族（PS 真值**粘住**）：
+        //    切开它们是把方向从 fail-open 翻成误报，故一并钉住。
+        'Remove-Item -Force $TARGET' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force ${x}' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force abc]' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force a.b' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force x$y.y' + BT + NL + '-Confirm:$false',
+        // ⚠️ **opaque 构造 + 空白 + 访问器后缀**（`(Get-Item x) .Name`）：官方解析器实测
+        //    `Generic[(Get-Item x) .Name`+NL+`-Confirm:$false]` —— 空白已把词元**终结**，
+        //    下一段 `.Name` 是**新的普通词元**（首字符是 `.`，不是 typed 构造）⇒ 仍**粘住**。
+        //    这一格钉的是「`tokenTyped` 必须在 `flushWord` 的**早退**路径也复位」：
+        //    opaque 构造不设 `started`，只在正常路径复位会让标记跨过空白泄漏到 `.Name` 上，
+        //    于是 `.Name` 被误判成 typed 词元而多切一刀（实测变异 M10：误切）。
+        'Remove-Item -Force (Get-Item x) .Name' + BT + NL + '-Confirm:$false',
+        'Remove-Item -Force (Get-Item x) [0]' + BT + NL + '-Confirm:$false']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w.indexOf('-Confirm:$false') !== -1) {
+          bad.push(['裸词后的字面反引号被误当边界', c, JSON.stringify(w)])
+        }
+      }
+      // 反向：**真续行**（反引号前面是词元分隔符）不得被切成两个词元
+      {
+        const c = 'Get-ChildItem ' + BT + NL + '-LiteralPath .'
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w.indexOf('-LiteralPath') === -1) {
+          bad.push(['真续行被误切词元', c, JSON.stringify(w)])
+        }
+      }
+      // **分组块族 / 孤立闭合符族**之后 —— 同属 `LineContinuation`（词元边界、同一条语句）。
+      //   官方解析器实测：`… RParen[)] LineContinuation[`+NL+`] Generic[C:/Windows]`、`stmts=1`；
+      //   实参绑定 `& probe @(1)` + `` ` `` + NL + `ZZZ` → **N=2**（与空格形 `@(1) ZZZ` 同值）。
+      //   ⚠️ 这一族是**第十轮修复新引入的回退**：判据由「反引号前一**字符**是不是
+      //   `PWSH_TOKEN_BREAK`」换成「前一**词元**是否已完结」后，分组块**只写 `segText`、
+      //   不写 `wordText`**，于是两个尾部判据都看不到它 ⇒ 回退成「粘住」（第十轮前是切开的，
+      //   因为 `)` / `}` 恰在 `PWSH_TOKEN_BREAK` 里）。
+      //   实测（`@(x)` + 反引号 + NL + `C:/Windows`）：词元由
+      //   `[…,'@','C:/Windows']`（PRE）变成 `[…,'@C:/Windows']`（回退后），
+      //   `blast` 由 `system` 掉成 `unknown` ⇒ 破坏性子设置与 deny 例外双双失明。
+      //   ⚠️ 没有本组时，把 `lastGroupClose === index - 1` 那一项删掉（= 回退本次修复）
+      //   本组**不红**（该格在别处无覆盖）——故这是**必需**语料。
+      for (const c of ['Remove-Item -Recurse -Force @(x)' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force @("C:/Windows")' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force @{a=1}' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force a(x)' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force x{y}' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force Get-Item(x)' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force a(b(c))' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force @{}' + BT + NL + 'C:/Windows',
+        // 孤立闭合符族（同一条根因：`abc)` / `a}` 同样只在 `PWSH_TOKEN_BREAK` 里）
+        'Remove-Item -Recurse -Force abc)' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force a}' + BT + NL + 'C:/Windows']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w[w.length - 1] !== 'C:/Windows') {
+          bad.push(['反引号+换行未切词元（分组块 / 孤立闭合符族）', c, JSON.stringify(w)])
+        }
+      }
+      // 反向：分组块的**粘住子族**（收尾符之后还有字符）不得被误切。
+      //   官方解析器实测 `a(x)y` / `@(x)z` / `(x)$y` 都是**一个** `Generic[y`+NL+`…]`
+      //   （反引号是字面字符）。位置判据（`lastGroupClose === index - 1`）天然排除它们；
+      //   若改成对 `segText` 裸判 `/[)}]$/`，这一族会被误切（且 `${x}` 同样中招）。
+      for (const c of ['Remove-Item -Recurse -Force a(x)y' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force @(x)z' + BT + NL + 'C:/Windows',
+        'Remove-Item -Recurse -Force ' + '$' + '{x}' + BT + NL + 'C:/Windows']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const w = d.ok ? d.segments[0].words : null
+        if (!w || w[w.length - 1] === 'C:/Windows') {
+          bad.push(['分组块粘住族被误切', c, JSON.stringify(w)])
+        }
+      }
+      // **fd 号重定向**（`"5">out.txt`）—— `tokenTyped` 必须跨过重定向复位。
+      //   fd 号分支**绕过 `flushWord()`**（它只清 `wordText` / `started`），故漏了 `tokenTyped`
+      //   的复位会让标记泄漏到**目标**上：`out.txt` 被 `PWSH_ACCESSOR_TAIL` 的
+      //   `\.[A-Za-z_]\w*$` 误判成成员访问 ⇒ 多切一刀。
+      //   实测（`"5">out.txt` + 反引号 + NL + `Remove-Item …`）：`writeTargets` 由
+      //   `['out.txtRemove-Item']` 变成 `['out.txt']`，第二行另起一段。
+      //   ⚠️ 官方解析器实测该行是**一个** `Generic[out.txt`+NL+`Remove-Item]`（**粘住**）
+      //   ⇒ 那一刀是**误切**，方向是放宽（`category=deny` + `destructive={wide:allow}`
+      //   实测由 `deny` 变 `allow`）。故本组钉的是「目标**粘住**」（与第十轮前同值；
+      //   重定向目标处的续行语义本实现仍与 PS 有别，那是**既有**反向误差，非本次引入）。
+      //   ⚠️ 没有本组时，把那行 `tokenTyped = false` 删掉本组**不红**（该形态全库无覆盖）。
+      for (const c of ['"5">out.txt' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows',
+        '2>a.txt' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows']) {
+        const d = decomposeCommand(c, 'pwsh')
+        const wt = d.ok ? d.segments[0].writeTargets : null
+        if (!wt || wt.length !== 1 || wt[0] !== 'out.txtRemove-Item' && wt[0] !== 'a.txtRemove-Item') {
+          bad.push(['fd 号重定向后的 tokenTyped 泄漏（目标被误切）', c, JSON.stringify(wt)])
+        }
+      }
+      // 端到端授权方向：破坏性子设置与 deny 例外都不得因「粘成一个词元」而失明
+      //
+      // ⚠️ 端到端**只钉 Parameter 语句边界族**，理由是实测出来的（本机三态对拍）：
+      //    · Parameter 族是**真 fail-open** —— 回退守卫时 `wide=deny` 下由 `deny` 变
+      //      **`allow`（all-allow）**，因为第二行 `Remove-Item …` 被当成第一行 `Write-Host`
+      //      的参数、不再单独判档。修好后回到 `deny`（segment-deny）。
+      //    · 下标/成员访问族的修正是**语义级**的（与 PS 真值一致、与空格形逐字同值），
+      //      **端到端 action 不翻转**：那一族的目标本身是动态词元（`$x.Name` / `$arr[0]`），
+      //      粘住后 `$x.Name-Confirm:$false` **同样是**动态 ⇒ `blast` 两侧都是 `unknown`。
+      //      故这里不钉它的 action（钉了也只是把配置语义钉死，不是承重面）——
+      //      它的守护在上一段的**词元级**断言（回退守卫即红）。
+      //    判据取「不得为 allow」而非「=== deny」（动作落点由配置决定，与本文件既有风格一致）。
+      {
+        const dsWideDeny = Object.assign({}, hooks({ category: 'allow' }), { destructive: () => ({ wide: 'deny' }) })
+        const dsWideDenyUnknownAllow = Object.assign({}, hooks({ category: 'allow' }),
+          { destructive: () => ({ wide: 'deny', unknown: 'allow' }) })
+        for (const [cn, h] of [['wide=deny', dsWideDeny], ['wide=deny+unknown=allow', dsWideDenyUnknownAllow]]) {
+          for (const c of ['Remove-Item -Recurse -Force "C:/Windows"' + BT + NL + '-Confirm:$false',
+            'Remove-Item -Recurse -Force "C:/Windows"' + BT + '\r\n-Confirm:$false',
+            // Parameter 语句边界族（第二行是**新命令**，必须自己走到档位判定）
+            'Write-Host -NoNewline' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows',
+            'Get-ChildItem -Recurse' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows',
+            // 分组块族（同上：粘住时第二行的破坏性命令不再单独判档）
+            'Remove-Item -Recurse -Force @(x)' + BT + NL + 'Remove-Item -Recurse -Force C:/Windows']) {
+            const a = assessCommand(c, 'pwsh', h).action
+            if (a === 'allow') bad.push(['续行判据缺失致 deny 被静默绕过（fail-open）', cn, JSON.stringify(c), a])
+          }
+        }
+      }
+    }
+
+    // ── ② 假候选 label：**按方言分列**（方言维度即本轮修法的核心）────────────────────
+    // ⚠️ 这一组此前把三条**混在同一门方言（pwsh）下**判「label 必须为空」，而其中
+    //    `FOO=/usr/local/bin/myapp` 在 pwsh 里**根本不是赋值** —— 它是**真命令**：
+    //    本机 PS 5.1 实测 `[Parser]::ParseInput('FOO=/usr/local/bin/myapp')` →
+    //    `PipelineAst`、**cmdAst=1**、assignAst=0；建好 `FOO=\usr\local\bin\myapp.cmd`
+    //    后 `& 'FOO=/usr/local/bin/myapp'` **RAN=True、rc=0**（无害替代目标，临时目录内）。
+    //    故旧断言「它必须认不出」**建立在错误真值上**：pwsh 侧它必须产出 `myapp`，
+    //    否则段级 `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置与**全部例外匹配**
+    //    双双跳过 ⇒ 落大分类（**fail-open**）。bash 侧它**确实**是赋值（`NAME=value`），
+    //    保持为空 —— 两门方言要求相反，故语料必须按方言分列，不能一刀切。
+    //    判据归属见 shell-parse.js 的 `LEAD_ASSIGN`（bash）/ `LABEL_ASSIGN_PWSH`（pwsh）。
+    //    ⚠️ **`$d=…` 这一格两门方言语义也相反**（本处此前建立在错误真值上）：Git Bash 5.3.15
+    //    实测（`mktemp -d` 内建 `=X:/ws/demo/_tmp/file-test` 可执行文件，整行写进文件再
+    //    source，RAN 证据写进独立日志）—— `$d='X:/ws/demo/_tmp/file-test'` 在 bash 下
+    //    `$d` 先展开成**空串**，词成了 `='X:/ws/demo/_tmp/file-test'`，是一次**真命令**执行
+    //    （RAN 命中），故 label 是 `file-test`；只有 **pwsh** 下它才是真赋值（右侧带引号）。
+    //    旧期望把 pwsh 侧的真值套到了 bash 上，两门方言都写成空串。
+    for (const [c, wantBash, wantPwsh] of [
+      // ⚠️ 只此一条**两门方言语义相反**：bash 真命令（`$d` 展开成空） / pwsh 真赋值
+      ['$d=' + D, 'file-test', ''],
+      // 两门方言下**都是**「没有命令要执行」→ label 必须为空
+      ['"--- 编码/换行校验 ---"', '', ''],
+      // ⚠️ 同样**两门方言语义相反**：bash 赋值 / pwsh 真命令（见上实测）
+      ['FOO=/usr/local/bin/myapp', '', 'myapp'],
+    ]) {
+      for (const [sh, want] of [['bash', wantBash], ['pwsh', wantPwsh]]) {
+        const d = decomposeCommand(c, sh)
+        const labels = d.ok ? d.segments.map((s) => segmentLabel(s.words)) : []
+        if (labels.some((x) => x !== want)) {
+          bad.push(['假候选 label 未消除 / 方言维度不符（缺陷②未修）', sh, c, 'want=' + JSON.stringify(want), JSON.stringify(labels)])
+        }
+      }
+    }
+    // 反向：真命令名**一个都不能**被这条守卫误伤（含 `$`/`=` 落在路径前缀里的形态）
+    //   ⚠️ 这一族是最容易修过头的地方：坏字符判据若落在**原始词元**上，
+    //      `$x/rm` / `C:/my=dir/rm.exe` 会被一起拒掉 → 八档全 deny 下由 deny 变 **allow**。
+    for (const c of ['/usr/bin/rm -rf x', 'C:\\Windows\\System32\\rm.exe -rf x', 'a/b/c',
+      '$x/rm -rf /etc', '$env:TEMP/rm.exe -rf /etc', 'C:/my=dir/rm.exe -rf /etc',
+      '"reg delete" HKLM\\X /f', '"C:/Program Files/My Tool.exe" -rf', 'Format-Table -AutoSize',
+      // ⚠️ 本轮新增：**含空格的相对路径 + 两词命令名**。`DESTRUCTIVE_LABELS` 里有合法的
+      //    两词命令名（`reg delete`），含空白是**正常形态**而不是「引号串」的特征 ——
+      //    只按「剥路径后 basename 含空白」判会把这一族判成字符串字面量 ⇒ label 变空
+      //    ⇒ 同一条 `unparsable → destructive=false → 落大分类` 失效链。
+      //    实测（大分类 allow + reg 档 deny）：三格 bash/pwsh **deny → allow**（共 8 格）。
+      //    该形态真实可执行：bash 实测 `"a b/reg delete" HKLM/X /f` 真的执行了
+      //    `a b/reg delete`（无害替代目标，rc=0）。没有这一格时，把判据放宽回
+      //    「含空白即引号串」会让本组**全绿**。
+      '"a b/reg delete" HKLM\\X /f', '-x/reg delete HKLM\\X /f', '"-x/reg delete" HKLM\\X /f',
+      // ⚠️ 本轮新增：**含空格的相对路径 + basename 既非破坏性命令名、也非两词命令名**。
+      //    这一族是本守卫最容易整族误伤的形态（`looksLikeExplicitPath` 不认相对路径开头）：
+      //    `"Program Files/My Tool.exe"` 剥路径后是 `my tool` —— 含空白、不在
+      //    `DESTRUCTIVE_LABELS` 里 ⇒ 判成字符串字面量 ⇒ label 变空 ⇒ 同一条
+      //    `unparsable → destructive=false → 落大分类` 失效链（危害**双向**：大分类 ask +
+      //    allow 例外时由 allow 变 ask、例外失明；大分类 allow + deny 例外时由 deny 变
+      //    **allow**，用户显式写的拒绝被静默绕过）。
+      //    实测（无害替代目标）：`"Program Files/My Tool.exe" -rf ./x` HEAD=`my tool` /
+      //    无本行守卫时 **`` 空串**；`"my tools/My App"` 在本机 pwsh 下真能执行
+      //    （PATHEXT 解析到 `My App.cmd`，rc=0），故不能用「带可执行扩展名即放行」代替。
+      //    ⚠️ 没有这三格时，把守卫整行删掉（= 回退本次修复）本组**仍全绿**（实测）。
+      '"Program Files/My Tool.exe" -rf ./x', '"build tools/my script.ps1"', '"my tools/My App"',
+      // ⚠️ 本轮新增（第四轮）：**`-` 开头的目录 + 含空格的 basename**。上一轮把守卫的适用
+      //    范围收窄到「trim 后以 `-` 开头」时漏了这一族 —— 它**确实**以 `-` 开头，于是
+      //    `/\s/.test(head)` 照样判真、label 变空，与 `"Program Files/My Tool.exe"` 是
+      //    **同一个缺陷**（HEAD 都给得出 `my tool`），只是目录名以 `-` 开头才漏网。
+      //    本机 pwsh 实测这一族**真实可执行**（rc=0）：`-x/rm.cmd`、`-x/My Tool.cmd`、
+      //    `.\-x\My Tool.cmd`、`-x y/rm`、`.\-x y\rm.cmd` 都真的跑起来了
+      //    （`"-x/My Tool.exe"` 形态由 PATHEXT 解析到 `-x\My Tool.cmd`）。
+      //    实测（大分类 allow + 八档全 deny，无用户例外）：该族 HEAD/PRE 由 `my tool` 变
+      //    `` 空串；大分类 ask + allow 例外 `my tool *` 时 HEAD allow(source=exception) →
+      //    PRE ask(source=category)；大分类 allow + deny 例外 `my tool *` 时 HEAD
+      //    deny(source=exception) → PRE **allow(source=category)**（fail-open，bash/pwsh 各一格）。
+      //    ⚠️ 最后一格 `"-x y/My App"`（目录段与 basename **都**含空格）是中间那版修法
+      //    （「第一个分隔符之前就有空白」）唯一漏掉的形态，实测它 HEAD=deny(exception) →
+      //    该版 **allow(category)**；现版判据（`/^-+\s/`）已覆盖。
+      //    ⚠️ 没有这两格时，把本轮的适用范围那一格删掉（= 回退本次修复）本组**仍全绿**（实测）。
+      '"-x/My Tool.exe"', '"-x/My App"', '"-x y/My App"']) {
+      const d = decomposeCommand(c, 'pwsh')
+      const seg = d.ok ? d.segments[0] : null
+      const lab = seg ? segmentLabel(seg.words) : ''
+      if (!lab) bad.push(['真命令名被守卫误伤（认不出）', c, JSON.stringify(seg && seg.words)])
+    }
+    // ⚠️ 本轮新增（第四轮）：上一条只判「label 非空」，而**端到端授权方向**才是承重面 ——
+    //    该族的危害是「用户为该命令写下的 deny 例外被静默绕过」。故必须把这一向也钉住：
+    //    大分类 allow + 八档全 deny + 例外 `my tool *`=deny 时，两门方言都必须是 deny
+    //    （PRE 实测 allow）。对照组取 `"Program Files/My Tool.exe" -rf ./x`（同族、目录名
+    //    不以 `-` 开头）—— 它三态同值，证明本格测的是目录名那一维、不是别的分叉。
+    //    ⚠️ 断言方向取「不得为 allow」而不是「=== deny」：动作落点由配置决定，测试不该把
+    //    某个具体档位钉成语义（与本文件既有风格一致）；`=== 'deny'` 会随档位默认值漂移。
+    {
+      const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', proc: 'deny', power: 'deny', priv: 'deny', reg: 'deny' }
+      // 例外模式**按命令的 basename 取**（`my tool *` / `my app *`）—— 写死单一模式会让
+      // 语料里另一条命令匹配不上，断言随之空转（实测：`"-x y/My App"` 配 `my tool *` 时
+      // 例外本就不该命中，那条断言测的不是本缺陷）。
+      for (const [c, pat] of [['"-x/My Tool.exe" -rf ./x', 'my tool *'],
+        ['"Program Files/My Tool.exe" -rf ./x', 'my tool *'],
+        // 目录段与 basename 都含空格：中间那版修法唯一漏掉的形态（见上）
+        ['"-x y/My App"', 'my app *'],
+        // ⚠️ 本轮新增（第六轮）：**2+ 连字符开头的真实目录 + 收栏 basename** 的端到端授权方向。
+        //    危害与上面 A 族同形（label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+        //    落大分类 ⇒ 用户显式写的 `rm *`=deny 被静默绕过），只是触发子族是 `--x` 族。
+        //    实测三态（大分类 allow + `rm *`=deny，bash/pwsh 各一格）：
+        //      HEAD=deny → PRE=**allow**（fail-open）→ 本轮修复后=deny。
+        //    上一条只判「label 非空」是**不够**的：端到端授权方向才是承重面（同 A 族注释）。
+        ['"--x/rm ---" -rf /data', 'rm *'],
+        // ⚠️ 本轮新增（第九轮）：**单连字符收栏**子族（`"--- x/rm -"`）的端到端授权方向。
+        //    与上一行 `"--x/rm ---"` 同族、同一条 fail-open 链，只差收栏的连字符数 ——
+        //    成因是**同一个条件的两半用了两把尺子**：①的收栏判据用 `trailingDashRunAt(s, 1)`
+        //    （min=1），而残名取自 `trailingDashRunAt(head, 2)`（min=2）；单连字符收栏时后者
+        //    返回 -1 ⇒ 残名恒为 `''` ⇒ 「残名不是破坏性命令名」那一格成为**重言式**（恒真、
+        //    等于没补）⇒ 整族被判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒
+        //    `destructive=false` ⇒ 落大分类 ⇒ 用户显式写的 `rm *`=deny 被静默绕过。
+        //    实测三态（大分类 allow + 八档全 deny + `rm *`=deny，bash/pwsh 各一格）：
+        //      HEAD=deny → PRE=**allow**（fail-open）→ 第九轮修复后=deny（label 由 `""` 回到 `rm -`）。
+        //    ⚠️ 该子族是**守卫第一版引入、第八轮未覆盖、相对 HEAD 的真回归**，且**已因缺语料
+        //    回归过一次**；label 侧的同一格见下面「单连字符收栏」那段说明。
+        ['"--- x/rm -" -rf /data', 'rm *'],
+        ['"--tools/Remove-Item ---" -Recurse -Force C:/Windows', 'remove-item *'],
+        // ⚠️ 本轮新增（第七轮）：**目录名本身就是「连字符串 + 空格」**那一族的端到端授权方向。
+        //    与上面 A 族同形（label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类
+        //    ⇒ 用户显式写的 deny 例外被静默绕过），只是触发子族是「`-` + 空格」作目录名。
+        //    实测三态（大分类 allow + `my app *`=deny，bash/pwsh 各一格）：
+        //      HEAD=deny → PRE=**allow**（fail-open）→ 本轮修复后=deny。
+        //    ⚠️ 与上行两格**路径分离**：那两格 `tailAt >= 0` 走 `fenced`，本格 `tailAt < 0`
+        //    只被适用范围①拦下（见上「真实命令名一个都不能被误伤」那组语料的说明）。
+        //    ⚠️ 没有本格时，把①的收栏那半格删掉本组**仍全绿**（实测变异 M3）。
+        ['& \'--- x/My App\' -rf ./x', 'my app *']]) {
+        const hExc = Object.assign(hooks({ category: 'allow', exceptions: [pat], excAction: 'deny' }),
+          { destructive: () => dsAllDeny })
+        for (const sh of ['bash', 'pwsh']) {
+          const a = assessCommand(c, sh, hExc).action
+          if (a === 'allow') bad.push(['deny 例外被空 label 静默绕过（fail-open）', c, sh, a])
+        }
+      }
+    }
+    // 反向：60j5 钉住的契约 —— `sudo A=/bin/rm` 的**档位**必须与 `sudo rm` 同值
+    //   ⚠️ 契约的对象是 **tiers**，不是 label：赋值词元不是命令头（命令头是 `sudo`），
+    //      故它**不得**按词元被拒。`segmentLabel(['sudo','A=/bin/rm'])` 本就是 `'sudo'`。
+    //   ⚠️ 而 `A=/bin/rm` **单独成段**时确实没有命令要执行 → 认不出是对的（这正是缺陷②）。
+    for (const [a, b] of [['sudo A=/bin/rm', 'sudo rm']]) {
+      for (const sh of ['bash', 'pwsh']) {
+        const ra = assessCommand(a, sh, hooks({ category: 'ask' }))
+        const rb = assessCommand(b, sh, hooks({ category: 'ask' }))
+        const ta = (ra.segments || []).flatMap((s) => s.tiers || []).join('+')
+        const tb = (rb.segments || []).flatMap((s) => s.tiers || []).join('+')
+        if (ta !== tb || ra.action !== rb.action) {
+          bad.push(['赋值词元后的真命令档位分叉（60j5 契约）', a, 'vs', b, sh, ra.action + '|' + ta, rb.action + '|' + tb])
+        }
+      }
+    }
+    // 反向：纯赋值段**必须**认不出（没有命令要执行）—— 与上面那条是同一判据的两侧
+    // ⚠️ **但「纯赋值」本身是方言相对的**（本批修法的核心）：只有**带 `$`** 的形态
+    //    在两门方言下都是赋值；**不带 `$`** 的 `A=/bin/rm` 只在 **bash** 下是赋值，
+    //    在 **pwsh** 下是**真命令** —— 本机 PS 5.1 实测
+    //    `[Parser]::ParseInput('A=/bin/rm')` → `PipelineAst`、**cmdAst=1**、assignAst=0，
+    //    且建好 `A=\bin\rm.cmd` 后 `& 'A=/bin/rm'` **RAN=True、rc=0**（无害替代目标）。
+    //    故旧断言「pwsh 下 `A=/bin/rm` 必须认不出」**建立在错误真值上**，已按方言订正：
+    //    pwsh 侧必须产出 `rm`，否则段级 `unparsable` ⇒ `destructive=false` ⇒
+    //    破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（fail-open）。
+    for (const [c, wantBash, wantPwsh] of [
+      ['A=/bin/rm', '', 'rm'],
+      // ⚠️ `$d=…` 是**带 `$` 前缀**的形态：bash 下 `$d` 先展开成空串 ⇒ 词成了 `=…`，
+      //    是一次**真命令**（Git Bash 实测 RAN，见上第 ② 组语料的说明）⇒ label 非空；
+      //    pwsh 下它才是真赋值 ⇒ label 空。旧期望（两门方言都空）建立在错误真值上。
+      ['$d=' + D, 'file-test', ''],
+    ]) {
+      for (const [sh, want] of [['bash', wantBash], ['pwsh', wantPwsh]]) {
+        const d = decomposeCommand(c, sh)
+        const lab = d.ok ? segmentLabel(d.segments[0].words) : ''
+        if (lab !== want) {
+          bad.push(['纯赋值段仍产出命令名 / 方言维度不符', sh, c, 'want=' + JSON.stringify(want), JSON.stringify(lab)])
+        }
+      }
+    }
+
+    // ── ②′ 前导 `-` 的原始词元不是命令名（选项），但 `./-foo` 这类**路径形态**要保住 ──
+    // `"--- encoding check ---"` 不含路径分隔符，故引号判据（要求含分隔符）拦不住它，
+    // 整串会成 label、弹窗给出永不命中的「允许此项」按钮。前导 `-` 是它的判别特征。
+    // ⚠️ 判据必须落在**原始词元**：`./-foo` 剥路径后是 `-foo`，那是合法可执行文件。
+    for (const c of ['"--- encoding check ---"', '"--- 编码/换行校验 ---"', '-rf', '--help', '-',
+      // ⚠️ **首尾带空白**的同族串（引号**内**的空白被词法器逐字保留，实测
+      //    `"  --- 编码/换行校验 ---"` → 词元 `  --- 编码/换行校验 ---`）。守卫适用范围
+      //    第一格是 `/^-+\s/.test(t.trim())`，不 trim 时前导空白让它失配、这一格 label
+      //    变 `换行校验 ---`（假候选复活）。
+      //    ⚠️ 没有这一格时，把 `.trim()` 去掉本组**仍全绿**（实测）。
+      '"  --- 编码/换行校验 ---"',
+      // ⚠️ 本轮新增：适用范围**第二格**（装饰性开栏 + 装饰性收栏）钉住的形态 ——
+      //    连字符串后面**不是空白**而是字母/汉字，空白落在 basename 里。
+      //    第一格 `/^-+\s/` 对它们整族失配（`---编码` 后面紧跟的是汉字，不是空白），
+      //    故此前整族漏回假候选：label 非空 ⇒ 弹窗产出永不命中的「允许此项」按钮。
+      //    ⚠️ 没有这几格时，把第二格整条删掉本组**仍全绿**（实测，本轮变异测试）。
+      '"---编码/换行校验 ---"', '"---encoding/my check ---"',
+      '"--note/my check ---"', '"-编码/换行校验 ---"']) {
+      const d = decomposeCommand(c, 'bash')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== '') bad.push(['前导 - 的词元仍产出命令名', c, JSON.stringify(lab)])
+    }
+    // ⚠️ 同上，但**方言是 pwsh**：用户真实命令里的 `` `n `` 变体正是此形态
+    //    （`"` + 反引号 n + `--- 编码/换行校验 ---` + 反引号 n + `"`，pwsh 实测词元为
+    //    `\n--- 编码/换行校验 ---\n` —— 前导换行让 `/^-/` 失配，故 `.trim()` 在这里承重；
+    //    bash 侧反引号是字面量、词元不含换行，同一格不承重，故必须单独按 pwsh 钉）。
+    //    ⚠️ 这里**只放含路径分隔符**的形态：`"  --- encoding check ---"` 不含分隔符，
+    //    根本走不到本守卫（第一格 `/[\\/]/` 就早退），它的 label 由 `segmentLabelFrom`
+    //    那条**不 trim** 的前导 `-` 守卫决定 —— 那是既有的另一处口径，与本轮修法无关，
+    //    不要在这里钉它（实测该格在 HEAD / PRE / NOW 三态同值）。
+    //    ⚠️ 第二条（`---编码…`，连字符串后**不跟空白**）钉的是适用范围**第二格**：
+    //    它在 HEAD 本为空、在本次修法**之前**变 `换行校验 ---`（本轮缺陷），故它同时是
+    //    「第二格没被回退」与「没有把 PRE 拦下的假候选放回来」两件事的承重语料。
+    for (const c of ['"' + String.fromCharCode(96) + 'n--- 编码/换行校验 ---'
+      + String.fromCharCode(96) + 'n"',
+    '"' + String.fromCharCode(96) + 'n---编码/换行校验 ---' + String.fromCharCode(96) + 'n"']) {
+      const d = decomposeCommand(c, 'pwsh')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== '') bad.push(['前导 - 的词元仍产出命令名（pwsh）', c, JSON.stringify(lab)])
+    }
+    for (const [c, want] of [['./-foo', '-foo'], ['X:/-foo', '-foo'], ['/usr/bin/-foo', '-foo'],
+      // ⚠️ 本轮新增：`-` 开头**且含路径分隔符**的是**真实可执行的相对路径命令**（目录名以 `-`
+      //    开头），不是选项。只按「以 `-` 开头」判会让它们 label 变空 ⇒ 段级 `unparsable`
+      //    ⇒ `segmentLabelsCore` 的 labels 为空 ⇒ `destructive=false` ⇒ 破坏性子设置与全部
+      //    例外匹配双双跳过 ⇒ 落大分类。实测（无害替代目标，临时目录内）：
+      //      pwsh：`-x/Remove-Item -Recurse -Force C:/Windows` 真的执行了 `-x\Remove-Item.cmd`
+      //      bash：`"a b/reg" delete HKLM/X /f` 真的执行了 `a b/reg`（rc=0）
+      //    这两格钉的是**根因**（label 提取），而危害链的端到端形态由既有 54 系列覆盖。
+      //    没有它们时：把判据放宽回「只判 `-` 开头」会让本组**全绿**（实测 44 格 deny→allow）。
+      ['-x/rm -rf /etc', 'rm'], ['-rf/rm -rf /', 'rm'],
+      // ⚠️ 本轮新增：`"-x/rm ---"` —— 本轮适用范围第二格的**反例**（承重）。
+      //    它的 basename 同样以连字符串收尾，故只按「收栏」判会把它误当引号串；
+      //    而它剥路径后是**真实可执行文件**：实测（无害替代目标，本机 pwsh、临时目录内）
+      //    `-x/rm ---.cmd` 真的跑起来了（rc=0，PATHEXT 解析），即它与上面 A 族同族。
+      //    ⚠️ 没有这一格时，把开栏条件去掉本组**仍全绿**（实测，本轮变异测试），
+      //    而危害是 fail-open：label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+      //    落大分类，用户显式写的 `rm *`=deny 例外随之失明（大分类 allow + `rm *`=deny 时
+      //    HEAD/PRE 均为 deny → 去掉开栏条件变 **allow**）。
+      //    同族再补两格开栏是「真实目录名」的形态（`-` 与 `--` 作目录名）：
+      ['"-x/rm ---"', 'rm ---'], ['"-/rm ---"', 'rm ---'], ['"--/rm ---"', 'rm ---'],
+      // ⚠️ 本轮新增（第六轮）：**2+ 连字符开头的真实目录 + 收栏 basename**。
+      //    上一版适用范围第二格写作 `dash > 1 || !/[A-Za-z0-9]/.test(next)` —— `dash > 1`
+      //    时整格**恒真**，把「连字符串后是不是字母/数字」这条判据整体短路掉，于是
+      //    `--x`、`--tools`、`--bin`、`--9`、`--x y` 这些**真实目录**开头的词元整族被
+      //    判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类
+      //    ⇒ 用户显式写的 `rm *`=deny 例外失明（fail-open）。三态实测（无害替代目标，
+      //    大分类 allow + `rm *`=deny，bash/pwsh 各一格）：HEAD=deny → PRE=**allow** →
+      //    本轮修复后=deny（label 由 `""` 回到 `rm ---`）。
+      //    真实可执行性实测（本机 pwsh、TEMP 内、PATHEXT 解析，rc=0）：
+      //      `& "--x/rm ---"`、`& "--x y/rm ---"`、`& "--x/tool ---"` 都真的跑起来了
+      //      （解析到 `--x\rm ---.cmd` 等），故这一族与 `"-x/rm ---"` 同族、是**真命令**。
+      //    ⚠️ 没有这五格时，本轮修法**整条回退**（恢复 `dash > 1 ||` 短路）本组**仍全绿**
+      //    （实测变异 R1：shell-parse / regressions 双双 ALL PASS）—— 上面那三格反例
+      //    对本轮新口子**零覆盖**（把 `dash > 1` 改成 `dash > 5` 时它们也全绿）。故这五格
+      //    是**必需**语料，不是「为钉而钉」。
+      //    ⚠️ `--x/reg delete ---` 单独承重：它剥掉收栏后是**两词命令名** `reg delete`，
+      //    而「残名是单个可打印 ASCII 词」那半格判不出它（含空白）—— 少了
+      //    `DESTRUCTIVE_LABELS` 那半格，这一格 label 会变空（实测：只留词形判据时
+      //    `--x/reg delete ---` label=`""`，而 HEAD=`reg delete ---`）。
+      ['"--x/rm ---"', 'rm ---'], ['"--tools/Remove-Item ---"', 'remove-item ---'],
+      ['"--bin/del ---"', 'del ---'], ['"--x y/rm ---"', 'rm ---'], ['"--9/rm ---"', 'rm ---'],
+      ['"--x/reg delete ---"', 'reg delete ---'],
+      // ⚠️ 非破坏性的真实命令，承重的是「残名判据取**词形**」那一半：
+      //    只留 `DESTRUCTIVE_LABELS` 那半格时这一格 label 变空（实测：残名判据退化成
+      //    只查名单时，本族 96 格由非空变空，`--x/tool ---`、`--x/git ---`、`--x/node ---`
+      //    全在内）。而它是**真命令**：实测（TEMP 内、PATHEXT 解析）`& "--x/tool ---"`
+      //    rc=0，解析到 `--x\tool ---.cmd`。危害同族：用户写的 `tool --- *`=deny 例外失明。
+      //    没有这一格时，把残名判据简化成「只查 `DESTRUCTIVE_LABELS`」本组**仍全绿**（实测 R4）。
+      ['"--x/tool ---"', 'tool ---'],
+      // ⚠️ 承重的是「**真实目录名开栏**」那一半（`dash === 1 && 字母/数字`）：
+      //    `-x/my tool ---` 的残名是**含空白的非破坏性命令名** `my tool`，过不了「单个词」
+      //    那格、也不在名单里 —— 少了开栏那半格它会被判成引号串（实测：`plainDirLead`
+      //    恒假时本族 70 格由非空变空）。而它是**真命令**：`-x/my tool ---` 与既有语料
+      //    `"-x/My Tool.exe"`（label `my tool`）同族，只是尾巴多几个连字符。
+      //    没有这一格时，删掉开栏那半格本组**仍全绿**（实测 R3）。
+      ['"-x/my tool ---"', 'my tool ---'],
+      // ⚠️ 本轮新增（第七轮）：**目录名本身就是「连字符串 + 空格」**的真实命令。
+      //    它们 `tailAt < 0`（basename 不以连字符串收尾）、`fenced === false`，
+      //    **只**被适用范围①拦下 —— 而①此前只要求「连字符串 + 空白开头」，比②**宽半格**，
+      //    于是整族被判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false`
+      //    ⇒ 落大分类。危害**双向**（本机 pwsh，`& '--- x/My App'` 等经 PATHEXT 解析 rc=0）：
+      //      大分类 allow + `my app *`=deny  → HEAD **deny** → ①未加收栏时 **allow**（fail-open）
+      //      大分类 ask  + `my app *`=allow → HEAD **allow** → ①未加收栏时 **ask**（例外失明）
+      //    ⚠️ 本族与 `--x/my tool ---`（上行那族）**路径分离**：那族 `tailAt >= 0`，走
+      //    `fenced` / `bareIsCommand`，不在本轮修法范围内。
+      //    ⚠️ 没有这六格时，把①的收栏那半格删掉（= 回退本轮修法）本组**仍全绿**（实测变异 M3）。
+      ['"--- x/My App"', 'my app'], ['"- x/My App"', 'my app'], ['"-- x/My App"', 'my app'],
+      ['"---- x/My App"', 'my app'], ['"--- x/My Tool.exe"', 'my tool'],
+      ['"--- tools/My App"', 'my app'],
+      // ⚠️ 本轮新增（第九轮）：**单连字符收栏**子族（basename 以**单个**连字符收尾、剥掉后
+      //    残名 ∈ `DESTRUCTIVE_LABELS`）。它与上行 `"--- x/My App"` 是**同一个适用范围①**、
+      //    同一条 fail-open 链（label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+      //    落大分类 ⇒ 用户写的 deny 例外失明），只差收栏的连字符数。成因是**同一个条件的
+      //    两半用了两把尺子**：①的收栏判据用 `trailingDashRunAt(s, 1)`（min=1），而残名取自
+      //    `trailingDashRunAt(head, 2)`（min=2）；单连字符收栏时后者返回 -1 ⇒ 残名恒为 `''`
+      //    ⇒ 「残名不是破坏性命令名」那一格在该子族是**重言式**（恒真、等于没补）。
+      //    实测三态（bash/pwsh 同值）：HEAD=`rm -` → PRE=**`""`** → 第九轮修复后=`rm -`。
+      //    ⚠️ 本格与上行那六格**路径分离**：本格 `tailAt < 0`（basename 不以 **2+** 连字符
+      //    收尾），只被①拦下，不走 `fenced` / `bareIsCommand`。端到端授权方向由 AJ 组
+      //    `["--- x/rm -" -rf /data, 'rm *']` 单独钉（两处合起来才覆盖「label 恢复」+「例外生效」）。
+      ['"--- x/rm -"', 'rm -']]) {
+      // ── ⚠️ 未覆盖的残余范围是**两类**（不要读成「只限非 ASCII 残名」—— 含空格的**纯 ASCII**
+      //    残名同样中招；本条**不加断言**，只如实记录边界，见下）──────────────────────────────
+      //    剥掉收栏后的**残名**含空白**或**含非 ASCII，都过不了「是命令名」那一格，于是被判成
+      //    装饰性收栏 ⇒ label 变空（上面这组语料只覆盖「残名是命令名」那一侧，两类残余都**没有**
+      //    语料守护）：
+      //      · 残名**含空白**（纯 ASCII）：`"--x/my tool ---"`、`"--x/a b ---"`、`"--x/My Tool ---"`
+      //      · 残名**含非 ASCII**：`"--x/换行校验 ---"`、`"--x/工具 ---"`
+      //    两类都是**真实可执行文件**（与上面 `"--x/rm ---"` 同族，TEMP 内 PATHEXT 解析实测 rc=0），
+      //    危害同族：label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类，用户为该
+      //    命令写的 deny 例外随之失明。实测（最坏配置：大分类 allow + 八档全 allow + 该命令
+      //    deny 例外）：上面五个形态 × bash/pwsh 两门方言共 10 格，**全部** HEAD=deny →
+      //    NOW=allow（真 fail-open）。
+      //    ⚠️ 含空格的**纯 ASCII** 残名比非 ASCII 名**常见得多**（`"--x/my tool ---"` 与上面刚修好的
+      //    `"-x/my tool ---"` 只差一个连字符），故不要把残余读窄成「只限非 ASCII 名」。
+      //    ⚠️ 该残余**不是第六轮引入**：第五轮（`dash > 1` 短路那版）下残余族同样为空，第六轮
+      //    既未引入也未修复；但**相对 HEAD 属本次未提交改动引入**（HEAD 该格非空，
+      //    `"--x/my tool ---"` HEAD=`my tool ---`）。
+      //    ⚠️ **无任何词法判据能分开两族**：残余族与守卫要防的装饰串族在词元粒度上**逐字同形** ——
+      //    `dash` 数、`next` 字符、残名含空白三维全同（`"--x/my tool ---"` 真命令
+      //    vs `"--x/my check ---"` 装饰串，判据读到的每一维取值都相同）。六轮所加的每一格判据都在
+      //    这个**不含区分信息**的空间里搬动分界线 —— 故这里判定为「**不值得继续修补**」，
+      //    **不是「待修」、不是 TODO**，也**不要为它补断言**（补了只能钉住「两族同判」这个已知事实）。
+      //    触发面**四重叠加**：`--` 开头目录 + 含空格或非 ASCII 名 + basename 以 `---` 收尾
+      //    + 用户为该命令写了 deny 例外。
+      const d = decomposeCommand(c, 'bash')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== want) bad.push(['路径形态的 - 开头命令名被误伤', c, 'want=' + JSON.stringify(want), 'got=' + JSON.stringify(lab)])
+    }
+
+    // ── ③ 洞① 的**危害**（fail-open）必须钉住：ok:false 路径只认 deny 例外 ──────
+    // 用户配置是「command 默认 allow + 若干 ask/deny 例外」，故整行 ok:false 会让
+    // **全部 allow/ask 例外集体失明**。实测（例外 `Remove-Item *` = ask）：
+    //     带 1 个反引号 → 旧实现 **allow**（静默绕过确认），新实现 ask
+    {
+      const mkHooks = (excAction) => ({
+        home: HOME, userHome: HOME, platform: 'win32',
+        matchException: (segText) => (String(segText).indexOf('Remove-Item') !== -1
+          ? { action: excAction, ruleId: 'e1' } : null),
+        destructive: () => ({ action: 'ask', reason: null }),
+        category: () => ({ action: 'allow', reason: null }),
+        isOutsideWorkspace: () => false,
+      })
+      const withBt = 'Remove-Item -Recurse -Force C:/Windows ' + BT + 'n'
+      const plain = 'Remove-Item -Recurse -Force C:/Windows'
+      const rw = assessCommand(withBt, 'pwsh', mkHooks('ask'))
+      const rp = assessCommand(plain, 'pwsh', mkHooks('ask'))
+      if (rw.action !== 'ask') bad.push(['带反引号时 ask 例外仍失明（fail-open 未修）', withBt, rw.action])
+      if (rw.action !== rp.action) bad.push(['带/不带反引号的判定分叉', 'with=' + rw.action, 'plain=' + rp.action])
+    }
+
+    // ── ④ 转义表逐格核对：`PWSH_ESCAPES` 的 9 个映射值必须与官方转义表一致 ─────────
+    // 为什么必须逐格钉：这张表是本轮**新增**的，而它的值是「官方解析器实测」得来的
+    // （见 `shell-parse.js` 里 `PWSH_ESCAPES` 的注释）。没有断言时，表里任何一个值写错
+    // （例如把 `` `t `` 写成空格、`` `0 `` 写成字符 `0`）都不会有任何测试变红 ——
+    // 实测：把**双引号内**那条 pwsh 转义分支删掉（反引号退化成字面字符），
+    // 全部既有断言**存活**，只有本格能发现（`"a`nb"` 的值应是 `a<LF>b` 而不是 `a`nb`）。
+    // 两个上下文都要核：引号内（`inQuote=true`）与裸词元（`inQuote=false`）走的是
+    // 同一条 `readPwshEscape`，但调用分支不同，值都该一致。
+    //
+    // ⚠️ `` `e `` 这一格是**版本相关**的，本机宿主（PS 5.1，实测 5.1.19041.5965）真值是
+    //    **字面 `e`**：`$ExecutionContext.InvokeCommand.ExpandString('"a`eb"')` → `aeb`
+    //    （ESC 0x1B 是 PowerShell 6.0 才加入的）。此处曾把期望值抄成 `'\x1b'`，
+    //    与 5.1 真值不符 —— 那是**测试抄错**，不是实现错，故修正的是期望值本身。
+    //    错值若留着，`shell-parse.js` 把该格改对反而会假红。
+    {
+      const WANT = { n: '\n', r: '\r', t: '\t', 0: '\0', a: '\x07', b: '\b', e: 'e', f: '\f', v: '\v' }
+      for (const [k, v] of Object.entries(WANT)) {
+        for (const [label, src, idx] of [
+          ['双引号内', 'Write-Output "a' + BT + k + 'b"', 1],
+          ['裸词元', 'echo a' + BT + k + 'b', 1],
+        ]) {
+          const d = decomposeCommand(src, 'pwsh')
+          const got = d.ok ? d.segments[0].words[idx] : null
+          if (got !== 'a' + v + 'b') {
+            bad.push(['转义表值不符（' + label + '）', BT + k, 'want=' + JSON.stringify('a' + v + 'b'), 'got=' + JSON.stringify(got)])
+          }
+        }
+      }
+      // 未知转义 = 丢掉反引号留下字符本身；`` `` `` = 字面反引号（与 bash 的 `\z` → `\z` 不同构）
+      for (const [src, want] of [
+        ['Write-Output "a' + BT + 'zb"', 'azb'],
+        ['Write-Output "a' + BT + BT + 'b"', 'a`b'],
+      ]) {
+        const d = decomposeCommand(src, 'pwsh')
+        const got = d.ok ? d.segments[0].words[1] : null
+        if (got !== want) bad.push(['未知/字面转义值不符', src, 'want=' + JSON.stringify(want), 'got=' + JSON.stringify(got)])
+      }
+    }
+
+    // ── ⑤ 缺陷 A：`` ` `` + **CRLF** 在**未完结词元内**要切开（本轮修复）──────────────
+    // PS 真值（官方解析器 token 表 + `PipelineAst` 语句数，逐格实测）：
+    //   `Write-Output abc` + `` ` `` + **LF**   → **一个** `Generic[abc`<LF>def]`、`stmts=1`（粘住）
+    //   `Write-Output abc` + `` ` `` + **CRLF** → `Generic[abc`<CR>]` + `NewLine[<LF>]` + `…`、`stmts=2`（切开）
+    //   `Write-Output abc` + `` ` `` + **CR**   → **一个** `Generic[abc`<CR>def]`、`stmts=1`（粘住）
+    // 即 `` ` ``+`\r\n` **不是**整体续行：PS 只把 `` ` ``+`\r` 当转义（字面 CR），`\n` **仍是**换行符。
+    // 真实执行实测（`powershell -Command`，无害标记）：CRLF 形态下第二行**真的执行**。
+    // ⚠️ 缺这一格时 CRLF 下两行粘成一个词元，第二行的破坏性命令不再单独判档 ——
+    //   端到端实测（大分类 allow + 用户显式 deny 例外 `remove-item *`）由 `deny` 变 **`allow`**。
+    // ⚠️ 变异实测：把 CR 支的 `open` 判定删掉（= 回退本轮修法）本组 4 格全红。
+    {
+      const CRLF = '\r\n'
+      for (const pre of ['Remove-Item -Recurse -Force C:/Windows', 'Remove-Item -Force $TARGET',
+        'Remove-Item -Force a.b', 'Remove-Item -Force abc]']) {
+        const d = decomposeCommand(pre + BT + CRLF + 'RemoveXyz', 'pwsh')
+        if (!d.ok || d.segments.length !== 2) {
+          bad.push(['CRLF 下未完结词元内的反引号未切语句', pre, JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // 反向：**词元边界**处（反引号前是空白 / 行首）`` ` ``+CRLF 仍是**整体**续行，不得切开
+      for (const c of ['Get-ChildItem ' + BT + CRLF + '-LiteralPath .', BT + CRLF + 'Get-ChildItem']) {
+        const d = decomposeCommand(c, 'pwsh')
+        if (!d.ok || d.segments.length !== 1) {
+          bad.push(['词元边界处的 CRLF 续行被误切', c, JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // 反向：LF / CR 的既有行为**不得**被本次修法改动（PS 真值同为「粘住」）
+      for (const nl of ['\n', '\r']) {
+        const d = decomposeCommand('Remove-Item -Recurse -Force C:/Windows' + BT + nl + 'RemoveXyz', 'pwsh')
+        if (!d.ok || d.segments.length !== 1) {
+          bad.push(['LF/CR 下的粘住行为被改动', JSON.stringify(nl), JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+      // 反向：词元尾部挂着**转义空白**时（`` $x.Name` `` 的 `value` 是空格 ⇒ `wordText` 以空白收尾）
+      //   那个词元**已经完结**，`` ` ``+CRLF 仍是**整体**续行、不得切开。
+      //   真实执行实测（无害标记）：`cmd /c ver $x.Name` + `` ` `` + ` ` + `` ` `` + CRLF + `Write-Output MARKER`
+      //   的第二行**不执行**（与真续行同结论）。
+      //   ⚠️ 这一格是**本轮修法自己**最容易踩的坑：`open` 判据若只看「`wordText` 非空」，
+      //   这族会被当成「词元还在写」而多切一刀 —— 实测变异（把 `closedLoose` 删掉）会
+      //   新引入 18 格反向误差（穷尽对拍 11520 格，见回报）。故这是**必需**语料。
+      for (const pre of ['cmd /c ver $x.Name', 'cmd /c ver -Confirm:', 'cmd /c ver "abc"']) {
+        const d = decomposeCommand(pre + BT + ' ' + BT + CRLF + 'RemoveXyz', 'pwsh')
+        if (!d.ok || d.segments.length !== 1) {
+          bad.push(['词元尾部的转义空白被误判为未完结', pre, JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+        }
+      }
+    }
+
+    // ── ⑥ 缺陷 B：Parameter 词元内的反引号是**字面字符**，不得吞掉后面的运算符（本轮修复）──
+    // PS 真值（官方解析器 + `CommandParameterAst.Argument.Value`，逐格实测）：
+    //   `cmd /c ver -x` + `` ` `` + `;` + `` ` `` + LF + `RemoveXyz`
+    //     → `Parameter[-x`]` + **`Semi[;]`** + `LineContinuation` + `Identifier[RemoveXyz]`、`stmts=2`
+    //   —— 反引号是**字面**字符（并进参数名），而 `;` **仍是真语句分隔符**（`|` / `,` 同理）。
+    // 表内字符在 Parameter 词元内**同样不转义**：`Write-Output -xz` + `` ` `` + `n` + `zd`
+    // 的参数名是 `-xz`nzd`（反引号与 `n` 都原样保留），而普通词元同形态求值成 `abcz<LF>zd`。
+    // 真实执行实测（无害标记）：`` `; `` / `` `| `` / `` `n `` 三种形态下第二行**真的执行**。
+    // ⚠️ 缺这一格时 `;` 被吞进词元，第二行的破坏性命令与第一行同判 ——
+    //   端到端实测（大分类 allow + 用户显式 deny 例外 `remove-item *`）由 `deny` 变 **`allow`**。
+    // ⚠️ 变异实测：把 Parameter 支删掉 / 改回「两个字符都吃」/ 去掉参数名延续判定，本组分别红 4 / 2 / 1 格。
+    for (const c of [';', '|', 'n', '<']) {
+      const d = decomposeCommand('cmd /c ver -x' + BT + c + BT + '\n' + 'RemoveXyz', 'pwsh')
+      if (!d.ok || d.segments.length !== 2) {
+        bad.push(['Parameter 词元内的反引号吞掉了运算符', BT + c, JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
+      }
+    }
+    // 反向：Parameter 词元内的反引号**只吃自己**，后面那个字符按正常语义处理 ——
+    //   `;` 必须真的切段（上面已钉）；`-x` + `` ` `` + `;` 的**第一段词元**里不得含 `;`
+    {
+      const d = decomposeCommand('cmd /c ver -x' + BT + ';' + BT + '\n' + 'RemoveXyz', 'pwsh')
+      const w = d.ok ? d.segments[0].words : null
+      if (!w || w[w.length - 1].includes(';')) {
+        bad.push(['Parameter 词元内的反引号未按字面保留', JSON.stringify(w)])
+      }
+    }
+    // 反向：**普通词元**里的反引号仍是转义 —— `` z`; `` 求值成 `z;`（反引号消失、`;` 进词元），
+    //   故随后那个 `\n` **是真换行符** ⇒ 两段（PS 实测 `Generic[z`;]` + `NewLine` + `Identifier`、`stmts=2`）。
+    //   这一格与 Parameter 族**同结论但不同机制**：把 Parameter 支的判据误扩到普通词元
+    //   （= 把反引号当字面）会让 `;` 变成运算符、词元只剩 `zz` —— 词元级就分叉了。
+    {
+      const d = decomposeCommand('cmd /c ver zz' + BT + ';' + '\n' + 'RemoveXyz', 'pwsh')
+      const w = d.ok ? d.segments[0].words : null
+      if (!w || w[w.length - 1] !== 'zz;') {
+        bad.push(['普通词元内的反引号转义被误当字面', JSON.stringify(w)])
+      }
+    }
+    // ── ①″ Parameter 词元 + **行尾**反引号：不得把字面量 `undefined` 写进词元 ──────────
+    // 官方解析器实测：`Remove-Item -Recurse` + `` ` `` → `Generic[Remove-Item]`
+    // `Parameter[-Recurse`]`，`stmts=1` —— 反引号是**字面字符**，末词元就是 `` -Recurse` ``。
+    //
+    // ⚠️ 这里曾有一个由上一批修复自身引入的缺陷：`readPwshEscape` 的 `'segment'` 支条件是
+    //    `level === 'segment' && next !== '\n' && next !== '\r'`，**没有排除 `next === undefined`**
+    //    （行尾），于是求值的是 `PWSH_PARAMETER_TOKEN.test(word + undefined)` ——
+    //    **字符串拼接**把字面量 `undefined` 连同反引号一起写进 `wordText` 与 `segText`：
+    //      `Remove-Item -Recurse` + `` ` `` → 词元 `` -Recurse`undefined ``（PS 真值是 `` -Recurse` ``）
+    //    实测 34 格中 **32 格**末词元与真值不符。
+    //    后果是**用户显式写的精确 deny 例外失配**（例外 = 该命令原文时由 `deny` 变 `allow`），
+    //    且面板候选值（用 `seg.text`）落盘为含 `undefined` 的模式，
+    //    `matchCommand(真实原文, 污染串)` = **false** ⇒ 该例外**永不命中真实命令**（死规则）。
+    //
+    // ⚠️ 没有本组时该缺陷**静默通过**（实测变异 M1：全库三套测试全绿）—— 故这是**必需**语料。
+    //    钉**末词元与 PS 真值逐字相同**（而不是「不含 `undefined`」）：后者会被
+    //    「把行尾反引号整个丢掉」这类错法骗过，而 PS 真值里那个反引号**是在**的。
+    for (const [c, want] of [
+      ['Remove-Item -Recurse' + BT, '-Recurse' + BT],
+      ['rm -rf -Force' + BT, '-Force' + BT],
+      ['cmd /c ver -x' + BT, '-x' + BT],
+      ['Get-ChildItem -Recurse' + BT, '-Recurse' + BT],
+      ['Remove-Item C:/Windows -Recurse -Force' + BT, '-Force' + BT],
+      ['Remove-Item -ErrorAction:' + BT, '-ErrorAction:' + BT],
+      ['Write-Output abc' + BT, 'abc' + BT],
+    ]) {
+      const d = decomposeCommand(c, 'pwsh')
+      const w = d.ok ? d.segments[d.segments.length - 1].words : null
+      const got = w && w.length ? w[w.length - 1] : null
+      if (got !== want) {
+        bad.push(['Parameter 词元 + 行尾反引号：末词元与 PS 真值不符', c, 'want=' + JSON.stringify(want), 'got=' + JSON.stringify(got)])
+      }
+    }
+    // 端到端：例外 = **命令原文**时不得被污染串绕成 allow（判据取「不得为 allow」，与上文同风格）
+    {
+      for (const c of ['Remove-Item -Recurse' + BT, 'rm -rf /tmp/pgx -Force' + BT,
+        'Get-ChildItem -Recurse' + BT, 'cmd /c ver -x' + BT]) {
+        const hExcExact = hooks({ category: 'allow', destructive: 'deny', exceptions: [c], excAction: 'deny' })
+        const a = assessCommand(c, 'pwsh', hExcExact).action
+        if (a === 'allow') bad.push(['行尾反引号污染致精确 deny 例外失配（fail-open）', JSON.stringify(c), a])
+      }
+    }
+
+    // 端到端：两处缺陷都不得让用户显式配的 deny 例外失明
+    {
+      const excDeny = Object.assign({}, hooks({ category: 'allow' }),
+        { exceptions: ['remove-item *'], excAction: 'deny' })
+      const wideDeny = Object.assign({}, hooks({ category: 'allow' }), { destructive: () => ({ wide: 'deny' }) })
+      for (const [cn, h] of [['例外 remove-item * = deny', excDeny], ['wide=deny', wideDeny]]) {
+        for (const c of ['Remove-Item -Recurse -Force C:/Windows' + BT + '\r\n' + 'Remove-Item -Recurse -Force C:/Windows',
+          'cmd /c ver -x' + BT + ';' + BT + '\n' + 'Remove-Item -Recurse -Force C:/Windows',
+          'cmd /c ver -x' + BT + '|' + BT + '\n' + 'Remove-Item -Recurse -Force C:/Windows']) {
+          const a = assessCommand(c, 'pwsh', h).action
+          if (a === 'allow') bad.push(['CRLF / Parameter 反引号致 deny 被静默绕过（fail-open）', cn, JSON.stringify(c), a])
+        }
+      }
+    }
+
+    ok('★★ AJ 用户实测两缺陷：反引号方言矩阵（含奇偶指纹）+ 假候选 label（含 0 误伤反向核查）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AJ2. pwsh `$NAME=` 赋值守卫的右半判据 + `rawCommandNames` 的方言维度（本轮两处缺陷的钉桩）')
+{
+  // 本组钉的是**同一条失效链**的两处入口（均由独立验证发现，PRE 引入）：
+  //   label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置与**全部例外匹配**
+  //   双双跳过 ⇒ 落大分类（**fail-open**）。
+  //
+  // ⚠️ 为什么必须有本组（变异测试实测，6 个变异**全部**在既有断言下保持全绿）：
+  //   M1 守卫回退成「只认左半」、M6 右半判据放宽成「一律判赋值」、
+  //   M2/M3/M4/M5 `rawCommandNames` 四处方言透传各自回退 —— 既有的
+  //   `['A=/bin/rm', '', 'rm']`（**不带 `$`**）与 `['$d=' + D, '', '']`（**引号串**）
+  //   两格都覆盖不到**带 `$` 且右侧是裸词/路径**这一半，故整个修复面此前无守护。
+  //
+  // 真值来源：本机 PS 5.1 官方解析器 `[Parser]::ParseInput` + **实执行**（无害替代目标，
+  //   临时目录内建 `A=\bin\rm.cmd`，绝不碰真实 rm），逐条跑过：
+  //     `$A=/bin/rm` / `$A=./rm` / `$A=C:\Windows\System32\rm.exe` / `$A=/bin/dd`
+  //       → `PipelineAst`、**cmdAst=1**、命令名就是那个路径 → `& '<原文>'` **RAN=True**
+  //     `$A=1` / `$A=$OTHER` / `$A=(1)` / `$A=@(1,2)` / `$A=[int]1` / `$A=.5` / `$A=-1`
+  //       → `CommandExpressionAst`、**cmdAst=0**（真赋值，无命令）
+  //     `$A='X:/ws/x'` → cmdAst=0（**引号**是关键：裸写 `$A=X:/ws/x` 是 cmdAst=1 的真命令）
+  {
+    const bad = []
+    // ① 靶形态：pwsh 侧必须**认出命令名**，且端到端不得 allow。
+    //    判据取「不得为 allow」而非「=== deny」：动作落点由配置决定（与本文件既有风格一致）。
+    //    档位取八档全 deny + 大分类 allow —— 这正是失效链暴露的那一格。
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', proc: 'deny', power: 'deny', priv: 'deny', reg: 'deny' }
+    const hDeny = () => Object.assign({}, hooks({ category: 'allow' }), { destructive: () => dsAllDeny })
+    // 例外方向同样承重：用户显式写的 `rm *`=deny 曾被整段跳过（实测 HEAD=deny → PRE=allow）
+    const hExcDeny = () => Object.assign({}, hooks({ category: 'allow' }),
+      { destructive: () => dsAllDeny, exceptions: ['rm *', 'dd *'], excAction: 'deny' })
+    for (const [c, want] of [
+      ['$A=/bin/rm', 'rm'], ['$A=/usr/bin/rm', 'rm'], ['$A=./rm', 'rm'],
+      ['$A=C:\\Windows\\System32\\rm.exe', 'rm'], ['$A=/bin/rm.exe', 'rm'],
+      ['$A=/bin/dd', 'dd'],
+    ]) {
+      const d = decomposeCommand(c, 'pwsh')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== want) bad.push(['pwsh `$NAME=<命令>` 的 label 必须认出（缺陷 1 未修）', c, 'want=' + want, JSON.stringify(lab)])
+      for (const [cn, h] of [['八档全 deny', hDeny()], ['例外 deny', hExcDeny()]]) {
+        const a = assessCommand(c, 'pwsh', h).action
+        if (a === 'allow') bad.push(['pwsh `$NAME=<命令>` 落大分类（fail-open）', cn, c, a])
+      }
+    }
+    // ② 反向：真赋值形态**仍须**判「没有命令要执行」（label 空）—— 防止修过头
+    //    （把守卫整行删掉是最省事的错修，会让这些形态重新产出假候选按钮）。
+    for (const c of ["$A='X:/ws/x'", '$A="X:/ws/x"', '$A=1', '$A=$OTHER', '$A=(1)', '$A=(Get-Item x)',
+      '$A=@(1,2)', '$A=@{a=1}', '$A=[int]1', '$A=.5', '$A=-1', '$A=1..5', '$A=${env:TEMP}', '$A=$null', '$A=']) {
+      const d = decomposeCommand(c, 'pwsh')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== '') bad.push(['真赋值形态被误判成命令（修过头）', c, JSON.stringify(lab)])
+    }
+    // ③ bash 侧零回退：`A=/bin/rm` 在 bash 里**确实是赋值**（不执行命令），label 必须仍为空。
+    //    ⚠️ 这一格与 ① 是**同一判据的两侧**：少了它，把守卫改成「两门方言都不拦」也能全绿。
+    //    ⚠️ 语料里**不得**再放 `$d=/bin/rm`（本处此前建立在错误真值上）：带 `$` 前缀的形态
+    //    在 bash 下 `$d` 先展开成空串、词成了 `=/bin/rm`，是一次**真命令**（Git Bash 5.3.15
+    //    实测 RAN[=/bin/rm]），label 应为 `rm` —— 它属下面 ④ 的靶形态族，不是赋值语料。
+    for (const c of ['A=/bin/rm', 'my=dir/rm']) {
+      const d = decomposeCommand(c, 'bash')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== '') bad.push(['bash 侧赋值守卫回退', c, JSON.stringify(lab)])
+    }
+    // ③′ 同一格的**订正真值**：`$d=/bin/rm` 此前被放在 ③ 的赋值语料里（**错误真值** ——
+    //     那是把 pwsh 侧的语义套到了 bash 上）。带 `$` 前缀的形态在 bash 下 `$d` 先展开成
+    //     空串、词成了 `=/bin/rm`，是一次**真命令**（Git Bash 5.3.15 实测 RAN[=/bin/rm]，
+    //     整行写进文件再 source，RAN 证据写进独立日志），label 应为 `rm`。
+    //     这一格与 shell-parse.js 的缺陷 3 同源：判据对象必须是 `LEAD_ASSIGN`（不认 `$` 前缀）。
+    for (const [c, want] of [['$d=/bin/rm', 'rm']]) {
+      const d = decomposeCommand(c, 'bash')
+      const lab = d.ok ? segmentLabel(d.segments[0].words) : null
+      if (lab !== want) bad.push(['bash 侧 `$NAME=` 被误判成赋值（缺陷 3）', c, 'want=' + want, JSON.stringify(lab)])
+    }
+    // ④ 缺陷 2：pwsh 侧**藏在 opaque 构造里**的靶形态必须恢复 deny。
+    //    根因：`rawCommandNames` 走文本、内部 `tokens` 是自建数组（无 `SEG_SHELL` 戳），
+    //    不传方言就退回 bash 判据 ⇒ `$A=/bin/rm` 被当赋值 ⇒ 认不出命令名。
+    //    实测三态（大分类 allow + 八档全 deny）：HEAD=deny → PRE=**allow** → 本轮=deny。
+    //    ⚠️ 只钉 pwsh 侧：bash 侧这几条**本来就没有命令要执行**（`$(A=/bin/rm)` 是赋值），
+    //       label 为空是对的，钉它会与 ③ 的语义冲突。
+    for (const c of ['echo $(A=/bin/rm)', '(A=/bin/rm)', '{ A=/bin/rm; }', 'echo $(A=/bin/dd)',
+      'echo a | (A=/bin/rm)']) {
+      const a = assessCommand(c, 'pwsh', hDeny()).action
+      if (a === 'allow') bad.push(['pwsh opaque 构造内的 `$NAME=<命令>` 未认出（缺陷 2 未修）', c, a])
+    }
+    // ⑤ 缺陷 2 的**另两条入口**（同一处方言透传，各自独立承重 —— 变异测试实测：
+    //    回退任一处，本组下面两格分别由 deny 变 **allow**）。
+    //    ① `assessCommand` 的整行 `ok:false` 分支：整行读不懂时命令名只从原文粗提，
+    //       该路径**只认 deny**（收紧方向），故 pwsh 侧必须带方言。
+    //    ② `destructiveHeadReadable` 的 `opaqueTexts` 逐块判据：段首是**可读的**破坏性命令、
+    //       构造里另藏一个 pwsh `$NAME=<命令>` 时，只有带方言才认得出「构造里还有载荷」，
+    //       从而把 `wide`/`inside` 两档并进来。实测（**只有 `inside=deny`**、其余七档 allow）：
+    //       回退后 `rm -rf C:/Windows $(A=/bin/dd)` 由 deny 变 **allow**（真 fail-open）。
+    {
+      const only = (tier) => {
+        const t = {}
+        for (const x of ['inside', 'outside', 'wide', 'unknown', 'proc', 'power', 'priv', 'reg']) t[x] = x === tier ? 'deny' : 'allow'
+        return t
+      }
+      for (const [cn, h, c] of [
+        ['整行 ok:false', hDeny(), 'echo $(A=/bin/rm) "unclosed'],
+        ['opaqueTexts 逐块判据', Object.assign({}, hooks({ category: 'allow' }), { destructive: () => only('inside') }),
+          'rm -rf C:/Windows $(A=/bin/dd)'],
+      ]) {
+        const a = assessCommand(c, 'pwsh', h).action
+        if (a === 'allow') bad.push(['缺陷 2 的方言透传缺一处（fail-open）', cn, c, a])
+      }
+    }
+    ok('★★ AJ2 pwsh `$NAME=` 守卫右半判据（`$A=/bin/rm` 必须认出且不落大分类）+ 真赋值/bash 反向 + opaque 内靶形态（两处缺陷的钉桩）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AK. 语句边界处续行标记的归属 + 词元形态影子默认表的单一来源（本批三处缺陷的钉桩）')
+
+// ── 缺陷 1：语句边界（`level === 'segment'`）处**不得**把续行标记写进任何段 ────────────
+//
+// 实测缺陷（PRE，`cmd /c ver -x` + `` ` `` + LF + `Remove-Item …`）：
+//   `` ` ``+LF   段 2 的 op 是 **`start`**、text 是 `` `\nRemove-Item … ``（标记污染了下一段）
+//   `` ` ``+CRLF 段 2 的 op 是 `newline`、text 是 `Remove-Item …`（干净）
+// 两者是**同一条命令**（`[Parser]` 对 LF / CRLF 都给 `Parameter[-x`]` + 2 条 PipelineAst），
+// 判定的段文本却不同 ⇒ 用户手写的**干净精确 deny 例外失明**：
+//   大分类 allow + 八档全 allow + 例外 `Remove-Item -Recurse -Force C:/Windows`=deny
+//     `` ` ``+LF → PRE **allow**、`` ` ``+CRLF / 裸 NL / `;` / `&&` → deny。
+//
+// ⚠️ 本组是**必需**语料：把该分支退回「先 `flushSegment()` 再无条件 `pushText(esc.raw)`」
+// （= 本批修复的靶）时，**现有全部断言仍全绿**（实测变异 M1）；
+// 只去掉 `nextOp = 'newline'`（M1-b）同样全绿。即这两格此前**无任何守护**。
+// 判据取**两种换行的段 op / text 逐字相同**（而不是钉死 `'newline'` 这个字面值）：
+// 前者是缺陷本身，后者只是实现细节。
+{
+  const NL = '\n'
+  const CMD2 = 'Remove-Item -Recurse -Force C:/Windows'
+  const paramToks1 = ['-x', '-Recurse', '-NoNewline', '-Verbose', '-Path$p', '-Filter*', '-?y']
+  const bad = []
+  for (const t of paramToks1) {
+    const head = 'cmd /c ver ' + t
+    const lf = decomposeCommand(head + BT + NL + CMD2, 'pwsh')
+    const crlf = decomposeCommand(head + BT + '\r\n' + CMD2, 'pwsh')
+    const bare = decomposeCommand(head + NL + CMD2, 'pwsh')
+    // 对照（防空转）：CRLF 支本来就是对的 —— 若它也判不出 2 段，本组测不到任何东西
+    if (!crlf.ok || crlf.segments.length !== 2) {
+      bad.push(['对照失效：CRLF 支未判成 2 段', t, JSON.stringify(crlf.ok ? crlf.segments : crlf.reason)])
+      continue
+    }
+    if (!lf.ok || lf.segments.length !== 2) {
+      bad.push(['LF 支未判成 2 段', t, JSON.stringify(lf.ok ? lf.segments : lf.reason)])
+      continue
+    }
+    // ① 段 2 的 op 必须与 CRLF 支、裸 NL 支**同值**（缺陷时是 `start`）
+    if (lf.segments[1].op !== crlf.segments[1].op || lf.segments[1].op !== bare.segments[1].op) {
+      bad.push(['LF 段 2 的 op 与 CRLF / 裸 NL 不一致', t,
+        lf.segments[1].op + ' vs ' + crlf.segments[1].op + ' / ' + bare.segments[1].op])
+    }
+    // ② 段 2 的 text 必须干净（缺陷时带着 `` ` ``+换行 前缀），且与 CRLF 支逐字相同
+    if (lf.segments[1].text !== crlf.segments[1].text || lf.segments[1].text !== CMD2) {
+      bad.push(['LF 段 2 的 text 与 CRLF 不一致 / 被续行标记污染', t, JSON.stringify(lf.segments[1].text)])
+    }
+    // ③ 续行标记**不得**留在段 1 上（「先 pushText 再 flush」那个变体的特征）
+    if (lf.segments[0].text !== head) bad.push(['段 1 文本被续行标记污染', t, JSON.stringify(lf.segments[0].text)])
+    // ④ 词元也不得被污染
+    if (JSON.stringify(lf.segments[1].words) !== JSON.stringify(crlf.segments[1].words)) {
+      bad.push(['LF 段 2 的 words 与 CRLF 不一致', t, JSON.stringify(lf.segments[1].words)])
+    }
+  }
+  // ⑤ 端到端：干净精确 deny 例外 + 八档全 allow 下，LF 形态必须与 CRLF / 裸 NL / `;` / `&&` 同判
+  {
+    const dsAll = {}; for (const t of TIERS) dsAll[t] = 'allow'
+    const h = Object.assign({}, hooks({ category: 'allow' }), {
+      destructive: () => dsAll,
+      matchException: (segText, label) => (matchCommand(CMD2, segText) || (label && matchCommand(CMD2, label)))
+        ? { action: 'deny', ruleId: 'e1' } : null,
+    })
+    const forms = [['`+LF', BT + NL], ['`+CRLF', BT + '\r\n'], ['裸 NL', NL], ['分号', ';'], ['&&', ' && ']]
+    for (const t of paramToks1) {
+      const acts = forms.map(([n, sep]) => [n, assessCommand('cmd /c ver ' + t + sep + CMD2, 'pwsh', h).action])
+      const lfAct = acts[0][1]
+      if (lfAct !== 'deny') bad.push(['干净精确 deny 例外在 LF 形态下失明（fail-open）', t, JSON.stringify(acts)])
+      // 对照（防空转）：其余四种写法必须都真的是 deny，否则「同判」可能两边都不是 deny
+      if (acts.slice(1).some(([, a]) => a !== 'deny')) bad.push(['对照失效：CRLF/裸 NL/分号/&& 未判 deny', t, JSON.stringify(acts)])
+    }
+  }
+  ok('★★ AK1 语句边界处续行标记不得写进任何段（LF 的 op/text 必须与 CRLF 逐字一致；端到端 deny 不得失明）',
+    bad.length === 0, JSON.stringify(bad.slice(0, 6)))
+}
+
+// ── 缺陷 2：同一分支内 `pwshEscapeBoundaryAt` 不得重复求值 ──────────────────────────
+// 纯函数、五个输入在两次调用之间一个都没被修改 ⇒ 重复调用只是白付一次判定 + 一次对象分配。
+// 判据取**调用点计数**（与 Z5 的 `segHasContent` 同手法）：
+// 定义恰好一处，且「出现次数 - 定义次数」= 1 —— 即调用点恰好**一处**（本分支开头那次，
+// 续行支直接复用它的结果）。缺陷时该差值为 2（同一分支内重复求值）。
+{
+  const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+  const defs = (spSrc.match(/function pwshEscapeBoundaryAt\s*\(/g) || []).length
+  // 注意 `pwshEscapeBoundaryAt(` 也命中定义行本身，故调用点数 = 总数 - 定义数
+  const total = (spSrc.match(/pwshEscapeBoundaryAt\(/g) || []).length
+  const calls = total - defs
+  const bad = []
+  if (defs !== 1) bad.push(['定义不是恰好一处', 'count=' + defs])
+  if (calls !== 1) bad.push(['调用点不是恰好一处（重复求值残留）', 'count=' + calls])
+  ok('★ AK2 `pwshEscapeBoundaryAt` 单一实现、单一调用点（无重复求值残留）',
+    bad.length === 0, JSON.stringify(bad))
+}
+
+// ── 缺陷 3：词元形态影子的默认值表必须**只有一份**（构造侧与复位侧共用）──────────────
+//
+// 两份逐字段抄写时，加字段必然漏一处 —— 漏**复位侧**的后果不是「少复位一个标量」，
+// 而是**上一词元的残值跨词元泄漏**，直接改变 `pwshEscapeBoundaryAt` 的续行切分结论。
+// ⚠️ 实测：退回两份手抄（字段齐全，M3-a）、复位侧漏 `lastOpenIdx`（M3-b）、
+// 漏 `cLast`（M3-c）三种变异下**测试套件全部 exit 0 全绿** —— 此前无任何守护。
+// 判据取**机制**（两张表不得同时存在）而不是「字段值对不对」：后者在字段齐全时恒真。
+{
+  const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+  const bad = []
+  const emptyTables = (spSrc.match(/const EMPTY_WORD_SHAPE = \{/g) || []).length
+  if (emptyTables !== 1) bad.push(['`EMPTY_WORD_SHAPE` 不是恰好一处', 'count=' + emptyTables])
+  // 两份手抄的特征：`c0: -1` 这类默认值字面量出现两次以上（表里一次 + 另一份抄写里一次）
+  const literal = (spSrc.match(/c0:\s*-1,\s*c1:\s*-1/g) || []).length
+  if (literal !== 1) bad.push(['默认值字面量出现多次（两份逐字段抄写）', 'count=' + literal])
+  // 复位侧必须走整体覆盖，不得逐字段赋值
+  if (!/function resetWordShape \(s\) \{\s*\n\s*Object\.assign\(s, EMPTY_WORD_SHAPE\)/.test(spSrc)) {
+    bad.push(['resetWordShape 未用 Object.assign 整体覆盖'])
+  }
+  if (!/function newWordShape \(\) \{\s*\n\s*return Object\.assign\(\{\}, EMPTY_WORD_SHAPE\)/.test(spSrc)) {
+    bad.push(['newWordShape 未从同一张表构造'])
+  }
+  // 字段数固定为 15（加字段时本断言会红灯，提示同步核对 `pushWordShape` 的更新点）
+  const m = /const EMPTY_WORD_SHAPE = \{([\s\S]*?)\n\}/.exec(spSrc)
+  const fields = m ? (m[1].match(/[A-Za-z_]\w*:/g) || []).length : -1
+  if (fields !== 15) bad.push(['字段数不是 15', 'count=' + fields])
+  ok('★ AK3 词元形态影子默认表单一来源（构造侧 / 复位侧共用 `EMPTY_WORD_SHAPE`）',
+    bad.length === 0, JSON.stringify(bad))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── 缺陷：bash 侧赋值守卫只看**词元**，把「整体引号包裹的 `NAME=path`」误判成赋值 ──────
+//
+// 失效链与 AJ2 同一条：label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
+// 破坏性子设置与**全部例外匹配**双双跳过 ⇒ 落大分类（**fail-open**）。
+//
+// 词法器**剥引号**后，`'A=/bin/rm'`（整体引号）与 `A=/bin/rm`（无引号）的词元**逐字相同**
+// （实测都是 `A=/bin/rm`）—— 词元粒度上不可区分，只有段原文还留着那对引号。
+//
+// 真值来源：Git Bash 5.3.15 实测（无害替代目标，`mktemp -d` 内建 `A=/bin/rm` 可执行文件，
+// 每条都在**同一个 shell 内**跑完并回显变量，绝不碰真实 rm）：
+//     `A=/bin/rm`    → 不执行任何命令，`A` 被设为 `/bin/rm`        ⇒ **真赋值**
+//     `'A=/bin/rm'`  → **真的执行了**该路径文件（rc=0），`A` 仍 unset ⇒ **真命令**
+//     `"A=/bin/rm"`  → 同上（引号改变语义：`NAME=` 不再被识别为赋值前缀）
+//     `A='/bin/rm'`  → 真赋值（引号只包住**值**，名字与 `=` 仍是字面量）
+//     `'A'=/bin/rm` / `A'='/bin/rm` / `A''=/bin/rm` / `''A=/bin/rm`
+//     / `\A=/bin/rm` / `A\=/bin/rm` / `'A='/bin/rm` / `'A=''/bin/rm'` → **全是真命令**
+//   即：`NAME=` 整段必须是**字面量**（未加引号、未转义）才算 bash 的赋值前缀。
+//
+// ⚠️ 为什么必须有本组（变异测试实测）：把 bash 分支退回
+//   `LABEL_ASSIGN.test(String(w[0]))`（= 本缺陷的靶）后，**三个套件全部 ALL PASS** ——
+//   既有断言的 bash 赋值语料只有 `A=/bin/rm` / `my=dir/rm`（**无引号**），
+//   **没有一格**带引号，故整个修复面此前无守护。
+//   （原先这里还把 `$d=/bin/rm` 列为「bash 赋值语料」—— 那是**错误真值**，已按 Git Bash
+//   实测订正：带 `$` 前缀的形态在 bash 下是真命令，归 AJ2 的 ③′ 靶形态组。）
+// ⚠️ 语料刻意**最小**：只放「整体引号」与「无引号」的对照，不顺手扩充其他形态 ——
+//   引号/转义插入名字或 `=` 的那一族与本次是**同一条判据**，由下面第 ② 组顺带覆盖即可。
+group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（本轮缺陷的钉桩）')
+{
+  // 档位取八档全 deny + 大分类 allow —— 这正是失效链暴露的那一格。
+  const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', proc: 'deny', power: 'deny', priv: 'deny', reg: 'deny' }
+  const hDeny = () => Object.assign({}, hooks({ category: 'allow' }), { destructive: () => dsAllDeny })
+  const bad = []
+  // ① 靶形态：整体引号（单/双）⇒ bash 真值是**真命令**，必须认出命令名且端到端不得 allow。
+  //    判据取「不得为 allow」而非「=== deny」：动作落点由配置决定（与本文件既有风格一致）。
+  for (const [c, want] of [
+    ["'A=/bin/rm'", 'rm'], ['"A=/bin/rm"', 'rm'],
+    ["'my=dir/rm'", 'rm'], ["'x=1/diskpart'", 'diskpart'],
+  ]) {
+    const d = decomposeCommand(c, 'bash')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'bash') : null
+    if (lab !== want) bad.push(['整体引号的 `NAME=path` 被误判成赋值（label 变空）', c, 'want=' + want, JSON.stringify(lab)])
+    const a = assessCommand(c, 'bash', hDeny()).action
+    if (a === 'allow') bad.push(['整体引号的 `NAME=path` 落大分类（fail-open）', c, a])
+  }
+  // ② 反向：**无引号**的真赋值必须**仍判赋值**（label 空）—— 防止修过头
+  //    （把守卫整行删掉是最省事的错修，会让这些形态重新产出假候选按钮）。
+  for (const c of ['A=/bin/rm', 'my=dir/rm', 'x=1/diskpart', "A='/bin/rm'", 'A=/bin/rm > /tmp/z']) {
+    const d = decomposeCommand(c, 'bash')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'bash') : null
+    if (lab !== '') bad.push(['bash 侧真赋值被误判成命令（修过头）', c, JSON.stringify(lab)])
+  }
+  // ③ 同族（同一判据、`NAME=` 被引号/转义打断）：bash 真值**全是真命令**，必须一并认出。
+  //    ⚠️ 这一组是①的**判据边界**而非新语料：判据一旦退回「只看词元」，它们与①同时失效；
+  //    只钉①不钉这里，改「只在段原文以引号开头时放行」这类半吊子修法也能全绿。
+  for (const [c, want] of [
+    ["'A'=/bin/rm", 'rm'], ["A'='/bin/rm", 'rm'], ["A''=/bin/rm", 'rm'],
+    ["''A=/bin/rm", 'rm'], ['\\A=/bin/rm', 'rm'], ['A\\=/bin/rm', 'rm'],
+    ["'A='/bin/rm", 'rm'], ["'A=''/bin/rm'", 'rm'],
+  ]) {
+    const d = decomposeCommand(c, 'bash')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'bash') : null
+    if (lab !== want) bad.push(['引号/转义打断 `NAME=` 的形态被误判成赋值', c, 'want=' + want, JSON.stringify(lab)])
+  }
+  // ④ pwsh 侧零变化：本次只动 bash 分支，pwsh 的赋值判据（含 `$d='X:/ws/x'` 这一格，
+  //    它的引号在原文里、是「真赋值 vs 真命令」的唯一判据）必须逐字不变。
+  for (const [c, want] of [['$A=/bin/rm', 'rm'], ["$d='X:/ws/x'", ''], ["'$A=/bin/rm'", 'rm']]) {
+    const d = decomposeCommand(c, 'pwsh')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'pwsh') : null
+    if (lab !== want) bad.push(['pwsh 侧赋值判据被本次改动影响（应为零变化）', c, 'want=' + JSON.stringify(want), JSON.stringify(lab)])
+  }
+  // ⑤ 同一判据的**操作符位**那一半（缺陷 1：重定向目标位 / 操作符之后的 `NAME=` 不是赋值前缀）——
+  //    `'A=/bin/rm' >| A=x` 里的 `A=x` 是**重定向目标**、其前一个非空白字符是操作符，故它不是
+  //    赋值前缀；`$( A=x )` 里的 `A=x` 同理（前一字符是 `(`）。这些形态的命令词都是真命令。
+  //
+  // ⚠️ 为什么必须有这 6 格（变异测试实测）：判据里的**操作符字符类**必须是完整集
+  //   `[\n\r;|&(){}<>]`，把它退回修复者注释里那个「简化版」`[<>]` 后，下面各格由 deny 变
+  //   **allow**（真 fail-open），而**两套件连同本组 ①~④ 一律全绿** ——
+  //   即整个操作符位修复面此前无语料守护。
+  //
+  // bash 真值（Git Bash 5.3.15 实测；`mktemp -d` 内建 `A=/bin/rm` 可执行文件（内容只往
+  //   独立日志追加），整行写进文件再 source，故赋值语义与真跑一致、RAN 证据不受该行自身
+  //   重定向影响）：
+  //     `'A=/bin/rm' >| A=x`   → **RAN[A=/bin/rm]** ⇒ 真命令
+  //     `'A=/bin/rm' >& A=x`   → **RAN[A=/bin/rm]** ⇒ 真命令
+  //     `'A=/bin/rm' > A=x`    → **RAN[A=/bin/rm]** ⇒ 真命令
+  //     `>| A=x 'A=/bin/rm'`   → **RAN[A=/bin/rm]** ⇒ 真命令
+  //     `$( A=x ) 'A=/bin/rm'` → **RAN[A=/bin/rm]** ⇒ 真命令
+  //
+  // ⚠️ 为什么是 6 格而不是 3 格（本机把字符类逐个成员删掉 + 半修法变异，逐项实测）：
+  //   · 承重成员各占一格 —— 删 `|` 会让第 1 格与第 4 格都变 allow、删 `&` 只让第 2 格、删 `>` 只让
+  //     第 3 格、删 `(` 只让第 5 格、删 `)` 只让第 6 格；五者**各自独立承重**，少一格就漏一个成员。
+  //     （第 3 格不可省：第 1/2 格的判据字符是 `|` / `&`，`>` 只是它们的一部分，
+  //     故「把 `<>` 从字符类里去掉」这类回退只有第 3 格抓得到。）
+  //   · 第 4 格（**前置**形态）不可省：只钉后置形态时，「只处理重定向目标位、不管词首
+  //     操作符位」这类**半修法**会让第 1/2/5 格全绿、而前置形态由 deny 变 allow
+  //     （本机实测），故必须有一条前置语料与后置形态互为边界。
+  //   · 另有四类形态**刻意不入册**（真值有问题，钉住就是把反向误差焊进测试）：
+  //     `{ A=x; } 'A=/bin/rm'` / `( A=x ) 'A=/bin/rm'` 在 bash 下是**语法错误**（rc=2，
+  //     命令**未启动**，实测 RAN=<none>）；`'A=/bin/rm' < A=x` 只在目标文件**已存在**时
+  //     才执行（目标不存在时 rc=1、**命令不启动**，实测 RAN=<none>），真值随环境而变；
+  //     `'A=/bin/rm' 2>& A=x` 是 `ambiguous redirect`（rc=1，命令未启动）。
+  //     即 `{` / `)` / `<` 三个成员**没有**「无条件真命令」的形态可钉，故不为它们造语料。
+  //     ⚠️ 这句里的 `)` **已被实测推翻**，见紧接的订正段。
+  //
+  //   · ⚠️ **订正**：上面「`{` / `)` / `<` 都没有无条件形态」这句，对 `)` 是**错的** ——
+  //     已按 Git Bash 5.3.15 实测推翻，故补第 6 格。实测（同上手法，命令词侧取**裸词**
+  //     `NAME=path`）：
+  //         `$(true) A=/bin/rm 2>/dev/null` / `$(true) A=/bin/rm 2>&1`
+  //         / `$(echo) A=/bin/rm 2>/dev/null` / `$( :) A=/bin/rm 2>&1`
+  //         / `$(true; ) A=/bin/rm 2>/dev/null` / `$(exit 0) A=/bin/rm 2>&1`
+  //           → **6/6 全部 RAN[A=/bin/rm]、rc=0、A 仍 unset** ⇒ 真命令、**无条件成立**
+  //             （不依赖任何已存在文件；`$( )` 已闭合，故不落入上面「语法错误」那类）。
+  //     ⚠️ 该成员此前**完全无语料守护**（本格是它唯一一格，同族形态判据相同、多钉无益）：
+  //        只把 `shell-parse.js` 里 `bashLeftIsAssign` 那条操作符字符类中的 `)` 一个成员删掉，上面那 6 格形态即由 deny
+  //        变 **allow**（覆盖八档全 deny / 逐档单 deny / 大分类 allow + 用户写下的
+  //        `rm *`=deny 例外三族配置），而**本文件与 regressions.mjs 双双 ALL PASS**。
+  //     ⚠️ 本格形态不可替换成**无后缀**的 `$(true) A=/bin/rm`：同一变异下那一格 label 虽
+  //        同样变空，端到端却**仍是 deny**（实测），钉不住该成员；带重定向后缀才是
+  //        该成员 fail-open 的触发形态。
+  //     `{` 那半（`{ A=x; } 'A=/bin/rm'` 是语法错误 rc=2、命令未启动）与 `<` 那半
+  //     （目标文件不存在时 rc=1、命令不启动）**实测均成立**；但 `<` 是否存在别的
+  //     **无条件**形态**未确证**，本处不作断言。
+  for (const [c, want] of [
+    ["'A=/bin/rm' >| A=x", 'rm'],
+    ["'A=/bin/rm' >& A=x", 'rm'],
+    ["'A=/bin/rm' > A=x", 'rm'],
+    [">| A=x 'A=/bin/rm'", 'rm'],
+    ["$( A=x ) 'A=/bin/rm'", 'rm'],
+    //   · 第 6 格（`)` 成员）同样独立承重 —— 见上方订正段。
+    ["$(true) A=/bin/rm 2>/dev/null", 'rm'],
+  ]) {
+    const d = decomposeCommand(c, 'bash')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'bash') : null
+    if (lab !== want) bad.push(['操作符位的 `NAME=` 被误判成赋值前缀（label 变空）', c, 'want=' + want, JSON.stringify(lab)])
+    const a = assessCommand(c, 'bash', hDeny()).action
+    if (a === 'allow') bad.push(['操作符位的 `NAME=` 落大分类（fail-open）', c, a])
+  }
+  // ⑥ 命令词位被 opaque 构造占据 + 重定向带**具名目标** ⇒ `NAME=path` 是真命令。
+  //
+  // ⚠️ 这一格与 ⑤ 的六格是**不同判据**：⑤ 判「命中处前一非空白字符是操作符」，
+  //    本族的前一非空白字符是**目标词的末字符**（`> out A=x` 里是 `t`），故 ⑤ 全绿时
+  //    本族照旧 fail-open。失效链与 ⑤ 同：label 空 ⇒ 段级 `unparsable` ⇒ `destructive=false`
+  //    ⇒ 破坏性子设置与全部例外失配 ⇒ 落大分类。
+  // bash 真值（Git Bash 5.3.15 实测；`mktemp -d` 内建 `A=/bin/rm` 可执行文件，内容只往
+  //    独立日志追加，整行写进文件再 source，故赋值语义与真跑一致、RAN 证据不受该行自身
+  //    重定向影响）：
+  //      `$(true) > out A=/bin/rm` → **RAN**、`A` 仍 unset ⇒ 真命令
+  //      `> out A=/bin/rm`         → **无 RAN**、`A=/bin/rm` ⇒ 真赋值
+  //    （`> out` / `>out` / `2>` / `>>` / `>|` / `&>` / `<` / 带引号目标 / 多级重定向
+  //      同族共 13 格实测**全部 RAN**；无 opaque 的 `> out A=…` 实测**全部赋值**。）
+  //
+  // ⚠️ 为什么是 3 格而不是 2 格（另有本轮补的「只钉动作」那格，来由见下方 ④ 那条）：本判据依赖**两个不同来源的位置关系**（词法器戳下的
+  //    opaque 起点 vs `NAME=` 命中位置），日后最容易漂移的正是这一处 —— 若有人给词法器
+  //    加新的 opaque 标记点而漏调 `noteOpaqueHead`，或改了空白归一化，定位会**静默失效**，
+  //    而失效方向恰好是 fail-open（回到 NOW 的错误行为），两套件仍然全绿。
+  //    第 3 格是**反向**钉桩，且三格合起来把判据**夹在中间**（本机变异实测）：
+  //      · 把前提放宽成「隔一个词也判非赋值」→ 多格变红；
+  //      · 把 `noteOpaqueHead` 的 `pending === undefined` 守卫去掉（改成「段里任何位置的
+  //        opaque 都记」）→ **只有反向那格**变红（正向格仍绿）。
+  //    即只钉第 1 格抓不住这两个方向。
+  //    ⚠️ 第 1 格只走 `$()` 那**一个** opaque 标记点，而词法器共**六处**调用
+  //    `noteOpaqueHead`（`$()` 两处、反引号两处、分组/花括号两处）。实测（本机变异：每次
+  //    只删一处调用，跑本套件 + `test/regressions.mjs`）：删 `group` 分支（`shell-parse.js`
+  //    里 `(` / `{` 那次）那**一处**时，两套件**双双全绿**，而端到端由 `deny` 掉成
+  //    `allow`（fail-open）—— 故第 2 格补的正是这条**当时无语料守护**的路径。
+  //    第 2 格取**花括号展开**（`{,}` 展开成**零个词**、不产出词元 ⇒ 该段词元只剩
+  //    `A=/bin/rm` 一个 ⇒ 它直接成为命令名；⚠️ 与 `''` 的**一个空词**不同族 —— 后者真值
+  //    是 `command not found`、命令**不**执行），因为 `(` / `{`
+  //    走的是**同一个**分支：`(true) > out A=/bin/rm` 与 `{ true; } > out A=/bin/rm` 在
+  //    bash 里都是**语法错误**（Git Bash 5.3.15 实测 `bash -n` rc=2、`syntax error near
+  //    unexpected token 'A=/bin/rm'`，`--posix` 同样报错），钉它们等于把**反向误差**写进
+  //    语料；而 `{,} > out A=/bin/rm` 实测是**真命令**（RAN、`A` 仍 unset）。
+  //    ⚠️ 其余四处调用点**不能一概而论**，实测分三类（本机逐点变异：每次只删那一处调用，
+  //    多轮形态枚举合计约 5.9k 格；**下面一律用锚点、不写行号** —— 本文件的行号引用
+  //    已被证明系统性不可维护，改动 `shell-parse.js` 后必然陈旧）：
+  //      · 漏调**零可观测差异**（旁路兜住，故不补）—— **引号内反引号分支**与**词首反引号
+  //        分支**（各自 `markOpaque` 之后那处 `noteOpaqueHead()`）：逐格 label 与动作**全同**。
+  //        旁路有二：反引号分支 `addWord(raw)` 把构造记成**独立词元**（段内多一个词元 ⇒
+  //        那条 `w.length === 1` 守卫根本不被咨询）；而构造与 `NAME=` **紧贴**时，定界符
+  //        紧邻 `NAME=`，又不满足「命中处在词首、或前一字符为空白」这一**前置**条件。
+  //      · 漏调**确有**真 fail-open，且**此前完全无语料守护**（**故本轮补一格**）——
+  //        **引号内 `$()` 的 `noteOpaqueHead()` 调用**（`markOpaque` 之后那处）：
+  //        差异只出现在「fd 号紧贴」族（`"$(true)"2> out A=/bin/rm`，删后 `"rm"/deny`
+  //        → `""/allow`）。该族 bash 真值确如旧注所述是 `CMD=[2]`（`A=/bin/rm` 只是 `2` 的
+  //        **参数**；词内含引号部分 ⇒ 该数字**不**算 fd 号，故命令名是 `2`；把它造成可执行文件
+  //        后确实跑的是 `2`）—— 但**「命令名是 `2`」不等于「没有危害」**：引号内 `$()` 的
+  //        **载荷本身会真的执行**（Git Bash 5.3.15 实测，用 stub 顶替 `rm`：`"$(sh -c 'rm …')"
+  //        2> out A=/bin/rm` 的载荷确实跑到了 `rm`）。删**那处 `noteOpaqueHead()` 调用**后
+  //        这一族由 `deny` 掉成 `allow`，放宽的形态里包含 `sh -c '…'` / `base64 -d | sh` / `${CMD}` / `r''m`
+  //        这些**载荷命令名不可静态读取**的写法 —— 恰恰是 `opaque`（`command substitution
+  //        cannot be read statically`）要防的东西：**读不出来时应当 fail-closed，删掉这处却变
+  //        allow** ⇒ 这是**真 fail-open**（放宽方向本身就是 fail-open，不能按「判据与真值
+  //        不符但方向无害」来接受）。
+  //        差异的成因是词法器把紧贴的数字**当 fd 号吞掉**（引号分支只 `pushText`、不 `addWord`
+  //        ⇒ `started` 仍假）⇒ 段内只剩 `A=/bin/rm` 一个词元 ⇒ 那条 `w.length === 1` 守卫被
+  //        咨询 ⇒ 赋值守卫两态给出不同答案。
+  //        ⚠️ **label 两态都与真值不符**（HEAD 给 `"rm"`、删后给 `""`，而真值是 `2`）⇒ 本路径
+  //        **仍无真值正确的 label 可钉**（钉 `label==="rm"` 等于把误报写进语料，旧注这句是对的）。
+  //        但**动作层面**有真值正确的守护可补：该载荷**确实执行**（见上），故「不得静默放行」是
+  //        真值正确的安全属性 —— 本轮因此补一格，**只钉动作、不钉 label**（见下方独立断言块）。
+  //        ⚠️ 但该守护**当前并不存在**：本格之所以 deny，靠的是那句 label 误报 `"rm"` 命中
+  //        `DESTRUCTIVE_LABELS`，而非任何「载荷读不出 ⇒ fail-closed」机制 —— 详见下方 ④ 的订正。
+  //      · 漏调**确有** fail-open，**但已被第 1 格语料守护**（故不补）—— **命令词位 `$()`
+  //        的 `noteOpaqueHead()` 调用**（词法器主循环里 `char === '$'` 那条分支的
+  //        `markOpaque` 之后）：该分支只 `pushText`、**不** `addWord`，故 `$(true) > out
+  //        A=/bin/rm` 里 `A=` 前是**真空白**、前驱非空白字符是目标词 `out` 的末字符（不是
+  //        操作符）⇒ 前置条件**满足** ⇒ 判据真的会误判成赋值。实测删那处调用后该格由
+  //        `"rm"/deny` 掉成 `""/allow`（真值确是 COMMAND：实测 `CMD=[A=/bin/rm]`），本套件
+  //        `FAIL(1)`、明细正是第 1 格 —— **故第 1 格是这条路径的唯一守护，不可删**。
+  //        ⚠️ 本类与上一类**同属真 fail-open**（都不可当作「可接受差异」），区别只在**守护
+  //        归属**：本类已被第 1 格钉住，上一类此前无格、由本轮新补的那格钉住。
+  //    `close` 分支（孤立 `}` / `)`）
+  //    漏调**确有** fail-open，该分支可触发的形态穷举后真值**分两类**（Git Bash 5.3.15 实测）：
+  //      · **带空格或操作符**的接法 —— `} > out A=/bin/rm` / `} ; A=…` / `} && A=…` /
+  //        `} | A=…`（以及 `}>> out` / `}&> out` / `}>| out` / `}< out` / `} 2>out` …）
+  //        → **SYNTAX-ERR**（rc=2，`syntax error near unexpected token '}'`）；
+  //      · **紧贴数字**的接法 —— `}2>out` / `}2> out` / `}2>>out` / `}2>/dev/null` /
+  //        `}2>&1` / `}2>|out` / `}2<out` / `}22>out` / `}3>out` / `}12>out`
+  //        → **真命令**（rc=0；命令名实测是 `}2` / `}22` / `}3` / `}12`，`A=/bin/rm`
+  //        是它的**参数**）；`}A=/bin/rm` / `}rm` 同样是真命令（命令名 `}A=/bin/rm` / `}rm`）。
+  //      ⚠️ 而 `)` 那半**全部**是 SYNTAX-ERR（连 `)2>out` 也报错）—— 「紧贴数字即真命令」
+  //        只对 `}` 成立。
+  //    ⇒ 并非「全部是 SYNTAX-ERR」。但真命令的命令名**一律带 `}` 前缀**（`}2` / `}rm` /
+  //    `}A=/bin/rm` …），实测这些名字**无一在 `DESTRUCTIVE_LABELS` 里** ⇒ **不存在真破坏性
+  //    命令被放行** ⇒ **无真值正确的承重格可补**，这是**已知且可接受的守护缺口**（结论句仍成立）。
+  //    ⚠️ 第 3 格**不能**换成 `> out A=1`：实测该形态的 label 在 HEAD/NOW/FIX 三态
+  //    恒为空（`A=1` 剥路径后仍含 `=`，被 `BAD_LABEL_CHARS` 提前拦下，与赋值守卫无关），
+  //    对任何变异都无鉴别力 —— 钉住它等于没钉。
+  //    ⚠️ 不按「重定向操作符 × opaque 构造类型」铺开成矩阵：同族形态判据相同、多钉无益。
+  for (const [c, want] of [
+    ['$(true) > out A=/bin/rm', 'rm'],
+    ['{,} > out A=/bin/rm', 'rm'],
+    ['> "$(true)" A=/bin/rm', ''],
+    // ⑦ opaque 占**重定向目标位** ⇒ 命令词被吞进 `writeTargets`、`words` 只剩 `NAME=path`
+    //    ⇒ 与上面三格（opaque 占**命令词位**）走的是**不同**的判据分支，故必须另钉。
+    //    ⚠️ 本族此前**完全无语料守护**（AL 组未覆盖）：失效链与上面同（label 空 ⇒ 段级
+    //    `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外失配 ⇒ 落大分类）。
+    //    bash 真值（Git Bash 5.3.15 实测，**真** `mktemp`、只 stub `rm`/`marker` 且写独立日志；
+    //    整行在子 shell 里 `eval`，故赋值语义与真跑一致）：
+    //      `> $(mktemp) r"m" A=/bin/rm > out2` → **RAN[rm] args=[A=/bin/rm]**、`A` unset ⇒ 真命令
+    //      `> $(true) X=/bin/marker`           → **无 RAN**、`X=/bin/marker`            ⇒ 真赋值
+    //    ⚠️ 两格的**承重项各不同**（本机变异实测：逐个改 `shell-parse.js` 再跑本套件 + regressions）：
+    //      · 第 1 格承**粘性**：把「已定案」的目标位戳改成「遇新重定向即复位」⇒ 本格由 `rm`
+    //        掉成 `''`（`allow`），套件 **FAIL**。⚠️ **尾部那个 `> out2` 是承重的一半**：
+    //        去掉它（只留 `> $(mktemp) r"m" A=/bin/rm`）时，同一变异下本格**仍是 `rm`**、
+    //        套件**全绿** ⇒ 该形态**抓不到非粘性回退**，故本格取带尾写法。
+    //      · 第 2 格承**过收**：`noteOpaqueTarget` 里无条件复位 `pending`（即本缺陷两个
+    //        被否掉的候选修法之一）⇒ 本格由 `''` 变 **`marker`**（把真赋值判成真命令）。
+    //    ⚠️ 另有**两处判据当前无语料守护**（同批变异实测：两处各自单独去掉后**两套件仍双双
+    //    PASS**，故只在本注释里记下、不为它们再造语料 —— 「不为钉住而钉住」）：
+    //      · 目标位戳的**定案条件**（被吞的第一个词**不是赋值词**才算顶掉命令词位）：
+    //        去掉后 `> $(mktemp) A=/bin/rm B=/bin/rm` 由 `''` 变 `rm`（真值 ASSIGN，实测
+    //        `A`/`B` 都被设上、无 RAN）—— 该形态与上面第 2 格是**不同族**（词元数组非空）。
+    //      · 新重定向**作废未定案的候选**：去掉后 `> $(true) > out A=/bin/rm` 由 `''` 变
+    //        `rm`（真值 ASSIGN，实测 `A=/bin/rm`、rc=1）。
+    //      改动这两处判据时必须手工复核上面两格（它们**不会**变红）。
+    ['> $(mktemp) r"m" A=/bin/rm > out2', 'rm'],
+    ['> $(true) X=/bin/marker', ''],
+    // ⑧ `NAME=path` 在**段首** + 重定向 + opaque 目标（本轮修法 Z 的靶，AL 组此前无语料守护）。
+    //    与 ⑦ 是**同一判据**（`SEG_OPAQUE_TARGET`）但走**不同分支**：⑦ 里 `NAME=` 在段首
+    //    **之后**（`at > 0`，前一非空白字符是操作符）；本格里 `NAME=` 就在段首（`at === 0`）
+    //    ⇒ 上一批那个「位置比较」收窄在这里**恒假**（`oT < 0` 不可能成立）⇒ 判据**根本没被
+    //    咨询** ⇒ 落到 `k < 0` 那条（`at === 0` 时 `k === -1`）⇒ 无条件 `return true`（判赋值）。
+    //    bash 真值（Git Bash 5.3.15 实测，**真** `mktemp`/`true`、只 stub `rm`/`marker`/
+    //    `diskpart` 且写独立日志；整行在子 shell 里 eval）：
+    //      `FOO=/usr/bin/rm 2> $(mktemp) marker` → **RAN[marker]**、`FOO` unset ⇒ 真命令
+    //      `> $(mktemp) r"m" A=/bin/rm`         → **RAN[rm]**、`A` unset      ⇒ 真命令
+    //    ⚠️ 第 1 格是本轮靶（真值 COMMAND、label `rm`）；第 2 格是**第 7 圈靶族的回归守卫** ——
+    //    仲裁的变体 X（在 `OT` 判据内部加「该 opaque 之后没有产出真词元」这类收窄）会把
+    //    第 2 格由 `rm` 误伤成 `''`；钉住它可防日后又加收窄打掉第 7 圈的修复面。
+    //    ⚠️ 不按「重定向操作符 × opaque 类型 × 命令词形态」铺开成矩阵：同族判据相同、多钉无益。
+    ['FOO=/usr/bin/rm 2> $(mktemp) marker', 'rm'],
+    ['> $(mktemp) r"m" A=/bin/rm', 'rm'],
+    // ⑨ 占目标位的 opaque 构造**带内联程序**（本轮批次 A 的靶，AL 组此前无语料守护）。
+    //    与 ⑦/⑧ 是**同一族形态**（opaque 占重定向目标位）但**判据不同**：⑦/⑧ 判「有没有
+    //    占过目标位」（`SEG_OPAQUE_TARGET`），本族还要求判「那个构造里**装了什么**」——
+    //    上面两条判据都**不过问构造内容**，故 `> $(sh -c "…") > out A=/bin/rm` 这一族
+    //    在仅靠前两条时仍 fail-open（真值 COMMAND，却判赋值）。
+    //    bash 真值（Git Bash 5.3.15 实测，**真** `mktemp`/`true`、只 stub `marker` 且写独立
+    //    日志；载荷已无害化 —— 用的是 stub `marker`，**不是** `rm -rf /tmp/zzz`）：
+    //      `> $(sh -c 'marker') > out A=/bin/rm` → **RAN[marker]**、`A` unset ⇒ 真命令
+    //      `> $(true) > out A=/bin/rm`           → **无 RAN**、`A=/bin/rm`   ⇒ 真赋值
+    //    ⚠️ 第 2 格是**真赋值对照**：它防的是「日后把判据放宽成『段里任何 opaque 构造带内联
+    //    程序』」——那样会把这一格打成 COMMAND（新过收）。两格的词元数组**逐字相同**
+    //    （`words=["A=/bin/rm"]`、`writeTargets=["out"]`），差别**只在构造里装了什么**。
+    //    ⚠️ 判据必须落在 `noteOpaqueText` 里（那一刻构造仍占着目标位）：`> $(sh -c …) > out …`
+    //    里构造后紧跟 `>`，**新重定向作废未定案候选**那处（`>` 分支里
+    //    `opaqueTargetSwallow = false` 那一行）会让 `flushWord` 的**定案分支根本不会执行** ——
+    //    任何「在定案处加一问」的修法在本族上一行都不跑。
+    //    ⚠️ 不按「重定向操作符 × 载荷类型 × 命令词形态」铺开成矩阵：同族判据相同、多钉无益。
+    //    ⚠️ **已知残余（本批刻意不扩，勿为它叠第二层判据）**：管道形态
+    //    `> $(base64 -d x | sh) > out A=/bin/rm` 本判据**不覆盖**（剥定界符后首词是
+    //    `base64`，`nestedInlineProgram('base64', …)` = false），而真值实测该形态**载荷确实
+    //    执行**。扩它要动 `nestedInlineProgram` 的语义（承重函数，`assessCommand` 与 index.js
+    //    的候选守卫都在用）⇒ 记为已知残余，不为它再造语料。
+    ["> $(sh -c 'marker') > out A=/bin/rm", 'rm'],
+    ['> $(true) > out A=/bin/rm', ''],
+    // ⑩ 带内联程序的 opaque 构造，三个**入参构造维度**（第 10 圈修法 U 的靶，AL 组此前
+    //    无语料守护）。⑨ 钉的是「构造里装了什么」，本组钉的是**判据的入参怎么构造** ——
+    //    三处曾与既有调用点（`assessCommand` / index.js 候选守卫，拿到的是**词法器产出 +
+    //    已剥引号 + 已归一化**的形态）**不同源**，各自漏掉一族：
+    //      · 第 1 格 —— 守卫多了 `!started`（引号分支读到引号即置 `started = true`）
+    //        ⇒ 引号内的站点**永远进不了判据**；
+    //      · 第 2 格 —— 朴素 `split(/\s+/)` **不剥引号** ⇒ 当**标志词元自身**被引号包裹
+    //        （`sh "-c" x` / `"sh" -c x`）时 `INLINE_PROGRAM_FLAG` 不命中。
+    //        ⚠️ **只有那一族失效**：朴素切分对 `sh -c x`（标志不带引号）**同样命中**，
+    //        且它的首词仍是 `sh`（带引号的是**第二**个词元）⇒ 不是「首词错」。
+    //      · 第 3 格 —— 首词未归一化 ⇒ `/bin/sh` / `env sh` / `nohup sh` 恒不命中
+    //        （**承重的是 `headCommandNameOf`**；实测只留 `commandNameOf(rawHead)`
+    //        会让 244 格定向语料里 28 格 label 由 `rm` 掉成 `""`）。
+    //    bash 真值（Git Bash 5.3.15 实测，**真** `mktemp`/`true`、只 stub `marker` 且写独立
+    //    日志；载荷已无害化 —— 用 stub `marker`，**不是** `rm -rf /tmp/zzz`）：
+    //      第 1/2/3 格 → **RAN[marker]**、`A` 仍 unset ⇒ 真命令
+    //      第 4 格     → **无 RAN**、`A=/bin/rm`              ⇒ 真赋值
+    //    ⚠️ 第 4 格是**真赋值对照**（`> "$(true)" > out A=/bin/rm`，真值 ASSIGN）：它防的是
+    //    日后把判据再收窄成「引号内的 opaque 一律算载荷」——那样会把这格打成 COMMAND。
+    //    ⚠️ 它同时是「本批没把 HEAD 的过收带回来」的证据：该格 HEAD=deny（过收）、
+    //    NOW/FIX=allow（正确）。
+    //    ⚠️ 三个维度**判据相同**，故各只钉一格；不按「载荷写法 × 引号 × 归一化拼写 ×
+    //    重定向」铺开成矩阵（那是「为了钉住而钉住」）。
+    ['> "$(sh -c \'marker\')" > out A=/bin/rm', 'rm'],
+    ['> $(sh "-c" "marker") > out A=/bin/rm', 'rm'],
+    ['> $(/bin/sh -c "marker") > out A=/bin/rm', 'rm'],
+    ['> "$(true)" > out A=/bin/rm', ''],
+    // ⑪ **遍历全部分段**（第 11 圈修法 W 的靶，AL 组此前无语料守护）。⑩ 钉的是「入参怎么
+    //    构造」的前三维（守卫 / 切分 / 归一化），本组钉的是**第四维**：`segs[0]` 只取第一个
+    //    操作符分段，而本文件既有的 opaque 载荷机制（`rawCommandNames`）扫的是**所有**分片
+    //    —— 实测 `rawCommandNames('$(true; sh -c "x")')` = `["true","sh"]`，即**既有机制本来
+    //    就看得到 `sh`** ⇒ 只取首段是**同源没做全**，不是「不可区分边界」。
+    //    bash 真值（Git Bash 5.3.15 实测，**真** `mktemp`/`true`、只 stub `marker` 且写独立
+    //    日志；载荷已无害化 —— 用 stub `marker`，**不是** `rm -rf /tmp/zzz`）：
+    //      第 1/2 格 → **RAN[marker]**、`A` 仍 unset ⇒ 真命令
+    //      第 3 格   → **无 RAN**、`A=/bin/rm`              ⇒ 真赋值
+    //    ⚠️ 第 3 格是**真赋值对照**（`> $(true; true) > out A=/bin/rm`，真值 ASSIGN）：它防的是
+    //    日后把「分段里出现任何命令」当成载荷 —— 那样会把这格打成 COMMAND。
+    //    ⚠️ **不为短路族（`||` / `&&`）补格**：`$(true || sh -c …)` / `$(false && sh -c …)`
+    //    真值是 ASSIGN（短路）却被判 deny，但 **HEAD 也是 deny**（逐格同值）⇒ 那是
+    //    **HEAD 既有行为、方向 fail-closed**，钉它等于把「已知过收」写成期望值。
+    //    ⚠️ 两格分别承 `;`（顺序）与 `|`（管道）两种连接符；同族判据相同，不铺开成矩阵。
+    ['> $(true; sh -c \'marker\') > out A=/bin/rm', 'rm'],
+    ['> $(true | sh -c \'marker\') > out A=/bin/rm', 'rm'],
+    ['> $(true; true) > out A=/bin/rm', ''],
+  ]) {
+    const d = decomposeCommand(c, 'bash')
+    const lab = d.ok ? segmentLabel(d.segments[0].words, 'bash') : null
+    if (lab !== want) bad.push(['opaque 占命令词位时 `NAME=` 被误判成赋值前缀', c, 'want=' + JSON.stringify(want), JSON.stringify(lab)])
+    const a = assessCommand(c, 'bash', hDeny()).action
+    if (want === 'rm' && a === 'allow') bad.push(['opaque 占命令词位时落大分类（fail-open）', c, a])
+  }
+  // ④ 引号内 `$()`（**引号内 `$()` 的 `noteOpaqueHead()` 调用**那条路径）：**只钉动作，不钉 label**（本轮补）。
+  //    ⚠️ 这一格刻意**不进**上面那个 `[c, want]` 循环：该族 label 的 HEAD 值 `"rm"` 是**误报**
+  //    （bash 真值命令名是 `2`，见上方订正段），把它写成 `want` 等于**把误报钉进语料**；而
+  //    `""` 又是 fail-open 的那一态。两态都不可钉 ⇒ 只能钉**动作**（钉的是哪一下，见下）。
+  //    ⚠️ **本格 deny 的真实来源就是上面那句 label 误报**：`"rm"` 命中 `DESTRUCTIVE_LABELS`
+  //    ⇒ 该段被判破坏性 ⇒ 走破坏性子设置（本组配置 = 八档全 deny）⇒ `deny`。**并不存在**
+  //    独立的「载荷不可读 ⇒ fail-closed」机制 —— 载荷根本没有谁去读。
+  //    判别性实测（NOW + 本组 `hDeny()`）：
+  //      · **只换载荷、不换 basename**：`"$(true)"2> out A=/bin/rm`（载荷完全无害）**照旧
+  //        `deny`** ⇒ 动作与载荷内容无关；
+  //      · **只换 basename、不换载荷**：`A=` 换成 `echo` / `ls` / `true` / `2` / `printf` /
+  //        `cat` / `x` 这 7 个**非名单**名 ⇒ HEAD 与 NOW **双双 `allow`，7/7 无一例外**
+  //        （「label 在名单外却仍非 allow」的形态：**0 个**）。
+  //        Git Bash 5.3.15 无害 stub 实测：同一行**确实执行了载荷**（`rm -rf /tmp/zzz` 落到 stub），
+  //        `A` 仍 unset ⇒ 确是真命令、确有危害，而判据照样放行。
+  //    ⇒ 「载荷不可静态读取时不得静默放行」是**真值正确的安全属性，但当前没有任何机制实现它**；
+  //      本格只是被那句 label 误报**顺带**拦下。**修正该 label 误报会让本格变红 —— 那是正确
+  //      信号**（届时确无任何机制拦该命令），届时应**补上真正的载荷守卫**（让 opaque 载荷本身
+  //      参与判定），**不要删本格**：删掉它等于连「误报顺带拦住的那一下」也一并失去，还会掩盖
+  //      「引号内 `$()` 的 `noteOpaqueHead()` 调用」自此无人守护这一事实。
+  //    守护对象：`shell-parse.js` 里**引号内 `$()` 的 `noteOpaqueHead()` 调用**（即引号分支内
+  //    `char === '$'` 那条的 `markOpaque` 之后那一处；逐点变异实测：删其余五处时本格恒绿；
+  //    反向实测：先删本格、再删那处调用，则套件 ALL PASS —— 即本格确是它**唯一**的守护）。
+  //    ⚠️ 本行原先写的是 `:5857`，而**该行号在 `shell-parse.js` 里是一行注释**（删它对
+  //    7580 格语料零差异）⇒ 原「唯一守护对象」的断言**为假**。真实守护对象是上面那处调用
+  //    （逐点变异实测：删它 ⇒ 本格 `deny`→`allow`、套件 FAIL）。行号已全部换成锚点。
+  //    ⚠️ 只放**带 `A=path` 后缀**的形态：同族无后缀的 `"$(sh -c '…')"2> out` 在 HEAD 就是
+  //    `allow`（`A=` 缺席 ⇒ 那条赋值守卫不被咨询），钉它等于把既存 fail-open 写成期望值。
+  for (const c of [
+    "\"$(sh -c 'rm -rf /tmp/zzz')\"2> out A=/bin/rm",
+  ]) {
+    const a = assessCommand(c, 'bash', hDeny()).action
+    if (a === 'allow') bad.push(['引号内 `$()` 载荷不可静态读取时被静默放行（fail-open）', c, a])
+  }
+  ok('★★ AL bash 侧赋值守卫区分「整体引号」（真命令）与「无引号」（真赋值）+ 引号/转义插入族 + 操作符位六格（`>|` / `>&` / `>` / 前置 `>|` / `$( )` / `$( )`+重定向后缀）+ opaque 占命令词位三格（具名目标后 `NAME=path` 的 `$()` 与花括号展开两条路径 / 无 opaque 反向对照）+ opaque 占**重定向目标位**六格（靶 `> $(mktemp) r"m" A=/bin/rm > out2` 与真赋值对照 `> $(true) X=/bin/marker` + 段首 `NAME=` 靶 `FOO=/usr/bin/rm 2> $(mktemp) marker` 与其回归守卫 `> $(mktemp) r"m" A=/bin/rm` + 带内联程序靶 `> $(sh -c \'marker\') > out A=/bin/rm` 与其真赋值对照 `> $(true) > out A=/bin/rm` + 带内联程序**入参构造三维度**四格（引号内站点 / 带引号标志 / 未归一化首词 各一靶 + 真赋值对照 `> "$(true)" > out A=/bin/rm`）+ **遍历全部分段**三格（`;` 靶 / `|` 靶 / 真赋值对照 `> $(true; true) > out A=/bin/rm`））+ 引号内 `$()` 载荷不可静态读取时不得静默放行（只钉动作，引号内 `$()` 的 `noteOpaqueHead()` 调用那条路径）+ pwsh 零变化',
+    bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+}
 
 
 // ─────────────────────────────────────────────────────────────────────────────
