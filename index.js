@@ -7,8 +7,39 @@ import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, se
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
-const CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop']
-const EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo']
+// 工作区外访问拆成读 / 写两道闸。**键名与显示名不一致是有意的**：
+//   · 写闸复用老键 `directory`（显示名「工作区外写入」）—— 存量配置的 mode 与例外列表
+//     才能原地留在写闸上。若新建 outsideWrite 又不写迁移，buildConfig 的 `for (const c of CATS)`
+//     只遍历新清单，旧 directory 键连同 exceptions 一起被静默丢弃，其中 `directory=deny`
+//     会掉到新键默认 ask —— 从拒绝放宽为询问，是 fail-open。
+//   · 且 `directory` 键的存在与否参与配置格式判别（load() 的 isOld）：一份同时带 global.mode
+//     与 outsideWrite 的配置会被判成旧格式、走 migrateOld **重建整份配置**，
+//     所有分类的 mode、例外列表、自定义规则全被丢弃。
+//     故：**显示名可以改，`directory` 这个键名不能删也不能重命名。**
+const OUTSIDE_WRITE_CAT = 'directory'
+const OUTSIDE_READ_CAT = 'outsideRead'
+// 区外闸归属的**单点**：读类（read/image）走读闸，写类（edit/undo）走写闸。
+// 判定侧（outsideMatrix）与候选生成侧（buildCandidates）**必须**共用它 —— 候选决定
+// 「用户点『允许此项』后例外写到哪个分类」；它若与实际作出判定的那道闸不一致，
+// 用户点完允许、同一文件下次仍会弹窗，而候选因 alreadyInProject 判重已不再出现，成了死结。
+//
+// 两道区外闸**自身**原样返回（而不是再往下映射一道）：这使
+// `outsideGateOf(k) === k` 成为「k 本身就是一道区外闸」的判据 —— 候选生成侧要靠它
+// 判断「该不该双写」。把这条判据收进本函数，是为了不让「哪些分类是区外闸」散落成第二份清单。
+const outsideGateOf = (catKey) => {
+  if (catKey === OUTSIDE_READ_CAT || catKey === OUTSIDE_WRITE_CAT) return catKey
+  return (catKey === 'read' || catKey === 'image') ? OUTSIDE_READ_CAT : OUTSIDE_WRITE_CAT
+}
+// 面板顺序 = 本数组顺序（面板按 CATS.map 全量渲染）。「执行命令」最前：它是唯一有三层的分类
+// （例外 → 破坏性命令 → 其余情况），默认动作被挪到块底，布局特殊（见 client.js 的 catBlock）。
+// 其后**按操作配对**：区外闸紧邻它所管的操作类型，用户读到的是「同一个操作在区外怎么管、
+// 区内怎么管」这一对，而不是先看完所有区外闸、再回头看它们各自管什么。
+// 顺序无位置依赖：全仓没有按下标取分类的地方（CATS[0] 0 处），command 的特殊布局断言
+// 判的是**块内**顺序，与本数组的位次无关。
+const CATS = ['command', OUTSIDE_READ_CAT, OUTSIDE_WRITE_CAT, 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop']
+// 可挂例外的分类（不含 subagent/doomloop）。顺序同样无依赖 —— 全仓只用于成员判定（indexOf）
+// 与面板的分支开关（client.js 的 catBlock）。这里与 CATS 的前缀保持一致，仅为便于对照。
+const EXC_CATS = ['command', OUTSIDE_READ_CAT, OUTSIDE_WRITE_CAT, 'read', 'image', 'edit', 'undo']
 const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 // 严格度序：allow < ask < deny（越大越严）。做法 A 的「取更严者」合并与面板的
@@ -186,7 +217,7 @@ const SESSION_BUCKET_MAX = 32
 // 留一份在宿主里就会与解析器实际用的那份漂移（候选生成与判定各按一张表走）。
 
 const FILE_READ_TOOLS = { read: 1 }
-// 图片读取单列一类：判定链与 read 完全同构（工作区外先过「目录访问」闸，再过本分类 + 路径例外），
+// 图片读取单列一类：判定链与 read 完全同构（工作区外先过**区外读闸**，再过本分类 + 路径例外），
 // 但配置与默认值都独立 —— 「读文件」的设置不管读图，且 image 默认 ask（read 默认 allow），
 // 老配置升级后读图会先询问（v1 的 locked 配置保持 deny），是否放宽由用户自己决定。
 const FILE_IMAGE_TOOLS = { read_image: 1 }
@@ -1871,8 +1902,9 @@ export default {
       return isUndo(name, args, sreUndoWrites(exec))
     }
 
-    // 工具自身所属的路径类分类（不含 directory 闸）：工作区外审批的「仅此文件」候选要写哪个分类，
-    // 不能靠 entry.cat —— 它只记录「作出决定的那道闸」，directory 处于 ask 时反映不出工具本身属于哪类。
+    // 工具自身所属的路径类分类（不含区外闸）：工作区外审批的「仅此文件」候选要写哪个分类，
+    // 不能靠 entry.cat —— 它只记录「作出决定的那道闸」，区外闸处于 ask 时反映不出工具本身属于哪类。
+    // 返回值 {read, image, edit, undo} 与区外闸的映射交给 outsideGateOf（单点），本函数不管映射。
     function pathToolCat(name, args, exec) {
       if (isFileWrite(name, args)) return 'edit'
       if (isFileImage(name)) return 'image'
@@ -4332,14 +4364,21 @@ export default {
     }
 
     // 工作区外路径类工具的合并矩阵单点（read / image / edit / undo 共用）：
-    // 先过「目录访问」闸，再过工具自身分类闸；任一 deny → 拒绝，任一 ask → 询问，否则放行。
+    // 先过**区外闸**（读类走读闸、写类走写闸，映射单点在 outsideGateOf），再过工具自身分类闸；
+    // 任一 deny → 拒绝，任一 ask → 询问，否则放行。
+    //
+    // 为什么读类也必须保留「自身分类」这一道（而不是只看区外闸）：「读取文件」是读取的总开关，
+    // 只看区外闸会让「读取文件=拒绝」的用户在区外反而被放行 —— 那是 fail-open。
+    // 写类同理，「编辑」是写入的总开关。
+    //
     // cat 取「真正作出决定的那道闸」：它决定弹窗候选（加入例外）写到哪个分类的例外里——
-    // 若只写自身分类而目录闸仍是 ask，用户点「允许」后同一个文件会反复弹窗、且候选会因已存在而消失。
+    // 若只写自身分类而区外闸仍是 ask，用户点「允许」后同一个文件会反复弹窗、且候选会因已存在而消失。
     // 分类名文案：决定由哪道闸作出，reason 就用哪道闸的名字（否则 cat 已是自身分类、
-    // ruleId 也指向自身分类的例外，文案却写「目录权限」，用户会去改错分类的配置）
+    // ruleId 也指向自身分类的例外，文案却写「工作区外写入权限」，用户会去改错分类的配置）
     // deny / ask / allow 三个分支都遵循这一条：cat、前缀、ruleId 三者必须同源。
     const OUTSIDE_PREFIX = {
-      directory: ['目录权限：', 'Directory permission: '],
+      [OUTSIDE_WRITE_CAT]: ['工作区外写入权限：', 'Outside-workspace write permission: '],
+      [OUTSIDE_READ_CAT]: ['工作区外读取权限：', 'Outside-workspace read permission: '],
       read: ['读取权限：', 'Read permission: '],
       image: ['读取图片权限：', 'Read image permission: '],
       edit: ['编辑权限：', 'Edit permission: '],
@@ -4347,28 +4386,30 @@ export default {
     }
 
     function outsideMatrix(catKey, fp, root) {
-      const d = resolveCategory('directory', fp, 'path', root)
+      // 闸归属单点：调用方不传闸 key，4 个调用点因此一行都不用改。
+      const gate = outsideGateOf(catKey)
+      const d = resolveCategory(gate, fp, 'path', root)
       const e = resolveCategory(catKey, fp, 'path', root)
       if (d.action === 'deny' || e.action === 'deny') {
         const src = d.action === 'deny' ? d : e
-        const cat = src === d ? 'directory' : catKey
-        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+        const cat = src === d ? gate : catKey
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
         return { action: 'deny', src, cat, pz: p[0], pe: p[1] }
       }
       if (d.action === 'ask' || e.action === 'ask') {
         // 与 deny/allow 同口径：由**例外**触发的 ask 让 cat 跟随该例外所在闸，前缀与 ruleId 同源；
-        // 纯模式默认值触发的 ask 沿用「目录闸优先」的既有取法（此时无 ruleId，文案回落「（需确认）」）。
+        // 纯模式默认值触发的 ask 沿用「区外闸优先」的既有取法（此时无 ruleId，文案回落「（需确认）」）。
         const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)
-        const cat = src ? (src === d ? 'directory' : catKey) : (d.action === 'ask' ? 'directory' : catKey)
-        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+        const cat = src ? (src === d ? gate : catKey) : (d.action === 'ask' ? gate : catKey)
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
         return { action: 'ask', src, cat, pz: p[0], pe: p[1] }
       }
       // allow：与 deny/ask 同口径——由哪道闸的例外实际放行，cat 就跟随哪道闸，
       // 保证 reason 前缀、ruleId、cat 三者同源（否则文案写「读取图片权限：」
-      // 而括号里的例外 id 属于目录闸，用户会去错分类找一条不存在的规则）。
+      // 而括号里的例外 id 属于区外闸，用户会去错分类找一条不存在的规则）。
       const src = d.ruleId ? d : (e.ruleId ? e : null)
-      const cat = src === d ? 'directory' : catKey
-      const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX.directory
+      const cat = src === d ? gate : catKey
+      const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
       return { action: 'allow', src, cat, pz: p[0], pe: p[1] }
     }
 
@@ -4511,8 +4552,8 @@ export default {
       if (isFileRead(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          // 与 image/edit/undo 同口径：工作区外先过「目录访问」闸，再过「读取文件」闸。
-          // 只取 directory 的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
+          // 与 image/edit/undo 同口径：工作区外先过**区外读闸**（工作区外读取），再过「读取文件」闸。
+          // 只取区外闸的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
           const m = outsideMatrix('read', fp, root)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
@@ -4523,12 +4564,12 @@ export default {
         const exEn = exReasonEn(d)
         return out({ action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
       }
-      // 读图与读文件同一条判定链（工作区外先过「目录访问」闸，再落本分类 + 路径例外），
+      // 读图与读文件同一条判定链（工作区外先过**区外读闸**，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
       if (isFileImage(name)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          // 工作区外读图：directory + image 合并矩阵（不能用 directory 的动作短路，
+          // 工作区外读图：区外读闸 + image 合并矩阵（不能用区外闸的动作短路，
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
           const m = outsideMatrix('image', fp, root)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
@@ -4543,7 +4584,7 @@ export default {
       if (isFileWrite(name, args)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
-          // 工作区外写入：directory + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
+          // 工作区外写入：区外写闸 + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
           const m = outsideMatrix('edit', fp, root)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
@@ -4555,7 +4596,7 @@ export default {
         return out({ action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
-      // 与写类一致：工作区外仍先过「目录访问」闸（directory + undo 合并矩阵）。
+      // 与写类一致：工作区外仍先过**区外写闸**（区外写闸 + undo 合并矩阵）。
       if (isUndoNow(name, args, exec)) {
         const fp = pathArg(args)
         if (fp && isOutside(fp, root)) {
@@ -5014,14 +5055,19 @@ export default {
         // 写出的模式会命中解析后与「整个目录」文案完全不同的路径（授权面更大）。
         const hasParentSeg = (p) => /(^|[\\/])\.\.([\\/]|$)/.test(String(p || ''))
         const catKey = entry.toolCat && EXC_CATS.indexOf(entry.toolCat) !== -1 ? entry.toolCat : entry.cat
-        const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))
+        // 区外闸本身作出决定时（catKey 就是区外闸）只写它自己的例外，不双写 —— 判据
+        // `gate !== catKey` 即「catKey 不是区外闸」，与 outsideGateOf 同一份定义。
+        // 闸归属必须与判定侧共用同一个映射：否则用户点「允许此项」后例外写到了不作出判定的
+        // 那道闸上，同一文件下次仍会弹窗，而候选已因 alreadyInProject 判重不再出现（死结）。
+        const gate = outsideGateOf(catKey)
+        const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root))
         // 候选文案用的分类名：说明这条候选会放开「哪一类操作」，避免文案与落盘的例外分类不符
         // 标签与设置面板的分类名保持一致（edit 就叫「编辑文件」，不再写「写入/编辑」）
         const KIND_LABEL = { read: ['读取文件', 'file reads'], image: ['读取图片', 'image reads'], edit: ['编辑文件', 'file edits'], undo: ['撤销操作', 'undo actions'] }
         const kindLabel = KIND_LABEL[catKey] || ['此类操作', 'this kind of operation']
         if (outsideHere) {
-          // 工作区外路径：两道闸各给一条候选。「整个目录」写 directory 与该分类的目录 glob ——
-          // 点一次后该类操作在该目录下都不再询问；「仅此文件」写自身分类例外 + directory 的精确路径例外。
+          // 工作区外路径：两道闸各给一条候选。「整个目录」写区外闸与该分类的目录 glob ——
+          // 点一次后该类操作在该目录下都不再询问；「仅此文件」写自身分类例外 + 区外闸的精确路径例外。
           // 路径先规范化为绝对路径（折叠 .. 与重复分隔符）：判重与落盘值统一基于它。
           // 含通配符的原文不做折叠——pathResolve 会把 `*` 当普通目录名、被其后的 .. 吃掉
           // （实测 B:/x/*/../y.txt → B:/x/y.txt），使通配路径被误当成精确路径生成候选。
@@ -5030,18 +5076,18 @@ export default {
           // 含 .. 的原文不给目录 glob——dirGlob 取父目录，`..` 可拼出覆盖整个盘根的 `G:/*`。
           const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)
           const glob = globSafe ? dirGlob(absVal) : ''
-          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', 'directory', root)
+          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', gate, root)
           const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey, root)
           if (globSafe && (!hasDirGlob || !hasKindGlob)) {
             // label 就是路径本身（弹窗里最该被看清的东西），范围说明走 hint 小字
-            push(glob, glob, 'path', [{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }], t('工作区外访问目录 + ' + kindLabel[0] + '权限', 'Outside workspace · directory + ' + kindLabel[1]))
+            push(glob, glob, 'path', [{ cat: gate, kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }], t('工作区外访问目录 + ' + kindLabel[0] + '权限', 'Outside workspace · directory + ' + kindLabel[1]))
           }
           const fileVal = absVal
-          // 判重按该候选实际要写的**全部分类**判定：它同时写 catKey 与 directory 两条例外，
+          // 判重按该候选实际要写的**全部分类**判定：它同时写 catKey 与区外闸两条例外，
           // 只要其中一道闸还没有等价例外就得给出候选——否则用户补不上那道闸，只能改选
           // 「整个目录」，精确授权被迫放大为目录级授权。
-          const fileWrites = [{ cat: catKey, kind: 'path', value: fileVal }, { cat: 'directory', kind: 'path', value: fileVal }]
-          // 按候选实际要写的两个分类（catKey + directory）各自判重：任一道闸缺等价例外即给候选。
+          const fileWrites = [{ cat: catKey, kind: 'path', value: fileVal }, { cat: gate, kind: 'path', value: fileVal }]
+          // 按候选实际要写的两个分类（catKey + 区外闸）各自判重：任一道闸缺等价例外即给候选。
           // 注：能走到这里就说明至少一道闸没命中等价例外（两道都命中时 resolveCategory 直接
           // 返回 allow/deny、不会弹窗），因此 covered 当前恒为 false——保留它是防御性冗余，
           // 用来表达「两条写入目标各自判重」的语义，避免未来弹窗流程变更后候选被误隐藏。
@@ -5515,7 +5561,7 @@ export default {
         }
         if (entry.kind === 'path' && entry.cat && EXC_CATS.indexOf(entry.cat) !== -1 && entry.value) {
           // 复用例外写入单点。注意：choice 是用户在弹窗上的显式选择（「拒绝并加入项目黑名单」），
-          // 不能套用候选双写场景的「deny 不写 directory 例外」过滤，否则显式决定会被静默丢弃。
+          // 不能套用候选双写场景的「deny 不写区外闸例外」过滤，否则显式决定会被静默丢弃。
           addProjectException(entry.cat, 'path', String(entry.value), action, root, { target })
           return
         }
@@ -6506,13 +6552,17 @@ export default {
             await init(exec)
             let allow = false
             let ruleCount = 0
-            // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写 directory 例外」这道安全过滤
+            // 例外落盘单点（候选路径与旧形态规则共用）：内含「拒绝时不写**区外闸**例外」这道安全过滤
             // 与计数，避免同一决定因入口不同而落盘范围不同；候选写入一律显式落到项目块。
             // root 用 entry.projRoot（审批发起时的快照）：弹窗可能挂起很久、期间用户会切会话，
             // 用「当前会话」的根会把例外写进别的项目块（用户实测：在 proj-alpha 点的写进了 MCP）。
             const entryRoot = entry.projRoot || rootOf(exec)
             const writeException = (cat, kind, value, decision) => {
-              if (decision === 'deny' && cat === 'directory') return
+              // 语义是「**区外闸**的 deny 例外不落盘」：区外闸本身已是 ask/deny，
+              // 再写一条指向具体路径的 deny 例外没有意义（放行的反面不是逐路径再拒一次）。
+              // 拆成两道闸后必须**两道都覆盖** —— 只拦一半会让读类候选的 deny 凭空多写
+              // 一条 outsideRead 例外（区外闸的例外列表本该只由用户显式决定写入）。
+              if (decision === 'deny' && outsideGateOf(cat) === cat) return
               addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })
               ruleCount++
             }
@@ -6853,7 +6903,7 @@ export default {
 
     registerTool({
       name: 'perm_status',
-      description: '查看权限网关(permgate)当前生效的分类默认(目录/命令/读取/读取图片/编辑/撤销操作/子代理/重复操作)、例外、快捷工具、自定义规则、最近决策与配置路径。',
+      description: '查看权限网关(permgate)当前生效的分类默认(执行命令/工作区外读取/工作区外写入/读取文件/编辑文件/读取图片/撤销操作/启动子代理/重复操作)、例外、快捷工具、自定义规则、最近决策与配置路径。',
       parameters: {},
       output: { schema: { type: 'json' }, render: renderer() },
       async execute(_args, exec) { await init(exec); return toolView(statusView(exec)) },

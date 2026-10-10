@@ -794,26 +794,26 @@ group('11. 工作区外 allow 的 cat / reason 前缀 / ruleId 同源')
     return nexted
   }
 
-  // (a) 目录例外与图片例外同时命中：三者都指向目录闸（与 deny / ask 同口径）
-  const dAdd = await addEx('directory', 'allow', join(ext, '*'))
+  // (a) 区外读闸例外与图片例外同时命中：三者都指向区外读闸（与 deny / ask 同口径）
+  const oAdd = await addEx('outsideRead', 'allow', join(ext, '*'))
   await addEx('image', 'allow', join(ext, '*'))
   const nextedA = await runOut(img)
   const dA = await lastDecision()
-  const dId = dAdd.data && dAdd.data.added && dAdd.data.added.id
-  ok('工作区外 allow：目录例外优先决定文案（不写图片前缀）', !!dA && dA.action === 'allow' && !/读取图片权限/.test(String(dA.reason)), String(dA && dA.reason).slice(0, 50))
-  ok('工作区外 allow：ruleId 与 reason 前缀同源', !!dA && dA.ruleId === dId && /目录权限/.test(String(dA.reason)), JSON.stringify(dA && { ruleId: dA.ruleId, want: dId, reason: String(dA.reason).slice(0, 50) }))
+  const oId = oAdd.data && oAdd.data.added && oAdd.data.added.id
+  ok('工作区外 allow：区外读闸例外优先决定文案（不写图片前缀）', !!dA && dA.action === 'allow' && !/读取图片权限/.test(String(dA.reason)), String(dA && dA.reason).slice(0, 50))
+  ok('工作区外 allow：ruleId 与 reason 前缀同源', !!dA && dA.ruleId === oId && /工作区外读取权限/.test(String(dA.reason)), JSON.stringify(dA && { ruleId: dA.ruleId, want: oId, reason: String(dA.reason).slice(0, 50) }))
   ok('工作区外 allow：确实放行未弹窗', nextedA === true)
 
-  // (b) 目录闸为 allow 且无例外（无 ruleId）→ cat 落回自身分类
+  // (b) 区外读闸为 allow 且无例外（无 ruleId）→ cat 落回自身分类
   const ext2 = mkdtempSync(join(tmpdir(), 'pg-out-b-'))
   const img2 = join(ext2, 'p.png')
   writeFileSync(img2, Buffer.from(PNG, 'base64'))
-  await setCat4('directory', 'allow')
+  await setCat4('outsideRead', 'allow')
   const iAdd = await addEx('image', 'allow', join(ext2, '*'))
   await runOut(img2)
   const dB = await lastDecision()
   const iId = iAdd.data && iAdd.data.added && iAdd.data.added.id
-  ok('工作区外 allow：目录闸无例外时前缀落回自身分类', !!dB && dB.ruleId === iId && /读取图片权限/.test(String(dB.reason)) && !/目录权限/.test(String(dB.reason)), JSON.stringify(dB && { ruleId: dB.ruleId, want: iId, reason: String(dB.reason).slice(0, 50) }))
+  ok('工作区外 allow：区外读闸无例外时前缀落回自身分类', !!dB && dB.ruleId === iId && /读取图片权限/.test(String(dB.reason)) && !/工作区外读取权限/.test(String(dB.reason)), JSON.stringify(dB && { ruleId: dB.ruleId, want: iId, reason: String(dB.reason).slice(0, 50) }))
 
   try { rmSync(ext, { recursive: true, force: true }); rmSync(ext2, { recursive: true, force: true }); rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
 }
@@ -896,7 +896,9 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   const ext6 = mkdtempSync(join(tmpdir(), 'pg-out-c-'))
   const img6 = join(ext6, 'z.png')
   writeFileSync(img6, Buffer.from(PNG, 'base64'))
-  await callRoute(h6.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'directory', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+  // read_image 走「区外读闸 + image」两道闸，故两道都设 ask：弹窗由 image 触发（读闸默认 allow
+  // 不改变结果），但两道闸都得在 ask 上，候选才会按双写语义生成（与下方两个例外列表的断言配套）。
+  await callRoute(h6.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'outsideRead', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
   await callRoute(h6.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'image', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
   const p6 = pre6(makeExec(ws6, 'read_image', { file_path: img6 }), async () => ({ kind: 'allow' }))
   p6.catch(() => {})
@@ -908,8 +910,11 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   await Promise.race([p6, new Promise((r) => setTimeout(r, 200))])
   const st6 = await callRoute(h6.routes, 'GET', '/permgate/status')
   const rows6 = ((((st6.data || {}).categories || {}).project || {}).image || {}).exceptions || []
-  const dirRows6 = ((((st6.data || {}).categories || {}).project || {}).directory || {}).exceptions || []
-  ok('拒绝时携带 allow 规则不落 allow 例外（两个分类都没写）', !!(item6 && cand6) && rows6.length === 0 && dirRows6.length === 0, JSON.stringify({ decisions: (denied6.data || {}).ruleAdded, rows: rows6.map((e) => e.action), dirRows: dirRows6.map((e) => e.action) }))
+  // 被双写的**另一道闸**是区外读闸（不是 directory —— 读类根本不看写闸）。
+  // 这里曾查 directory：拆分后那个键成了写闸，读图这次调用根本没碰它，列表当然为空 ——
+  // 断言照常绿，但本意要覆盖的读闸例外列表没被检查。
+  const gateRows6 = ((((st6.data || {}).categories || {}).project || {}).outsideRead || {}).exceptions || []
+  ok('拒绝时携带 allow 规则不落 allow 例外（两个分类都没写）', !!(item6 && cand6) && rows6.length === 0 && gateRows6.length === 0, JSON.stringify({ decisions: (denied6.data || {}).ruleAdded, rows: rows6.map((e) => e.action), gateRows: gateRows6.map((e) => e.action) }))
   try { rmSync(ws6, { recursive: true, force: true }); rmSync(home6, { recursive: true, force: true }); rmSync(ext6, { recursive: true, force: true }) } catch (e) {}
 
   // (d) 反向确认：拒绝态下勾选的「拒绝此项」必须照常落盘（过滤只针对 allow 方向）
@@ -921,7 +926,8 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   const ext7 = mkdtempSync(join(tmpdir(), 'pg-out-d-'))
   const img7 = join(ext7, 'w.png')
   writeFileSync(img7, Buffer.from(PNG, 'base64'))
-  await callRoute(h7.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'directory', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+  // 同 (c)：读图走「区外读闸 + image」，两道都设 ask（弹窗实际由 image 触发）
+  await callRoute(h7.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'outsideRead', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
   await callRoute(h7.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'image', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
   const p7 = pre7(makeExec(ws7, 'read_image', { file_path: img7 }), async () => ({ kind: 'allow' }))
   p7.catch(() => {})
@@ -934,8 +940,10 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   await Promise.race([p7, new Promise((r) => setTimeout(r, 200))])
   const st7 = await callRoute(h7.routes, 'GET', '/permgate/status')
   const img7Rows = ((((st7.data || {}).categories || {}).project || {}).image || {}).exceptions || []
-  const dir7Rows = ((((st7.data || {}).categories || {}).project || {}).directory || {}).exceptions || []
-  ok('拒绝时勾选「拒绝此项」仍照常落盘（image 记 deny、目录闸不连带）', !!cand7 && img7Rows.length === 1 && img7Rows[0].action === 'deny' && dir7Rows.length === 0, JSON.stringify({ img: img7Rows.map((e) => e.action), dir: dir7Rows.map((e) => e.action) }))
+  // 候选双写的是 image + **区外读闸**（读类的另一道闸；写闸 directory 读类根本不看）。
+  // deny 方向下区外闸被过滤（区外闸的 deny 例外不落盘），image 侧照常落盘。
+  const gate7Rows = ((((st7.data || {}).categories || {}).project || {}).outsideRead || {}).exceptions || []
+  ok('拒绝时勾选「拒绝此项」仍照常落盘（image 记 deny、区外读闸不连带）', !!cand7 && img7Rows.length === 1 && img7Rows[0].action === 'deny' && gate7Rows.length === 0, JSON.stringify({ img: img7Rows.map((e) => e.action), gate: gate7Rows.map((e) => e.action) }))
   try { rmSync(ws7, { recursive: true, force: true }); rmSync(home7, { recursive: true, force: true }); rmSync(ext7, { recursive: true, force: true }) } catch (e) {}
 
   // (e) 例外删除严格按 id：删掉被遮蔽的 allow 不影响生效中的 deny；方向交替写入也不累积同向条目
@@ -1095,17 +1103,34 @@ group('13. 复合权限（工作区外 + 各自分类）的候选：四种都带
     return item
   }
   const CASES = [
-    ['read', 'read', '读取文件', { file_path: join(outDir, 'r.txt') }],
-    ['read_image', 'image', '读取图片', { file_path: join(outDir, 'i.png') }],
-    ['write', 'edit', '编辑文件', { file_path: join(outDir, 'w.txt'), content: 'x' }],
-    ['undo_last_edit', 'undo', '撤销操作', { path: join(outDir, 'u.txt') }],
+    ['read', 'read', '读取文件', 'outsideRead', { file_path: join(outDir, 'r.txt') }],
+    ['read_image', 'image', '读取图片', 'outsideRead', { file_path: join(outDir, 'i.png') }],
+    ['write', 'edit', '编辑文件', 'directory', { file_path: join(outDir, 'w.txt'), content: 'x' }],
+    ['undo_last_edit', 'undo', '撤销操作', 'directory', { path: join(outDir, 'u.txt') }],
   ]
-  for (const [tool, cat, label, args] of CASES) {
+  for (const [tool, cat, label, gate, args] of CASES) {
     const item = await preview(tool, args)
     const cands = (item && item.candidates) || []
     ok('group13: ' + cat + ' 工作区外给出两条复合候选', cands.length === 2, JSON.stringify(cands.map((c) => c.label)))
     ok('group13: ' + cat + ' 候选主文案是纯路径、小字含「' + label + '」', cands.length === 2 && cands.every((c) => c.label === c.value && typeof c.hint === 'string' && c.hint.indexOf(label) !== -1), JSON.stringify(cands.map((c) => c.hint)))
-    ok('group13: ' + cat + ' 小字同时点出目录闸', cands.length === 2 && cands.every((c) => c.hint.indexOf('工作区外访问') === 0), JSON.stringify(cands.map((c) => c.hint)))
+    ok('group13: ' + cat + ' 小字同时点出工作区外', cands.length === 2 && cands.every((c) => c.hint.indexOf('工作区外访问') === 0), JSON.stringify(cands.map((c) => c.hint)))
+    // ★★ 候选写入的分类必须**包含**该工具所属的区外闸。
+    //
+    // 这是拆分引入的最隐蔽的一类缺陷：候选决定「用户点『允许此项』后例外写到哪个分类」，
+    // 它若漏写判定侧真正看的那道闸，用户点完允许、同一文件下次仍会弹窗（那道闸没被写例外），
+    // 而候选因 alreadyInProject 判重已不再出现 —— 用户既没放行成功、也再没有按钮可点，成了死结。
+    //
+    // 注意**不能**拿 item.cat 当判据：按 outsideMatrix 的既有纪律，cat 是「实际作出决定的那道闸」，
+    // 区外闸默认 allow 且无例外时它会落回自身分类（read/image）—— 那是正确的，不代表候选
+    // 不该写区外闸。故断言比的是候选 writes 的分类集合必须恰好是「自身分类 + 它的区外闸」。
+    const gateCats = cands.length ? cands[0].writes.map((w) => w.cat).sort() : []
+    const wantCats = [cat, gate].sort()
+    ok('★★ group13: ' + cat + ' 候选写入的闸含该工具的区外闸（否则点了允许还反复弹窗）',
+      cands.length === 2
+      && gateCats.length === 2
+      && gateCats.indexOf(gate) !== -1
+      && gateCats.indexOf(cat) !== -1,
+      JSON.stringify({ wantCats, gateCats }))
   }
   try { rmSync(outDir, { recursive: true, force: true }); rmSync(ws5, { recursive: true, force: true }); rmSync(home5, { recursive: true, force: true }) } catch (e) {}
 }
@@ -1120,8 +1145,9 @@ group('14. 相对 glob 例外不被绝对化（`**/*.env` 仍匹配任意目录�
   const hG = createHost({ workspaceRoot: wsG, dshHome: homeG })
   const preG = hG.hooks.get('tools/pre-execute')
   // read 默认 allow：先设 ask，这样才能靠「例外命中即放行」判定 glob 是否真的生效；
-  // directory 默认 ask：工作区外访问会先被目录闸拦住（cat=目录权限），必须放开它才测得到 read 的例外
-  await callRoute(hG.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'directory', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  // 工作区外访问会先被**区外读闸**拦住（cat=工作区外读取权限），必须放开它才测得到 read 的例外。
+  // 注意：读类（read/image）走的是**读闸**，设写闸（directory）在这里毫无作用。
+  await callRoute(hG.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'outsideRead', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
   await callRoute(hG.routes, 'POST', '/permgate/set-category', { target: 'global', category: 'read', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
   const add = await callRoute(hG.routes, 'POST', '/permgate/add-exception', { target: 'global', category: 'read', action: 'allow', match: '**/*.env' })
   const addedPath = add.data && add.data.added && add.data.added.path
@@ -1162,7 +1188,7 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   ok('group15: 传给 ask 例外的 reason 被忽略（不串字段）', !!(rA0.data && rA0.data.added && rA0.data.added.reason === undefined && rA0.data.added.note === undefined), JSON.stringify(rA0.data && rA0.data.added))
 
   // (b) ask 例外命中 → 仍走审批（不静默放行、也不静默拒绝），且弹窗 reason 带出自己的备注
-  await setCatA('directory', 'allow')   // 排除目录闸干扰：只看 read 分类这一条
+  await setCatA('outsideRead', 'allow')   // 排除区外读闸干扰：只看 read 分类这一条（读类走读闸，不是写闸）
   await setCatA('read', 'allow')        // 分类默认 allow，若例外不生效就会被静默放行
   const pA = preA(makeExec(wsA, 'read', { file_path: join(outA, 'note.txt') }), async () => ({ kind: 'allow' }))
   pA.catch(() => {})
@@ -1247,7 +1273,7 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   const hA2 = createHost({ workspaceRoot: wsA2, dshHome: homeA2 })
   const preA2 = hA2.hooks.get('tools/pre-execute')
   const addA2 = (cat, action, match, extra) => callRoute(hA2.routes, 'POST', '/permgate/add-exception', Object.assign({ target: 'project', category: cat, action, match }, extra || {}))
-  await callRoute(hA2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'directory', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
+  await callRoute(hA2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'outsideRead', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
   await callRoute(hA2.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'image', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
   const rA2 = await addA2('image', 'ask', join(outA, '*.png'), { note: '外部图片需确认' })
   const idA2 = rA2.data && rA2.data.added && rA2.data.added.id
@@ -1623,7 +1649,11 @@ group('18. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入 edit
     const h = createHost({ workspaceRoot: ws, dshHome: home })
     h.ctx.tools.get = () => sreDef
     await callRoute(h.routes, 'POST', '/permgate/set-fallback', { target: 'global', mode: 'allow' })
-    for (const c of ['edit', 'undo', 'read', 'directory']) {
+    // 把所有**路径类**分类设为 deny：若判定落到了别的分类上会直接拒绝、而不是弹窗，
+    // 于是「askCat 那个分类改 ask 后能弹窗」就证明了落点正确。
+    // 两个区外闸在这里其实不参与判定（本组的文件在**工作区内**，outsideMatrix 不被调用），
+    // 列出来是为了让「路径类分类都设 deny」这个意图保持完整、不漏项。
+    for (const c of ['edit', 'undo', 'read', 'outsideRead', 'directory']) {
       await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'global', category: c, mode: 'deny' })
     }
     // 目标分类改 ask：deny 会直接拒绝、不弹窗，看不到落点；ask 才能从 pending 里读出 cat
@@ -1752,6 +1782,130 @@ group('18b. 撤销分类默认值 = allow（缺键回落），显式落盘的值
   const n5 = await freshUndo(legacy)
   ok('group18b: 缺 undo 键的存量配置回落 allow（影响面已如实标注）', n5.eff === 'allow' && n5.verdict === 'allow', JSON.stringify({ eff: n5.eff, verdict: n5.verdict }))
   ok('group18b: 缺 undo 键的存量配置里，显式的 edit:ask 仍存活', (n5.effective || {}).edit === 'ask', JSON.stringify(n5.effective))
+}
+
+// ─────────────────────────────────────────────────────────────
+group('18c. 工作区外读写拆分：存量 directory 配置零迁移、读写两道闸互不串味')
+{
+  // 本组钉住拆分的**核心承诺**：写闸复用老键 `directory`，故存量配置的 mode 与例外列表
+  // 原地留在写闸上，不需要任何迁移代码。这条承诺一旦被破坏，方向是 **fail-open**：
+  // 存量 `directory=deny`（用户明确拒绝区外访问）会掉到新键默认值 allow —— 静默放宽。
+  // 故必须有行为级断言，不能只靠「键名没改」这种结构观察。
+  //
+  // 同时钉住：读闸（outsideRead）是**新键**，默认 allow、例外列表为空；
+  // 且两道闸互不串味（设读闸不影响写闸，反之亦然）。
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+
+  // 预置一份**存量**配置：写闸（老键 directory）显式 deny + 一条 allow 例外，
+  // 且带 global.mode 之外的分类键 —— 故 isOld 判别为 false、走 buildConfig 而非 migrateOld。
+  async function seedSplit(seed) {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-split-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-split-home-'))
+    const out = mkdtempSync(join(tmpdir(), 'pg-split-out-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(seed), 'utf8')
+    const h = createHost({ workspaceRoot: ws, dshHome: home })
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    const eff = (st.data && st.data.effective) || {}
+    const excOf = (cat) => ((((st.data || {}).categories || {}).global || {})[cat] || {}).exceptions || []
+    const probe = async (name, args) => {
+      const { done, mark } = settleFlag()
+      let nexted = false
+      const p = h.hooks.get('tools/pre-execute')(makeExec(ws, name, args), async () => { nexted = true; return { kind: 'allow' } })
+      p.then(mark, mark)
+      p.catch(() => {})
+      const item = await awaitPending(name, done, h)
+      if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+      const out2 = await withTimeout(p, 'g18c settle')
+      try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }) } catch (e) {}
+      return { verdict: item ? 'ask' : (nexted ? 'allow' : 'deny'), reason: String((item && item.reason) || (out2 && out2.reason) || '') }
+    }
+    return { eff, excOf, probe, out, ws }
+  }
+
+  // ① 存量 directory=deny + 例外：写闸的值与例外都必须在，且读闸取新键默认 allow
+  {
+    const legacyExc = { id: 'legacy1', action: 'allow', path: 'X:/somewhere/keep.txt' }
+    const s = await seedSplit({
+      global: {
+        fallbackMode: 'ask',
+        directory: { mode: 'deny', exceptions: [legacyExc] },
+        command: { mode: 'ask', exceptions: [] },
+        read: { mode: 'allow', exceptions: [] },
+        image: { mode: 'ask', exceptions: [] },
+        edit: { mode: 'ask', exceptions: [] },
+      },
+      projects: {},
+    })
+    ok('★ group18c: 存量 directory=deny 原地留在写闸上（零迁移，不得放宽）', s.eff.directory === 'deny', 'effective.directory=' + s.eff.directory)
+    ok('★ group18c: 存量写闸的例外列表原地保留（未被丢弃）', s.excOf('directory').length === 1 && s.excOf('directory')[0].id === 'legacy1', JSON.stringify(s.excOf('directory')))
+    ok('★ group18c: 读闸是新增键，取默认 allow、例外列表为空', s.eff.outsideRead === 'allow' && s.excOf('outsideRead').length === 0, JSON.stringify({ eff: s.eff.outsideRead, exc: s.excOf('outsideRead') }))
+  }
+
+  // ② 读写分道的行为复算：读闸 allow 时区外**读**放行，而写闸 deny 仍拦住区外**写**。
+  // 这正是本次拆分要达成的目标组合（拆前无解：读写共用一道闸）。
+  {
+    const s = await seedSplit({
+      global: {
+        fallbackMode: 'ask',
+        outsideRead: { mode: 'allow', exceptions: [] },
+        directory: { mode: 'deny', exceptions: [] },
+        read: { mode: 'allow', exceptions: [] },
+        image: { mode: 'ask', exceptions: [] },
+        edit: { mode: 'allow', exceptions: [] },
+      },
+      projects: {},
+    })
+    const f = join(s.out, 'x.txt')
+    writeFileSync(f, 'hello', 'utf8')
+    const rd = await s.probe('read', { file_path: f })
+    ok('★★ group18c: 区外读闸 allow → 区外读放行（写闸 deny 不牵连读）', rd.verdict === 'allow', JSON.stringify(rd))
+    const wr = await s.probe('write', { file_path: f, content: 'y' })
+    ok('★★ group18c: 写闸 deny → 区外写被拒（读闸 allow 不牵连写）', wr.verdict === 'deny', JSON.stringify(wr))
+    ok('★★ group18c: 区外写被拒时 reason 前缀指向**写闸**（cat/前缀同源）', /工作区外写入权限/.test(wr.reason), wr.reason.slice(0, 60))
+  }
+
+  // ③ 反向：读闸 deny、写闸 allow 时，区外读被拒而区外写放行。
+  // 这一条同时证明两道闸各自独立生效，而不是「写闸永远赢」之类的隐式优先级。
+  {
+    const s = await seedSplit({
+      global: {
+        fallbackMode: 'ask',
+        outsideRead: { mode: 'deny', exceptions: [] },
+        directory: { mode: 'allow', exceptions: [] },
+        read: { mode: 'allow', exceptions: [] },
+        image: { mode: 'ask', exceptions: [] },
+        edit: { mode: 'allow', exceptions: [] },
+      },
+      projects: {},
+    })
+    const f = join(s.out, 'y.txt')
+    writeFileSync(f, 'hello', 'utf8')
+    const rd = await s.probe('read', { file_path: f })
+    ok('★★ group18c: 读闸 deny → 区外读被拒（写闸 allow 不牵连读）', rd.verdict === 'deny', JSON.stringify(rd))
+    ok('★★ group18c: 区外读被拒时 reason 前缀指向**读闸**（cat/前缀同源）', /工作区外读取权限/.test(rd.reason), rd.reason.slice(0, 60))
+  }
+
+  // ④ 读闸对读图同样生效（读闸范围 = read + image）：读闸 deny 时读图也被拒，
+  // 且拒绝文案指向读闸而不是 image —— 证明 image 走的是读闸这条链。
+  {
+    const s = await seedSplit({
+      global: {
+        fallbackMode: 'ask',
+        outsideRead: { mode: 'deny', exceptions: [] },
+        directory: { mode: 'ask', exceptions: [] },
+        read: { mode: 'allow', exceptions: [] },
+        image: { mode: 'allow', exceptions: [] },
+        edit: { mode: 'ask', exceptions: [] },
+      },
+      projects: {},
+    })
+    const img = join(s.out, 'p.png')
+    writeFileSync(img, Buffer.from(PNG, 'base64'))
+    const im = await s.probe('read_image', { file_path: img })
+    ok('★★ group18c: 读闸 deny → 区外读图同样被拒（image 也在读闸范围内）', im.verdict === 'deny', JSON.stringify(im))
+    ok('★★ group18c: 读图被拒的文案指向读闸（image 走读闸这条链）', /工作区外读取权限/.test(im.reason), im.reason.slice(0, 60))
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

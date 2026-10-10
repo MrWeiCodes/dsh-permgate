@@ -630,8 +630,14 @@ window.__ModuleLoader__.load({
 				command: '%3Crect x=%222.2%22 y=%223.2%22 width=%2211.6%22 height=%229.6%22 rx=%221.6%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22/%3E' +
 					'%3Cpath d=%22M4.8 6.4l1.9 1.7-1.9 1.7%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E' +
 					'%3Cpath d=%22M8.4 10.2h3.1v1.1H8.4z%22 fill=%22black%22/%3E',
-				// 目录：文件夹
+				// 目录（区外写闸）：文件夹（实心）
 				directory: '%3Cpath d=%22M2.2 4.6c0-.7.6-1.3 1.3-1.3h2.6l1.3 1.4h5.1c.7 0 1.3.6 1.3 1.3v5.7c0 .7-.6 1.3-1.3 1.3H3.5c-.7 0-1.3-.6-1.3-1.3z%22 fill=%22black%22/%3E',
+				// 区外读取：同一个文件夹的**线框**形态 + 向外的箭头。
+				// 与 directory（实心文件夹）成对：两道区外闸在面板上相邻，同族不同形态便于一眼配对；
+				// 箭头朝外表示「这个闸管的是往工作区外看」，与实心那个（管往外写）区分开。
+				// 不能沿用 read 的文档图标：那会让「区外读取」与「读取文件」在弹窗缩小方块里撞脸。
+				outsideRead: '%3Cpath d=%22M2.2 4.6c0-.7.6-1.3 1.3-1.3h2.6l1.3 1.4h5.1c.7 0 1.3.6 1.3 1.3v5.7c0 .7-.6 1.3-1.3 1.3H3.5c-.7 0-1.3-.6-1.3-1.3z%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linejoin=%22round%22/%3E' +
+					'%3Cpath d=%22M5.9 8.5h3.7M8.1 6.9l1.6 1.6-1.6 1.6%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E',
 				// 图片：山峦 + 太阳（平台图标集没有图片类图标，必须自绘）
 				image: '%3Crect x=%222.2%22 y=%223.2%22 width=%2211.6%22 height=%229.6%22 rx=%221.6%22 fill=%22none%22 stroke=%22black%22 stroke-width=%221.3%22/%3E' +
 					'%3Ccircle cx=%225.6%22 cy=%226.4%22 r=%221.1%22 fill=%22black%22/%3E' +
@@ -1378,9 +1384,10 @@ window.__ModuleLoader__.load({
 			};
 		}
 
-		// 分类清单默认值：以宿主下发为准（见 applyStatusLists），避免双端各存一份而漂移
-		let CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'];
-		let EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo'];
+		// 分类清单默认值：以宿主下发为准（见 applyStatusLists），避免双端各存一份而漂移。
+		// 顺序与宿主 CATS 一致：执行命令最前，其后按操作配对（区外闸紧邻它所管的操作类型）。
+		let CATS = ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'];
+		let EXC_CATS = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'];
 		// 例外的爆炸半径（宿主下发 { global: { [例外id]: {level,path} }, project: {...} }，
 		// 只含 allow 例外）。
 		//
@@ -1561,7 +1568,10 @@ window.__ModuleLoader__.load({
 				'app.openFileFailed': '无法在侧栏打开（当前 DSH 未提供右侧栏服务）',
 				'app.diffResize': '拖动调整宽度',
 				'settings.title': '权限网关',
-				'cat.directory': '目录访问（工作区外）',
+				// 键名 `directory` 与显示名不一致是**有意的**（写闸复用老键才能继承存量 mode 与例外
+				// 列表，且该键参与宿主配置格式判别，改名会让整份配置被判成旧格式而重建）。
+				'cat.directory': '工作区外写入',
+				'cat.outsideRead': '工作区外读取',
 				'cat.command': '执行命令',
 				'cat.read': '读取文件',
 				'cat.image': '读取图片',
@@ -1572,7 +1582,8 @@ window.__ModuleLoader__.load({
 				// 缩小方块的短名（cat.* 是设置页的长名，两者用途不同故分开；
 				// 但都放 I18N 走 T()，不再另存平行表）。custom/quick/fallback 是
 				// decide() 的三个特殊 cat 值，也要有短名。
-				'catS.directory': '目录',
+				'catS.directory': '区外写',
+				'catS.outsideRead': '区外读',
 				'catS.command': '命令',
 				'catS.read': '读取',
 				'catS.image': '图片',
@@ -1899,7 +1910,8 @@ window.__ModuleLoader__.load({
 				'app.openFileFailed': 'Cannot open in the sidebar (this DSH build has no right-sidebar service)',
 				'app.diffResize': 'Drag to resize',
 				'settings.title': 'Permissions',
-				'cat.directory': 'Directory access (outside workspace)',
+				'cat.directory': 'Write outside workspace',
+				'cat.outsideRead': 'Read outside workspace',
 				'cat.command': 'Run command',
 				'cat.read': 'Read file',
 				'cat.image': 'Read image',
@@ -1907,7 +1919,8 @@ window.__ModuleLoader__.load({
 				'cat.undo': 'Undo edit (revert last edit)',
 				'cat.subagent': 'Spawn subagent',
 				'cat.doomloop': 'Doom Loop',
-				'catS.directory': 'Directory',
+				'catS.directory': 'Outside write',
+				'catS.outsideRead': 'Outside read',
 				'catS.command': 'Command',
 				'catS.read': 'Read',
 				'catS.image': 'Image',
@@ -3269,7 +3282,7 @@ window.__ModuleLoader__.load({
 			// 旧定时器既不清理也不重新计时，对勾会按第一次保存的时间点提前消失。
 			const reasonSavedSeq = React.useRef(0);
 			const markReasonSaved = (f) => { reasonSavedSeq.current += 1; setReasonSaved({ key: reasonKeyOf(f), seq: reasonSavedSeq.current }); };
-			const [exVals, setExVals] = React.useState({ directory: '', command: '', read: '', edit: '' });
+			const [exVals, setExVals] = React.useState({ command: '', outsideRead: '', directory: '', read: '', edit: '' });
 			// 例外添加行的动作与文字也必须**按分类**存，不能是全局单值：
 			// 每个分类各有一行添加控件，共用一份状态时在任一分类选「拒绝」或输入原因，
 			// 其余分类的添加行会一起联动（值被同步改写），用户看到的就是「一改全变」。
@@ -3384,12 +3397,12 @@ window.__ModuleLoader__.load({
 			// ── 为什么例外不能只用一个 ref ─────────────────────────────────────────
 			// 这里曾经断言「同一时刻只有一个分类的列表被展开（折叠状态下 listBox 根本不渲染），
 			// 故一个 ref 就够」—— 该前提**不成立**：折叠状态按分类独立存（excCollapsed[c]），
-			// 默认折叠判据是 `excList.length > EXC_COLLAPSE_THRESHOLD`（=6），而例外分类有 6 个，
+			// 默认折叠判据是 `excList.length > EXC_COLLAPSE_THRESHOLD`（=6），而例外分类有 7 个，
 			// 于是「多个分类同时展开」是**默认态**而不是边缘情况。
 			//
 			// 后果（实测复现）：CATS.map(catBlock) 会同时渲染多个 listBox，它们把**同一个** ref
 			// 挂到各自的滚动容器上；React 中同一 ref 被多元素共用时按挂载顺序依次赋值，
-			// current 最终只指向**最后挂载**的那个。于是用户在靠前的分类（directory/command）
+			// current 最终只指向**最后挂载**的那个。于是用户在靠前的分类（outsideRead/command）
 			// 添加例外后，effect 滚的是**别的分类**的列表 —— 自己刚加的那条仍在视口外，
 			// 而另一个无关列表被莫名拽到底部。这正是本次改动（push 到末尾 + 滚到底）要消除的症状。
 			//
@@ -4847,7 +4860,7 @@ window.__ModuleLoader__.load({
 					// 而中间那层还挂着 panel.subMismatch「判定链上子设置优先」的提示，
 					// 等于用文字承认了顺序是反的。
 					//
-					// 其余五个分类只有两层（例外 → 默认动作），标题行放「分类名 + 该分类的
+					// 其余分类只有两层（例外 → 默认动作），标题行放「分类名 + 该分类的
 					// 默认值」是卡片布局的惯例，且整块被分类边框包着、例外列表紧贴其下，
 					// 不会被读成「管全局」。所以**不动它们** —— 面板里因此只有一处特殊布局，
 					// 而这个特殊性是真实的（只有 command 有三层），不是为了统一而统一。
@@ -5020,14 +5033,15 @@ window.__ModuleLoader__.load({
 											// ── 只标**命令**例外（与上面 excTooBroad 同一个门）────────────────────
 											// 路径例外上这个标注不成立，两类原因：
 											//
-											// ① `outside` 档在路径侧是同义反复。「目录访问（工作区外）」这个分类
-											//    名已经写明了适用范围，而一条 directory 例外**只可能在工作区外被命中**
-											//    （全仓库唯一调用点 resolveCategory('directory', …) 在 outsideMatrix 里，
-											//    而 outsideMatrix 的 4 个调用点全在 `if (fp && isOutside(fp, root))` 内）
-											//    —— 于是「存在一条 directory 例外」⟺「它被标 outside」。
+											// ① `outside` 档在路径侧是同义反复。区外闸的分类名（「工作区外读取」
+											//    /「工作区外写入」）已经写明了适用范围，而一条区外闸例外**只可能
+											//    在工作区外被命中** —— resolveCategory 对区外闸的调用点只有
+											//    outsideMatrix 一处，而 outsideMatrix 的 4 个调用点全在
+											//    `if (fp && isOutside(fp, root))` 内
+											//    —— 于是「存在一条区外闸例外」⟺「它被标 outside」。
 											//    用户为了跨项目协作写的每一条路径例外，都必然收到一次「目标范围过大」，
 											//    而它本身毫无问题。实测：工作区 proj-a、例外指向同级 proj-b
-											//    → directory 与 read 两条例外都被标 outside。
+											//    → 区外写闸与 read 两条例外都被标 outside。
 											//
 											// ② 标签与档位含义在路径侧对不上。`panel.excBlast` 是「目标范围过大」，
 											//    而 outside 档的 title 是「目标在工作区之外——不在本项目范围内」：

@@ -88,8 +88,8 @@ if (meta !== undefined && meta !== null) {
     typeof meta.description === 'object' && meta.description !== null,
     JSON.stringify(meta.description))
   if (typeof meta.description === 'object' && meta.description !== null) {
-    const zhDesc = '按分类逐项审查工具调用：目录、命令、读写、子代理等八类分开管控，支持例外、自定义规则与中英双语审批弹窗。'
-    const enDesc = 'Reviews tool calls per category — directories, commands, reads, writes, subagents — with exceptions, custom rules, and a bilingual approval modal.'
+    const zhDesc = '按分类逐项审查工具调用：命令、工作区外读写、读写文件、子代理等九类分开管控，支持例外、自定义规则与中英双语审批弹窗。'
+    const enDesc = 'Reviews tool calls per category — commands, reads and writes outside the workspace, file reads and writes, subagents — with exceptions, custom rules, and a bilingual approval modal.'
     ok('description.zh 是钉住的中文描述', meta.description.zh === zhDesc,
       JSON.stringify(meta.description.zh))
     ok('description.en 是钉住的英文描述', meta.description.en === enDesc,

@@ -133,8 +133,13 @@ if (mod) {
     && src.includes('if (typeof o === \'string\') return o'))
   // CATEGORY_ENUM / EXC_CATEGORY_ENUM 已随权限写工具移除（它们原本只是工具 schema 的 enum 来源，
   // 且旧断言是恒真式：常量定义为 CATS.slice()，与自己比较必然相等）。这里直接守住两份清单本身。
-  ok('CATS 含全部八个分类且 undo 在内', mod.CATS.length === 8 && mod.CATS.indexOf('undo') !== -1 && mod.CATS.indexOf('doomloop') !== -1)
-  ok('EXC_CATS 是可挂例外的六个分类（不含 subagent/doomloop）', JSON.stringify(mod.EXC_CATS) === JSON.stringify(['directory', 'command', 'read', 'image', 'edit', 'undo']))
+  ok('CATS 含全部九个分类且 undo 在内', mod.CATS.length === 9 && mod.CATS.indexOf('undo') !== -1 && mod.CATS.indexOf('doomloop') !== -1)
+  // 顺序即面板顺序（面板按 CATS.map 全量渲染）：执行命令最前（唯一三层布局），其后按操作配对 ——
+  // 区外闸紧邻它所管的操作类型。这条断言钉住配对关系，否则后续调整会把成对的项拆散。
+  ok('CATS 顺序：执行命令最前，其后按操作配对（区外闸紧邻所管的操作类型）',
+    JSON.stringify(mod.CATS) === JSON.stringify(['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop']),
+    JSON.stringify(mod.CATS))
+  ok('EXC_CATS 是可挂例外的七个分类（不含 subagent/doomloop）', JSON.stringify(mod.EXC_CATS) === JSON.stringify(['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo']))
   ok('fileTooLarge 用参数而非闭包常量', mod.fileTooLarge({ size: 2000000 }, mod.DIFF_MAX_CHARS) === true && mod.fileTooLarge({ size: 10 }, mod.DIFF_MAX_CHARS) === false)
   // COMMAND_TOOLS 由 SHELL_OF_TOOL 派生（单一来源）：两份定义漂移时新增命令工具会漏判
   ok('★ COMMAND_TOOLS 由 SHELL_OF_TOOL 派生（单一来源）',
@@ -328,7 +333,7 @@ group('6b. lint 工具链：配置声称的覆盖范围必须真的被跑')
 
 // ─────────────────────────────────────────────────────────────
 group('7. 浏览器半部分：清单以宿主下发为准')
-ok('client 清单为可变并保留默认', cli.includes("let CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'];") && cli.includes("let EXC_CATS = ['directory', 'command', 'read', 'image', 'edit', 'undo'];"))
+ok('client 清单为可变并保留默认', cli.includes("let CATS = ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'];") && cli.includes("let EXC_CATS = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'];"))
 ok('client applyStatusLists 覆盖清单', cli.includes('function applyStatusLists(s) {') && cli.includes('applyStatusLists(s);'))
 ok('client 读取 status 下发的清单', cli.includes('s.cats') && cli.includes('s.excCats') && cli.includes('s.modes') && cli.includes('s.allModes'))
 ok('client 无 editorKernel 残留（面板入口已移除）', !cli.includes('editorKernel') && !cli.includes('set-editor-kernel'))
@@ -992,8 +997,8 @@ ok('decided/encoding 从 readPreviewText 透传到预览数据',
 // ─────────────────────────────────────────────────────────────
 group('10. 读图独立分类（image）口径')
 ok('read_image 已从 read 移出、单列 FILE_IMAGE_TOOLS', !src.includes('FILE_READ_TOOLS = { read: 1, read_image: 1 }') && src.includes('const FILE_IMAGE_TOOLS = { read_image: 1 }'))
-ok('image 进入分类清单与例外分类清单', src.includes("const CATS = ['directory', 'command', 'read', 'image'") && src.includes("const EXC_CATS = ['directory', 'command', 'read', 'image'"))
-ok('decide 里有 image 判定（与 read 同链：工作区外先过目录访问）', src.includes("resolveCategory('image', fp, 'path', root)") && src.includes('if (isFileImage(name)) {'))
+ok('image 进入分类清单与例外分类清单', mod.CATS.indexOf('image') !== -1 && mod.EXC_CATS.indexOf('image') !== -1)
+ok('decide 里有 image 判定（与 read 同链：工作区外先过区外读闸）', src.includes("resolveCategory('image', fp, 'path', root)") && src.includes('if (isFileImage(name)) {'))
 ok('pathToolCat 把 read_image 归到 image（不继承 read）', src.includes("if (isFileImage(name)) return 'image'") && src.includes("if (isFileRead(name, args)) return 'read'"))
 // undo 默认 allow 是一个取舍（撤销恢复既有内容、不接受新内容），不是「撤销无害」的结论：
 // 两个撤销实现的破坏面不同 —— fs-encoding 只在内存、按 session 分桶且文件改动后拒绝；
@@ -1023,8 +1028,10 @@ ok('sniffImage: WebP VP8X/VP8L/VP8 三种 chunk 宽高', (() => { const a = sn(v
 ok('sniffImage: 非图片/空缓冲/短缓冲返回 null', sn(Buffer.from('definitely not an image, just text padding to exceed the sniff length\n')) === null && sn(Buffer.alloc(0)) === null && sn(Buffer.alloc(8)) === null)
 ok('IMAGE_MIME 覆盖 PNG/JPEG/GIF/WebP', mod.IMAGE_MIME.png === 'image/png' && mod.IMAGE_MIME.jpeg === 'image/jpeg' && mod.IMAGE_MIME.gif === 'image/gif' && mod.IMAGE_MIME.webp === 'image/webp')
 ok('isFileImage 只认 read_image', mod.isFileImage('read_image') === true && mod.isFileImage('read') === false && mod.isFileImage('str_replace_editor') === false)
-// 防回退：工作区外读图必须走 directory+image 合并矩阵单点，不得再用 directory 的动作短路 image 分类
-ok('工作区外读图走合并矩阵单点（不被 directory 短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp, root\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('目录权限/.test(src))
+// 防回退：工作区外读图必须走合并矩阵单点，不得再用区外闸的动作短路 image 分类。
+// 否命题的锚点从「目录权限」改为**当前**的区外写闸前缀：前缀改名后旧的否命题会恒真、
+// 断言静默失效（写「目录权限」时它匹配不到任何东西，无论实现是否回退都通过）。
+ok('工作区外读图走合并矩阵单点（不被区外闸短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp, root\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('工作区外写入权限/.test(src))
 // 防回退：read 也必须走合并矩阵（deny 例外与 read=ask 在跨工作区时必须生效）
 ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root\)/.test(src))
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
@@ -1046,13 +1053,15 @@ ok('迁移不把老模式套到 image 上', src.includes("c === 'image' ? (oldMo
 // 防回退：imagePreview 字段已废弃（客户端不再据它分流，详情看 hasDiff），不得回潮
 ok('pending 不再下发已废弃的 imagePreview 标记', !src.includes('imagePreview') && !cli.includes('imagePreview'))
 ok('图片详情默认展开并自动预取（读图时直接看到缩略图）', cli.includes("openDetail[p.id] === undefined ? !!p.hasDiff") && !cli.includes('!p.imagePreview') && !cli.includes('p.imagePreview && !userOpened'))
-// 防回退：工作区外审批给两条候选（整个目录 / 仅此文件），且「仅此文件」写两条例外（自身分类 + 目录精确路径）
-ok('工作区外 path 审批给两条候选', src.includes("const outsideHere = !!(catKey && catKey !== 'directory' && isOutside(entry.value, root))") && src.includes('function pathToolCat(name, args, exec) {') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments, exec)'))
-ok('「仅允许此文件」写自身分类 + 目录精确路径两条例外（值取归一化路径）', src.includes("{ cat: catKey, kind: 'path', value: fileVal }, { cat: 'directory', kind: 'path', value: fileVal }") && src.includes('const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null') && cli.includes('({ id: c.id, value: c.value, kind: c.kind, decision: sel[c.id] })'))
-ok('「整个目录」同时写目录闸与自身分类的 glob', src.includes("{ cat: 'directory', kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }") && src.includes('const hasKindGlob = globSafe && alreadyInProject(glob'))
+// 防回退：工作区外审批给两条候选（整个目录 / 仅此文件），且「仅此文件」写两条例外（自身分类 + 区外闸精确路径）
+// 判据同步改为闸归属单点：`outsideHere` 现在由 outsideGateOf(catKey) 派生，
+// 断言保住的是**语义**（区外路径 → 两条候选分支），不是某个具体字面量。
+ok('工作区外 path 审批给两条候选', src.includes('const gate = outsideGateOf(catKey)') && src.includes('const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root))') && src.includes('function pathToolCat(name, args, exec) {') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments, exec)'))
+ok('「仅允许此文件」写自身分类 + 区外闸精确路径两条例外（值取归一化路径）', src.includes("{ cat: catKey, kind: 'path', value: fileVal }, { cat: gate, kind: 'path', value: fileVal }") && src.includes('const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null') && cli.includes('({ id: c.id, value: c.value, kind: c.kind, decision: sel[c.id] })'))
+ok('「整个目录」同时写区外闸与自身分类的 glob', src.includes("{ cat: gate, kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }") && src.includes('const hasKindGlob = globSafe && alreadyInProject(glob'))
 // 防回退：缩略图像素上限、落盘分类/类型自洽、reason 前缀跟随决定闸、read 复用预检单点
 ok('缩略图有像素/边长上限（16MP / 4096），尺寸未知时一律不内联', src.includes('const IMAGE_MAX_PIXELS = 16 * 1000 * 1000') && src.includes('const IMAGE_MAX_DIM = 4096') && src.includes('const pixelOver = !!(sizeKnown && (') && src.includes('if (!sizeKnown) { out.sizeUnknown = true; return out }'))
-ok('拒绝候选不落 directory 例外（单点过滤，候选与旧形态共用）', src.includes('const writeException = (cat, kind, value, decision)') && src.includes("if (decision === 'deny' && cat === 'directory') return") && (src.match(/writeException\(/g) || []).length === 2 && !src.includes("w.cat === 'directory') continue"))
+ok('拒绝候选不落区外闸例外（单点过滤，候选与旧形态共用）', src.includes('const writeException = (cat, kind, value, decision)') && src.includes('if (decision === \'deny\' && outsideGateOf(cat) === cat) return') && (src.match(/writeException\(/g) || []).length === 2 && !src.includes("w.cat === 'directory') continue"))
 ok('同值相反 action 不再静默覆盖历史例外（守卫按同向判定）', (src.match(/findIndex\(\(r\) => cmdExcKey\(r\.match\) === key && r\.action === decision\)/g) || []).length === 1 && src.includes('pathKey(r.path, rootKey) === pathKey(value, rootKey) && r.action === decision') && !src.includes('idx !== -1 && c.exceptions[idx].action === decision') && src.includes('const item = build({ path: normAbsPath(value, rootKey) })') && src.includes('const item = build({ match: value })'))
 // 原本计数为 2（面板路由 + perm_add_exception 工具）；工具移除后只剩面板路由这一处
 ok('例外写入统一走 addProjectException（不再尾部 push）', (src.match(/addProjectException\(a\.category|addProjectException\(args\.category/g) || []).length === 1 && !src.includes('block[a.category].exceptions.push(e)') && !src.includes('block[args.category].exceptions.push(e)'))
@@ -1069,11 +1078,11 @@ ok('拒绝只提交 deny 方向规则，服务端二次拦截', cli.includes('co
 ok('hasGlobMeta 只拦 * 与 ?（[ ] 是字面量）', src.includes('const hasGlobMeta = (p) => /[*?]/.test(String(p || \'\'))'))
 ok('例外落盘校验分类与类型自洽', src.includes("if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1)") && src.includes("if (kind === 'command' && cat === 'command')") && src.includes('if (!p) return false'))
 ok('工作区外 reason 前缀跟随决定闸', src.includes('const OUTSIDE_PREFIX = {') && (src.match(/m\.pz \+ /g) || []).length === 12)
-ok('工作区外 allow 的 cat 与 ruleId 同源（不再硬编码 catKey）', src.includes("const cat = src === d ? 'directory' : catKey") && !src.includes("return { action: 'allow', src: d.ruleId ? d : (e.ruleId ? e : null), cat: catKey"))
+ok('工作区外 allow 的 cat 与 ruleId 同源（不再硬编码 catKey）', src.includes("const cat = src === d ? gate : catKey") && !src.includes("return { action: 'allow', src: d.ruleId ? d : (e.ruleId ? e : null), cat: catKey"))
 ok('read/image 详情复用预检单点且跳过体积闸', (src.match(/skipSizeCheck: true/g) || []).length === 2)
 // 防回退：路径先规范化再判定（含 .. 的原文会写出不生效的例外）；文件级判重按候选要写的全部分类；
 // 通配符仍由 hasGlobMeta 拦下。旧形态（无 id）按 value 反查候选复用 writes
-ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)') && src.includes('return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: \'directory\', kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat, root))') && src.includes('const hasGlobMeta = (p) =>'))
+ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)') && src.includes('return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: gate, kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat, root))') && src.includes('const hasGlobMeta = (p) =>'))
 ok('旧形态 rules 按 value 反查候选复用 writes', src.includes('const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))'))
 // 防回退：例外删除必须是单点且严格按 id 删除，并回传同路径剩余条目数供 UI 提示
 // 原本计数为 2（面板路由 + perm_remove_exception 工具）；工具移除后只剩面板路由
@@ -1125,7 +1134,7 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
       "function ensureProject(root) { if (!config.projects[root]) { config.projects[root] = { custom: [] }; for (const c of EXC_CATS) config.projects[root][c] = freshCategory(c, true) } return config.projects[root] }",
       sliceFn3('addProjectException'),
       'return { add: addProjectException, cfg: () => config }',
-    ].join('\n'))(['directory', 'command', 'read', 'image', 'edit', 'undo'])
+    ].join('\n'))(['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'])
   } catch (e) { A = null }
   ok('★ addProjectException 可独立求值（追加语义行为复算的前置）', A !== null, '')
   if (A) {
@@ -1231,7 +1240,7 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
   if (S) {
     // pathResolve 由调用方传入（真实实现的 normAbsPath 用它折叠 `..`）
     const Srun = (cfg, cats, root) => S(cfg, null, cats, root, pathResolve)
-    const CATS6 = ['directory', 'command', 'read', 'image', 'edit', 'undo']
+    const CATS7 = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo']
     // 按分类建块：命令用例必须落在 command 分类下（都塞进 image 的话，命令侧判据
     // 根本没被执行到，断言会在「实现正确」时变红）。
     const mk = (exceptions, cat) => ({ global: { [cat || 'image']: { mode: 'allow', exceptions: exceptions } }, projects: {} })
@@ -1240,7 +1249,7 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
       // 下发形状是 { global: { [例外id]: {...} }, project: {...} } —— **按 id 直接索引**，
       // 不像 categories 那样再分一层分类（照 categories 的形状取值会得到 undefined，
       // 症状是断言全红而根因在测试自己的取值路径）。
-      const view = Srun(cfg, CATS6, 'X:/ws')
+      const view = Srun(cfg, CATS7, 'X:/ws')
       return (view && view.global) || {}
     }
     // ① [allow, deny] 同目标：后面的 deny 被前面的 allow 遮蔽 → 必须标注
@@ -4024,8 +4033,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     badArity.length === 0, JSON.stringify(badArity.slice(0, 6)))
 
   // 3) 行为断言：真实执行 rootOf/projectBlock/ensureProject，验证按会话隔离
-  const CATS_L = ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop']
-  const EXC_L = ['directory', 'command', 'read', 'image', 'edit', 'undo']
+  const CATS_L = ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop']
+  const EXC_L = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo']
   const sliceFn = (name) => {
     const s = src.indexOf('function ' + name + '(')
     if (s < 0) return ''
@@ -5965,8 +5974,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
         custom: { global: [{ id: 'r1', action: 'deny', tool: 'pwsh' }, { id: 'r2', action: 'allow', tool: 'git', args: 'status' }], project: [] },
         counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
-        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
-        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        cats: ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'],
+        excCats: ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
         // 推导的档位缺省表）已随「两份八档默认值规则」一起从宿主下发里**删除**。
@@ -6117,10 +6126,10 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     // 判据必须同时查「该有的有」与「不该有的没有」：只查前者时把分类门删掉也不会变红
     // （e4 会被多画一个，而 blastMarks.length 变成 2 —— 故上面那条其实也能抓到；
     //  但下面这条把**原因**钉死：漏的是路径侧，不是「数量算错了」）。
-    // 为什么路径侧不该标：`outside` 档对路径例外是同义反复 —— directory 例外只在
+    // 为什么路径侧不该标：`outside` 档对路径例外是同义反复 —— 区外闸例外只在
     // outsideMatrix 里被命中（4 个调用点全在 `if (fp && isOutside(fp, root))` 内），
-    // 故「存在一条 directory 例外」⟺「它被标 outside」；而「目录访问（工作区外）」
-    // 这个分类名已经把适用范围写在标题上了，行内再标一次是同一个信息编码两遍。
+    // 故「存在一条区外闸例外」⟺「它被标 outside」；而「工作区外读取 / 工作区外写入」
+    // 这两个分类名已经把适用范围写在标题上了，行内再标一次是同一个信息编码两遍。
     // 另：`panel.excBlast` 的文案是「目标范围过大」，而 outside 档的含义是
     // 「不在本项目范围内」—— 对一条指向隔壁项目的具体目录的例外，前者不成立。
     // 判据用 title 的**文案键**分辨是哪一档：本渲染桩的 T() 返回键本身（Tstub = (k) => k），
@@ -6310,8 +6319,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         // 场景跑不起来（实测「过滤框数量 = 0」→ 断言全部空转通过）。
         quickPreset: ['job_list', 'web_search', 'todo_write', 'grep', 'glob'], quickDefaults: {},
         custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
-        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
-        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        cats: ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'],
+        excCats: ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         exceptionBlast: {},
         // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
@@ -6429,6 +6438,10 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   {
     let sErr = null
     let res = null
+    // 面板按 CATS.map 渲染，故「第一个例外添加行」属于 CATS 中第一个也在 EXC_CATS 里的分类。
+    // 分类名**从 fixture 派生**、且定义在 try 之外：断言在 try 之外，写死分类名会让
+    // CATS 顺序调整后这条断言红掉，而它要守的是「滚的是本次添加的那个分类」，与是哪个分类无关。
+    let firstExcCat = null
     try {
       let loaded3 = null
       new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded3 = m } } })
@@ -6465,22 +6478,22 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         if (n.props && n.props.children) walk3(n.props.children, acc)
         return acc
       }
-      // 六个例外分类各 1 条 → 全部 ≤6 → **默认全部展开**（多 listBox 同时渲染）
+      // 七个例外分类各 1 条 → 全部 ≤6 → **默认全部展开**（多 listBox 同时渲染）
       const mkC = (id, match) => ({ mode: 'ask', exceptions: [{ id, action: 'allow', match }] })
       const fx = {
         configPath: 'C:/x/config.json', active: true, preset: 'custom-review', activeForSession: true, platformPreset: 'custom-review', projectKey: 'X:/ws',
         sandbox: { global: 'danger-full-access', project: 'inherit', effective: 'danger-full-access', session: 'danger-full-access' },
         categories: {
           global: {
-            directory: mkC('d1', 'X:/ws/a'), command: mkC('c1', 'git status'), read: mkC('r1', 'X:/ws/b'),
+            directory: mkC('d1', 'X:/ws/a'), outsideRead: mkC('o1', 'X:/ws/oa'), command: mkC('c1', 'git status'), read: mkC('r1', 'X:/ws/b'),
             image: mkC('i1', 'X:/ws/c.png'), edit: mkC('e1', 'X:/ws/d'), undo: mkC('u1', 'X:/ws/e'),
           },
           project: null,
         },
         effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
         custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
-        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
-        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        cats: ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'],
+        excCats: ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         exceptionBlast: {},
         // ⚠️ 夹具不再声明 `globalDefault` / `projectDefault`：这两个字段（按本层 mode
@@ -6530,7 +6543,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         return bs.length
       }
       mount(nodes); runEff3()
-      // 在**第一个**分类（directory）的添加行填内容并点添加
+      // 在**第一个例外分类**的添加行填内容并点添加（分类名见 try 外的 firstExcCat）
+      firstExcCat = fx.cats.find((c) => fx.excCats.indexOf(c) !== -1)
       const addInputs = nodes.filter((n) => n.type === 'input' && n.props && (n.props.placeholder === 'panel.excPathPh' || n.props.placeholder === 'panel.excPh'))
       if (!addInputs.length) throw new Error('例外添加输入框未渲染')
       addInputs[0].props.onChange({ target: { value: 'X:/ws/new-thing' } })
@@ -6553,8 +6567,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       }
     } catch (e) { sErr = e }
     ok('★★★ 多分类同时展开时，滚的是**本次添加的那个**分类（不是最后挂载的）',
-      sErr === null && res && res.cat === 'directory' && res.scrolled.length === 1 && res.scrolled[0] === 0,
-      JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), ...(res || {}) }))
+      sErr === null && res && res.cat === firstExcCat && res.scrolled.length === 1 && res.scrolled[0] === 0,
+      JSON.stringify({ err: sErr && (sErr.name + ': ' + sErr.message), want: firstExcCat, ...(res || {}) }))
   }
   // 清理本次渲染留下的全局桩
   try { delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
@@ -6611,6 +6625,7 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         categories: {
           global: {
             directory: { mode: 'ask', exceptions: [] },
+            outsideRead: { mode: 'allow', exceptions: [] },
             command: { mode: 'deny', exceptions: [{ id: 'c1', action: 'allow', match: 'git status' }] },
             read: { mode: 'allow', exceptions: [] }, image: { mode: 'ask', exceptions: [] },
             edit: { mode: 'ask', exceptions: [] }, undo: { mode: 'allow', exceptions: [] },
@@ -6619,8 +6634,8 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         },
         effective: {}, quickTools: { global: {}, project: {} }, quickPreset: [], quickDefaults: {},
         custom: { global: [], project: [] }, counts: {}, stats: { deny: 0, ask: 0 }, recentDecisions: [],
-        cats: ['directory', 'command', 'read', 'image', 'edit', 'undo', 'subagent', 'doomloop'],
-        excCats: ['directory', 'command', 'read', 'image', 'edit', 'undo'],
+        cats: ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'],
+        excCats: ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'],
         modes: ['ask', 'allow', 'deny'], allModes: ['ask', 'allow', 'deny', 'inherit'],
         exceptionBlast: {},
         commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
