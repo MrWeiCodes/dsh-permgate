@@ -59,6 +59,35 @@ const CAND_VALUE_MAX_CHARS = 2000
 const INTENT_MAX_CHARS = 120
 // ④ 思考末尾的取样长度（字符）。见 reasoningTail 的按行收敛规则。
 const REASONING_TAIL_CHARS = 100
+// 回溯（intentLookback）**最多往前扫几条消息**。
+//
+// 为什么用「限定步数」而不是「判定轮边界」：本功能第一版按 source.kind 白名单划轮边界
+// （只有已知注入类 kind 可跨越，其余 user 角色一律当边界）。那个方向对，但清单**不可能穷举** ——
+// MessageSourceMap 是 merge-extensible 联合，且第三方插件会持续引入新 kind（实测本机
+// dsh-loop-guard 用 kind:'loop-guard' 注入，935 次；compact-checkpoint 198 次；plan-mode 36 次），
+// 它们不在白名单里，于是被误判成轮边界、回溯提前终止。实测 949 个会话：需回溯 43454 次，
+// 其中 1849 次（4.3%）被这类假边界挡掉、退化成 ⑤「用户意图」。
+//
+// 改法：不再问「这条算不算轮边界」，只问「往前几步之内有没有我要的东西」——
+// 命中「模型文本 / 模型思考 / 用户文本(kind==='user')」即停，其余消息一律跳过（含注入、
+// goal/schedule/webhook、tool 结果、以及 loop-guard 这类第三方注入）。
+//
+// 取 6 的依据（同一批 949 会话，40870 个需回溯的 assistant 消息实测）：
+//   N=2  命中 26310 (64.4%)   跨轮 3
+//   N=4  命中 35107 (85.9%)   跨轮 3
+//   N=6  命中 38219 (93.5%)   跨轮 3      ← 取此值
+//   N=8  命中 39493 (96.6%)   跨轮 6
+//   N=12 命中 40395 (98.8%)   跨轮 6
+// 6 是拐点：再往后每加 2 步只多覆盖约 3%，而跨轮次数翻倍。
+//
+// ⚠️ 跨轮**没有**被消除，只是被压到 0.01%（3/38219）：往前扫 N 步必然先撞上模型自己的文本，
+// 所以到不了轮边界 —— 这是覆盖率带来的副作用，不是判据。那 3 例已核对（都是「上一轮末尾的
+// 收尾话」被当成下一步的意图），代价可接受，且远比旧版被假边界挡掉 1849 次小。
+//
+// 步数口径：**每条被扫过的消息都计 1 步**，注入与 tool 结果同样消耗预算（实测消息序列是
+// assistant / tool / assistant / tool …，且注入常成串出现 —— agent-instructions + runtime-context
+// + skill-catalog 三连是常态，故 N=6 约等于「往回看 3 条 assistant 消息」）。
+const INTENT_LOOKBACK_STEPS = 6
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
 // 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
@@ -3753,10 +3782,18 @@ export default {
     // ③ 是「这一步要干什么」，⑤ 是「你要的最终结果」，⑥ 只是「这是什么操作」。
     // 此前一律挂「意图说明」的牌子，等于让 ⑤⑥ 冒充 ③。
     //
-    // ⚠️ ③④ 同源，故**不存在「③ 取不到要不要往回找」的问题**：
-    // 同一位置再试一次 reasoning 块即可；两者都空说明模型这次一个字都没说，
-    // 那时显示 ⑤/⑥ 才是诚实的。「往回找最近一条 assistant 文本」是按**时间接近**
-    // 定位，会取到说给别的调用的话 —— 那是引入缺陷，明确不做。
+    // ③④ 同源：一次 callId 定位，两种块各试一次。但**同源不等于够用** ——
+    // 实测（一次真实会话，逐条核对投影后的消息）确实存在「自己那条一个文字块都没有」
+    // 的工具调用：seq 160 的 edit 只含 tool-call，而描述它的那句话在 seq 155（上一个 step）。
+    // 故 ③④ 落空后还要**往前扫有限步**，见 intentLookback。
+    //
+    // 为什么是「限定步数」而不是「划轮边界」：第一版按 source.kind 白名单判定轮边界
+    // （只有已知注入类可跨越），方向对但清单穷举不了 —— 第三方插件会持续引入新 kind
+    // （实测 dsh-loop-guard 的 'loop-guard' 935 次、'compact-checkpoint' 198 次、
+    // 'plan-mode' 36 次都不在白名单里），它们被误判成轮边界，回溯提前终止。
+    // 949 会话实测：需回溯 43454 次，其中 1849 次（4.3%）被这类假边界挡掉、退化成 ⑤。
+    // 改成限定步数后，覆盖率 93.5%、跨轮 0.01%（3/38219）—— 两个指标都优于旧版。
+    // 取舍与依据详见 INTENT_LOOKBACK_STEPS 常量处。
 
     // 块 → 文本。只认 type，不做「兜底猜字段」：
     // 旧实现有 `typeof b.text === 'string'` / `typeof b.content === 'string'` 两条猜测分支，
@@ -3801,6 +3838,10 @@ export default {
 
     // ③④ 的共同定位：**哪条 assistant 消息里含有 id === exec.callId 的 tool-call 块**。
     // 这是构造上的精确对应（tool-call 块带 id，exec.callId 就是它），不是时间上的「最近」。
+    //
+    // 返回 { msg, msgs } 而不是只返回 msg：调用方（③ 落空后的回溯）需要同一份消息表
+    // 来定界与继续往前扫。这里返回它，就省掉第二次 session.deriveMessages() ——
+    // 那是纯开销（该方法内部走缓存，但每次仍要建一份快照数组）。
     function assistantMessageForCall(exec) {
       try {
         const callId = exec && exec.callId
@@ -3815,17 +3856,24 @@ export default {
           const c = m.content
           if (!Array.isArray(c)) continue
           for (const b of c) {
-            if (b && b.type === 'tool-call' && b.id === callId) return m
+            if (b && b.type === 'tool-call' && b.id === callId) return { msg: m, msgs }
           }
         }
         return null
       } catch (e) { return null }
     }
 
-    function assistantTextOf(m) {
-      if (!m || !Array.isArray(m.content)) return ''
+    // 「消息 → 文本」的**单一来源**（③④⑤ 与回溯共用同一套口径）。
+    // 兼容 content 为裸字符串的形态（历史消息可能有），其余按块类型取。
+    // 曾按角色分成两份（assistant 版不认裸字符串、user 版认）—— 那是漂移面：
+    // 同一形态在 ③④ 被判「无文字」而在 ⑤ 有文字，取值规则一改就要两处同改。
+    function messageTextOf(m) {
+      if (!m) return ''
+      const c = m.content
+      if (typeof c === 'string') return c.trim()
+      if (!Array.isArray(c)) return ''
       let out = ''
-      for (const b of m.content) out += textOfBlock(b)
+      for (const b of c) out += textOfBlock(b)
       return String(out).trim()
     }
 
@@ -3837,6 +3885,109 @@ export default {
         if (r) out += (out ? '\n' : '') + r
       }
       return out.trim()
+    }
+
+    // 「这条消息是不是模型产生的」：判**来源**，不是判角色。
+    //
+    // 为什么不能只判 role === 'assistant'：DSH 的 live append 路径**不校验**消息来源 ——
+    // 强制 `assistant ⇒ kind:'model'` 的 assertMessageEventShape 只在 seed/restore 时调用，
+    // append 只过 validateSessionEventData（该函数对 user/assistant 角色不作要求），
+    // 投影层 deriveEventMessage 又是原样透传。实测：往 user/message 事件里塞
+    // { role:'assistant', source:{ kind:'任意' } } 的消息，deriveMessages() 原样返回。
+    // 弹窗是审批依据，把这类文本挂「模型意图」＝ 让第三方插件替模型说话。
+    //
+    // 真实模型消息的 source.kind 恒为 'model'（createAssistantMessage 构造时即带上），
+    // 故这条判据不会误伤。
+    function isModelMessage(m) {
+      if (!m || m.role !== 'assistant') return false
+      const src = m.source
+      return !!src && src.kind === 'model'
+    }
+
+    // 一条**模型消息**能提供的意图候选：text 优先、reasoning 次之，各带自己的标签。
+    // ③④（owner 那条）与回溯（往前扫到的每条）都走这里 —— 两处各写一遍的话，
+    // 改标签措辞或调换优先级时漏改一处，同一条消息就会在两个入口给出不同结果。
+    function modelIntentOf(m) {
+      if (!isModelMessage(m)) return null
+      const t = messageTextOf(m)
+      if (t) return { raw: t, label: bi('模型意图', 'Model intent') }
+      const r = assistantReasoningOf(m)
+      if (r) return { raw: reasoningTail(r), label: bi('模型思考', 'Model reasoning') }
+      return null
+    }
+
+    // ③ 的补充定位：**自己那条没有文字块时，往前扫有限步，找最近的一条可用文本**。
+    //
+    // 为什么需要它（实测）：DSH 一个 step 产出一条 assistant 消息，而「模型先说一句、
+    // 再连发几个工具调用」的形态里，文字只落在**其中一条**上。逐条核对真实会话记录
+    // （按 deriveEventMessage 投影后的结构，42 个 tool-call）：39 个（93%）自己那条就带文字，
+    // 剩 3 个不带 —— 其中就有弹窗上显示成「用户意图」的那次 edit（文字在上一 step 的消息里）。
+    // 比例不高但后果显眼：审批人看到的是自己上一句话，而不是模型这一步要干什么。
+    //
+    // 命中三类之一即停（各带自己的标签，与 ③④⑤ 同一套）：
+    //   · 模型的文本   → 模型意图
+    //   · 模型的思考   → 模型思考
+    //   · 用户的文本   → 用户意图（判据同 ⑤：source.kind === 'user'）
+    // 其余消息一律跳过且**不终止**：注入、goal/schedule/webhook 这类开轮消息、tool 结果、
+    // 以及 loop-guard / compact-checkpoint / plan-mode 这类第三方或未列出的 kind。
+    //
+    // ⚠️ 两类消息都必须按 source.kind 判，不能只看 role：
+    //   · user 角色是**任何生产者都能投递**的公共车道。loop-guard 的注入就是 user 角色 + text
+    //     块（正文如「你的思考内容已连续重复 987 个字符而没有进展…」，本机 738 次落在回溯窗口内），
+    //     goal 的正文是 <goal_round> 包装、compact-checkpoint 是「This is an automatically
+    //     generated checkpoint…」；放宽成「任何 user 角色」就会把这些当意图糊到审批人脸上，
+    //     正是 ⑤ 当初修掉的那个症状。
+    //   · tool 结果也要排除。它投影出的消息 role 恒为 'tool'（实测 957 会话 184647 条，
+    //     100% 是 role='tool'，role='user' 0 条；口径：tool/result 事件的 data.message.role，
+    //     与投影规则 deriveEventMessage 的 `case "tool/result": return event.data.message` 一致）。
+    //     故它在下面的循环里既非 assistant 也非 user，会自然落到下一格。
+    //     ⚠️ 此处曾写作「投影出两种角色（role='tool' 184390、role='user' 129868）」——
+    //     实测不成立，且 129868 对不上任何一种口径（全表 user 也只有 14994 条，
+    //     那是 user/message 事件投影来的，不是 tool 结果）。结论不变但依据必须是真的。
+    //   · assistant 角色同理不可信：live append 不校验来源（见 isModelMessage），
+    //     只判 role 就会让第三方插件伪造的 assistant 文本冒充「模型意图」。
+    //
+    // 步数口径：**扫过的消息条数**（含 tool 结果与注入消息）。实测消息序列是
+    // assistant / tool / assistant / tool …，故 N=6 约等于「往回看 3 条 assistant 消息」。
+    // 步数上限的依据见 INTENT_LOOKBACK_STEPS 常量处（949 会话实测的覆盖率-跨轮权衡）。
+    //
+    // 起点是**被审批调用自己那条消息**（owner），不是消息表末尾：同一轮里可能有多个
+    // 工具调用，先审批的那个执行时，后面的消息未必已经存在；从末尾起扫会越界到本次调用
+    // **之后**的消息。owner 为 null（callId 定位不到）时直接放弃 —— 定位不到就无从知道
+    // 当前位置在哪，此时硬扫等于按时间猜。
+    //
+    // 返回 { raw, label }（raw 未经裁剪，由调用方过 level 的 cut）；找不到返回 null，
+    // 让调用方继续落到 ⑤，而不是硬凑一个。
+    function intentLookback(msgs, owner) {
+      try {
+        if (!Array.isArray(msgs) || !owner) return null
+        const from = msgs.indexOf(owner)
+        if (from < 0) return null
+        let steps = 0
+        for (let i = from - 1; i >= 0 && steps < INTENT_LOOKBACK_STEPS; i--) {
+          // 先计步、再判形状：步数是「扫过几条」的预算，非对象条目也占一格。
+          // 反过来写（形状不合格就 continue 且不计步）会让这类条目免费通过、上界被无限稀释 ——
+          // 实测消息表里确实会出现裸字符串这类非对象条目（deriveMessages 只判 truthy 就 push）。
+          steps++
+          const m = msgs[i]
+          if (!m || typeof m !== 'object') continue
+          if (m.role === 'assistant') {
+            // 与 ③④ 同源（text 优先、reasoning 次之），且**最近一条命中的胜出**，
+            // 不是「整段窗口里优先 text」；来源判据也在 modelIntentOf 里面。
+            const hit = modelIntentOf(m)
+            if (hit) return hit
+            continue
+          }
+          if (m.role === 'user') {
+            const src = m.source
+            if (!src || src.kind !== 'user') continue
+            const t = messageTextOf(m)
+            if (t) return { raw: t, label: bi('用户意图', 'User intent') }
+            continue
+          }
+        }
+        return null
+      } catch (e) { return null }
     }
 
     // ⑤ 用户说的话：**白名单**过滤。
@@ -3867,13 +4018,7 @@ export default {
           if (!m || m.role !== 'user') continue
           const src = m.source
           if (!src || src.kind !== 'user') continue
-          let text = ''
-          const c = m.content
-          if (typeof c === 'string') text = c
-          else if (Array.isArray(c)) {
-            for (const b of c) text += textOfBlock(b)
-          }
-          text = String(text).trim()
+          const text = messageTextOf(m)
           if (text) return text
         }
         return ''
@@ -3927,16 +4072,23 @@ export default {
         const text = cut(raw)
         return (text.zh || text.en) ? { text, label } : null
       }
+      // 「候选 { raw, label } → 过 cut 的一级」：③④ 与回溯都由取值函数带回自己的标签，
+      // 故这里只负责裁剪与空判定（标签不再由调用方各写一份）。
+      const levelOf = (cand) => (cand ? level(cand.raw, cand.label) : null)
       const hit =
         level(argJustification(args), bi('提权意图', 'Escalation intent')) ||
         level(argDescription(args), bi('执行意图', 'Execution intent'))
       if (hit) return hit
       // ③④ 同源：定位一次，两种块各试一次（见上方注释）。
-      const msg = assistantMessageForCall(exec)
-      if (msg) {
-        const h3 = level(assistantTextOf(msg), bi('模型意图', 'Model intent')) ||
-          level(reasoningTail(assistantReasoningOf(msg)), bi('模型思考', 'Model reasoning'))
+      const located = assistantMessageForCall(exec)
+      if (located) {
+        const h3 = levelOf(modelIntentOf(located.msg))
         if (h3) return h3
+        // 自己那条一个文字块都没有 —— 往前扫有限步（同一份消息表，不再调 deriveMessages）。
+        // 这一步可能命中的三类各带**自己的标签**（模型意图 / 模型思考 / 用户意图），
+        // 因为往回扫有可能先撞上「本轮开头用户那句话」——那时说成「模型意图」就是不实的。
+        const h3b = levelOf(intentLookback(located.msgs, located.msg))
+        if (h3b) return h3b
       }
       const h5 = level(recentUserText(exec), bi('用户意图', 'User intent'))
       if (h5) return h5
