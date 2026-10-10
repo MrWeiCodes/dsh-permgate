@@ -8483,8 +8483,8 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
   // 具体到「哪个分支挂哪个标签」：只验三个标签都在会漏掉张冠李戴
   // （实测把 text 分支误挂成「模型思考」，仅凭上面那条是抓不到的）。
   ok('★ 63 text 分支挂「模型意图」、reasoning 分支挂「模型思考」（不得互换）',
-    /const t = messageTextOf\(m\)\s*\n\s*if \(t\) return \{ raw: t, label: bi\('模型意图'/.test(modelFn)
-    && /const r = assistantReasoningOf\(m\)\s*\n\s*if \(r\) return \{ raw: reasoningTail\(r\), label: bi\('模型思考'/.test(modelFn))
+    /const t = messageTextOf\(m\)\s*\n\s*if \(t\) return \{ raw: tailSample\(t, INTENT_MAX_CHARS\), label: bi\('模型意图'/.test(modelFn)
+    && /const r = assistantReasoningOf\(m\)\s*\n\s*if \(r\) return \{ raw: tailSample\(r, Math\.min\(REASONING_TAIL_CHARS, INTENT_MAX_CHARS\)\), label: bi\('模型思考'/.test(modelFn))
   // ③④ 与回溯必须走同一个取值函数：各写一份的话，改标签措辞或调换优先级时漏改一处，
   // 同一条消息在两个入口就会给出不同结果。
   ok('★ 63 ③④ 与回溯都调 modelIntentOf（不得各写一份 text/reasoning 取值与标签）',
@@ -8509,14 +8509,37 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
   ok('★ 63 不得再引入按 kind 枚举的轮边界（第三方插件的新 kind 会漏，实测 1849 次退化）',
     !/INTENT_INJECTION_KINDS/.test(src) && !/assistantTextBefore/.test(src))
 
-  // ★ 64 ④ 思考末尾的按行收敛：切点落在行中时丢掉那半行
-  const tailFn = (src.match(/function reasoningTail\(s\) \{[\s\S]*?\n    \}/) || [''])[0]
-  ok('★ 64 reasoningTail 存在且按行收敛（nl > 0 才丢首行）',
+  // ★ 64 ③④ 的末尾取样与按行收敛：切点落在行中时丢掉那半行
+  const modelFnFor64 = (src.match(/function modelIntentOf\(m\) \{[\s\S]*?\n    \}/) || [''])[0]
+  const tailFn = (src.match(/function tailSample\(s, max\) \{[\s\S]*?\n    \}/) || [''])[0]
+  ok('★ 64 tailSample 存在且按行收敛（nl > 0 才丢首行）',
     tailFn.length > 0 && /search\(\/\[\\r\\n\]\/\)/.test(tailFn) && /if \(nl > 0\)/.test(tailFn))
-  ok('★ 64 reasoningTail 处理代理对（切点落在字符中间时回退一格）',
+  ok('★ 64 tailSample 处理代理对（切点落在字符中间时回退一格）',
     /0xdc00/.test(tailFn) && /0xdfff/.test(tailFn))
-  ok('★ 64 reasoningTail 收敛为单行（多行会把卡片撑高）',
+  ok('★ 64 tailSample 收敛为单行（多行会把卡片撑高）',
     /replace\(\/\[\\r\\n\]\+\/g, ' '\)/.test(tailFn))
+  // ③ 也必须取末尾：本组修的就是「④ 取末尾、③ 取开头」这个方向不一致。
+  // 判据落在 modelIntentOf 上 —— 它是 ③④ 的唯一取值函数，两处各写一份就会再次漂移。
+  ok('★ 64 ③ 文本与 ④ 思考都走末尾取样（不得有一处退回完整文本/开头取样）',
+    /const t = messageTextOf\(m\)\s*\n\s*if \(t\) return \{ raw: tailSample\(t, INTENT_MAX_CHARS\)/.test(modelFnFor64)
+    && /const r = assistantReasoningOf\(m\)\s*\n\s*if \(r\) return \{ raw: tailSample\(r, Math\.min\(REASONING_TAIL_CHARS, INTENT_MAX_CHARS\)\)/.test(modelFnFor64))
+  // ③ 的预算必须与下游裁剪同源（写死 120 的话，INTENT_MAX_CHARS 调到 200 时 ③ 仍只给 120 字）
+  ok('★ 64 ③ 的取样预算用 INTENT_MAX_CHARS 而非字面量（与 cutOne 同源同值）',
+    /tailSample\(t, INTENT_MAX_CHARS\)/.test(modelFnFor64) && !/tailSample\(t, 120\)/.test(modelFnFor64))
+  // ⚠️ 输出上界必须 <= max，且被截断时前置 '…' 占 1 字符预算。
+  // 若返回 max+1 个字符，下游 cutOne（长度 > INTENT_MAX_CHARS 才裁、且**从开头裁**）
+  // 会再切一刀，末尾取样当场退化回开头取样，而输出外观完全一样（都是「上限 + …」）。
+  ok('★ 64 tailSample 的输出恒 <= max（否则被 cutOne 二次裁剪、静默退回开头取样）',
+    /const budget = max - 1/.test(tailFn) && /let cut = full\.length - budget/.test(tailFn)
+    && /return one \? '…' \+ one : ''/.test(tailFn))
+  ok('★ 64 tailSample 未超长时不加省略号（加了就是谎称上面还有内容）',
+    /if \(full\.length <= max\) return full\.replace/.test(tailFn))
+  // ④ 的预算是**独立常量**，不像 ③ 那样与 cutOne 上限同源，故必须显式钳制。
+  // 否则 REASONING_TAIL_CHARS 一旦调到 > INTENT_MAX_CHARS，cutOne（从开头裁）会二次裁剪，
+  // ④ 的末尾结论被静默吃掉、退化回开头取样，而输出外观仍是「上限 + …」，看不出来。
+  ok('★ 64 ④ 的取样预算被钳到 INTENT_MAX_CHARS（越界时不得被 cutOne 二次裁剪）',
+    /tailSample\(r, Math\.min\(REASONING_TAIL_CHARS, INTENT_MAX_CHARS\)\)/.test(modelFnFor64)
+    && !/tailSample\(r, REASONING_TAIL_CHARS\)/.test(modelFnFor64))
 
   // ★ 65 裁剪收在一处：INTENT_MAX_CHARS=120，且 describeIntent 内不得再有第二套口径
   ok('★ 65 INTENT_MAX_CHARS = 120',
@@ -8576,7 +8599,7 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
   // 例如「③ 与 ④ 都有时 ③ 优先」「找不到 callId 时不往回找」是**语义**，正则看不出来。
   // 手法与 tierChainOf 同源：new Function 注入依赖后取出函数实例。
   const grabFn = (name) => (src.match(new RegExp('(?:^|\\n)    function ' + name + '\\([\\s\\S]*?\\n    \\}\\n', 'm')) || [''])[0]
-  const intentDeps = ['textOfBlock', 'reasoningOfBlock', 'reasoningTail', 'assistantMessageForCall',
+  const intentDeps = ['textOfBlock', 'reasoningOfBlock', 'tailSample', 'assistantMessageForCall',
     'messageTextOf', 'assistantReasoningOf', 'isModelMessage', 'modelIntentOf', 'intentLookback', 'recentUserText',
     'argDescription', 'argJustification', 'intentFor', 'describeIntent']
   const intentSrc = intentDeps.map(grabFn).join('')
@@ -8584,11 +8607,17 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
   // 抄一份到测试里就成了「第二套口径」—— 改实现不改测试时用例照旧通过（假绿）。
   // 取不到就让 intentOf 为 null，由下方 ★70 那条断言变红，不静默跳过。
   const lookSteps = (src.match(/const INTENT_LOOKBACK_STEPS = (\d+)/) || [])[1]
+  // 两个长度常量同理从源码取。③ 的端到端用例要断言「输出 <= 上限」——
+  // 把 120 抄进测试的话，上限改成 200 后用例仍拿 120 当界，断言变得比实现更严或更松，
+  // 而它验证的正是「末尾取样不得被 cutOne 二次裁剪」这件事，界取错就白验了。
+  const maxChars = Number((src.match(/const INTENT_MAX_CHARS = (\d+)/) || [])[1])
+  const reasonChars = Number((src.match(/const REASONING_TAIL_CHARS = (\d+)/) || [])[1])
   const intentOf = (function () {
-    if (intentDeps.some((n) => !grabFn(n)) || lookSteps === undefined) return null
+    if (intentDeps.some((n) => !grabFn(n)) || lookSteps === undefined
+      || !Number.isFinite(maxChars) || !Number.isFinite(reasonChars)) return null
     try {
       return new Function(
-        'const INTENT_MAX_CHARS = 120\nconst REASONING_TAIL_CHARS = 100\n' +
+        'const INTENT_MAX_CHARS = ' + maxChars + '\nconst REASONING_TAIL_CHARS = ' + reasonChars + '\n' +
         'const INTENT_LOOKBACK_STEPS = ' + lookSteps + '\n' +
         'const bi = (zh, en) => ({ zh, en })\nconst agentRef = null\n' +
         'const decomposeCommand = () => ({ ok: false, segments: [] })\nconst SHELL_OF_TOOL = {}\n' +
@@ -8892,13 +8921,27 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
     ok('★ 75 ⑤ 级同样认裸字符串（两处共用 messageTextOf）',
       ZH(intentOf(mkExec({ msgs: bareStringUser }), D)) === '裸字符串形态的用户文本')
 
-    // 回溯仍受 120 字裁剪约束（不得成为绕过 cut 的旁路）
+    // 回溯仍受裁剪约束（不得成为绕过裁剪的旁路）
+    //
+    // ⚠️ 本条的界改过一次，记下来免得又改回去：旧版断言长度 === 121（120 + 省略号），
+    // 那是**旧路径**的形状 —— raw 原样交给下游 cutOne 从开头裁。③④ 改成末尾取样后，
+    // 裁剪发生在 tailSample（上游），输出的上界就是 INTENT_MAX_CHARS 本身（省略号占 1 字符
+    // 预算），cutOne 不再触发。故这里断言的是**上界**而不是某个固定长度：
+    // 固定长度会把「哪一层负责裁」这个实现细节焊进用例，而本意只是「必须有上界」。
     const backLong = [
-      { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: 'z'.repeat(300) }] },
+      { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: '铺'.repeat(300) + '末尾结论' }] },
       { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'tool-call', id: 'c1' }] },
     ]
-    ok('★ 75 回溯取到的文字同样受 120 字裁剪（不是绕过 cut 的旁路）',
-      (function () { const r = intentOf(mkExec({ msgs: backLong }), D); return r.text.zh.length === 121 && r.text.en.length === 121 })())
+    ok('★ 75 回溯取到的文字同样受裁剪（长度 <= 上限，不是绕过裁剪的旁路）',
+      (function () {
+        const r = intentOf(mkExec({ msgs: backLong }), D)
+        return r.text.zh.length <= maxChars && r.text.en.length <= maxChars
+          && r.text.zh.length > 0
+      })())
+    // 回溯与 ③④ 同源（都走 modelIntentOf），故也应是**末尾**取样 —— 否则同一条消息
+    // 在「自己那条命中」与「往前扫命中」两个入口会给出不同片段。
+    ok('★ 75 回溯也是末尾取样（与 ③④ 同源，同一条消息两个入口结果一致）',
+      ZH(intentOf(mkExec({ msgs: backLong }), D)).endsWith('末尾结论'))
 
     // 白名单过滤：注入消息不得进意图框（这是本次修复的**主症状**）
     const injected = [
@@ -8940,25 +8983,57 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
         return ZH(intentOf(mkExec({ msgs: m }), D)) === '看图'
       })())
 
-    // ④ 的按行收敛（真求值，不是扫源码）
+    // ③④ 的末尾取样与按行收敛（真求值，不是扫源码）
     const rt = (function () {
       try {
-        return new Function('const REASONING_TAIL_CHARS = 100\n' + grabFn('reasoningTail') + '\nreturn reasoningTail;')()
+        return new Function(grabFn('tailSample') + '\nreturn tailSample;')()
       } catch (e) { return null }
     })()
-    ok('★ 70 reasoningTail 可求值', typeof rt === 'function')
+    ok('★ 70 tailSample 可求值', typeof rt === 'function')
     if (typeof rt === 'function') {
-      ok('★ 70 reasoningTail：无换行时硬截 100 字符', rt('a'.repeat(250)).length === 100)
-      ok('★ 70 reasoningTail：有换行时丢掉被切断的首行（首行是完整的）',
+      // ⚠️ 上界必须是 max **含**省略号：返回 max+1 会被下游 cutOne（从开头裁）二次裁剪，
+      // 末尾取样静默退回开头取样，而输出外观一样（都是「上限 + …」）—— 极难发现。
+      ok('★ 70 tailSample：无换行时输出长度恒 <= max，且前置省略号占预算',
+        rt('a'.repeat(250), 100).length === 100 && rt('a'.repeat(250), 100).startsWith('…'))
+      ok('★ 70 tailSample：取的是**末尾**而不是开头（本组修的就是这个方向）',
+        rt('HEAD'.repeat(60) + 'TAIL', 100).endsWith('TAIL')
+        && !rt('HEAD' + 'x'.repeat(400), 100).startsWith('…HEAD'))
+      ok('★ 70 tailSample：未超长时原样返回、不加省略号',
+        rt('short', 100) === 'short' && rt('x'.repeat(100), 100) === 'x'.repeat(100))
+      ok('★ 70 tailSample：有换行时丢掉被切断的首行（首行是完整的）',
         (function () {
           const lines = Array.from({ length: 40 }, (_, i) => '第' + i + '行x').join('\n')
-          return /^第\d+行x$/.test(rt(lines).split(' ')[0])
+          return /^第\d+行x$/.test(rt(lines, 100).slice(1).split(' ')[0])
         })())
-      ok('★ 70 reasoningTail：CRLF / LF / CR 三态都收敛为单行',
-        rt('a\r\nb\r\nc') === 'a b c' && rt('a\nb') === 'a b' && rt('a\rb') === 'a b')
-      ok('★ 70 reasoningTail：空串与 null 返回空串（不得抛异常）',
-        rt('') === '' && rt(null) === '')
+      ok('★ 70 tailSample：CRLF / LF / CR 三态都收敛为单行',
+        rt('a\r\nb\r\nc', 100) === 'a b c' && rt('a\nb', 100) === 'a b' && rt('a\rb', 100) === 'a b')
+      ok('★ 70 tailSample：空串与 null 返回空串（不得抛异常）',
+        rt('', 100) === '' && rt(null, 100) === '')
+      // 全空白：trim 后为空，不得吐出只有一个省略号的框（看起来像「有内容但取不到」）
+      ok('★ 70 tailSample：全空白输入返回空串（不得返回孤立的省略号）',
+        rt('   \n  \t ', 100) === '' && rt('\n'.repeat(300), 100) === '')
     }
+    // ③ 的端到端：超长 text 必须给出末尾而不是开头，且长度不超过 INTENT_MAX_CHARS
+    ok('★ 70 ③ 超长 text 取末尾、长度 <= 上限（首尾取值不同的那 27.8% 走这条）',
+      (function () {
+        const head = '铺垫'.repeat(200)
+        const tail = '这一步要改 X:/a.txt 的第 3 行'
+        const m = [{ role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: head + tail }, { type: 'tool-call', id: 'c1' }] }]
+        const r = ZH(intentOf(mkExec({ msgs: m }), D))
+        return r.endsWith(tail) && r.length <= maxChars && r.startsWith('…')
+      })())
+    // ④ 的端到端：超长 reasoning 同样必须给出**末尾**。此前 ④ 只喂过单字符 'R'（不触发
+    // 截断路径），于是「④ 的预算被 cutOne 二次裁剪」这条路径无人覆盖 —— 常量越界时
+    // 整套用例照旧全绿。界取 maxChars（cutOne 的上限，钳制后 ④ 的输出上界也是它），
+    // 不抄字面量。
+    ok('★ 70 ④ 超长 reasoning 取末尾、长度 <= 上限（预算越界会在此变红）',
+      (function () {
+        const head = '思考铺垫'.repeat(100)
+        const tail = '结论：改 X:/a.txt 第 3 行'
+        const m = [{ role: 'assistant', source: { kind: 'model' }, content: [{ type: 'reasoning', text: head + tail }, { type: 'tool-call', id: 'c1' }] }]
+        const r = ZH(intentOf(mkExec({ msgs: m }), D))
+        return r.endsWith(tail) && r.length <= maxChars && r.startsWith('…')
+      })())
   }
 }
 

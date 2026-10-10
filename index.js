@@ -57,7 +57,7 @@ const CAND_VALUE_MAX_CHARS = 2000
 // 取 120：比 normalizeText 的 200 短（那是**存储口径**，服务例外/分类默认值/兜底/快捷工具
 // 四处落盘，与显示层无关，不应复用），比原机械标签的 80 长（够放一句完整的话）。
 const INTENT_MAX_CHARS = 120
-// ④ 思考末尾的取样长度（字符）。见 reasoningTail 的按行收敛规则。
+// ④ 思考末尾的取样长度（字符，**含**前置省略号）。见 tailSample 的按行收敛规则。
 const REASONING_TAIL_CHARS = 100
 // 回溯（intentLookback）**最多往前扫几条消息**。
 //
@@ -3809,31 +3809,46 @@ export default {
       return b.type === 'reasoning' && typeof b.text === 'string' ? b.text : ''
     }
 
-    // ④ 思考末尾：取末尾 REASONING_TAIL_CHARS 字符，再**按行收敛**。
+    // ③④ 共用的**末尾取样**：取末尾 max 个字符，再**按行收敛**。
+    //
+    // 为什么是末尾而不是开头：③ 回答的是「这一步要干什么」，而文字块在消息里**紧邻
+    // 工具调用之前** —— 实测 122906 条同时含 text 与 tool-call 的模型消息，text 全在
+    // tool-call 之前的有 122905 条，在之后的仅 1 条。故末尾那几句就是「接着要做什么」的
+    // 结论，开头是铺垫（实测样本的形态：同一条消息开头在复述已确认的根因，末尾才给出
+    // 本次要执行的方案 —— 后者才是这一步要干的事）。
+    // 超长比例不低：137219 条带 text 的消息里 38046 条（27.8%）超过 120 字符，
+    // 即首尾取值会给出不同结果的部分占近三成，不是边角情况。
+    //
+    // ⚠️ 返回长度**恒 <= max**，且被截断时前置 '…' 也占 1 个字符预算。
+    // 因为下游 intentFor 的 cutOne 判据是「长度 > INTENT_MAX_CHARS 才裁」，且它**从开头裁** ——
+    // 若这里返回 max+1 个字符，cutOne 会再切一刀，末尾取样当场退化回开头取样。
+    // 这个坑很隐蔽：输出仍是「上限长度 + …」，肉眼看不出是末尾还是开头。
+    // 故 ③ 传的 max 必须**恰好等于** INTENT_MAX_CHARS（两者不等就会触发二次裁剪）。
     //
     // 规则（用户方案）：切点落在行中间时，那半行不要 —— 宁可少显示一行，
     // 也不给审批人看半句话。切点正好落在行首时第一行其实也完整，但**无法判断**，
     // 故一律丢弃首行（保守方向，代价很小）。
     //
     // 换行三态都要认：\r\n（Windows 模型输出常见）、\n、\r。
-    function reasoningTail(s) {
+    function tailSample(s, max) {
       const full = String(s == null ? '' : s).trim()
       if (!full) return ''
-      let t = full
-      if (full.length > REASONING_TAIL_CHARS) {
-        let cut = full.length - REASONING_TAIL_CHARS
-        // 代理对不能切一半：低位代理（DC00-DFFF）说明切点落在字符中间，往回退一格。
-        const c = full.charCodeAt(cut)
-        if (c >= 0xdc00 && c <= 0xdfff) cut += 1
-        t = full.slice(cut)
-        // 首行是否被切断，只看**切点是否落在行首**：nl > 0 说明切点之后还有内容
-        // 才遇到换行 ⇒ 首行是半行，丢掉。nl === 0（切点正好落在换行上）时首行不存在，
-        // nl === -1（整段无换行）时按用户规则「直接用这 100 字符」，都不丢。
-        const nl = t.search(/[\r\n]/)
-        if (nl > 0) t = t.slice(nl)
-      }
+      // 没超长就不截、也不加省略号：加了反而谎称「上面还有内容」。
+      if (full.length <= max) return full.replace(/[\r\n]+/g, ' ').trim()
+      const budget = max - 1
+      let cut = full.length - budget
+      // 代理对不能切一半：低位代理（DC00-DFFF）说明切点落在字符中间，往回退一格。
+      const c = full.charCodeAt(cut)
+      if (c >= 0xdc00 && c <= 0xdfff) cut += 1
+      let t = full.slice(cut)
+      // 首行是否被切断，只看**切点是否落在行首**：nl > 0 说明切点之后还有内容
+      // 才遇到换行 ⇒ 首行是半行，丢掉。nl === 0（切点正好落在换行上）时首行不存在，
+      // nl === -1（整段无换行）时按用户规则「直接用这一段」，都不丢。
+      const nl = t.search(/[\r\n]/)
+      if (nl > 0) t = t.slice(nl)
       // 收敛成单行：意图框是一行标签 + 一段文字，多行会把卡片撑高。
-      return t.replace(/[\r\n]+/g, ' ').trim()
+      const one = t.replace(/[\r\n]+/g, ' ').trim()
+      return one ? '…' + one : ''
     }
 
     // ③④ 的共同定位：**哪条 assistant 消息里含有 id === exec.callId 的 tool-call 块**。
@@ -3907,12 +3922,22 @@ export default {
     // 一条**模型消息**能提供的意图候选：text 优先、reasoning 次之，各带自己的标签。
     // ③④（owner 那条）与回溯（往前扫到的每条）都走这里 —— 两处各写一遍的话，
     // 改标签措辞或调换优先级时漏改一处，同一条消息就会在两个入口给出不同结果。
+    //
+    // ③④ 都取**末尾**（tailSample），但预算不同：
+    //   · ③ 传 INTENT_MAX_CHARS —— 不写成字面量 120，这样它与下游 cutOne 的上限
+    //     **同源同值**，将来调 INTENT_MAX_CHARS 时两处自动一致（写成 120 的话，
+    //     上限调到 200 之后 ③ 仍只给 120 字符，白丢 80 字预算且无人察觉）。
+    //   · ④ 传 REASONING_TAIL_CHARS 再**钳到** INTENT_MAX_CHARS —— 思考比文本长得多
+    //     （实测 p50 已 1966 字符），只取末尾一小段。钳制不是防御性冗余：④ 的预算是
+    //     独立常量，一旦它超过 INTENT_MAX_CHARS，cutOne（从开头裁）就会二次裁剪，
+    //     末尾取样静默退化回开头取样，而输出外观仍是「上限长度 + …」，看不出区别。
+    //     现有 100 < 120，钳制不改变任何行为。
     function modelIntentOf(m) {
       if (!isModelMessage(m)) return null
       const t = messageTextOf(m)
-      if (t) return { raw: t, label: bi('模型意图', 'Model intent') }
+      if (t) return { raw: tailSample(t, INTENT_MAX_CHARS), label: bi('模型意图', 'Model intent') }
       const r = assistantReasoningOf(m)
-      if (r) return { raw: reasoningTail(r), label: bi('模型思考', 'Model reasoning') }
+      if (r) return { raw: tailSample(r, Math.min(REASONING_TAIL_CHARS, INTENT_MAX_CHARS)), label: bi('模型思考', 'Model reasoning') }
       return null
     }
 
