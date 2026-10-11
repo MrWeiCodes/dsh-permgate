@@ -161,6 +161,24 @@ const QUICK_DEFAULTS = {
   perm_status: 'allow',
   // cordis_run 在宿主进程里执行代码、stop/undefine 管理（可移除）动态插件 —— 同属元操作，一律先问
   cordis_run: 'ask', cordis_stop: 'ask', cordis_undefine: 'ask',
+  // plugin_manager 与上面三个 cordis_* 同属「管插件」的元操作，且是这一类里权限最大的一个：
+  // 它能装包（install_bundle 会执行包自带的 install 脚本）、卸包、改插件的启用状态，
+  // 还能 set_version_exemption 跳过 DSH 的 peer 兼容校验（工具描述原文即「可能崩溃和数据丢失」）。
+  //
+  // 它此前不在这张表里，走的是兜底策略（默认 ask）—— 行为上同样是弹窗，但**面板上看不见它**：
+  // 设置页只渲染 QUICK_PRESET + 用户已配置的键，于是用户没法把它单独设成 deny，
+  // 只能把兜底策略整个改掉；而兜底一旦放宽为 allow，它就会静默放行。
+  // 一个能执行安装脚本的工具不该只有「一刀切」这一种管控方式，故纳入本表。
+  //
+  // 注册条件与 cordis_* 同构 —— 它是 DSH 自带的核心依赖（@deepseek-ai/dsh-plugin-manager，
+  // 被 dsh/dsh-base/dsh-web-app 直接依赖），但注册行 tool-plugin-manager 同样受 agent preset
+  // 约束：dsh-base、standard、ptc 三个预设里均为 disabled: true，只有 cordis 预设启用。
+  // 即它在非 cordis 预设下与 cordis_* 一样是命不中的死键 —— 这既不构成纳入的理由，
+  // 也不构成排除的理由（本表是静态清单、不感知会话选中的 preset）。
+  //
+  // 存量配置无需迁移：新键缺席时按预设默认值 ask 裁决，与本条加入前的行为完全一致
+  // （区别只在于面板上多了一行、用户可以改它）—— 故**不**进 QUICK_RETIRED_DEFAULTS。
+  plugin_manager: 'ask',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）

@@ -1317,10 +1317,16 @@ ok('decide 不再硬编码放行 perm_*', !src.includes("name.indexOf('perm_') =
   ok('★ 9 个权限写工具已移除（未复活）', resurrected.length === 0, JSON.stringify(resurrected))
   ok('★ 全仓只剩 perm_status 一个 perm_* 工具注册',
     (src.match(/name: 'perm_\w+'/g) || []).length === 1 && src.includes("name: 'perm_status'"))
-  // 其余元操作（管插件）仍必须纳入管控
-  const ASK_TOOLS = ['cordis_run', 'cordis_stop', 'cordis_undefine']
+  // 其余元操作（管插件）仍必须纳入管控。
+  // plugin_manager 是这一类里权限最大的：能装包（会执行包自带 install 脚本）、卸包、改启用状态，
+  // 还能跳过 DSH 的 peer 兼容校验。它曾长期不在本表里、只靠兜底策略（默认 ask）兜着 ——
+  // 行为上会弹窗，但**面板上看不见**，用户没法单独把它设成 deny，兜底一放宽就静默放行。
+  const ASK_TOOLS = ['cordis_run', 'cordis_stop', 'cordis_undefine', 'plugin_manager']
   const missing = ASK_TOOLS.filter((t) => !new RegExp('\\b' + t + ": 'ask'").test(src))
   ok('管插件的元操作仍纳入快捷预设且默认 ask', missing.length === 0, JSON.stringify(missing))
+  // 用途标签必须一并存在：清单里有、面板上没有说明文字时，那一行就成了没有用途说明的孤儿行
+  const noLabel = ASK_TOOLS.filter((t) => !cli.includes("'quick." + t + "':"))
+  ok('★ 管插件的元操作都有中英用途标签', noLabel.length === 0, JSON.stringify(noLabel))
   // perm_status 只读查询：明确放宽为 allow，防止被顺手改回 ask
   ok('perm_status 默认 allow（只读查询不弹窗）', src.includes("perm_status: 'allow'"))
   // 写工具的快捷预设项与 i18n 标签都必须一并清掉，不留死键

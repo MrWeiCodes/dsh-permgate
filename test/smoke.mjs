@@ -706,7 +706,8 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   const presetList = (st.data && st.data.quickPreset) || []
   const defaults = (st.data && st.data.quickDefaults) || {}
   // 35 → 26：9 个权限写工具已移除（22 常规 + perm_status + cordis_run/stop/undefine）
-  ok('group5: status 下发 quickPreset（26 项：22 常规 + perm_status + cordis_run/stop/undefine）', presetList.length === 26, 'len=' + presetList.length)
+  // 26 → 27：新增 plugin_manager（DSH 自带核心依赖，管插件的元操作里权限最大的一个）
+  ok('group5: status 下发 quickPreset（27 项：22 常规 + perm_status + cordis_run/stop/undefine + plugin_manager）', presetList.length === 27, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
   // 9 个权限写工具已移除：它们既不该在预设清单里，也不再是可调用的工具
   const permWrites = presetList.filter((t) => /^perm_/.test(t) && t !== 'perm_status')
