@@ -1768,6 +1768,46 @@ window.__ModuleLoader__.load({
 				// 档位会发现下拉里没有这一项 —— 与本次把「默认动作」改成「其余情况」同一个理由：
 				// 提示里点名的控件必须是面板上找得到的那个名字。
 				'panel.subMismatch': '注意：「命令」的「其余情况」是「{cat}」，但「破坏性命令」里「{tier}」这一档是「{sub}」—— 判定链上破坏性命令优先，命中该档的破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让「其余情况」生效，请把该档也改成「{cat}」或「继承全局」。',
+				// 命令类工具的管辖边界。这条提示存在的理由是一个**真实的语义缺口**，不是文档洁癖：
+				// 命令工具（pwsh/bash）的判定链是 例外 → 破坏性八档 → 本分类默认值，与
+				// read/image/edit/undo/outsideRead/directory 六道闸**完全无关**（实测：把区外写闸
+				// 与编辑都设为 deny 后，`Set-Content G:/outside/x.txt`、`Get-Content G:/outside/secret.txt`
+				// 仍判 allow）。九个分类平铺展示会让人读成「九个维度都生效」，而命令块又排在最前，
+				// 于是「我把区外写设成拒绝就安全了」是一个很容易形成的错误结论。
+				//
+				// ── 主体必须是「AI」，不是「命令工具」，也不是「DSH」────────────────────
+				// 这个主体被用户连续纠正过两次，两个错法各有各的偏差：
+				//   · 初版「命令工具可用 Set-Content…直接读写文件」—— 工具自己不会「用命令」，
+				//     读起来像「这个工具自带读写能力」，而本条要传达的是「AI 能绕过文件分类」。
+				//   · 二版「DSH 可通过执行命令直接读写文件」—— DSH 是**载体/宿主**（框架本身），
+				//     做决策、发工具调用的是**模型**。把行为归给 DSH，等于说「软件自己会读写」，
+				//     而这条警告防的是「AI 会绕过你设的文件分类」这个判断失误。
+				// 面板既有文案一律用「AI」（见「会告知 AI 为什么被拒」「中断 AI」「AI 连续重复
+				// 相同调用」三处），本行跟随同一口径 —— 术语一致比各自斟酌更重要。
+				//
+				// ── 为什么是「绕过」而不是「不受…限制」────────────────────────────────
+				// 两者字面都成立，但语义强度不同，而这条提示的全部价值就在强度上：
+				//   · 「不受 X 限制」是**静态描述** —— 读起来像「文件分类的设计范围本来就不含命令」，
+				//     是一个中性的边界说明，用户容易读成「各管各的、很正常」。
+				//   · 「绕过 X」是**动态行为** —— 点出这是 AI 主动走的一条旁路，被绕开的那道闸
+				//     仍然立在那里、用户以为它生效。这正是要提醒的风险（「我设了区外写拒绝」）。
+				// 英文侧本来就是 bypassing，中文改成「绕过」后两边语义对齐。
+				// 实测的判据也支持「绕过」：区外写闸=deny 时 `Set-Content G:/outside/x.txt`
+				// 仍判 allow —— 那道 deny 确实被跨过去了，不是「不适用」。
+				//
+				// ── 为什么不写「怎么拦住」──────────────────────────────────────────
+				// 初版还给了两条出路，**两条都不成立**，实测逐条推翻：
+				//   · 「用『破坏性命令』档位」—— 那八档只覆盖破坏性命令（rm/format/diskpart 那类）。
+				//     实测八档全设 deny 时，`Set-Content G:/outside/x.txt` 与
+				//     `Get-Content G:/outside/secret.txt` 仍判 allow，只有 `Remove-Item` 被拦。
+				//     非破坏性的读写它根本不覆盖，拿它当出路是错的。
+				//   · 「把本分类设为拒绝」—— 拦得住，但代价是**所有** pwsh/bash 全禁，
+				//     不是「拦住读写」的解法，是「禁用命令」的解法，性质不同。
+				// 真正能定向拦的是**命令例外**（写一条 `Set-Content *`=deny），但那是例外列表的
+				// 用法、不是这一行要教的事；把它塞进这句说明会让文案重新变长。
+				// 故本文案只陈述**边界事实**，不给出路 —— 用户知道「这里的设置管不到它」之后，
+				// 该用什么手段由他自己判断（例外 / 沙箱 / 全禁各有代价）。
+				'panel.cmdScopeNote': '注意：AI 可通过执行命令直接读写文件（Set-Content、echo > 等），绕过「读取文件 / 编辑文件 / 工作区外读写」等文件分类限制。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
 				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
 				// 那是实现细节，用户改不了也用不上），也不写 Markdown 语法 —— 这里是纯文本，
@@ -2045,6 +2085,11 @@ window.__ModuleLoader__.load({
 				// "Inherit global" (the label of `mode.inherit`) rather than "inherit": the option
 				// the sentence tells the user to pick must read exactly like the one in the dropdown.
 				'panel.subMismatch': 'Note: for "command", "Everything else" is "{cat}", but the "{tier}" tier under "Destructive commands" is "{sub}". Destructive commands take precedence in the verdict chain, so ones matching that tier follow "{sub}" (not "{cat}"). To make "Everything else" apply, set that tier to "{cat}" or "Inherit global".',
+				// Scope boundary of command tools — mirrors panel.cmdScopeNote. The subject is the AI
+				// (see the Chinese entry: neither "command tools" nor "DSH" is right — the tool does
+				// not run commands by itself, and DSH is the host, not the actor). The English panel
+				// already says "the AI" elsewhere ("tells the AI why it was denied", "aborts the AI").
+				'panel.cmdScopeNote': 'Note: the AI can read and write files directly by running commands (Set-Content, echo > and the like), bypassing the file categories (file read / file edit / outside-workspace read and write).',
 				// ── doom loop threshold ────────────────────────────────────────────
 				'panel.loopThreshold': 'Trigger threshold',
 				'panel.loopThresholdHint': ': how many identical calls in a row before it triggers. Leave empty to use the default.',
@@ -4673,6 +4718,27 @@ window.__ModuleLoader__.load({
 				);
 			};
 
+			// 命令类工具的**管辖边界**说明。它**不属于任何一个分类块**，而是排在
+			// 「执行命令」块与其余分类之间的**独立分隔说明** —— 因为它讲的正是
+			// 「命令这一类与下面那些文件类分类之间的边界」这件事，两边都不归属。
+			//
+			// 为什么不放在 command 块内部：放进去后它会被读成「命令块的脚注」，
+			// 而它要提醒的恰恰是「下面那些分类管不到命令」—— 信息方向是**朝下**的。
+			// 放在两块之间，用户从命令块往下一路读过去时正好撞上它。
+			//
+			// 为什么必须有这一行：命令工具的判定链与六道文件/路径分类闸**毫无交集**
+			// （实测：区外写闸=deny、编辑=deny 时，`Set-Content G:/outside/x.txt` 与
+			// `Get-Content G:/outside/secret.txt` 仍判 allow）。而面板把九个分类平铺，
+			// 命令块又排在最前，很容易让人得出「区外写设成拒绝就安全了」这个错误结论。
+			//
+			// 只出现一次（不挂到每个文件类分类上）：同一句话重复五遍会让面板更长，
+			// 而它讲的是同一条边界，说一遍就够。
+			const commandScopeNote = () => {
+				return React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', lineHeight: 1.5, margin: '0 0 12px 2px' } },
+					T('panel.cmdScopeNote'),
+				);
+			};
+
 
 			// 循环检测（doomloop）阈值行 + 状态提示。
 			// 与「破坏性命令」子设置的区别：那个是**动作**（三态），这个是**数字**，故不复用 sel()。
@@ -5296,7 +5362,18 @@ window.__ModuleLoader__.load({
 						),
 					),
 				),
-				CATS.map(catBlock),
+				// 分类块之间插入「命令管辖边界」说明：紧跟第一个分类（执行命令）之后、
+				// 其余分类之前。第一个分类恒为 command（CATS[0] 由宿主下发顺序决定，
+				// 见 index.js 的 CATS 常量 —— 那里把它排在首位是为了「唯一三层布局」，
+				// 本行依附于同一前提）。
+				//
+				// 判据取 `CATS[0] === 'command'` 而不是写死「在第一个块后」：宿主若调整
+				// 顺序、command 不再居首，这里会**静默错位**（说明挂到别的分类后面）。
+				// 故显式判一次 —— 前提不成立时不渲染，而不是画错位置。
+				CATS.map((c, i) => React.createElement(React.Fragment, { key: c },
+					catBlock(c),
+					(c === 'command' && i === 0) ? commandScopeNote() : null,
+				)),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.quick')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)', marginBottom: 6 } }, T('panel.quickHint')),

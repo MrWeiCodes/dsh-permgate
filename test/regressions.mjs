@@ -1046,8 +1046,21 @@ ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ dat
 // 的运行时拼接，渲染侧源码里没有这个字面量。故断言必须锚在渲染路径本身（catBlock 内
 // 确实用 catLabel 取名、且被 CATS.map 全量渲染），否则「catBlock 跳过 image」这类回归
 // 会静默通过。image 是否在 CATS 清单内由上面第 7 组「client 清单为可变并保留默认」钉住。
+// ⚠️ 锚点必须是**渲染代码**，不能是字符串 `CATS.map(catBlock)`：client.js 的一条注释里
+// 也出现过这串（「CATS.map(catBlock) 会同时渲染多个 listBox…」），于是 `includes()` 在
+// 渲染行被改写后**仍然为真**。实测把整片 `CATS.map(...)` 渲染删掉、分类块全部消失，
+// 本条照旧通过（零鉴别力）。现锚到挂载点本身：CATS.map + Fragment 包裹 + 迭代变量 c
+// 被传进 catBlock —— 这钉住的是「分类块由 CATS.map 这个挂载点渲染」，而不是像原写法
+// 那样钉在一串注释上也出现的字面量。
+// 能力边界（实测，别把话说满）：本锚点**不**保证每次迭代都真的渲染 —— 改成
+// `i === 0 ? catBlock(c) : null`（只渲染首块）它仍为绿。那种回归由「面板真实渲染一次」
+// 那组断言拦住（按渲染结果数控件：「面板渲染出排序控件：↑↓ 按钮与可拖动行都到位」等），
+// 不是由本条 —— 别把兜底责任记到本锚点头上。
+// ⚠️ 这里**不写分组编号**：本文件的 `27c` / `27d` 各被用了两次（既有编号重复，非本次引入），
+// 写「27d」指代不清，故按断言标题引用。
 ok('面板按 CATS 全量渲染分类块且经 catLabel 取名',
-  cli.includes('CATS.map(catBlock)') && /const catBlock = \(c\) => \{[\s\S]{0,2000}?catLabel\(c\)/.test(cli))
+  /CATS\.map\(\(c, i\) => React\.createElement\(React\.Fragment[\s\S]{0,300}?catBlock\(c\)/.test(cli)
+  && /const catBlock = \(c\) => \{[\s\S]{0,2000}?catLabel\(c\)/.test(cli))
 // 防回退：image 不套用老模式迁移（off/permissive→ask、locked→deny），不能变回 allow
 ok('迁移不把老模式套到 image 上', src.includes("c === 'image' ? (oldMode === 'locked' ? 'deny' : 'ask')") && !src.includes('for (const c of CATS) cfg.global[c].mode = map[oldMode] || \'allow\''))
 // 防回退：imagePreview 字段已废弃（客户端不再据它分流，详情看 hasDiff），不得回潮
@@ -2760,6 +2773,80 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const row = (iRow < 0 || iEnd <= iRow) ? '' : cli.slice(iRow, iEnd)
     return !!row && row.includes("T('panel.subDestructiveNote')")
   })())
+  // ★ 面板必须给出**命令管辖边界说明**：命令工具不受文件/路径类分类限制。
+  //
+  // 为什么必须有：命令工具的判定链（例外 → 破坏性八档 → 本分类默认值）与 read/image/
+  // edit/undo/outsideRead/directory 六道闸**毫无交集**。实测（区外写闸=deny、编辑=deny、
+  // 命令=allow 时跑真实 assessCommand）：`Set-Content G:/outside/x.txt -Value hi` 与
+  // `Get-Content G:/outside/secret.txt` 全部判 allow。
+  //
+  // 而面板把九个分类平铺展示、命令块又排在最前，很容易让人得出「区外写设成拒绝就安全了」
+  // 这个**错误结论** —— 那是一条真实的安全语义缺口，不是文档洁癖。
+  //
+  // 四个方向都要守：
+  //   ① 中英两个键都在（缺英文键时英文界面显示裸键名 panel.cmdScopeNote）；
+  //   ② 文案里确实点出「不受…文件分类限制」这个**边界声明**（只存在于注释里等于没写）；
+  //   ③ 它**只陈述边界、不给"怎么拦住"的出路**。初版给过两条出路，实测**两条都不成立**：
+  //      · 「用『破坏性命令』档位」—— 八档全设 deny 时 `Set-Content`/`Get-Content` 仍 allow，
+  //        只有 `Remove-Item` 被拦（它只覆盖破坏性命令，不覆盖非破坏性读写）；
+  //      · 「把本分类设为拒绝」—— 拦得住但代价是所有 pwsh/bash 全禁，性质是「禁用命令」，
+  //        不是「拦住读写」的解法。
+  //      故本条**反向**守住：文案里不得再出现「破坏性命令」这个错误指路。同时守长度上限
+  //      （初版两段四行，说明比控件还长，用户会直接跳过）。
+  //   ④ 它**真的渲染出来**，且位置正确：排在「执行命令」块与其余分类**之间**（它讲的就是
+  //      这两者之间的边界），而不是 command 块内部。用 `CATS[0] === 'command'` 做前提判据。
+  ok('★ 面板给出命令管辖边界说明（中英齐备 + 主体是 AI + 用「绕过」措辞 + 不给错误出路 + 简洁 + 真渲染 + 位置正确）', (function () {
+    if (!cli.includes("'panel.cmdScopeNote'")) return false
+    // ② 边界声明必须落在文案本身里，且用「绕过」而不是「不受…限制」：
+    // 前者是动态行为（AI 主动走旁路、被绕开的那道闸仍立着），后者是静态描述
+    // （读起来像「各管各的、本来就如此」）。这条提示的价值全在强度上，故钉死措辞。
+    if (!/panel\.cmdScopeNote': '[^']*绕过[^']*分类限制/.test(cli)) return false
+    if (!/panel\.cmdScopeNote': '[^']*bypassing[^']*'/.test(cli)) return false
+    // ②′ 主体必须是**AI**，既不是「命令工具」也不是「DSH」。这个主体被用户连续纠正两次：
+    //   · 「命令工具可用 Set-Content…」—— 工具自己不会「用命令」，读起来像「工具自带读写能力」；
+    //   · 「DSH 可通过执行命令…」—— DSH 是宿主/载体，做决策发工具调用的是**模型**。
+    // 面板既有文案一律用「AI」（「会告知 AI 为什么被拒」「中断 AI」「AI 连续重复相同调用」），
+    // 本行必须跟随同一口径 —— 术语一致比各自斟酌更重要。
+    // 中英**各守一次**，且**各自锚定到本语言的那一条**。
+    // 原写法 `[^']*AI ` 有一个实测踩过的缺口：它**不锁定中文条** —— 把中文条改成
+    // 「注意：本工具可通过…」后，正则转而由**英文条**里的 `the AI ` 满足，断言照绿
+    // （变异实测：中文主体换成「本工具」仍然 PASS）。故中文侧锚定句首 `'注意：AI `，
+    // 与英文侧 `'Note: the AI` 对称：两边钉的都是「AI 是本句主语」这件事本身，
+    // 而不是「本键的某一条值里出现过 AI 字样」—— 后者对「命令工具 / DSH / 本工具」
+    // 三种错法全都无鉴别力。
+    if (!/panel\.cmdScopeNote': '注意：AI /.test(cli)) return false
+    if (!/panel\.cmdScopeNote': 'Note: the AI/.test(cli)) return false
+    if (/panel\.cmdScopeNote': '[^']*命令工具[^']*可用/.test(cli)) return false
+    if (/panel\.cmdScopeNote': '[^']*command tools can/.test(cli)) return false
+    // 「DSH」也不得充当主体（它是宿主，不是行为者）
+    if (/panel\.cmdScopeNote': '[^']*DSH 可/.test(cli)) return false
+    if (/panel\.cmdScopeNote': '[^']*DSH can/.test(cli)) return false
+    // ③ 不得给出「破坏性命令」这个错误出路（实测拦不住非破坏性读写）
+    if (/panel\.cmdScopeNote': '[^']*破坏性命令/.test(cli)) return false
+    if (/panel\.cmdScopeNote': '[^']*Destructive commands/.test(cli)) return false
+    // ③ 简洁性：中文文案设长度上限
+    const zh = cli.match(/panel\.cmdScopeNote': '([^']*)'/)
+    if (!zh || zh[1].length > 80) return false
+    // 中英各一条，不得再冒出第三条（cmdScopeNote2 之类）。
+    // 正则必须带冒号：只匹配 `panel.cmdScopeNote'` 会把渲染处的
+    // `T('panel.cmdScopeNote')` 一并数进来（实测 3 而非 2，断言会误红）。
+    if ((cli.match(/panel\.cmdScopeNote\d*':/g) || []).length !== 2) return false
+    // ④ 真渲染：commandScopeNote 内出现该键
+    const iFn = cli.indexOf('const commandScopeNote = ()')
+    const iEnd = cli.indexOf('// 循环检测（doomloop）阈值行', iFn)
+    const fn = (iFn < 0 || iEnd <= iFn) ? '' : cli.slice(iFn, iEnd)
+    if (!fn || !fn.includes("T('panel.cmdScopeNote')")) return false
+    // ④ 位置：挂载点必须在 CATS.map 里、紧跟第一个块之后，且带 command 前提判据。
+    // 反例（本条要拦的）：把它挪回 command 块内部 —— 那样它会被读成「命令块的脚注」，
+    // 而它要提醒的方向是**朝下**的（下面那些分类管不到命令）。
+    if (!/CATS\.map\(\(c, i\) => React\.createElement\(React\.Fragment[\s\S]{0,300}?catBlock\(c\)[\s\S]{0,200}?c === 'command' && i === 0/.test(cli)) return false
+    // 且不得再挂在 command 块内部（catBlock 里不能再有 commandScopeNote）
+    const iBlock = cli.indexOf('const catBlock = (c) => {')
+    const iBlockEnd = cli.indexOf('const quickGq =', iBlock)
+    const block = (iBlock < 0 || iBlockEnd <= iBlock) ? '' : cli.slice(iBlock, iBlockEnd)
+    return !!block && !block.includes('commandScopeNote()')
+  })())
+
   // ★ 「匹配任意段」的警告判据必须与匹配器同构：字面量 `=== '*'` 会漏报 `**`/`***`/`* *`
   //（命令侧 globMatch 里 `*` 之间无特殊含义；`**` 是本仓库路径侧的惯用写法，用户极易照搬）。
   // 反例：把判据写回 `String(r.match || '').trim() === '*'`，本条即失败。
@@ -6075,6 +6162,29 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     // 正常态的行必须带 rowStyle 的 flex（只在排序态给 style 会让行退化成裸块）
     const noFlex = dragRows.filter((n) => !n.props.style || n.props.style.display !== 'flex').length
     ok('★★ 渲染出的排序行都带 rowStyle（正常态也不丢 flex/内边距）', noFlex === 0, String(noFlex))
+    // ★★ 「命令管辖边界说明」必须**真的渲染进树里**，且排在第一个分类块与第二个分类块**之间**。
+    //
+    // 为什么必须渲染级：上面那条结构断言只能证明「源码里写了 T('panel.cmdScopeNote')、且挂载点
+    // 带 command 前提判据」。它证明不了渲染出来的树里真的有这段文字 —— 例如把 commandScopeNote()
+    // 的返回值接进一个永远为 null 的三元分支、或把 CATS.map 的 Fragment 写错，源码断言照样绿。
+    //
+    // ⚠️ 判据必须是**直接文字**（kids 里的字符串），不能用 textOf 拼整棵子树：
+    // 根节点拼出的文字必然包含全树内容，于是「命中节点」会同时包括根与祖先，
+    // 计数恒 > 1（实测 3），位置下标也会取到 0 —— 两条断言一起误红。
+    // 本渲染桩的 T 返回键本身，故承载该文案的节点 kids 里就是 'panel.cmdScopeNote'。
+    const hasNoteText = (n) => Array.isArray(n.kids) && n.kids.some((k) => typeof k === 'string' && k.indexOf('panel.cmdScopeNote') !== -1)
+    const noteIdx = nodes.findIndex(hasNoteText)
+    // 分类块的判据：标题行 span 的直接文字是分类名（T 桩返回键本身 → 'cat.command'）。
+    // 同样只认直接文字，避免祖先节点把分类名与说明文案混在同一棵子树里。
+    const hasCatText = (n, key) => Array.isArray(n.kids) && n.kids.some((k) => k === key)
+    const cmdIdx = nodes.findIndex((n) => hasCatText(n, 'cat.command'))
+    const nextIdx = nodes.findIndex((n) => hasCatText(n, 'cat.outsideRead'))
+    ok('★★ 命令管辖边界说明真的渲染出来，且夹在「执行命令」与下一个分类之间',
+      rErr2 === null && noteIdx > 0 && cmdIdx > 0 && nextIdx > 0 && cmdIdx < noteIdx && noteIdx < nextIdx,
+      JSON.stringify({ err: rErr2 && rErr2.message, noteIdx: noteIdx, cmdIdx: cmdIdx, nextIdx: nextIdx }))
+    // 只出现一次：挂到每个文件类分类上会让面板变长，且它讲的是同一条边界
+    const noteCount = nodes.filter(hasNoteText).length
+    ok('★★ 命令管辖边界说明只渲染一次（不挂到每个文件类分类上）', noteCount === 1, String(noteCount))
     // 边界禁用而非隐藏：规则首行不能上移、末行不能下移；单条目列表两个方向都禁用
     const disUp = moveBtns.filter((n) => n.kids[0] === '↑' && n.props.disabled === true).length
     const disDown = moveBtns.filter((n) => n.kids[0] === '↓' && n.props.disabled === true).length
