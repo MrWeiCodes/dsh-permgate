@@ -7048,7 +7048,11 @@ export default {
         //   且不弹窗）—— 而面板此刻还写着「循环检测不生效」。触发时机取决于审查关闭期间的
         //   调用，用户无从预期。清零（而非仅仅跳过计数）同时抹掉切换前可能残留的桶。
         if (d.action !== 'allow' || !customReview) resetStreak(sk)
-        console.log('[permgate]', d.action, exec.name, L(d.reason, uiLang) || '')
+        // 这行日志与上面的决策记录**同一条判据**：非「自定义审查」会话下 decide() 早退返回
+        // 无理由的 allow，打出来就是「[permgate] allow <工具名>」一串没有信息量的噪音 ——
+        // 它既不代表本插件做了判定，也和上面那条「不记决策」自相矛盾（记录都跳过了、日志还在刷）。
+        // 判据仍用同一个 customReview，不另写一份。
+        if (customReview) console.log('[permgate]', d.action, exec.name, L(d.reason, uiLang) || '')
         if (d.action === 'ask') {
           const out = await askUser(exec, d)
           // 超时自动结案必须留痕：recordDecision 在审批**之前**执行且只记 d.action === 'ask'，

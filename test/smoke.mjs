@@ -4276,6 +4276,19 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
       !/bi\(\s*'会话未选择「自定义审查」/.test(idxSrc)
       && !/bi\(\s*'Session has not selected "Custom Review"/.test(idxSrc)
       && /if \(!customReview\) \{\s*\n\s*return out\(\{ action: 'allow', reason: ''/.test(idxSrc))
+    // ★★ 审查关闭期间**控制台也不该刷日志**。
+    // 与上面「不记决策」是同一个漏点的两个出口：记录跳过了、日志还在打，用户看到
+    // 「[permgate] allow read」一串，会以为本插件在审查这些调用（实测用户就是这样报的）。
+    // 判据必须是**源码层**的「那行 console.log 被 customReview 包住」——
+    // 运行期没法断言（这条日志没有返回值、也不进任何下发结构）。
+    ok('★★ group22 S22: 审查关闭期间的判定不打 console.log（与「不记决策」同一条判据）',
+      // 正断言锚定**行首的代码行**（^ + m）：不锚定时注释掉整行也能满足（注释文本同形），
+      // 实测「日志被删」仍全绿 —— 而审查会话的日志一并消失正是本条要防的那半个回归。
+      /^\s*if \(customReview\) console\.log\('\[permgate\]'/m.test(idxSrc)
+      // 反面对照：不得存在**未被闸门包住**的同形裸调用。不限缩进（只挡 8 空格会漏掉
+      // 放进 ask 分支的 10 空格写法）、覆盖同族方法（console.info/warn）；
+      // 只匹配 `'[permgate]'` 精确形态，以免误伤超时那条 console.warn 等合法留痕。
+      && !/^\s*console\.(log|info|warn)\(\s*'\[permgate\]'/m.test(idxSrc))
     // 打开审查：同一会话、同一调用。若①期间累积过计数，这里第 1 次就会立刻 ask。
     h.ctx.permissionPresets = { permissionState: () => ({ preset: 'custom-review' }), current: () => 'custom-review', resolved: () => ({ preset: 'custom-review' }) }
     const on1 = await probe(h, ws, 's22', T, A)

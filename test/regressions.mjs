@@ -9293,6 +9293,19 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
   // 且**不能**退化成「无条件记录」或「无条件不记」——两者都会让面板失真。
   ok('★★ 非审查会话不写决策记录（用 decide() 外的同一个 customReview 作闸门）',
     /if \(customReview\) recordDecision\(d, exec\)/.test(src))
+  // ★★ 控制台日志是同一个漏点的**第二个出口**：记录跳过了、日志还在刷，
+  // 用户看到「[permgate] allow read」一串会以为本插件在审查这些调用。
+  // 两个出口必须同一条判据 —— 只挡一个就是「面板干净了、控制台还在说谎」。
+  ok('★★ 非审查会话的判定也不打 console.log（与不记决策同一条判据）',
+    // 正断言必须锚定**行首的代码行**（^ + m）：不锚定时，把整行注释掉也满足 ——
+    // 注释文本里同样含 `if (customReview) console.log('[permgate]'`，实测「日志被删」
+    // 断言仍全绿；而审查会话的日志一并消失，正是本条要防的那半个回归。
+    /^\s*if \(customReview\) console\.log\('\[permgate\]'/m.test(src)
+    // 反面对照：不得存在**未被闸门包住**的同形裸调用。只钉「8 空格缩进 + console.log」
+    // 会漏掉异缩进（如放进 ask 分支的 10 空格写法）与 console.info/warn 同族 ——
+    // 实测这些形态全部逃逸，故不限缩进、覆盖同族方法；仍只匹配 `'[permgate]'`
+    // 这一精确形态，以免误伤 `console.warn('[permgate] approval timed out…')` 这类合法留痕。
+    && !/^\s*console\.(log|info|warn)\(\s*'\[permgate\]'/m.test(src))
   ok('★ 非审查会话的判定 reason 为空串（不再带「未选择自定义审查」的噪音文案）',
     /if \(!customReview\) \{\s*\n\s*return out\(\{ action: 'allow', reason: ''/.test(src)
     && !/bi\(\s*'会话未选择「自定义审查」/.test(src))
