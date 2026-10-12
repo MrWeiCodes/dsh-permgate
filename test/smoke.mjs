@@ -4259,6 +4259,23 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const bucketsOff = (await callRoute(h.routes, 'GET', '/permgate/status')).data.counts.loopBuckets
     ok('★★ group22 S22: 审查关闭期间不建桶（计数不累积）',
       bucketsOff === 0, JSON.stringify({ buckets: bucketsOff }))
+    // ★ 审查关闭期间的调用**不进决策记录**：decide() 此时恒返回无理由的 allow，
+    //   记下来只会把「最近决策」刷成噪音、把真正被审查过的记录挤出窗口。
+    //   判据取 statusView 的 decisionCount（宿主下发的 O(1) 计数）—— 用 recentDecisions.length
+    //   在「不足首屏条数」时恒等于实际条数，区分不出「没记」与「记了但没满」。
+    const offSt = (await callRoute(h.routes, 'GET', '/permgate/status')).data
+    ok('★★ group22 S22: 审查关闭期间的调用不写决策记录（decisionCount 为 0）',
+      offSt.decisionCount === 0, JSON.stringify({ decisionCount: offSt.decisionCount, recent: (offSt.recentDecisions || []).length }))
+    // 「删掉那句文案」只能**在源码层断言**：非审查会话已不写决策记录（上一条），
+    // 故 reason 在运行时没有任何观测点 —— 写成 `recentDecisions.every(...)` 是死断言
+    // （`[].every()` 恒真；实测把文案改回去也不会变红）。
+    // ⚠️ 判据必须锚定**字符串字面量**（引号 + bi( 调用），不能只匹配那串中文：
+    //    注释里提到这句话（说明「曾经是什么」）就会误报 —— 本断言第一版正是这样红的。
+    const idxSrc = readFileSync(join(ROOT, 'index.js'), 'utf8')
+    ok('★ group22 S22: 生产代码里不再有「会话未选择自定义审查」这类噪音文案（只查字面量，注释提及不算）',
+      !/bi\(\s*'会话未选择「自定义审查」/.test(idxSrc)
+      && !/bi\(\s*'Session has not selected "Custom Review"/.test(idxSrc)
+      && /if \(!customReview\) \{\s*\n\s*return out\(\{ action: 'allow', reason: ''/.test(idxSrc))
     // 打开审查：同一会话、同一调用。若①期间累积过计数，这里第 1 次就会立刻 ask。
     h.ctx.permissionPresets = { permissionState: () => ({ preset: 'custom-review' }), current: () => 'custom-review', resolved: () => ({ preset: 'custom-review' }) }
     const on1 = await probe(h, ws, 's22', T, A)
@@ -4266,6 +4283,96 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const on3 = await probe(h, ws, 's22', T, A)
     ok('★★ group22 S22: 切回审查模式后计数从零开始（第 1 次不得凭空触发；第 3 次才 ask）',
       on1 === 'allow' && on2 === 'allow' && on3 === 'ask', JSON.stringify({ on1: on1, on2: on2, on3: on3 }))
+    // 对照：审查打开后**必须**开始记（否则上面「关闭时不记」可由「永远不记」满足）。
+    const onSt = (await callRoute(h.routes, 'GET', '/permgate/status')).data
+    ok('★★ group22 S22: 对照 —— 切回审查模式后恢复写决策记录（decisionCount > 0）',
+      onSt.decisionCount > 0, JSON.stringify({ decisionCount: onSt.decisionCount }))
+    // 展开通道：/permgate/decisions 返回全量（首屏只带 DECISIONS_PREVIEW 条）。
+    const full = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    // ★★ 首屏取的必须是**最近** N 条，不是最前 N 条。
+    //
+    // ⚠️ 这个场景（3 条记录）**测不出方向**：首屏窗口是 10，而 slice(-10) 与 slice(0,10)
+    //    在条数 ≤ 10 时结果完全相同 —— 实测把实现改成 slice(0, limit) 时此处不会变红。
+    //    故方向判据单独放在下面的 group23（造 12 条，越过首屏窗口），这里只钉「展开通道
+    //    与首屏是同一批记录」这件事。
+    const allD = (full.data && full.data.decisions) || []
+    ok('★ group22 S22: 展开通道与首屏是同一批记录（首屏是全量的尾部子集）',
+      (onSt.recentDecisions || []).length > 0
+      && JSON.stringify(onSt.recentDecisions) === JSON.stringify(allD.slice(-(onSt.recentDecisions || []).length)),
+      JSON.stringify({ previewLen: (onSt.recentDecisions || []).length, totalLen: allD.length }))
+    ok('★ group22 S22: /permgate/decisions 返回全量与计数',
+      Array.isArray(full.data && full.data.decisions) && full.data.total === onSt.decisionCount
+      && full.data.decisions.length === onSt.decisionCount && full.data.max === 100,
+      JSON.stringify({ len: full.data && full.data.decisions && full.data.decisions.length, total: full.data && full.data.total, max: full.data && full.data.max }))
+    ok('★ group22 S22: 展开通道的 reason 与首屏同口径（都经 L() 投影，不是两套语言）',
+      (full.data.decisions || []).slice(-(onSt.recentDecisions || []).length)
+        .every((d, i) => d.reason === onSt.recentDecisions[i].reason),
+      JSON.stringify({ full: (full.data.decisions || []).slice(-1)[0], preview: (onSt.recentDecisions || []).slice(-1)[0] }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+}
+
+group('23. 决策记录：首屏取「最近」N 条的方向判据（需越过首屏窗口）')
+{
+  // 为什么必须单独造场景：首屏窗口是 DECISIONS_PREVIEW=10，而 `slice(-10)` 与 `slice(0,10)`
+  // 在**记录条数 ≤ 10** 时结果完全相同。上面 S22 只有 3 条，故把实现改成取最前 N 条时
+  // 那边不会变红（实测确认）。面板要的是「最近决策」，取错方向会显示**最老**的记录，
+  // 而条数、字段、reason 全都正常 —— 只有「越过窗口后的顺序」能区分这两者。
+  {
+    // 自建宿主（group22 的 mkHost 是那个块的局部函数，这里取不到）。
+    // createHost 是模块级函数，直接调；dshHome 指向临时目录，避免写进真实 home。
+    const ws = mkdtempSync(join(tmpdir(), 'pg-dec-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-dec-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    writeFileSync(join(home, 'dsh-permgate', 'config.json'),
+      JSON.stringify({ global: { fallbackMode: 'allow' }, projects: {} }, null, 2), 'utf8')
+    const h = createHost({ workspaceRoot: ws, dshHome: home })
+    // 自建 pre-execute 调用（group22 的 probe 同样是那个块的局部函数）。
+    // 用未分类工具名 → quickAction 不命中 → 落兜底 allow，保证每次都真的记一条。
+    const pre = h.hooks.get('tools/pre-execute')
+    const fire = async (name) => {
+      const exec = {
+        name, arguments: {}, callId: 'call-1', token: 'tok-1',
+        agent: { cwd: ws, session: { id: 'sess-23' } },
+        signal: undefined,
+      }
+      const p = pre(exec, async () => ({ kind: 'allow' }))
+      p.catch(() => {})
+      await Promise.race([p, new Promise((r) => setTimeout(() => r(null), 400))])
+    }
+    // 12 次互不相同的调用（名字带序号）→ 12 条记录，越过 10 条的首屏窗口。
+    const names = []
+    for (let i = 0; i < 12; i++) names.push('dtool' + i)
+    for (const n of names) await fire(n)
+
+    const st = (await callRoute(h.routes, 'GET', '/permgate/status')).data
+    const full = (await callRoute(h.routes, 'GET', '/permgate/decisions')).data
+    const preview = st.recentDecisions || []
+    const all = full.decisions || []
+
+    ok('group23 前置：确实造出了超过首屏窗口的记录（否则下面的方向判据空转）',
+      all.length === 12 && preview.length === 10,
+      JSON.stringify({ total: all.length, preview: preview.length }))
+
+    // 方向判据：首屏必须等于全量的**最后 10 条**（最近发生的），而不是最前 10 条。
+    // 用 tool 名逐条比对 —— ts 是 ISO 字符串，同一毫秒内可能相同，不适合做顺序判据。
+    const lastTen = all.slice(-10).map((d) => d.tool)
+    const firstTen = all.slice(0, 10).map((d) => d.tool)
+    ok('★★ group23: 首屏取的是最近 10 条（取最前 10 条时会显示最老的记录）',
+      JSON.stringify(preview.map((d) => d.tool)) === JSON.stringify(lastTen),
+      JSON.stringify({ got: preview.map((d) => d.tool), wantLast: lastTen, wouldBeFirst: firstTen }))
+
+    // 反向钉桩：这个场景里「最前 10 条」与「最后 10 条」必须**确实不同** ——
+    // 否则上面的断言在两侧都成立，等于没测。12 条窗口 10，尾部与首部必然差 2 条。
+    ok('★★ group23: 对照 —— 该场景下首尾两段确实不同（否则上面的方向断言是空转）',
+      JSON.stringify(lastTen) !== JSON.stringify(firstTen),
+      JSON.stringify({ last: lastTen, first: firstTen }))
+
+    // 展开通道必须是**时间正序**（最老在前），面板据此把最新的一条显示在底部。
+    ok('★ group23: 展开通道按时间正序（最老在前），首屏是它的尾部',
+      JSON.stringify(all.map((d) => d.tool)) === JSON.stringify(names),
+      JSON.stringify({ got: all.map((d) => d.tool) }))
+
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 }

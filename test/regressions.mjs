@@ -9257,6 +9257,83 @@ group('28. 插件清单元信息：插件管理页显示的名字/描述/图标'
     fsExistsSync(pathJoin(ROOT, 'test', 'meta.mjs')))
 }
 
+group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
+{
+  // src / cli 在文件顶部已读好（L12-13），此处不重复读 —— 重复读会多两份 500KB 字符串，
+  // 且一旦顶部换了读取方式（如改编码参数）这里会静默不同步。
+
+  // ── 宿主侧：两个常量必须**分开** ─────────────────────────────────
+  // 合成一个的后果：调大内存窗口会连带把 statusView 的每次下发变重（它被面板反复取：
+  // SSE 通知后重查、各写盘路由回带、perm_status 每次调用）。这条断言钉住两件事是两件事。
+  ok('★ 内存窗口与首屏条数是两个常量（合成一个会让面板下发随窗口变重）',
+    /const MAX_DECISIONS = 100\b/.test(src) && /const DECISIONS_PREVIEW = 10\b/.test(src))
+
+  // statusView 用 DECISIONS_PREVIEW，不得硬编码数字（硬编码后改常量不生效）
+  ok('★ statusView 的首屏条数取自 DECISIONS_PREVIEW（不硬编码）',
+    /recentDecisions: projectDecisions\(l, DECISIONS_PREVIEW\)/.test(src)
+    && !/recentDecisions: decisions\.slice\(-10\)/.test(src))
+
+  // ── 展开通道：路由存在、只读、与首屏同口径投影 ────────────────────
+  ok('★ 展开通道 /permgate/decisions 是 GET 且只读（无写盘调用）',
+    /pathname === '\/permgate\/decisions' && method === 'GET'/.test(src))
+  // ★★ 首屏与展开**共用同一个投影函数**，不是两处各写一份同形代码。
+  // 各写一份时两处的语言变量来源不同（首屏是 normLang(lang || uiLang)，展开是请求参数），
+  // 任何一处改动漏改另一处，同一条记录就会在首屏与展开列表里显示不同内容。
+  // 判据必须钉「共用」这件事本身：只钉「两处都出现 Object.assign(...L(...))」时，
+  // 把其中一处改回独立实现仍然全绿 —— 那正是本条要防的漂移。
+  ok('★★ 首屏与展开通道共用同一个投影函数（各写一份会让同一记录两处显示不一致）',
+    /function projectDecisions\(lang, limit\) \{/.test(src)
+    && /recentDecisions: projectDecisions\(l, DECISIONS_PREVIEW\)/.test(src)
+    && /decisions: projectDecisions\(lang\)/.test(src)
+    // 两处都不得再出现各自的 Object.assign + L 投影（共用之后它们应已消失）
+    && (src.match(/reason: L\(d\.reason, (l|lang)\)/g) || []).length === 1)
+
+  // ── 非审查会话不记决策 ──────────────────────────────────────────
+  // 判据必须用 decide() 外面那个 customReview（与 decide() 内部同源），
+  // 且**不能**退化成「无条件记录」或「无条件不记」——两者都会让面板失真。
+  ok('★★ 非审查会话不写决策记录（用 decide() 外的同一个 customReview 作闸门）',
+    /if \(customReview\) recordDecision\(d, exec\)/.test(src))
+  ok('★ 非审查会话的判定 reason 为空串（不再带「未选择自定义审查」的噪音文案）',
+    /if \(!customReview\) \{\s*\n\s*return out\(\{ action: 'allow', reason: ''/.test(src)
+    && !/bi\(\s*'会话未选择「自定义审查」/.test(src))
+
+  // ── 客户端：展开态、按需拉取、滚动条 ─────────────────────────────
+  ok('★ 客户端注册了展开通道并新增了路由映射',
+    /'permgate:decisions': \['GET', '\/permgate\/decisions'\]/.test(cli))
+  ok('★ 展开是**按需拉取**（点击才请求），不是让 statusView 直接发全量',
+    /const toggleDecisions = \(\) => \{/.test(cli) && /call\('permgate:decisions'\)/.test(cli))
+  // 展开按钮的出现判据必须比 **首屏那份列表**（decisions），不能比当前显示的列表：
+  // 用后者时展开后两者相等、按钮消失，用户再也收不回去。
+  // ★★ 还必须带上「已展开」这一支：`decisionCount > decisions.length` 只在单次插件生命周期内
+  // 恒真 —— 插件重载后宿主数组清空、计数归 0，判据变假而列表仍在渲染旧快照，用户被锁死
+  // 在展开态里（唯一出口是刷新整页）。两个方向都要钉：比错了列表会消失，漏了展开态也会消失。
+  ok('★★ 展开/收起按钮的判据比首屏列表、且展开态下恒显示（两种消失路径都要挡住）',
+    /\(expandedList \|\| decisionTotal > decisions\.length\) \? React\.createElement\('button'/.test(cli)
+    && !/decisionTotal > decisionsShown\.length/.test(cli))
+  // ★★ 「是否已展开」必须是**单一判据**（expandedList），三处消费（取值 / 限高 / 按钮文案）
+  // 共用它。此前三处各写一遍 `decisionsExpanded !== 'loading'` 且含义分叉：限高那处把
+  // `{ error }`（请求失败）也当成已展开，于是给首屏那 10 条套上了滚动条 —— 与「未展开
+  // 不限高（就 10 条，不值得出滚动条）」的约定相反，而该态经 .catch 确实可达。
+  // 判据钉「分叉写法已消失」：`!== 'loading'` 这种半判据不得再出现在展开态的消费点。
+  ok('★★ 展开态是单一判据（三处不再各写一遍 `!== \'loading\'` 的半判据）',
+    /const expandedList = Array\.isArray\(decisionsExpanded && decisionsExpanded\.list\) \? decisionsExpanded\.list : null;/.test(cli)
+    && /const decisionsShown = expandedList \|\| decisions;/.test(cli)
+    && !/decisionsExpanded !== 'loading'/.test(cli))
+  // 滚动条只在真正展开（取回了列表）时出现 —— 判据就是上面那个单一值，不是 `!== 'loading'`
+  ok('★ 滚动条只在展开态出现（maxHeight + overflowY 成对，且以展开态为前提）',
+    /style: expandedList\s*\n\s*\? \{ maxHeight: 360, overflowY: 'auto'/.test(cli))
+  // 两个文案都要有 {n} / {m} 占位（否则按钮上会出现字面的 {n}）。
+  // ⚠️ 两处正则细节都是踩过的坑：
+  //    · `{n}` 必须转义 —— 不转义时被当量词解析（匹配「n 重复若干次」而非字面 `{n}`）；
+  //    · i18n 键名在源码里**带引号**（`'panel.decisionsExpand':`），只写键名会数到 0。
+  ok('★ 展开/收起文案齐备且带占位符（中英各一套）',
+    (cli.match(/'panel\.decisionsExpand':/g) || []).length === 2
+    && (cli.match(/'panel\.decisionsCollapse':/g) || []).length === 2
+    && /\{n\}/.test(cli) && /\{m\}/.test(cli)
+    && /\.replace\('\{n\}', String\(decisionTotal\)\)/.test(cli)
+    && /\.replace\('\{m\}', String\(decisions\.length\)\)/.test(cli))
+}
+
 
 // ─────────────────────────────────────────────────────────────
 if (fail.length) {

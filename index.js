@@ -68,7 +68,12 @@ const keyOfTier = (tier) => (tier === 'inside' ? 'action' : tier)
 // 不用 `'__no_such_root__'` 这类普通字符串：用户真有一个叫它的项目键时探针会取到那个项目，
 // 面板全局 tab 又会显示成项目的值 —— 正是本探针要消除的那类面板说谎。
 const GLOBAL_PROBE_ROOT = '\u0000__no_project__'
-const MAX_DECISIONS = 30
+const MAX_DECISIONS = 100
+// 面板「最近决策」的**首屏**条数：statusView 会被面板反复取（SSE 通知后重查、各写盘路由回带、
+// perm_status 每次调用），故首屏只带这么多；用户点「展开」时走 /permgate/decisions 按需取全量
+// （上限 MAX_DECISIONS）。与 MAX_DECISIONS 分开是为了**不让面板体积随内存窗口增长**：
+// 把两个数合成一个，一旦调大窗口，statusView 的每次下发都会跟着变重。
+const DECISIONS_PREVIEW = 10
 // 候选值（例外模式）的字符上限：超限的候选**不产出**。
 //
 // 破坏性/载荷族段的候选值是「整段原文」，而命令行由 AI 生成、长度无上界 ——
@@ -4532,8 +4537,15 @@ export default {
         if (b === undefined || d === undefined || d < b) return base
         return doom
       }
+      // 会话没选「自定义审查」→ 不归本插件管，放行且**不带理由**。
+      // reason 曾经是一句「未选择自定义审查」的说明文案，但它会随 recordDecision
+      // 落进决策记录、再经 recentDecisions 下发到设置页与 perm_status——
+      // 于是**每一次**工具调用都在「最近决策」里留一条这种噪音行，把真正被审查过的
+      // 记录挤出窗口。判据本身就是「本插件不参与」，没有任何可归因的规则/分类/例外，
+      // 所以 reason 用空串（消费侧 L()/segmentSummary 都已容忍空值），
+      // 并由 pre-execute 侧的 customReview 闸门跳过记录（见那里的注释）。
       if (!customReview) {
-        return out({ action: 'allow', reason: bi('会话未选择「自定义审查」，由 DSH 权限预设处理', 'Session has not selected "Custom Review"; handled by DSH permission presets'), cat: null, value: null, kind: null })
+        return out({ action: 'allow', reason: '', cat: null, value: null, kind: null })
       }
       const proj = projectBlock(root)
       const rules = []
@@ -4715,6 +4727,20 @@ export default {
       // 而日志里没有这个字段，属于写了没人读的死数据。
       decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, code: d.code || null, reason: segmentSummary(d) })
       if (decisions.length > MAX_DECISIONS) decisions.splice(0, decisions.length - MAX_DECISIONS)
+    }
+
+    // 决策记录下发给面板时的**唯一投影**：浅拷贝每条记录 + 把 reason 从 bi() 对象按请求语言收成字符串。
+    //
+    // 为什么必须只有这一份：两个消费方（statusView 的 recentDecisions 首屏、GET /permgate/decisions
+    // 的展开全量）下发的是**同一批记录**，投影各写一份时同一条记录会在首屏与展开列表里显示不同内容
+    // （两种语言、或多/少一个字段），而这类分叉在面板上表现为「同一行两处说法不一致」，排查成本
+    // 远高于在此多一个函数。日后给记录增补字段（如 note/blast）也只需改这里一处。
+    //
+    // limit 是「取最后 N 条」：面板要的是最近记录，切片在投影**之前**做 —— 反过来会对被丢弃的
+    // 记录白做一次 L() 投影。不传 limit = 全量（展开通道用）。
+    function projectDecisions(lang, limit) {
+      const list = typeof limit === 'number' ? decisions.slice(-limit) : decisions
+      return list.map((d) => Object.assign({}, d, { reason: L(d.reason, lang) }))
     }
 
     function dirGlob(p) {
@@ -5982,7 +6008,13 @@ export default {
           loopBuckets: streakBySession.size,
         },
         stats,
-        recentDecisions: decisions.slice(-10).map((d) => Object.assign({}, d, { reason: L(d.reason, l) })),
+        // 首屏只带 DECISIONS_PREVIEW 条（见其定义处）：本视图会被面板反复取（SSE 通知后重查、
+        // 各写盘路由回带、perm_status 每次调用），全量下发会让每次下发都跟着内存窗口变重。
+        // 展开走 /permgate/decisions。投影与展开通道共用 projectDecisions（见其说明）。
+        recentDecisions: projectDecisions(l, DECISIONS_PREVIEW),
+        // 让面板知道「展开后能拿到多少条」，据此决定展开按钮是否出现/显示什么文案。
+        // 只下发计数，不下发内容 —— 计数是 O(1)，内容不是。
+        decisionCount: decisions.length,
         cats: CATS,
         // command 分类的子设置「破坏性命令」：下发**八档**的生效值、各层显式配置与推导默认值。
         // 与 quickTools/quickDefaults 同口径 —— 面板显示的就是裁决实际用的那个值。
@@ -6528,6 +6560,21 @@ export default {
           // 缺失时走全局回退（最近权限事件会话 / 最后创建会话）
           return json(res, statusView(exec, lang))
         }
+        // 决策记录的**展开**通道：statusView 只带首屏 DECISIONS_PREVIEW 条（理由见那里），
+        // 用户点「展开」时走本路由取全量（上限 MAX_DECISIONS 条）。
+        // 为什么单开一条而不是把 statusView 调大：statusView 会被面板反复取（SSE 通知后重查、
+        // 各写盘路由回带、perm_status 每次调用），而本路由**只在用户点击时**跑一次 ——
+        // 面板体积不随内存窗口增长。
+        // 只读、无副作用，故与 /permgate/status 同属可信浏览器栅栏下的 GET。
+        if (pathname === '/permgate/decisions' && method === 'GET') {
+          return json(res, {
+            // 全量下发；reason 走 L() 按请求语言投影，与首屏共用 projectDecisions（见其说明：
+            // 各写一份时同一条记录会在首屏与展开列表里显示两种语言）。
+            decisions: projectDecisions(lang),
+            total: decisions.length,
+            max: MAX_DECISIONS,
+          })
+        }
         if (pathname === '/permgate/decide' && method === 'POST') {
           const entry = pendingApprovals.get(a.id)
           if (!entry) return json(res, { error: lang === 'en' ? 'Approval request not found or expired' : '审批请求不存在或已过期' })
@@ -6981,7 +7028,11 @@ export default {
         // 故不会漂移。这里需要它是因为计数点在 decide() 之外，而计数必须受同一个闸门约束。
         const customReview = sessionPresetName(exec) === 'custom-review'
         const d = decide(exec)
-        recordDecision(d, exec)
+        // 决策记录只记**本插件真正参与过**的调用：非「自定义审查」会话下 decide() 恒返回
+        // 一个无理由的 allow（它自己第一行就早退），记下来只会把「最近决策」刷成噪音、
+        // 把真正被审查过的记录挤出窗口。判据用**同一个 customReview**（上面刚算的，
+        // 与 decide() 内部那一处同源），不是第二份判据。
+        if (customReview) recordDecision(d, exec)
         // ── 循环检测的计数口径（L-2 / L-11）──────────────────────────────────
         // 只有**真正静默放行并执行了**的调用才推进连续计数；其余一切路径都清零。
         // 为什么清零要在这里先做：`d.action !== 'allow'`（deny / ask）无论后面弹窗结果如何，

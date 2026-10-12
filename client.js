@@ -423,6 +423,8 @@ window.__ModuleLoader__.load({
 
 		const ROUTES = {
 			'permgate:status': ['GET', '/permgate/status'],
+			// 决策记录的展开通道：statusView 只带首屏 10 条，展开时按需取全量。
+			'permgate:decisions': ['GET', '/permgate/decisions'],
 			'permgate:pending': ['GET', '/permgate/pending'],
 			'permgate:file-diff': ['POST', '/permgate/file-diff'],
 			'permgate:decide': ['POST', '/permgate/decide'],
@@ -1648,6 +1650,11 @@ window.__ModuleLoader__.load({
 				'panel.noRules': '暂无规则',
 				'panel.decisions': '最近决策',
 				'panel.noDecisions': '暂无决策记录',
+				// 展开/收起决策记录。{n} 是展开后能看到的条数，{m} 是首屏条数。
+				'panel.decisionsExpand': '展开全部（{n} 条）',
+				'panel.decisionsCollapse': '收起（只显示最近 {m} 条）',
+				'panel.decisionsLoading': '加载中…',
+				'panel.decisionsFailed': '加载失败',
 				'panel.reload': '重新加载配置文件',
 				'panel.openConfig': '打开',
 				'panel.openConfigDone': '已用默认编辑器打开配置文件',
@@ -2024,6 +2031,11 @@ window.__ModuleLoader__.load({
 				'panel.noRules': 'No rules',
 				'panel.decisions': 'Recent decisions',
 				'panel.noDecisions': 'No decisions yet',
+				// 展开/收起决策记录。{n} 是展开后能看到的条数，{m} 是首屏条数。
+				'panel.decisionsExpand': 'Show all ({n})',
+				'panel.decisionsCollapse': 'Collapse (show last {m})',
+				'panel.decisionsLoading': 'Loading…',
+				'panel.decisionsFailed': 'Load failed',
 				'panel.reload': 'Reload config file',
 				'panel.openConfig': 'Open',
 				'panel.openConfigDone': 'Opened with default editor',
@@ -3398,6 +3410,19 @@ window.__ModuleLoader__.load({
 			// 快捷工具的计数器不按分类分（它只有一个列表）；例外那个按分类分，
 			// 理由见 excScrollRefs 处的说明（多个分类默认同时展开，共用一个 ref 会滚错列表）。
 			const [quickScrollEnd, setQuickScrollEnd] = React.useState(0);
+			// 「最近决策」的展开态：null = 未展开（显示 statusView 带来的首屏 10 条）；
+			// { list } = 已展开（list 是 /permgate/decisions 取回的全量**快照**）；
+			// 'loading' / { error } 是两个中间/失败态，都仍显示首屏那 10 条，不把面板清空。
+			//
+			// 为什么展开要**另取一份**而不是让 statusView 直接发全量：statusView 会被面板
+			// 反复取（SSE 通知后重查、各写盘路由回带、perm_status 每次调用），把 100 条记录
+			// 塞进去等于给每一次都加约 30KB。展开是低频的用户动作，按需取一次即可。
+			//
+			// ⚠️ 展开后**不自动刷新**：list 是点击那一刻的快照，展开期间新发生的决策不在其中
+			// （面板其余部分照常随 SSE 更新，只有这块不动）。刷新方式就是**收起再展开** ——
+			// 收起丢弃快照、下次展开重新取。不做「按 decisionCount 变化自动重拉」：宿主没有
+			// 定向通知，那样等于 AI 连续调工具时持续拉取数十 KB 全量，代价大于收益。
+			const [decisionsExpanded, setDecisionsExpanded] = React.useState(null);
 			const [ruleFilter, setRuleFilter] = React.useState({ global: '', project: '' });
 			// 拖动排序的当前状态：{ id, overId, pos } 或 null（没在拖）。
 			// **只存这一份、两个列表共用**：同一时刻只可能拖着一行，而规则与例外的 id 前缀
@@ -5287,6 +5312,28 @@ window.__ModuleLoader__.load({
 			const customList = status && status.custom ? status.custom[tab] : null;
 			const eff = status ? status.effective : null;
 			const decisions = status && status.recentDecisions ? status.recentDecisions : [];
+			// 「最近决策」的展开：首屏用 statusView 带来的 decisions，展开后用按需取回的全量。
+			// decisionTotal 是宿主下发的计数（O(1)），首屏条数由它自己那份列表长度得出 ——
+			// 不在客户端硬编码 10，否则宿主改 DECISIONS_PREVIEW 时按钮会出现/消失错判。
+			const decisionTotal = status && typeof status.decisionCount === 'number' ? status.decisionCount : decisions.length;
+			// 「是否真的展开了」的**唯一判据**：只有取回列表（{ list }）才算展开。
+			// 'loading' 与 { error } 都不算 —— 它们仍显示首屏那 10 条，故既不该出滚动条
+			// （10 条不值得），也不该把按钮换成「收起」（失败后用户要能再点一次重试）。
+			// 取值、限高样式、按钮三处都消费这一个值，不再各写一遍判据：各写一遍时分叉过 ——
+			// 限高那处只判 `!== 'loading'`，于是失败态给首屏 10 条套上了滚动条，与
+			// 「未展开不限高」的约定相反。
+			const expandedList = Array.isArray(decisionsExpanded && decisionsExpanded.list) ? decisionsExpanded.list : null;
+			const decisionsShown = expandedList || decisions;
+			const toggleDecisions = () => {
+				// 收起：丢掉取回的那份，回到首屏（下次展开重新取 —— 快照没有失效通知，
+				// 重取是它唯一的刷新方式，见 state 处的说明）。
+				if (expandedList) { setDecisionsExpanded(null); return; }
+				setDecisionsExpanded('loading');
+				call('permgate:decisions').then((r) => {
+					if (r && r.error) { setDecisionsExpanded({ error: String(r.error) }); return; }
+					setDecisionsExpanded({ list: (r && r.decisions) || [] });
+				}).catch((e) => setDecisionsExpanded({ error: String((e && e.message) || e) }));
+			};
 			const stats = status && status.stats ? status.stats : { deny: 0, ask: 0 };
 			const sandbox = status && status.sandbox ? status.sandbox : { global: 'workspace-write', project: 'inherit', effective: 'workspace-write' };
 			const presetName = status && status.preset ? status.preset : null;
@@ -5454,12 +5501,41 @@ window.__ModuleLoader__.load({
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
 				),
 				React.createElement('div', { style: card },
-					React.createElement('div', { style: h() }, T('panel.decisions')),
-					decisions.length ? decisions.map((d, i) => React.createElement('div', { key: i, style: rowStyle },
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 0 8px' } },
+						React.createElement('div', { style: h() }, T('panel.decisions')),
+						// 展开/收起按钮：两种情形出现 —— ①后端确实有更多条（decisionCount 由 statusView
+						// 下发，是 O(1) 的计数而非内容）；②**已展开**（复用上面那个单一判据）。
+						// ②不能省：decisions 只增不减仅在**单次插件生命周期内**成立 —— 插件重载后
+						// 宿主侧数组清空、decisionCount 归 0，①的判据变假，而 decisionsShown 仍在
+						// 渲染展开时取回的那份快照。按钮一消失，用户就被锁在陈旧展开态里，只能刷新整页。
+						// 判据里比的是**首屏那份列表**（decisions）而不是当前显示的列表 ——
+						// 用后者时展开后两者相等、按钮会消失，用户就再也收不回去。
+						(expandedList || decisionTotal > decisions.length) ? React.createElement('button', {
+							className: 'pg-btn',
+							disabled: decisionsExpanded === 'loading',
+							onClick: toggleDecisions,
+						}, decisionsExpanded === 'loading' ? T('panel.decisionsLoading')
+							// 收起文案里的 {m} 是**首屏条数**（收起后会剩几条），不是当前显示的条数。
+							: expandedList ? T('panel.decisionsCollapse').replace('{m}', String(decisions.length))
+							: T('panel.decisionsExpand').replace('{n}', String(decisionTotal))) : null,
+					),
+					decisionsShown.length ? React.createElement('div', {
+						// 展开后限高 + 滚动：100 条记录全铺开会把整个设置页撑成一条长滚动条，
+						// 用户反而找不到下面的分类设置。未展开（含 loading / 失败态）时不限高 ——
+						// 那两种态显示的就是首屏 10 条，不值得出滚动条。
+						style: expandedList
+							? { maxHeight: 360, overflowY: 'auto', overscrollBehavior: 'contain' }
+							: null,
+					}, decisionsShown.map((d, i) => React.createElement('div', { key: i, style: rowStyle },
 						badge(d.action),
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, d.tool),
-						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, d.reason || ''),
-					)) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noDecisions')),
+						// reason 可能很长（段摘要上限 300 字符）且不换行会把行撑出面板，
+						// 故给这一格 minWidth:0 + 允许换行，让它在剩余宽度内折行。
+						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', minWidth: 0, flex: '1 1 100%', wordBreak: 'break-word', whiteSpace: 'pre-wrap' } }, d.reason || ''),
+					))) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noDecisions')),
+					// 失败提示：只在 { error } 态出现（'loading' 是字符串、没有 .error，天然不命中）。
+					// 与 expandedList 的判据一致 —— 该态**不算展开**，故按钮仍是可重试的「展开」。
+					(decisionsExpanded && decisionsExpanded.error) ? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 6 } }, T('panel.decisionsFailed') + '：' + decisionsExpanded.error) : null,
 				),
 				notice ? React.createElement('div', { style: { fontSize: 12, color: '#bf8700', background: 'rgba(191,135,0,0.08)', border: '1px solid rgba(191,135,0,0.35)', borderRadius: 6, padding: '6px 8px', marginBottom: 8, lineHeight: 1.5 } }, '⚠ ' + notice) : null,
 				msg ? React.createElement('div', { style: { fontSize: 12, color: '#1e88e5', marginBottom: 8 } }, msg) : null,
