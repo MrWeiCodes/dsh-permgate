@@ -998,7 +998,7 @@ ok('decided/encoding 从 readPreviewText 透传到预览数据',
 group('10. 读图独立分类（image）口径')
 ok('read_image 已从 read 移出、单列 FILE_IMAGE_TOOLS', !src.includes('FILE_READ_TOOLS = { read: 1, read_image: 1 }') && src.includes('const FILE_IMAGE_TOOLS = { read_image: 1 }'))
 ok('image 进入分类清单与例外分类清单', mod.CATS.indexOf('image') !== -1 && mod.EXC_CATS.indexOf('image') !== -1)
-ok('decide 里有 image 判定（与 read 同链：工作区外先过区外读闸）', src.includes("resolveCategory('image', fp, 'path', root)") && src.includes('if (isFileImage(name)) {'))
+ok('decide 里有 image 判定（与 read 同链：工作区外先过区外读闸）', src.includes("resolveCategory('image', fp, 'path', root, cwd)") && src.includes('if (isFileImage(name)) {'))
 ok('pathToolCat 把 read_image 归到 image（不继承 read）', src.includes("if (isFileImage(name)) return 'image'") && src.includes("if (isFileRead(name, args)) return 'read'"))
 // undo 默认 allow 是一个取舍（撤销恢复既有内容、不接受新内容），不是「撤销无害」的结论：
 // 两个撤销实现的破坏面不同 —— fs-encoding 只在内存、按 session 分桶且文件改动后拒绝；
@@ -1031,9 +1031,9 @@ ok('isFileImage 只认 read_image', mod.isFileImage('read_image') === true && mo
 // 防回退：工作区外读图必须走合并矩阵单点，不得再用区外闸的动作短路 image 分类。
 // 否命题的锚点从「目录权限」改为**当前**的区外写闸前缀：前缀改名后旧的否命题会恒真、
 // 断言静默失效（写「目录权限」时它匹配不到任何东西，无论实现是否回退都通过）。
-ok('工作区外读图走合并矩阵单点（不被区外闸短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp, root\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('工作区外写入权限/.test(src))
+ok('工作区外读图走合并矩阵单点（不被区外闸短路）', /if \(isFileImage\(name\)\)[\s\S]{0,400}?outsideMatrix\('image', fp, root, cwd\)/.test(src) && !/if \(isFileImage\(name\)\)[\s\S]{0,400}?return \{ action: d\.action, reason: bi\('工作区外写入权限/.test(src))
 // 防回退：read 也必须走合并矩阵（deny 例外与 read=ask 在跨工作区时必须生效）
-ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root\)/.test(src))
+ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root, cwd\)/.test(src))
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
 ok('缩略图有体积上限', src.includes('const IMAGE_MAX_BYTES = 2 * 1024 * 1024'))
 ok('读图的文本预览分支已移除', !src.includes('图片内容不在此预览'))
@@ -1069,7 +1069,7 @@ ok('图片详情默认展开并自动预取（读图时直接看到缩略图）'
 // 防回退：工作区外审批给两条候选（整个目录 / 仅此文件），且「仅此文件」写两条例外（自身分类 + 区外闸精确路径）
 // 判据同步改为闸归属单点：`outsideHere` 现在由 outsideGateOf(catKey) 派生，
 // 断言保住的是**语义**（区外路径 → 两条候选分支），不是某个具体字面量。
-ok('工作区外 path 审批给两条候选', src.includes('const gate = outsideGateOf(catKey)') && src.includes('const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root))') && src.includes('function pathToolCat(name, args, exec) {') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments, exec)'))
+ok('工作区外 path 审批给两条候选', src.includes('const gate = outsideGateOf(catKey)') && src.includes('const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root, exCwd))') && src.includes('function pathToolCat(name, args, exec) {') && src.includes('toolCat: pathToolCat(exec.name, exec.arguments, exec)'))
 ok('「仅允许此文件」写自身分类 + 区外闸精确路径两条例外（值取归一化路径）', src.includes("{ cat: catKey, kind: 'path', value: fileVal }, { cat: gate, kind: 'path', value: fileVal }") && src.includes('const cand = r.id ? (entry.candidates || []).find((c) => c.id === r.id) : null') && cli.includes('({ id: c.id, value: c.value, kind: c.kind, decision: sel[c.id] })'))
 ok('「整个目录」同时写区外闸与自身分类的 glob', src.includes("{ cat: gate, kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }") && src.includes('const hasKindGlob = globSafe && alreadyInProject(glob'))
 // 防回退：缩略图像素上限、落盘分类/类型自洽、reason 前缀跟随决定闸、read 复用预检单点
@@ -1095,7 +1095,9 @@ ok('工作区外 allow 的 cat 与 ruleId 同源（不再硬编码 catKey）', s
 ok('read/image 详情复用预检单点且跳过体积闸', (src.match(/skipSizeCheck: true/g) || []).length === 2)
 // 防回退：路径先规范化再判定（含 .. 的原文会写出不生效的例外）；文件级判重按候选要写的全部分类；
 // 通配符仍由 hasGlobMeta 拦下。旧形态（无 id）按 value 反查候选复用 writes
-ok('路径两侧同口径 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)') && src.includes('return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))') && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: gate, kind: \'path\', value: fileVal }]') && src.includes('fileWrites.every((w) => alreadyInProject(w.value, \'path\', w.cat, root))') && src.includes('const hasGlobMeta = (p) =>'))
+// 注：原判据里「匹配两侧同一个 base」已剔除 —— 那正是缺陷（配置侧跟随可被 AI 改写的 cwd）。
+// 这里只留「两侧都经 normAbsPath 规范化」；基准分离由 group 30 精确守。
+ok('路径两侧都规范化 + 文件级候选按全部分类判重 + 通配符仍拦', src.includes('function normAbsPath(p, root)') && src.includes('const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, exCwd)') && /if \(kind === 'path'\) return matchGlob\(normAbsPath\(r\.path, [^)]*\), normAbsPath\(value, [^)]*\)\)/.test(src) && src.includes('const fileWrites = [{ cat: catKey, kind: \'path\', value: fileVal }, { cat: gate, kind: \'path\', value: fileVal }]') && src.includes("fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat, root, exCwd))") && src.includes('const hasGlobMeta = (p) =>'))
 ok('旧形态 rules 按 value 反查候选复用 writes', src.includes('const byValue = (entry.candidates || []).find((c) => c.value === String(r.value))'))
 // 防回退：例外删除必须是单点且严格按 id 删除，并回传同路径剩余条目数供 UI 提示
 // 原本计数为 2（面板路由 + perm_remove_exception 工具）；工具移除后只剩面板路由
@@ -1354,8 +1356,8 @@ ok('decide 不再硬编码放行 perm_*', !src.includes("name.indexOf('perm_') =
 // ─────────────────────────────────────────────────────────────
 group('12. 审批弹窗候选文案与路径口径')
 ok('候选分类标签与设置面板一致（不再写「写入/编辑」）', !src.includes("'写入/编辑'") && src.includes("edit: ['编辑文件', 'file edits']"))
-ok('两条候选路径写法一致（均取规范化绝对路径）', src.includes('const absVal = normAbsPath(entry.value, root)') && src.includes('const fileVal = absVal') && src.includes("push(fileVal, fileVal, 'path',") && !src.includes(") + entry.value, entry.value, 'path'"))
-ok('判重/去重/匹配三处共用 pathKey（同一路径不同写法不重复写入、且能命中）', src.includes('function pathKey(p, root)') && src.includes('return normPathKey(normAbsPath(p, root))') && src.includes('pathKey(r.path, root) === pathKey(value, root)') && (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); return i >= 0 && j > i && src.slice(i, j).indexOf("indexOf('://')") !== -1 })())
+ok('两条候选路径写法一致（均取规范化绝对路径）', src.includes('const absVal = normAbsPath(entry.value, exCwd)') && src.includes('const fileVal = absVal') && src.includes("push(fileVal, fileVal, 'path',") && !src.includes(") + entry.value, entry.value, 'path'"))
+ok('判重/去重/匹配三处共用 pathKey（同一路径不同写法不重复写入、且能命中）', src.includes('function pathKey(p, root)') && src.includes('return normPathKey(normAbsPath(p, root))') && src.includes('pathKey(r.path, root) === pathKey(value, cwd || root)') && (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); return i >= 0 && j > i && src.slice(i, j).indexOf("indexOf('://')") !== -1 })())
 ok('相对 glob 不被绝对化（glob 不是文件路径，只做斜杠归一）', (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); const body = i >= 0 && j > i ? src.slice(i, j) : ''; return body.indexOf('if (/[*?]/.test(s)) return s') !== -1 && body.indexOf('glob 不是文件路径') !== -1 })())
 
 // ─────────────────────────────────────────────────────────────
@@ -2645,6 +2647,11 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
         "const L = (o, lang) => (typeof o === 'string' ? o : ((o && (o[lang] || o.zh)) || ''))\n" +
         'const COMMAND_TOOLS = { pwsh: 1, bash: 1 }\nconst SHELL_OF_TOOL = {}\n' +
         "const pathArg = (a) => (a && (a.file_path || a.path)) || ''\n" +
+        // humanArgsPreview 现在用 absTargetOf(pathArg(args), cwdOf(exec)) 取展示路径
+        // （与 decide() 同源）。夹具必须注入这两个依赖，否则求值抛错、下面整组静默跳过 ——
+        // 那正是「断言不得静默失效」要防的形态。这里给的是恒等实现：本组只关心补位行为，
+        // 路径绝对化不在其断言范围内。
+        'const cwdOf = () => \'C:/ws\'\nconst absTargetOf = (p) => p\n' +
         'const isUndoNow = () => false\nconst isFileRead = () => false\nconst isFileImage = () => false\n' +
         'const isFileWrite = () => false\nconst isFileInsert = () => false\nconst sreCommand = () => \'\'\n' +
         "const codeLabel = () => ''\nconst tierLabel = () => ''\n" +
@@ -4505,7 +4512,7 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
   // 故改为把「共享助手 + 两个函数」一起放进沙箱求值，再**真实调用**它们断言行为：
   // 以后重构归一逻辑只会让本组断言失败，不会再中断套件。
   // 原意一条不少：工作区外路径必然过闸、空根 fail-open、null/undefined 根 fail-closed。
-  const iOut = src.indexOf('function isOutside(p, rootKey) {')
+  const iOut = src.indexOf('function isOutside(p, rootKey, base) {')
   // 沙箱产物提到块外：下方 4c) 的同口径不变量断言也要用（它断的正是这两个函数的关系）。
   let hostIsOutside = null
   let hostIsRoot = null
@@ -4535,8 +4542,8 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
       stmtOf('function rootMemoOf(rootKey) {'),
       stmtOf('function absOf(p, rootNorm) {'),
       stmtOf('function norm(p) {'),
-      stmtOf('function isOutside(p, rootKey) {'),
-      stmtOf('function isWorkspaceRoot(p, rootKey) {'),
+      stmtOf('function isOutside(p, rootKey, base) {'),
+      stmtOf('function isWorkspaceRoot(p, rootKey, base) {'),
     ]
     if (helpers.every(Boolean)) {
       try {
@@ -9345,6 +9352,244 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
     && /\{n\}/.test(cli) && /\{m\}/.test(cli)
     && /\.replace\('\{n\}', String\(decisionTotal\)\)/.test(cli)
     && /\.replace\('\{m\}', String\(decisions\.length\)\)/.test(cli))
+}
+
+
+// ─────────────────────────────────────────────────────────────
+group('30. 边界根与相对路径解析基准分离（DSH 0.2.1 的 workingDirectory）')
+{
+  // 背景：DSH 0.2.1 起 session.header.cwd（原始项目，不可变，沙箱边界用它）与
+  // workingDirectory 投影（当前目录，fs/pwsh 用它解析相对路径）可以不同。
+  // 若本插件把两者当同一个东西，cd 之后 `write a.txt` 会被按 header.cwd 判成「区内」，
+  // 而工具实际写到 cwd 下 —— 区外写闸整条跳过（fail-open）。
+  //
+  // 本组断言两件事：① 两个取值点各自存在且不合并；② 判定链的绝对化确实用了 cwd。
+
+  // 从源码里按标记切出一个完整函数声明（大括号配平），供 new Function 求值。
+  // 放在组首：下面 cwdOf 的行为断言与组末的 isOutside 复算共用它。
+  const stmtOf = (m) => {
+    const at = src.indexOf(m)
+    if (at < 0) return ''
+    const o = src.indexOf('{', at)
+    if (o < 0) return ''
+    let d = 0
+    for (let k = o; k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(at, k + 1) }
+    }
+    return ''
+  }
+
+  ok('★ cwdOf 从 sessionProjections 读 workingDirectory（投影可用时）',
+    /function cwdOf\(exec\) \{[\s\S]{0,600}?ctx\.get\('sessionProjections'\)/.test(src)
+    && /stateOf\(session, 'workingDirectory'\)/.test(src))
+
+  // ★ 行为断言（**升级**自原先那条静态正则「取不到投影时回落 rootOf」）：
+  // 正则只钉住「有回落这个写法」，钉不住「回落必须正确」，也钉不住盘根分支 ——
+  // 写成 `if (norm(d)) return norm(d)` 这类等价变形它照样通过（零鉴别力）。
+  // 这里把 cwdOf 与 norm 原样摘出来**真跑**，注入假 ctx / 假 rootOf：
+  //   · 投影 '/'、'//' → 归一后是空串，但原文是合法绝对路径，必须返回 '/'（盘根分支）；
+  //   · 投影 null → 必须回落 rootOf(exec)（投影缺席时两者恒等，回落得到正确值）。
+  // 为什么要单独钉：修复后的「先判原文、再对归一结果兜底」看起来像冗余的双重判空，
+  // 最容易被下一位维护者"简化"回单步 —— 而单步形态正是 fail-open（POSIX 上 cd 到 /
+  // 后 `write a.txt` 会按 header.cwd 判成区内，区外写闸整条跳过）。
+  const cwdSrc = stmtOf('function cwdOf(exec) {')
+  const normSrc = stmtOf('function norm(p) {')
+  const projBox = { v: null }
+  let cwdHost = null
+  if (cwdSrc && normSrc) {
+    try {
+      cwdHost = new Function('ctx', 'rootOf', normSrc + '\n' + cwdSrc + '\nreturn cwdOf;')(
+        { get: (k) => (k === 'sessionProjections' ? { stateOf: () => projBox.v } : null) },
+        () => 'C:/header-cwd')
+    } catch (e) { cwdHost = null }
+  }
+  const atCwd = (v) => { projBox.v = v; return cwdHost({ agent: { session: {} } }) }
+  ok('★★ cwdOf 盘根投影返回 /，取不到投影时仍回落 rootOf（行为断言，不是写法断言）',
+    !!cwdHost && atCwd('/') === '/' && atCwd('//') === '/' && atCwd(null) === 'C:/header-cwd',
+    cwdHost ? 'got ' + JSON.stringify([atCwd('/'), atCwd('//'), atCwd(null)]) : 'cwdOf/norm 未能从源码摘出')
+
+  ok('★★ rootOf 仍只读 header.cwd（边界不得跟随 cd —— 平台沙箱也是这么定的）',
+    /function rootOf\(exec\) \{[\s\S]{0,400}?session\.header\.cwd/.test(src)
+    && !/function rootOf\(exec\) \{[\s\S]{0,400}?workingDirectory/.test(src))
+
+  // isOutside / isWorkspaceRoot 必须接受 base 且 base 参与 absOf —— 否则相对路径仍按边界根解析。
+  ok('★★ isOutside 的 base 参与相对路径解析（不是被忽略的装饰参数）',
+    /function isOutside\(p, rootKey, base\) \{[\s\S]{0,400}?absOf\(p, base \? norm\(base\) : r\)/.test(src))
+
+  ok('★★ isWorkspaceRoot 与 isOutside 同口径接受 base',
+    /function isWorkspaceRoot\(p, rootKey, base\) \{[\s\S]{0,300}?absOf\(p, base \? norm\(base\) : rm\.norm\)/.test(src))
+
+  // 判定链四个路径分支都必须先绝对化再判 —— 少一处就是一个 fail-open 入口。
+  const absSites = (src.match(/const fp = absTargetOf\(pathArg\(args\), cwd\)/g) || []).length
+  ok('★★ read/image/edit/undo 四个路径分支全部先按 cwd 绝对化（4 处，少一处即 fail-open）',
+    absSites === 4, 'sites=' + absSites)
+
+  ok('★★ 四个分支的 isOutside 都传 cwd（不是只传 root）',
+    (src.match(/if \(fp && isOutside\(fp, root, cwd\)\) \{/g) || []).length === 4)
+
+  // commandDecision 是独立函数：cwd 若靠闭包穿透，取到的是 rootOf 内部那个 header.cwd，
+  // 口径完全不同。必须显式传参 —— 这条正是实测踩出来的（改前 group20 变红）。
+  // 第二个条件锚的是**调用点**（`out(commandDecision(...))`），不是声明行：写成裸的
+  // `commandDecision(...)` 时它只是第一个条件的子串，左真则右必真，对结果零影响 ——
+  // 实测把调用点的 cwd 删掉，断言照样通过（假钉子）。
+  ok('★★ commandDecision 显式接收 cwd 参数（闭包穿透会取到同名的 header.cwd）',
+    /function commandDecision\(exec, root, cwd, exReason, exReasonEn, exNote\) \{/.test(src)
+    && /out\(commandDecision\(exec, root, cwd, exReason, exReasonEn, exNote\)\)/.test(src))
+
+  ok('★ 命令分支两个判档钩子都用 cwd（isOutsideWorkspace / isWorkspaceRoot）',
+    /isOutsideWorkspace: \(p\) => isOutside\(p, root, cwd\)/.test(src)
+    && /isWorkspaceRoot: \(p\) => isWorkspaceRoot\(p, root, cwd\)/.test(src))
+
+  // 例外匹配两侧的 base **故意不同**，这是安全不变量，不是笔误：
+  //   · 配置侧 r.path 按 root（边界根 header.cwd，AI 改不动）；
+  //   · 目标侧 value 按 cwd（当前目录，它已由 decide() 的 absTargetOf 绝对化）。
+  // 曾断言「两侧共用同一个 base（const b = cwd || root）」—— 那正是缺陷形态：cwd 可被
+  // working_directory 工具（默认 allow）改写，配置里的相对路径 allow 例外会跟着 AI 的 cd 走，
+  // 先 cd 到工作区外再用相对路径访问同名文件即可命中 allow、跳过弹窗（fail-open）。
+  // 判据翻转为守正确行为：配置侧基准必须是 root —— 改回 cwd 就是重新引入 fail-open。
+  ok('★★ 例外匹配的配置侧按 root 解析（AI 改不动的边界根，不得跟随 cwd）',
+    /if \(kind === 'path'\) return matchGlob\(normAbsPath\(r\.path, root\), normAbsPath\(value, cwd \|\| root\)\)/.test(src))
+
+  ok('★★ 候选判重与写入同基准（alreadyInProject 收 cwd，避免「点过还弹」死结）',
+    /function alreadyInProject\(value, kind, catKey, root, cwd\)/.test(src)
+    && /alreadyInProject\(w\.value, 'path', w\.cat, root, exCwd\)/.test(src))
+
+  ok('★ 审批条目快照 projCwd（弹窗挂起期间用户可能 cd）',
+    /projCwd: cwdOf\(exec\)/.test(src)
+    && /const exCwd = entry\.projCwd \|\| root/.test(src))
+
+  ok('★ diff 预览按 projCwd 解析（按边界根会预览到另一个文件）',
+    /const fp = absTargetOf\(pathArg\(args\), entry\.projCwd \|\| entry\.projRoot\)/.test(src))
+
+  // ── 运行时复算：把 isOutside/isWorkspaceRoot 摘出来真跑 ──
+  // 静态正则只能证明「写了 base」，证明不了「base 真的改变了判定」。这里用同一份源码求值，
+  // 断言 base 不同 ⇒ 同一相对路径的判定翻转 —— 那正是 cd 之后必须发生的事。
+  // stmtOf 已在组首定义（cwdOf 的行为断言也要用），此处直接复用。
+  const memoDecl = (/(?:^|\n)(\s*let rootMemo = null)/.exec(src) || [])[1] || ''
+  const parts = [
+    memoDecl,
+    stmtOf('const fixRoot = (v) => {'),
+    stmtOf('function rootMemoOf(rootKey) {'),
+    stmtOf('function absOf(p, rootNorm) {'),
+    stmtOf('function norm(p) {'),
+    stmtOf('function isOutside(p, rootKey, base) {'),
+    stmtOf('function isWorkspaceRoot(p, rootKey, base) {'),
+  ]
+  let host = null
+  if (parts.every(Boolean)) {
+    try {
+      // 注入**真实的** pathResolve（文件头已 import），不注入「只换反斜杠」的桩：
+      // fixRoot 就是 pathResolve，桩掉它等于把「折叠点段」这一环节从被测实现里摘掉。
+      // 桩下 `'../../x'` 会被判为区内（正是 fail-open 形态），`isWorkspaceRoot('.')` 也判不出根；
+      // 实测把 fixRoot 变异成「不折叠」的坏实现，用桩的版本四条断言全绿（零检出）。
+      // 与 group 21 的沙箱同口径 —— 两处对同一份实现注入同一个宿主函数。
+      host = new Function('pathResolve', parts.join('\n') + '\nreturn { isOutside, isWorkspaceRoot };')(
+        pathResolve)
+    } catch (e) { host = null }
+  }
+  ok('★ 30 isOutside/isWorkspaceRoot 可从源码摘出并求值（依赖改名时变红，不静默跳过）',
+    !!host)
+  if (host) {
+    const BOUND = 'C:/proj'      // 边界根（header.cwd）
+    const CWD = 'C:/proj/sub'    // 当前目录（cd 之后）
+    // 同一相对路径 'a.txt'：按边界根 → 区内；按当前目录 → 仍在边界内（sub 是 proj 的子目录）
+    ok('30 子目录内 cd：相对路径仍在边界内（不误判为区外）',
+      host.isOutside('a.txt', BOUND, CWD) === false)
+    // cd 到边界**之外**：同一相对路径必须判为区外 —— 这是本条要守的核心
+    ok('★★ 30 cd 到边界外后同一相对路径判为区外（不传 base 时会被判成区内 = fail-open）',
+      host.isOutside('a.txt', BOUND, 'C:/other') === true
+      && host.isOutside('a.txt', BOUND) === false)
+    // 绝对路径不受 base 影响（既有调用点行为不变）
+    ok('30 绝对路径不受 base 影响（既有调用点行为不变）',
+      host.isOutside('C:/elsewhere/x', BOUND, CWD) === true
+      && host.isOutside('C:/elsewhere/x', BOUND) === true)
+    // isWorkspaceRoot 同口径：绝对路径形式的工作区根按边界根判定。
+    // 这里传绝对路径只是可读性选择 —— **不是**因为 '.' 判不出来：absOf 只做拼接、不折叠点段，
+    // 但 fixRoot 就是 pathResolve，点段在那里被折叠，故 'C:/proj/.'、'./' 与 '.' 都判为根
+    // （三者与 'C:/proj' 等价）。曾有一版注释说「C:/proj/. 与 C:/proj 不等、点段折叠在
+    // shell-parse 的 globRootOf 里」—— 与实现相反，是本条桩注入假 pathResolve 时写下的。
+    ok('★ 30 isWorkspaceRoot 同口径：绝对路径的边界根仍判为根，边界外不判',
+      host.isWorkspaceRoot('C:/proj', BOUND) === true
+      && host.isWorkspaceRoot('C:/other', BOUND) === false)
+  }
+
+  // ── 面板「例外爆炸半径」的判档基准（statusView）──
+  // 这一段有两个独立的基准，且**故意不同**：命令例外按 cwd、路径例外按 root。
+  // 两者都没有行为测试（需要完整 statusView 环境），故用源码形状 + 语义锚点钉住。
+  // 它们各自对应一个真实后果，下面逐条写明。
+  ok('★★ 30 blastOfPath 判档前把基准切到 root（配置侧口径，不得跟随 cwd）',
+    /const prevBase = blastBase[\s\S]{0,300}?blastBase = root[\s\S]{0,200}?blastRadiusOf\(pathText, opts\)[\s\S]{0,120}?finally[\s\S]{0,60}?blastBase = prevBase/.test(src))
+
+  ok('★★ 30 blast memo 键含 cwd（否则会话内 cd 后面板继续显示旧结论）',
+    // 两个键各一处：命令分支与路径分支。cwd 必须进键 —— memo 只在 persist/reload 清空，
+    // cd 不触发清空，少了这一维就会在 cd 之后读到 cd 前的判档结论。
+    /const memoKey = root \+ '\\u0000' \+ cwd \+ '\\u0000' \+ String\(pattern\)/.test(src)
+    && /const memoKey = root \+ '\\u0000' \+ cwd \+ '\\u0000p\\u0000' \+ String\(pathText\)/.test(src))
+
+  ok('★ 30 两个 blast 钩子共用一个可切换的基准变量（不另建第二份 opts）',
+    /let blastBase = cwd/.test(src)
+    && /isOutsideWorkspace: \(p\) => isOutside\(p, root, blastBase\)/.test(src)
+    && /isWorkspaceRoot: \(p\) => isWorkspaceRoot\(p, root, blastBase\)/.test(src))
+
+  // ── dirGlob：POSIX 根必须产出可匹配的 '/*' ──
+  // 旧写法 `if (!dir) dir = '/'` 再拼 '/*' 得 '//*'，而 globToRegExp('//*') = /^\/\/[^/]*$/i
+  // **连 '/a.txt' 都不匹配** —— 于是「整个目录」候选写下的例外永不生效（点一次还在弹）。
+  // Windows 盘根早有同源修复（dir + '/*'），POSIX 分支漏了；本条把两者钉成同口径。
+  const dgAt = src.indexOf('function dirGlob(')
+  const dgBody = dgAt < 0 ? '' : (() => {
+    const o = src.indexOf('{', dgAt)
+    let d = 0
+    for (let k = o; k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(dgAt, k + 1) }
+    }
+    return ''
+  })()
+  let dg = null
+  if (dgBody) {
+    try {
+      dg = new Function('norm', dgBody + '\nreturn dirGlob;')((p) => {
+        let s = String(p).replace(/\\/g, '/')
+        let e = s.length
+        while (e > 0 && s.charCodeAt(e - 1) === 47) e -= 1
+        return e === s.length ? s : s.slice(0, e)
+      })
+    } catch (e) { dg = null }
+  }
+  ok('★ 30 dirGlob 可从源码摘出并求值（依赖改名时变红，不静默跳过）', typeof dg === 'function')
+  if (typeof dg === 'function') {
+    ok('★★ 30 dirGlob 对 POSIX 根产出 /*（不是 //* —— 后者匹配不到任何真实路径）',
+      dg('/') === '/*' && dg('//') === '/*')
+    ok('30 dirGlob 对 Windows 盘根产出 G:/*（与 POSIX 根同口径）',
+      dg('G:/') === 'G:/*')
+    ok('30 dirGlob 对普通路径产出父目录 /*',
+      dg('/tmp/x.log') === '/tmp/*' && dg('C:/proj/a.txt') === 'C:/proj/*')
+  }
+
+  // ── 新工具的默认动作 ──
+  // 这几个默认值是**判定结果本身**：改一个字母就等于改了「AI 能不能在无人值守时
+  // 自己安排下一轮」这类问题，故逐个钉住，不用「清单长度」这类间接指标代替。
+  // 用源码文本而非 mod.QUICK_DEFAULTS：后者不在测试求值的返回列表里，
+  // 取到 undefined 会让三条断言全部恒假（静默失效的反面 —— 恒红也是坏断言）。
+  const qdSrc = (src.match(/const QUICK_DEFAULTS = \{[\s\S]*?\n\}/) || [''])[0]
+  ok('★ 30 QUICK_DEFAULTS 表可在源码中定位（取不到时下面几条不得静默跳过）',
+    qdSrc.length > 0)
+  if (qdSrc) {
+    const defOf = (k) => (new RegExp('(?:^|[\\s{])' + k + ":\\s*'([^']+)'").exec(qdSrc) || [])[1] || null
+    ok('★★ 30 schedule_create / update 默认 ask（能建出周期提醒 = 无人值守自动唤醒 AI）',
+      defOf('schedule_create') === 'ask' && defOf('schedule_update') === 'ask',
+      'create=' + defOf('schedule_create') + ' update=' + defOf('schedule_update'))
+    ok('★ 30 schedule_list / delete 默认 allow（只读 / 只做减法，方向都是收紧）',
+      defOf('schedule_list') === 'allow' && defOf('schedule_delete') === 'allow',
+      'list=' + defOf('schedule_list') + ' delete=' + defOf('schedule_delete'))
+    ok('★ 30 working_directory 默认 allow 且必须在面板清单里（可单独收紧）',
+      defOf('working_directory') === 'allow'
+      // QUICK_PRESET 由 QUICK_DEFAULTS 的键派生，故「在表里」即「在清单里」；
+      // 仍显式断言那条派生关系，避免将来有人把清单改成手写数组时这一条失去意义。
+      && /const QUICK_PRESET = Object\.keys\(QUICK_DEFAULTS\)/.test(src),
+      'working_directory=' + defOf('working_directory'))
+  }
 }
 
 

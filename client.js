@@ -1869,6 +1869,17 @@ window.__ModuleLoader__.load({
 				'quick.cordis_stop': '停用动态插件',
 				'quick.cordis_undefine': '移除动态插件',
 				'quick.plugin_manager': '管理插件与插件包',
+				// 工具自身没有文件/命令语义，说明文字要让用户看懂「放行/拒绝它意味着什么」。
+				// working_directory 的关键不是读写（它不写盘），而是**换基准**：改完 cwd，
+				// 后续相对路径全部落到新目录下，故文案点出「后续相对路径」而不是只说「切换目录」。
+				'quick.working_directory': '读取或切换工作目录（改变后续相对路径的基准）',
+				// schedule_* 四条的共同前提：到期是**无人值守自动触发**（会话内提醒到点把一条 prompt
+				// 投回本会话、让模型接着跑一轮）。只说「创建提醒」会让人以为是桌面闹钟，
+				// 看不出「AI 会在没有你操作的时候自己动起来」这层含义，故 create/update 两条明写。
+				'quick.schedule_create': '创建定时提醒（到点自动唤醒 AI 跑一轮，无需你在场）',
+				'quick.schedule_list': '列出本会话的定时提醒',
+				'quick.schedule_update': '修改定时提醒（含触发时间；改完仍会到点自动唤醒 AI）',
+				'quick.schedule_delete': '删除定时提醒',
 				'panel.excExpand': '展开',
 				'panel.excCollapse': '折叠',
 				'panel.excListLink': '例外列表',
@@ -2150,6 +2161,17 @@ window.__ModuleLoader__.load({
 				'quick.cordis_stop': 'stop a dynamic plugin',
 				'quick.cordis_undefine': 'remove a dynamic plugin',
 				'quick.plugin_manager': 'manage plugins and bundles',
+				// See the Chinese entries for the reasoning. The point of working_directory is not
+				// reading or writing (it touches no files) but the baseline: after a cd, every
+				// later relative path resolves against the new directory.
+				'quick.working_directory': 'read or change the working directory (moves the base for later relative paths)',
+				// schedule_* share one premise: a due reminder fires unattended — it feeds a prompt
+				// back into this session and the model runs another turn without anyone present.
+				// "create a reminder" alone reads like a desktop alarm clock, so create/update say it.
+				'quick.schedule_create': 'create a timed reminder (wakes the AI for another turn when due, with nobody present)',
+				'quick.schedule_list': 'list this session\'s timed reminders',
+				'quick.schedule_update': 'change a timed reminder (including when it fires; it still wakes the AI unattended)',
+				'quick.schedule_delete': 'delete a timed reminder',
 				'panel.excExpand': 'Expand',
 				'panel.excCollapse': 'Collapse',
 				'panel.excListLink': 'Exception list',

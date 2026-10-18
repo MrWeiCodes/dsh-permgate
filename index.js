@@ -128,8 +128,9 @@ const INTENT_LOOKBACK_STEPS = 6
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
 // 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
 // —— perm_* 曾经被 decide 无条件放行，等于「AI 可自我提权、且全程无弹窗」；纳入本清单后
-// 统一按 ask 裁决，只有用户在设置页显式改成 allow 才会静默放行（预设默认优先于兜底策略，
-// 改兜底也不会漏）。权限写工具已整体移除，本清单里的 perm_* 只剩只读的 perm_status（allow）。
+// 统一按 ask 裁决；要放行得由用户显式改成 allow（面板快捷工具、自定义规则、手写 config.json
+// 均可），清单内的项预设默认优先于兜底策略，改兜底也不会漏。权限写工具已整体移除，本清单里的
+// perm_* 只剩只读的 perm_status（allow）。
 const QUICK_DEFAULTS = {
   web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
   ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
@@ -139,7 +140,7 @@ const QUICK_DEFAULTS = {
   present: 'allow', exit_plan_mode: 'allow',
   // cordis_define 默认 ask（曾为 allow）：它在宿主进程内定义并执行任意代码，
   // 能力等价于 cordis_run（后者本就是 ask），而它比 run 更靠前——定义阶段即可
-  // 执行模块顶层代码。allow 意味着这条路径全程无弹窗，是本清单里唯一「可执行代码
+  // 执行模块顶层代码。allow 意味着这条路径全程无弹窗，是本清单里**当时唯一**「可执行代码
   // 却默认放行」的项，与「元操作一律先问」的口径自相矛盾，故收紧为 ask。
   // 注意：只改这一行对**存量配置**是无效的 —— 旧版 freshConfig 已把当时的 allow
   // seed 落盘，显式键优先于预设默认。真正让收紧生效的是 QUICK_RETIRED_DEFAULTS
@@ -153,7 +154,8 @@ const QUICK_DEFAULTS = {
   //   ① 与设置页 UI 重复 —— 除编辑器内核外，其余能力均由 /permgate/* 路由覆盖，工具没有独占能力；
   //      编辑器内核（builtin/shadow 判别）本就无面板入口，配置项 editorKernel 与工具已一并移除，
   //      判别恒为 detectEditorKernel 自动探测：config.json 里手写该键不会生效（buildConfig 不再
-  //      读取它，且会在下次保存时被抹掉）。探测失准时的纠正手段只剩调整工具描述；
+  //      读取它，且会在下次保存时被抹掉）。探测失准时的纠正手段落在工具描述上
+  //      （本插件不再提供人工指定入口）；
   //   ② 它们构成自我提权面 —— AI 可主动请求放宽约束自己的规则，而弹窗看起来只是普通
   //      工具调用，不会告诉用户「这是 AI 在请求放宽约束」；用户在现场勾「允许此项」时
   //      信息量完全不同，两者却共用同一个弹窗；
@@ -170,10 +172,13 @@ const QUICK_DEFAULTS = {
   // 它能装包（install_bundle 会执行包自带的 install 脚本）、卸包、改插件的启用状态，
   // 还能 set_version_exemption 跳过 DSH 的 peer 兼容校验（工具描述原文即「可能崩溃和数据丢失」）。
   //
-  // 它此前不在这张表里，走的是兜底策略（默认 ask）—— 行为上同样是弹窗，但**面板上看不见它**：
-  // 设置页只渲染 QUICK_PRESET + 用户已配置的键，于是用户没法把它单独设成 deny，
-  // 只能把兜底策略整个改掉；而兜底一旦放宽为 allow，它就会静默放行。
-  // 一个能执行安装脚本的工具不该只有「一刀切」这一种管控方式，故纳入本表。
+  // 它此前不在这张表里，走的是兜底策略（默认 ask）—— 行为上同样是弹窗，但**面板上没有预设行**：
+  // 设置页的快捷工具清单只渲染 QUICK_PRESET + 用户已配置的键，于是它默认不占一行。
+  // 单独收紧它仍有别的路径 —— 面板「新增工具名」可直接加任意工具名并设成 deny，自定义规则
+  // （tool: 'plugin_manager'）也在 decide 里先于快捷工具生效，手写 config.json 的 quickTools
+  // 同理；这些都不必改动兜底策略（只改兜底则会连整类未匹配的工具一起变）。而兜底一旦放宽为
+  // allow，它就会静默放行。
+  // 一个能执行安装脚本的工具不该在面板上没有一行自己的设置，故纳入本表。
   //
   // 注册条件与 cordis_* 同构 —— 它是 DSH 自带的核心依赖（@deepseek-ai/dsh-plugin-manager，
   // 被 dsh/dsh-base/dsh-web-app 直接依赖），但注册行 tool-plugin-manager 同样受 agent preset
@@ -184,6 +189,42 @@ const QUICK_DEFAULTS = {
   // 存量配置无需迁移：新键缺席时按预设默认值 ask 裁决，与本条加入前的行为完全一致
   // （区别只在于面板上多了一行、用户可以改它）—— 故**不**进 QUICK_RETIRED_DEFAULTS。
   plugin_manager: 'ask',
+  // ── DSH 0.2.1 新增的常驻工具 ────────────────────────────────────────────
+  // working_directory：读或**切换**本会话的当前目录。纳入本表的理由不是它危险，
+  // 而是它**改变后续所有相对路径的解析基准**（见 cwdOf）：放行它等于放行「把工作基准
+  // 挪到任意已存在目录」，此后 write/read 的相对路径都落在新目录下。
+  // 它不写盘，但**不是**只读语义：带 cd 参数时会改变本会话的工作基准（后续相对路径
+  // 按新目录解析）。quickTools 按**工具名**匹配、区分不了「不带 cd 的查询」与「带 cd 的
+  // 切换」，故这条默认 allow 放行的是两者。默认 allow 仍成立：本插件已让 cwd 参与判定
+  // （见 cwdOf / isOutside 的 base），cd 不再让**路径类工具**（read / read_image / edit /
+  // undo / 命令目标）的区外判定 fail-open；改成 ask 的代价是只读查询也弹窗。
+  // ⚠️ 但**不**覆盖 grep / glob：两者在 QUICK_DEFAULTS 里直接 allow、不参与边界判定
+  // （不看 path 参数也不看 cwd，只按工具名匹配），而平台侧 dsh-tool-fs-search 的 workdir
+  // 取自 ctx.workingDirectory.ensure —— cd 之后按新目录搜索，读取面确实变大。要收紧就在
+  // 快捷工具里把 grep / glob 设为 ask / deny —— 这是最直接的一道闸门；更精确的是自定义
+  // 规则（tool: 'grep' / 'glob'，可带 path 定向），它在 decide 里先于快捷工具生效。
+  // working_directory 本身也需要可单独配：进了本表，面板上默认就有这一行，用户能在这里
+  // 直接改它的动作（收紧即 ask / deny），不必为此动兜底策略（那会连整类工具一起改）；
+  // 自定义规则同样可用，且能带参数定向。
+  working_directory: 'allow',
+  // schedule_*：会话内提醒（写入会话日志、按时投递一条 prompt 回来）。不碰文件系统、
+  // 不执行命令，属「给本会话加个闹钟」。
+  //
+  // ── 为什么 create/update 是 ask，而 list/delete 可以是 allow ──────────────
+  // 差别不在「碰不碰文件」，而在**能否产生无人值守的自动触发**：
+  //   · create / update 都能建出 `every_seconds >= 60` 的周期提醒
+  //     （dsh-schedule 的 MIN_EVERY_INTERVAL_SECONDS = 60，update 的 change 还允许改
+  //     kind），到点经 followup → wakeDriver **唤醒模型跑一轮**。这是一条旧版插件
+  //     没有的通道：调用本身不写盘，真正的副作用是「此后每次到点都由 AI 自己发起一轮」，
+  //     而发起者与授权者都是 AI。用户不在环时无人能拦。
+  //   · list 只读；delete 只做减法（取消提醒），方向都是收紧，故仍 allow。
+  // 这两个键此前不在表里、走兜底默认 ask；本次纳入表时若沿用 allow，等于无任何配置变更
+  // 就把旧版的 ask 静默放宽 —— 与 plugin_manager 那条同一条理由：纳入本表的目的是让用户
+  // **能在面板上单独收紧它**，而不是替用户放宽。
+  // 存量配置无需迁移：上一发布版没有这些键，不会落盘；改默认值即生效，故**不**进
+  // QUICK_RETIRED_DEFAULTS（那里只收「曾被 freshConfig 全量 seed 过」的历史默认）。
+  schedule_create: 'ask', schedule_list: 'allow',
+  schedule_update: 'ask', schedule_delete: 'allow',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
@@ -925,6 +966,57 @@ export default {
       return fallbackRoot
     }
 
+    // ── 相对路径的解析基准（与上面的 root 是**两个不同的东西**）─────────────
+    // DSH 0.2.1 起一个会话有两个目录，平台自己就把它们分开了：
+    //   · session.header.cwd —— 原始项目，不可变。它是**权限边界**：沙箱的 workspaceRoot
+    //     取它（dsh-sandbox-policy.resolve → session?.header.cwd），cd **不**改变它；
+    //     它同时是本插件项目配置块的归属键（projectBlock）。
+    //   · workingDirectory  —— 当前目录，由 `working-directory/change` 事件投影得出。
+    //     fs/pwsh 工具用它解析**相对路径**（dsh-tool-fs 的 sessionResolveOptions →
+    //     ctx.workingDirectory.ensure；dsh-tool-pwsh 同）。
+    //
+    // 合并这两件事的后果（0.2.1 之前两者恒等，故无此问题）：
+    //   cd 到 <other> 后 `write a.txt`，fs 实际写 <other>/a.txt，而 isOutside 把
+    //   `a.txt` 拼到 header.cwd 上得 <workspace>/a.txt → 判「区内」→ **区外写闸整条跳过**。
+    //   边界与解析基准错位会产生 fail-open，与上面 root 漂移是同一类错误的另一条路径。
+    //
+    // 取不到投影时回落 header.cwd：那时两者本来恒等，回落得到的是**正确值**而非猜测。
+    function cwdOf(exec) {
+      try {
+        const session = exec && exec.agent && exec.agent.session
+        if (!session) return rootOf(exec)
+        const proj = ctx.get('sessionProjections')
+        if (proj && typeof proj.stateOf === 'function') {
+          const d = proj.stateOf(session, 'workingDirectory')
+          // 判空与归一必须分离 —— 与 rootOf 是同一个陷阱，但后果不同、方向相反：
+          //   · norm 会剥掉尾部分隔符，盘根形态（'/'、'//'、'\'）归一后是**空串**；
+          //   · 若按归一结果判空，POSIX 上 cd 到 `/` 就会被当成「取不到投影」而回落
+          //     rootOf(exec) = header.cwd。rootOf 的兜底是**非空根**、方向安全；这里
+          //     的兜底换了**另一个目录**、方向是错的：AI cd 到 / 后 `write a.txt`，
+          //     工具实际写 /a.txt，而这里把 a.txt 拼到 header.cwd 上判「区内」→
+          //     区外写闸整条跳过（fail-open）。
+          // 故先按**原文**判「投影给出了绝对路径」，再对归一结果做盘根兜底。
+          // Windows 盘根不受影响：norm('G:\\') === 'G:'，非空、不落这条分支。
+          if (typeof d === 'string' && d) {
+            const n = norm(d)
+            if (n) return n
+            if (/^[\\/]+$/.test(d)) return '/'
+          }
+        }
+      } catch (e) {}
+      return rootOf(exec)
+    }
+
+    // 工具参数 / 命令文本里的目标 → 绝对形态（相对路径按**当前目录**解析）。
+    // 这是判定链上唯一的绝对化点：下游 isOutside / resolveCategory / 例外匹配因此都收到
+    // 绝对路径，absOf 与 normAbsPath 对绝对路径恒等 —— 口径不会分叉。
+    // 非字符串原样返回（norm 会把 null 变成字符串 'null'，故必须先挡）。
+    function absTargetOf(p, cwd) {
+      if (typeof p !== 'string' || !p) return p
+      return normAbsPath(p, cwd || fallbackRoot)
+    }
+
+
     // 路径规范化单点：相对路径先按 root 绝对化，再折叠 .. 与重复分隔符。
     // glob/norm/globToRegExp 都不折叠 ..，仅规范化写入侧会让例外永不命中参数原文。
     // root 由调用方显式传入（见 rootOf 注释）：这是「同一条例外在三处同答案」的前提，
@@ -1450,8 +1542,8 @@ export default {
     function needsUpgrade(exec) {
       try {
         if (!isFileWrite(exec.name, exec.arguments) && !isUndoNow(exec.name, exec.arguments, exec)) return false
-        const fp = pathArg(exec.arguments)
-        if (!fp || !isOutside(fp, rootOf(exec))) return false
+        const fp = absTargetOf(pathArg(exec.arguments), cwdOf(exec))
+        if (!fp || !isOutside(fp, rootOf(exec), cwdOf(exec))) return false
         const agent = (exec && exec.agent) || agentRef
         const session = agent && agent.session
         if (!session) return false
@@ -1980,22 +2072,35 @@ export default {
       return true
     }
 
-    function matchException(r, value, kind, root) {
+    function matchException(r, value, kind, root, cwd) {
       // 路径两侧统一走 normAbsPath：写入值可能来自候选（规范绝对路径），而 value 是
       // 工具参数原文（可能是相对路径或含 ..）——只规范化写入侧会让例外永不命中。
-      if (kind === 'path') return matchGlob(normAbsPath(r.path, root), normAbsPath(value, root))
+      //
+      // ── 两侧的基准**故意不同**（不是笔误，不要「统一」）────────────────────────
+      //   · r.path（配置侧）固定按 **root**（header.cwd，权限边界、不可变）；
+      //   · value（目标侧）按 **cwd**（当前目录）—— 它已由 decide() 的 absTargetOf
+      //     折叠成绝对路径，base 对它本来就不起作用，显式写出来只是保持「目标按当前
+      //     目录解析」这条口径在本函数里可见。
+      //
+      // 为什么配置侧不能跟着 cwd 走：cwd 可被 `working_directory` 工具（默认 allow）
+      // 改写，而例外写入路径并不都做绝对化（setExceptionEntry 只 trim + 长度校验、
+      // normalizeException 不绝对化、手写 config.json 更是原样保留）。配置里存在
+      // **相对路径** allow 例外时，按 cwd 解析等于让被审查方（AI）自己决定这条例外
+      // 指向哪里：先 cd 到任意已存在目录、再用相对路径访问同名文件，就能在工作区外
+      // 命中 allow、跳过弹窗。基准必须是 AI 改不动的那一个。
+      if (kind === 'path') return matchGlob(normAbsPath(r.path, root), normAbsPath(value, cwd || root))
       return matchCommand(r.match, value)
     }
 
-    function resolveCategory(catKey, value, kind, root) {
+    function resolveCategory(catKey, value, kind, root, cwd) {
       const proj = projectBlock(root)
       const pCat = proj ? proj[catKey] : undefined
       const gCat = config.global[catKey] || freshCategory(catKey, false)
       if (value !== null && value !== undefined && EXC_CATS.indexOf(catKey) !== -1) {
         const pl = pCat && Array.isArray(pCat.exceptions) ? pCat.exceptions : []
-        for (const r of pl) if (matchException(r, value, kind, root)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of pl) if (matchException(r, value, kind, root, cwd)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
-        for (const r of gl) if (matchException(r, value, kind, root)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of gl) if (matchException(r, value, kind, root, cwd)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
       }
       // 没命中例外 → 落分类默认值：它的拒绝原因与 mode 同源取用（项目显式配置就取项目的，
       // 项目 inherit 才穿透全局），避免「动作来自项目、文字来自全局」的错配。
@@ -3206,7 +3311,12 @@ export default {
     async function buildFileDiffData(entry, fsService) {
       const name = entry.tool
       const args = parseEntryArgs(entry)
-      const fp = pathArg(args)
+      // fp 按审批发起时的**当前目录**绝对化（entry.projCwd 快照），不按 projRoot：
+      // projRoot 是权限边界，cd 之后它不是工具实际使用的相对路径基准 —— 按它解析会让
+      // 预览读另一个文件（甚至「文件不存在」），而工具真正要改的是 cwd 下的那个。
+      // 绝对化之后下游 statTargetChecked/readTargetChecked 的 projRoot 参数对绝对路径不再起作用，
+      // 故那几处无需逐一改签名。
+      const fp = absTargetOf(pathArg(args), entry.projCwd || entry.projRoot)
       // 每次请求各建一个 holder：请求内传递编码来源，请求间互不可见。
       // want 只有一个来源：**工具参数里的 encoding**（read 的 "Reopen with Encoding" 语义，
       // 工具按它解码，预览就该按它解，否则标注与内容都不是工具实际看到的那份）。
@@ -3683,12 +3793,16 @@ export default {
       return (s.indexOf('/') === 0 || /^[a-zA-Z]:/.test(s)) ? s : rootNorm + '/' + s
     }
 
-    function isOutside(p, rootKey) {
+    // base：相对路径的解析基准（缺省 = 边界根自身）。DSH 0.2.1 起两者可不同：
+    // 边界恒为 header.cwd，而相对路径按当前目录解析（见 cwdOf）。**必须**显式传 ——
+    // 不传就等于假定「相对路径相对边界根」，正是 cd 之后 fail-open 的那个假定。
+    // 绝对路径下 base 不起作用（absOf 原样返回），故所有既有绝对路径调用点行为不变。
+    function isOutside(p, rootKey, base) {
       const rm = rootMemoOf(rootKey)
       // 空根判「非工作区外」（fail-open）：这正是 rootOf 的兜底不可为空的原因
       if (!rm) return false
       const r = rm.norm
-      const abs = absOf(p, r)
+      const abs = absOf(p, base ? norm(base) : r)
       if (abs === null) return false
       const ra = fixRoot(abs)
       const rr = fixRoot(r)
@@ -3724,10 +3838,10 @@ export default {
     // rootMemoOf 的记忆化（约 1 µs/次 → 0），本函数内只留 `norm(p)` 与一次 pathResolve 比较。
     // 实测 `rm -rf` + N 个区内路径：N=30000（546 KB）时 68.6 → 39.5 ms（回到 N=10000 的量级）。
     // 命令文本由 AI 生成、参数个数无上界，这条热路径不该随参数个数线性付常量开销。
-    function isWorkspaceRoot(p, rootKey) {
+    function isWorkspaceRoot(p, rootKey, base) {
       const rm = rootMemoOf(rootKey)
       if (!rm) return false
-      const abs = absOf(p, rm.norm)
+      const abs = absOf(p, base ? norm(base) : rm.norm)
       if (abs === null) return false
       return fixRoot(abs).toLowerCase() === rm.lower
     }
@@ -4242,7 +4356,9 @@ export default {
       const t = (zh, en) => (lang === 'en' ? en : zh)
       try {
         if (!args || typeof args !== 'object') return lines
-        const fp = pathArg(args)
+        // 参数区展示的路径按**当前目录**绝对化：弹窗上要显示工具真正会碰的那个文件，
+        // 而不是「相对边界根」拼出来的另一个。与 decide() 的判定同源（都走 cwdOf）。
+        const fp = absTargetOf(pathArg(args), cwdOf(exec))
         // 意图框是否已被 ① 级 justification 独占 —— 决定 description 要不要在参数框补位。
         //
         // 判据直接调 `argJustification`（① 级的**唯一**取值函数，intentFor 也调它），
@@ -4408,11 +4524,11 @@ export default {
       undo: ['撤销权限：', 'Undo permission: '],
     }
 
-    function outsideMatrix(catKey, fp, root) {
+    function outsideMatrix(catKey, fp, root, cwd) {
       // 闸归属单点：调用方不传闸 key，4 个调用点因此一行都不用改。
       const gate = outsideGateOf(catKey)
-      const d = resolveCategory(gate, fp, 'path', root)
-      const e = resolveCategory(catKey, fp, 'path', root)
+      const d = resolveCategory(gate, fp, 'path', root, cwd)
+      const e = resolveCategory(catKey, fp, 'path', root, cwd)
       if (d.action === 'deny' || e.action === 'deny') {
         const src = d.action === 'deny' ? d : e
         const cat = src === d ? gate : catKey
@@ -4443,6 +4559,9 @@ export default {
       // 从 exec 派生而非读全局变量：否则并发会话会互相改写，导致 isOutside 用错根
       // 把工作区外路径判成区内、直接跳过目录闸（fail-open）。
       const root = rootOf(exec)
+      // 相对路径的解析基准：**不是** root（边界）。两者自 DSH 0.2.1 起可不同，
+      // 详见 cwdOf 上方注释 —— 用 root 解析相对路径会让 cd 之后的区外写判成区内。
+      const cwd = cwdOf(exec)
       // 自定义文字分两种，用途不同、不可互换，且**在数据层彻底分离**：
       //   reason —— 拒绝理由，会随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
       //             例外的 reason、分类默认值的 reason、兜底/快捷工具拒绝时的 reason 都走它。
@@ -4580,16 +4699,18 @@ export default {
         }
       }
       if (isFileRead(name, args)) {
-        const fp = pathArg(args)
-        if (fp && isOutside(fp, root)) {
+        // fp 先按**当前目录**绝对化：下游 isOutside / outsideMatrix / resolveCategory
+        // 收到的都是绝对路径，相对路径的解析基准因此只有这一处，不会与边界口径分叉。
+        const fp = absTargetOf(pathArg(args), cwd)
+        if (fp && isOutside(fp, root, cwd)) {
           // 与 image/edit/undo 同口径：工作区外先过**区外读闸**（工作区外读取），再过「读取文件」闸。
           // 只取区外闸的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
-          const m = outsideMatrix('read', fp, root)
+          const m = outsideMatrix('read', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
-        const d = resolveCategory('read', fp, 'path', root)
+        const d = resolveCategory('read', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return out({ action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
@@ -4597,30 +4718,30 @@ export default {
       // 读图与读文件同一条判定链（工作区外先过**区外读闸**，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
       if (isFileImage(name)) {
-        const fp = pathArg(args)
-        if (fp && isOutside(fp, root)) {
+        const fp = absTargetOf(pathArg(args), cwd)
+        if (fp && isOutside(fp, root, cwd)) {
           // 工作区外读图：区外读闸 + image 合并矩阵（不能用区外闸的动作短路，
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
-          const m = outsideMatrix('image', fp, root)
+          const m = outsideMatrix('image', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
-        const d = resolveCategory('image', fp, 'path', root)
+        const d = resolveCategory('image', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return out({ action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
       }
       if (isFileWrite(name, args)) {
-        const fp = pathArg(args)
-        if (fp && isOutside(fp, root)) {
+        const fp = absTargetOf(pathArg(args), cwd)
+        if (fp && isOutside(fp, root, cwd)) {
           // 工作区外写入：区外写闸 + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
-          const m = outsideMatrix('edit', fp, root)
+          const m = outsideMatrix('edit', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
-        const d = resolveCategory('edit', fp, 'path', root)
+        const d = resolveCategory('edit', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return out({ action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
@@ -4628,20 +4749,20 @@ export default {
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过**区外写闸**（区外写闸 + undo 合并矩阵）。
       if (isUndoNow(name, args, exec)) {
-        const fp = pathArg(args)
-        if (fp && isOutside(fp, root)) {
-          const m = outsideMatrix('undo', fp, root)
+        const fp = absTargetOf(pathArg(args), cwd)
+        if (fp && isOutside(fp, root, cwd)) {
+          const m = outsideMatrix('undo', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
-        const d = resolveCategory('undo', fp, 'path', root)
+        const d = resolveCategory('undo', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
         return out({ action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
       }
       if (COMMAND_TOOLS[name]) {
-        return out(commandDecision(exec, root, exReason, exReasonEn, exNote))
+        return out(commandDecision(exec, root, cwd, exReason, exReasonEn, exNote))
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
@@ -4753,9 +4874,12 @@ export default {
       const idx = s.lastIndexOf('/')
       let dir = idx >= 0 ? s.slice(0, idx) : s
       // 盘根（G:）本身就是父目录，直接拼 /*；若补分隔符会得到 G://*，而 norm 不折叠中间双斜杠，
-      // 该 glob 匹配不到任何真实路径，会让「整个目录」候选写出的例外永不生效
+      // 该 glob 匹配不到任何真实路径，会让「整个目录」候选写出的例外永不生效。
+      // POSIX 根同理：'/' 剥尾部分隔符后 s 为空 ⇒ dir 为空，拼出来是 '//*'（同样永不匹配，
+      // globToRegExp('//*') = /^\/\/[^/]*$/i，连 '/a.txt' 都不匹配）—— 故空目录时直接给 '/*'，
+      // 与盘根分支同一个理由：根就是父目录，不该再补分隔符。
       if (/^[a-zA-Z]:$/.test(dir)) return dir + '/*'
-      if (!dir) dir = '/'
+      if (!dir) return '/*'
       return dir + '/*'
     }
 
@@ -4776,7 +4900,7 @@ export default {
      */
     function cmdExcKey(s) { return String(s == null ? '' : s).toLowerCase() }
 
-    function alreadyInProject(value, kind, catKey, root) {
+    function alreadyInProject(value, kind, catKey, root, cwd) {
       const proj = projectBlock(root)
       if (!proj) return false
       // 只有「方向明确」的例外（allow / deny）才算已表态，ask 例外不算：
@@ -4791,8 +4915,17 @@ export default {
       }
       if (kind === 'path' && catKey && EXC_CATS.indexOf(catKey) !== -1) {
         const cat = proj[catKey]
-        // 与 pathKey 同口径：相对路径、含 .. 、斜杠与大小写写法都归一到同一条
-        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && pathKey(r.path, root) === pathKey(value, root)))
+        // 与 pathKey 同口径：相对路径、含 .. 、斜杠与大小写写法都归一到同一条。
+        //
+        // 两侧基准与 matchException **同一条纪律**（改一处必须改另一处）：配置侧 r.path
+        // 固定按 root，目标侧 value 按 cwd（它已是绝对路径，base 对它不起作用）。
+        // 这里曾写成「两侧都按 cwd」以求判重与写入同源 —— 代价是判重侧也跟着 AI 可改的
+        // cwd 走：配置里一条**相对路径**例外，在 cd 之后会被判成「指向别处的另一条」，
+        // 于是「允许此项」候选重新出现。方向虽是收紧（多弹窗），但基准必须与匹配侧一致，
+        // 否则「面板上看到的那条例外」与「判重时认作已表态的那条例外」不是同一条。
+        // 写入侧不受影响：addProjectException 落盘的是 normAbsPath(value, rootKey)，
+        // 而候选的 value 已由 buildCandidates 按审批发起时的 cwd 快照绝对化。
+        return !!(cat && Array.isArray(cat.exceptions) && cat.exceptions.some((r) => decided(r) && pathKey(r.path, root) === pathKey(value, cwd || root)))
       }
       if (kind === 'tool') {
         return !!(Array.isArray(proj.custom) && proj.custom.some((r) => r.tool === value))
@@ -4810,7 +4943,10 @@ export default {
     // 判定链（逐段，见 shell-parse.js 的 assessCommand）：
     //   ① 用户例外（段级匹配）  → ② destructive 子设置（更细，优先于大分类）→ ③ command 分类默认值
     //   读不懂的段跳过 ①②，直接落 ③ —— 读不懂的内容不可被授权。
-    function commandDecision(exec, root, exReason, exReasonEn, exNote) {
+    // cwd：相对路径的解析基准（见 cwdOf）。**必须由调用方显式传入** —— 它不能从
+    // decide() 的作用域里"看见"：本函数是独立声明，靠闭包穿透取到的会是别的同名变量
+    // （rootOf 内部那个 session.header.cwd），口径完全不同。
+    function commandDecision(exec, root, cwd, exReason, exReasonEn, exNote) {
       const cmd = commandArg(exec.arguments)
       const shell = SHELL_OF_TOOL[exec.name] || 'bash'
       // 例外匹配：作用对象是**单个命令段**（seg.text），不是整条命令串。
@@ -4865,10 +5001,10 @@ export default {
         // 这样档位语义只有一份定义 —— 宿主改配置不会与解析器分叉。
         destructive: () => destructiveTiers(root),
         category: () => resolveCategory('command', null, null, root),
-        isOutsideWorkspace: (p) => isOutside(p, root),
+        isOutsideWorkspace: (p) => isOutside(p, root, cwd),
         // 工作区根判据（§5.5）：解析器判不了「这是工作区根」（它不知道根在哪），
         // 故由宿主注入。必须与 isOutside 同口径，见该函数的注释。
-        isWorkspaceRoot: (p) => isWorkspaceRoot(p, root),
+        isWorkspaceRoot: (p) => isWorkspaceRoot(p, root, cwd),
       })
       // inherit：两层都没给出动作 → 落兜底策略（与分类 mode 的 inherit 同口径）。
       // 不在这里直接问 fallbackSetting 是为了让「为什么走到兜底」这件事由 decide() 统一处理。
@@ -5104,7 +5240,11 @@ export default {
         // 闸归属必须与判定侧共用同一个映射：否则用户点「允许此项」后例外写到了不作出判定的
         // 那道闸上，同一文件下次仍会弹窗，而候选已因 alreadyInProject 判重不再出现（死结）。
         const gate = outsideGateOf(catKey)
-        const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root))
+        // 解析基准用审批发起时的 cwd 快照（entry.projCwd），不用当前会话的：弹窗可能挂起
+        // 很久、期间用户会 cd，那时按新 cwd 判「是否区外」会与判定侧当时的结论不一致 ——
+        // 候选的授权面必须与它声称的判定同源。缺快照时回落 projRoot（两者曾经恒等）。
+        const exCwd = entry.projCwd || root
+        const outsideHere = !!(catKey && gate !== catKey && isOutside(entry.value, root, exCwd))
         // 候选文案用的分类名：说明这条候选会放开「哪一类操作」，避免文案与落盘的例外分类不符
         // 标签与设置面板的分类名保持一致（edit 就叫「编辑文件」，不再写「写入/编辑」）
         const KIND_LABEL = { read: ['读取文件', 'file reads'], image: ['读取图片', 'image reads'], edit: ['编辑文件', 'file edits'], undo: ['撤销操作', 'undo actions'] }
@@ -5115,13 +5255,16 @@ export default {
           // 路径先规范化为绝对路径（折叠 .. 与重复分隔符）：判重与落盘值统一基于它。
           // 含通配符的原文不做折叠——pathResolve 会把 `*` 当普通目录名、被其后的 .. 吃掉
           // （实测 B:/x/*/../y.txt → B:/x/y.txt），使通配路径被误当成精确路径生成候选。
-          const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, root)
-          // 守卫按**原始值**判定：absVal 已折叠 ..，对它判 hasParentSeg 恒为 false，等于没有守卫。
-          // 含 .. 的原文不给目录 glob——dirGlob 取父目录，`..` 可拼出覆盖整个盘根的 `G:/*`。
+          const absVal = hasGlobMeta(entry.value) ? norm(entry.value) : normAbsPath(entry.value, exCwd)
+          // 注意 hasParentSeg(entry.value) 对当前数据**恒为 false**：entry.value 是判定侧
+          // 传下来的目标值，已由 decide() 的 absTargetOf 折叠掉 `..`，对它判父段等于没有守卫。
+          // 曾有一版注释把这里写成「守卫按原始值判定」，那是失效后的状态、与代码不符；
+          // 恢复守卫也无价值 —— 它只挡 `..` 一种写法，AI 直接传绝对路径即可绕过，
+          // 故不恢复，只把事实写清。
           const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)
           const glob = globSafe ? dirGlob(absVal) : ''
-          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', gate, root)
-          const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey, root)
+          const hasDirGlob = globSafe && alreadyInProject(glob, 'path', gate, root, exCwd)
+          const hasKindGlob = globSafe && alreadyInProject(glob, 'path', catKey, root, exCwd)
           if (globSafe && (!hasDirGlob || !hasKindGlob)) {
             // label 就是路径本身（弹窗里最该被看清的东西），范围说明走 hint 小字
             push(glob, glob, 'path', [{ cat: gate, kind: 'path', value: glob }, { cat: catKey, kind: 'path', value: glob }], t('工作区外访问目录 + ' + kindLabel[0] + '权限', 'Outside workspace · directory + ' + kindLabel[1]))
@@ -5135,15 +5278,15 @@ export default {
           // 注：能走到这里就说明至少一道闸没命中等价例外（两道都命中时 resolveCategory 直接
           // 返回 allow/deny、不会弹窗），因此 covered 当前恒为 false——保留它是防御性冗余，
           // 用来表达「两条写入目标各自判重」的语义，避免未来弹窗流程变更后候选被误隐藏。
-          const covered = fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat, root))
+          const covered = fileWrites.every((w) => alreadyInProject(w.value, 'path', w.cat, root, exCwd))
           // 文件候选只要求原文无通配符：含 .. 的原文已被规范化成精确绝对路径，可以安全给候选
           if (!hasGlobMeta(entry.value) && !covered) {
             push(fileVal, fileVal, 'path', fileWrites, t('工作区外访问文件 + ' + kindLabel[0] + '权限', 'Outside workspace · file + ' + kindLabel[1]))
           }
         } else if (!hasGlobMeta(entry.value)) {
           // 工作区内同样走规范化单点，避免同一份配置里两种路径写法并存
-          const absVal = normAbsPath(entry.value, root)
-          if (!alreadyInProject(absVal, 'path', entry.cat, root)) push(absVal, absVal, 'path')
+          const absVal = normAbsPath(entry.value, exCwd)
+          if (!alreadyInProject(absVal, 'path', entry.cat, root, exCwd)) push(absVal, absVal, 'path')
         }
       }
       // 其余分类无「例外」候选：快捷工具（web_search/skill 等）走 quickTools 设置；
@@ -5268,6 +5411,10 @@ export default {
           // 审批发起时的项目根：审批可能挂起很久、期间用户会切会话，故必须把发起时的
           // 根快照下来 —— 打相对路径/对比/打开侧栏/落盘例外都用它，不能用「当前会话」的根。
           projRoot: rootOf(exec),
+          // 审批发起时的当前目录：与 projRoot 同理必须快照（弹窗挂起期间用户可能 cd）。
+          // 它与 projRoot 是两个不同的东西 —— projRoot 是权限边界与配置归属键，
+          // 这个是**相对路径的解析基准**（见 cwdOf）。diff 预览、打开文件、落盘例外都用它。
+          projCwd: cwdOf(exec),
           // 会话标识：session 挂在 agent 上，不在 exec 上（ToolExecutionInput 只有 agent/name/
           // arguments/callId/signal，没有 session）。旧写法读 exec.session 恒为 undefined，
           // 导致下发给客户端的 sessionId 一直是 null —— 弹窗因此认不出「来自哪个对话」，
@@ -6138,7 +6285,29 @@ export default {
           // 这份 opts 与 commandDecision 里 assessCommand 那份**必须成对增删**：宿主内同一个
           // 判档 opts 写了两遍，新增钩子只接一处会让另一处静默失效（本文件曾如此）。
           // test/regressions.mjs 有「两处 opts 键集合一致」的断言钉住这一点。
-          const opts = { home: homeFromEnv(), userHome: userHomeDir(), platform: shellPlatform(), isOutsideWorkspace: (p) => isOutside(p, root), isWorkspaceRoot: (p) => isWorkspaceRoot(p, root) }
+          // ── 两个分支的解析基准**故意不同**（不是笔误，不要「统一」）──────────────
+          //   · 命令分支按 **cwd**：命令执行时相对路径就相对当前目录（见 cwdOf），标注的
+          //     目标必须是它真正会碰到的那个 —— 与 commandDecision 那份 opts 同源。
+          //   · 路径分支按 **root**：`r.path` 是**配置侧**值，而 matchException 已把配置侧
+          //     基准钉为 root（理由见该函数：cwd 可被 working_directory 工具改写，配置里
+          //     存在相对路径 allow 例外时按 cwd 解析等于让被审查方自己决定这条例外指向
+          //     哪里）。同一个 r.path 在「实际生效目标」与「面板标注目标」两处必须解析成
+          //     同一个东西 —— 否则区外例外会被漏标（漏标方向有安全意义）。
+          // 基准由 blastBase 切换（见 blastOfPath）：共用同一份 opts，不另建第二份 ——
+          // 那会让 isOutside 多一个调用点，两份 opts 也会再次漂移。
+          //
+          // **只求值一次**（提到两个 lambda 之外）：这两个钩子处在
+          // blastRadiusOfSegment 的逐词元循环里（同一目标先问 isOutsideWorkspace，
+          // 判 inside 后再问 isWorkspaceRoot），写在 lambda 内部会退化成「每个词元最多
+          // 两次 cwdOf」，而 cwdOf 内部是 ctx.get('sessionProjections') + stateOf()
+          // （后者 materializeCells 要遍历 36 个 projection）。本函数每次 statusView 都跑，
+          // 例外条数 × 词元数会线性放大这笔开销。commandDecision 那份 opts 早已把 cwd
+          // 算在循环外、用闭包捕获，本处是唯一漏掉的对称点。
+          const cwd = cwdOf(exec)
+          // 钩子读的基准：命令分支 cwd，路径分支 root（见上方注释）。默认 cwd —— 与
+          // commandDecision 那份 opts 同口径；blastOfPath 在判档期间临时切到 root。
+          let blastBase = cwd
+          const opts = { home: homeFromEnv(), userHome: userHomeDir(), platform: shellPlatform(), isOutsideWorkspace: (p) => isOutside(p, root, blastBase), isWorkspaceRoot: (p) => isWorkspaceRoot(p, root, blastBase) }
           // 命令例外的 match 是**整条命令模式**，必须先按段分解再判档 ——
           // 直接把 `rmdir /s /q B:\` 喂给 blastRadiusOf 会把它当成一个路径，
           // 实测得到 {level:'outside', path:'rmdir /s /q B:'}（整个命令串被当路径、盘根信息丢失）。
@@ -6152,8 +6321,12 @@ export default {
           // 反向仍要收住：`git status *` 这类普通命令不标注（噪音会让真警告被忽略）。
           const blastOfCommand = (pattern) => {
             // 记忆化：statusView 每次都要现算，而例外文本长度无上限（见 blastPatternMemo）。
-            // 键含 root：判档里的 isOutsideWorkspace 闭包捕获了 root，换项目根结论会变。
-            const memoKey = root + '\u0000' + String(pattern)
+            // 键含 root 与 cwd：判档里的 isOutsideWorkspace / isWorkspaceRoot 闭包捕获了
+            // 这两者，换项目根或换当前目录结论都会变。cwd 必须进键 —— memo 只在
+            // persist/reload 时清空，cd 不触发清空；少了这一维，会话内 cd 之后面板会
+            // 继续显示 cd 前的旧结论（该标 outside 的漏标、或反之多标），同一项目下
+            // 不同会话 cd 到不同目录时还会互相污染同一张表。
+            const memoKey = root + '\u0000' + cwd + '\u0000' + String(pattern)
             if (blastPatternMemo.has(memoKey)) return blastPatternMemo.get(memoKey)
             const result = (() => {
               let worst = null
@@ -6186,10 +6359,26 @@ export default {
           // 路径例外的记忆化：与命令例外共用同一张表（问题同源 —— 路径例外同样是用户配置、
           // 长度同样无上限，而它在同一循环里每次 statusView 都要现算）。
           // 键前缀区分两类输入（命令模式 vs 路径），避免同文本互相串用结论。
+          // 键含 root 与 cwd：cwd 进键是因为**命令分支**的判档钩子捕获了它，而 memo 只在
+          // persist/reload 时清空，cd 不触发清空；少了这一维，会话内 cd 之后面板会继续显示
+          // cd 前的旧结论。路径分支的结论只随 root 变，多一维只是少命中，不会串台。
           const blastOfPath = (pathText) => {
-            const memoKey = root + '\u0000p\u0000' + String(pathText)
+            const memoKey = root + '\u0000' + cwd + '\u0000p\u0000' + String(pathText)
             if (blastPatternMemo.has(memoKey)) return blastPatternMemo.get(memoKey)
-            const result = blastRadiusOf(pathText, opts)
+            // 基准切到 root 再判档（配置侧口径，见上方注释）。
+            // 为什么不是「先 normAbsPath(pathText, root) 再判档」：normAbsPath 对 glob
+            // （含 * ?）与 file:// 形态**不做绝对化**（那会改变匹配范围，见其注释），于是
+            // 这两族仍以相对形态落到钩子上、被 cwd 拼接 —— 实测 `*.log` 在 cwd=区外时仍
+            // 标 outside、`~/x` 在 cwd=区外时仍漏标。切 base 对全部形态一致生效。
+            // blastRadiusOf* 对钩子的调用是同步的（无 await），try/finally 恢复即可。
+            const prevBase = blastBase
+            let result
+            try {
+              blastBase = root
+              result = blastRadiusOf(pathText, opts)
+            } finally {
+              blastBase = prevBase
+            }
             if (blastPatternMemo.size >= BLAST_PATTERN_MEMO_MAX) invalidateBlastMemo()
             blastPatternMemo.set(memoKey, result)
             return result
