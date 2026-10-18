@@ -1880,6 +1880,11 @@ window.__ModuleLoader__.load({
 				'quick.schedule_list': '列出本会话的定时提醒',
 				'quick.schedule_update': '修改定时提醒（含触发时间；改完仍会到点自动唤醒 AI）',
 				'quick.schedule_delete': '删除定时提醒',
+				// run_code 的关键不是「执行代码」这件事本身（cordis_run 也会），而是
+				// **执行面有一半在本插件视野之外**：程序内对 tools.* 的调用会逐条过闸，
+				// 但直接调 Node API 的部分只有 DSH 原生沙箱管得住。文案点出这层区别，
+				// 避免用户把它读成「和 pwsh 一样的命令审查」而放心设成 allow。
+				'quick.run_code': '执行模型写的 TypeScript 程序（程序内直接调用 Node API 的部分不经过本审查）',
 				'panel.excExpand': '展开',
 				'panel.excCollapse': '折叠',
 				'panel.excListLink': '例外列表',
@@ -2172,6 +2177,11 @@ window.__ModuleLoader__.load({
 				'quick.schedule_list': 'list this session\'s timed reminders',
 				'quick.schedule_update': 'change a timed reminder (including when it fires; it still wakes the AI unattended)',
 				'quick.schedule_delete': 'delete a timed reminder',
+				// The point is not "it runs code" (cordis_run does too) but that half its
+				// execution surface is outside this review: tools.* sub-calls pass through
+				// the gate one by one, while direct Node API use is bounded only by the
+				// platform sandbox. Saying so keeps it from reading like command review.
+				'quick.run_code': 'run a model-written TypeScript program (direct Node API use inside it bypasses this review)',
 				'panel.excExpand': 'Expand',
 				'panel.excCollapse': 'Collapse',
 				'panel.excListLink': 'Exception list',

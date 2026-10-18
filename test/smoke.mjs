@@ -708,7 +708,8 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   // 35 → 26：9 个权限写工具已移除（22 常规 + perm_status + cordis_run/stop/undefine）
   // 26 → 27：新增 plugin_manager（DSH 自带核心依赖，管插件的元操作里权限最大的一个）
   // 27 → 32：DSH 0.2.1 新增的常驻工具（working_directory + schedule_* 四个）
-  ok('group5: status 下发 quickPreset（32 项：22 常规 + perm_status + cordis_run/stop/undefine + plugin_manager + working_directory/schedule_*）', presetList.length === 32, 'len=' + presetList.length)
+  // 32 → 33：run_code（PTC 模式的保留传输工具，默认 ask）
+  ok('group5: status 下发 quickPreset（33 项：22 常规 + perm_status + cordis_run/stop/undefine + plugin_manager + working_directory/schedule_* + run_code）', presetList.length === 33, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
   // 9 个权限写工具已移除：它们既不该在预设清单里，也不再是可调用的工具
   const permWrites = presetList.filter((t) => /^perm_/.test(t) && t !== 'perm_status')
@@ -719,6 +720,13 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   ok('group5: perm_status 默认放行（只读）', rp1.nexted === true, JSON.stringify(rp1.out))
   const rp3 = await probe('cordis_run')
   ok('group5: cordis_run 默认不被静默放行', rp3.nexted === false, JSON.stringify(rp3.out))
+  // run_code 走的是与 cordis_run 同一条理由（执行任意代码），但多一层：程序内直接调
+  // Node API 的部分**不经** tools/pre-execute，只有原生沙箱管得住。故它必须弹窗。
+  // 「能否被用户单独设成 deny」那一半不在这里验 —— 它由 regressions 的 group30 断言
+  // （QUICK_PRESET 由 QUICK_DEFAULTS 的键派生，故「在表里」即「在清单里」）。
+  // 这里只钉「默认不放行」这一半：把它改成 allow 时本条必须变红。
+  const rrc = await probe('run_code')
+  ok('★ group5: run_code 默认不被静默放行（程序内直接 Node API 不过本审查）', rrc.nexted === false, JSON.stringify(rrc.out))
 
   // 老配置残留的已移除写工具键：必须在加载时被丢弃（否则设置页出现无说明的孤儿行，
   // 且残留的 allow 会在将来同名工具复活时绕过 QUICK_DEFAULTS 的 ask —— issue #3 老路）

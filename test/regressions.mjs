@@ -9589,6 +9589,29 @@ group('30. 边界根与相对路径解析基准分离（DSH 0.2.1 的 workingDir
       // 仍显式断言那条派生关系，避免将来有人把清单改成手写数组时这一条失去意义。
       && /const QUICK_PRESET = Object\.keys\(QUICK_DEFAULTS\)/.test(src),
       'working_directory=' + defOf('working_directory'))
+    // run_code：PTC 模式的保留传输工具。默认必须是 ask —— 它执行的程序里可以直接
+    // `await import('node:fs')`，这条路径不经任何工具调用、因而不经 tools/pre-execute；
+    // 程序内对 tools.* 的子调用会逐条过闸，但直接 Node API 那部分只有原生沙箱管得住。
+    // 一旦这里变成 allow，ptc 预设下就是「AI 可无弹窗执行任意代码且写盘绕过本插件」。
+    ok('★★ 30 run_code 默认 ask（程序内直接 Node API 不经过本审查，只能拦整段程序）',
+      defOf('run_code') === 'ask', 'run_code=' + defOf('run_code'))
+    // 它必须是**预设清单**里的键（而不只是能靠「新增工具名」手填）：这样面板默认就有
+    // 这一行，用户能在切到 ptc 之前就把它设成 deny，不必先知道这个工具名存在。
+    ok('★ 30 run_code 在预设清单里（面板默认有该行，可单独设 deny）',
+      /const QUICK_PRESET = Object\.keys\(QUICK_DEFAULTS\)/.test(src)
+      && qdSrc.indexOf('run_code:') !== -1)
+    // 用途标签与清单**同进同出**：清单里有、面板上没有说明文字时，那一行就是没有用途说明的
+    // 孤儿行（group11 已对管插件的元操作单独断言过，但那是点名清单，新增工具容易漏）。
+    // 这里改成对**整张表**机械核对：每个键必须在中英两个 i18n 块里各有一条 'quick.<键>'。
+    // 用 split 计数而不是正则：工具名里不会有需要转义的字符，而正则要拼一次转义。
+    const noLabel = Object.keys(Object.fromEntries(
+      [...qdSrc.matchAll(/([A-Za-z_][A-Za-z0-9_]*):\s*'(?:ask|allow|deny)'/g)].map((m) => [m[1], 1]),
+    )).filter((k) => cli.split("'quick." + k + "':").length - 1 !== 2)
+    ok('★ 30 QUICK_DEFAULTS 每个键都有中英两条用途标签（否则面板出现孤儿行）',
+      noLabel.length === 0, JSON.stringify(noLabel))
+    ok('★ 30 run_code 的用途标签点明「程序内直接 Node API 不过本审查」',
+      cli.includes("'quick.run_code': '执行模型写的 TypeScript 程序（程序内直接调用 Node API 的部分不经过本审查）'")
+      && cli.includes("'quick.run_code': 'run a model-written TypeScript program (direct Node API use inside it bypasses this review)'"))
   }
 }
 

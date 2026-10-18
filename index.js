@@ -225,6 +225,27 @@ const QUICK_DEFAULTS = {
   // QUICK_RETIRED_DEFAULTS（那里只收「曾被 freshConfig 全量 seed 过」的历史默认）。
   schedule_create: 'ask', schedule_list: 'allow',
   schedule_update: 'ask', schedule_delete: 'allow',
+  // run_code：**PTC 模式**的保留传输工具（dsh-tools 的 RUN_CODE_NAME），由
+  // dsh-agent-tool-presentation 的 `mode: ptc` 引入，只在 ptc 预设下可见 ——
+  // 本 profile 的默认预设是 standard（无 tool-presentation 行 → native），故当前不可达；
+  // 纳入本表的目的是**切到 ptc 时面板上已有这一行**，而不是等它冒出来再补。
+  //
+  // 为什么是 ask（与 cordis_run 同口径）：它的 code 参数是**模型写的程序**，里面可以
+  // 直接 `await import('node:fs')` —— 这条路径**不经任何工具调用**，因此也不经
+  // tools/pre-execute（本插件的判定链挂在那里）。程序内对 tools.write(...) 的子调用
+  // 确实会逐条过闸（binding → scheduler.prepare → prepareExecution → pre-execute），
+  // 但直接调 Node API 的那部分只有 DSH 原生沙箱管得住。
+  // 同一件事 DSH 自己的 dsh-experimental-auto-review README 写明：
+  // "The outer run_code transport and direct Node effects inside a PTC program do not
+  //  pass through inner-tool review." 我们与它处境相同，故不能声称本插件覆盖了它。
+  //
+  // ⚠️ 本表只按**工具名**匹配，拦得住的是「整段程序」这一粒度：ask 之后用户仍只能
+  // 「允许整段 / 拒绝整段」，无法区分「只读脚本」与「顺手写 C:/other/x.txt」。
+  // 想按路径拦，得靠 DSH 原生沙箱（会话沙箱保持 workspace-write）+ 把兜底/本项设为 deny。
+  // 也正因如此，本项**不能**降到 allow：它是本表里唯一一个「能执行任意代码、且执行面
+  // 有一部分在本插件视野之外」的常规工具，与 cordis_define/cordis_run 同类而更宽。
+  // 存量配置无需迁移：上一发布版没有这个键，不会落盘（理由同 schedule_* 那条）。
+  run_code: 'ask',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
