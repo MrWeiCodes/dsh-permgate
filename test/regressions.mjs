@@ -2193,8 +2193,13 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const m = src.match(/function normalizeSubSetting\(raw, inheritDefault\) \{[\s\S]*?\n    \}/)
     if (!m) return false
     const body = m[0]
-    // 沙箱：**真实求值** normalizeSubSetting（自由变量只有 MODES / ALL_MODES / TIERS / normalizeText），
-    // 把「① 封闭键集 ② 逐个值域校验 ③ 未知键丢弃 ④ 无通配拷贝」四件事直接钉在**输出**上。
+    // 沙箱：**真实求值** normalizeSubSetting（自由变量只有 MODES / ALL_MODES / TIERS /
+    // normalizeText / actionAllowed），把「① 封闭键集 ② 逐个值域校验 ③ 未知键丢弃
+    // ④ 无通配拷贝」四件事直接钉在**输出**上。
+    //
+    // `actionAllowed` 必须**从 src 抠真实实现**，不能在这里手抄一份等价判据 ——
+    // 手抄的副本会让「值域判据被改坏」这条断言失去鉴别力（副本自己是对的，生产实现错了
+    // 也照样绿）。这与本文件开头 tierChainOf 注释里记录的 `keyOfTier` stub 事故同源。
     //
     // 为什么从「匹配判据行」改为行为断言：判据已被改成
     // `const actionOk = allowed.indexOf(r.action) !== -1` + `if (!actionOk && !tierOk) return null`
@@ -2203,8 +2208,10 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     // 行为断言对前者不误报、对后者必红，四件事一件不少（见下方逐条注释）。
     let F = null
     try {
+      const actionAllowedSrc = (src.match(/function actionAllowed\(action, allowed\) \{[\s\S]*?\n\}/) || [''])[0]
+      if (!actionAllowedSrc) return false
       F = new Function('MODES', 'ALL_MODES', 'TIERS', 'normalizeText',
-        body + '\n; return normalizeSubSetting;')(
+        actionAllowedSrc + '\n' + body + '\n; return normalizeSubSetting;')(
         ['ask', 'allow', 'deny'], ['ask', 'allow', 'deny', 'inherit'], SP_TIERS,
         (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined))
     } catch (e) { return false }
@@ -2232,9 +2239,28 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
         && eq(outs[3], { action: 'deny', reasons: { inside: '整类拒绝' } })
         // ② 逐个值域校验：action 与每个档位键走同一份值域（全局层不含 inherit，项目层含）
         && F(null, false) === null && F({}, false) === null
-        && F({ action: 'bogus' }, false) === null && F({ wide: 'bogus' }, false) === null
-        && F({ action: 'bogus', wide: 'bogus' }, false) === null               // 两个都非法 → 整条丢弃
-        && eq(F({ action: 'deny', wide: 'bogus' }, false), { action: 'deny' }) // 非法档位值被丢弃，不是原样带出
+        // ── 值域校验的**两条相反方向**必须都在 ──────────────────────────────────
+        // 方向 A：**垃圾值**丢弃。空串 / 纯空白 / 非字符串是手改配置最常见的残值，
+        //   保留它会让「每次调用都弹窗」的静默故障粘住，必须丢弃回落默认值。
+        //   注意判据已从「不在白名单即丢」改为 actionAllowed（§9A.5 降级安全）：
+        //   它只放行**字符串**，故 `true` / `0` / `{}` / `[]` 一律丢弃。
+        && F({ action: '' }, false) === null && F({ action: '   ' }, false) === null
+        && F({ action: true }, false) === null && F({ action: 0 }, false) === null
+        && F({ action: {} }, false) === null && F({ wide: '' }, false) === null
+        && F({ action: '   ', wide: '   ' }, false) === null                   // 两个都是残值 → 整条丢弃
+        // 方向 B：**未知动作保留原值**（§9A.5）。这是有意改变旧行为的一条：
+        //   旧版丢弃 → 规则整条消失 → 落到分类默认值，而 read/undo/subagent/outsideRead
+        //   默认 allow，于是「模型判、失败就拒」在旧版里变成**直接放行**（fail-open），
+        //   且用户看不见（面板上连这一条都不显示）。
+        //   保留之后由 decide() 的 out() 折成 ask 执行，方向安全且升级回去自动恢复。
+        //   ⚠️ 不要把这里改回 `=== null`：那正是被修掉的那个 fail-open。
+        && eq(F({ action: 'bogus' }, false), { action: 'bogus' })
+        && eq(F({ wide: 'bogus' }, false), { wide: 'bogus' })
+        && eq(F({ action: 'deny', wide: 'bogus' }, false), { action: 'deny', wide: 'bogus' })
+        //   reasons 仍只跟「显式 deny」走：未知动作不等于 deny，故不产出理由
+        && eq(F({ action: 'bogus', reasons: { inside: '不该留' } }, false), { action: 'bogus' })
+        //   全局层不接受 inherit 这一条**不因方向 B 松动**：inherit 是已知档位，
+        //   它属于「本层语义非法」而非「未来动作」，仍回落默认值。
         && F({ action: 'inherit' }, false) === null                            // 全局层不接受 inherit
         && eq(F({ action: 'inherit' }, true), { action: 'inherit' })           // 项目层接受
         && F({ wide: 'inherit' }, false) === null && eq(F({ wide: 'inherit' }, true), { wide: 'inherit' })
@@ -2501,9 +2527,52 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
       && iOut > 0
       && /if \(b === undefined \|\| d === undefined \|\| d < b\) return base/.test(body)
       && doomOnlyInsideOut
-      && src.includes('const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }')
       // 候选恰好一处、且没有任何 return 直接产出 doomloop 判定
       && doomCats === 1 && doomReturns === 0
+  })())
+  // ★★ `MODE_STRICTNESS` 必须覆盖**所有**可产出的动作，否则 out() 里 `b === undefined`
+  // 会直接 `return base`，doomloop 的收紧被静默忽略（fail-open，§9B）。
+  //
+  // 这里**不再钉字面量**（原断言是 `src.includes('const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }')`）。
+  // 钉字面量的两个问题：① 加 `auto` 这种正确改动也会红；② 它只证明「那行字还在」，
+  // 不证明表里的值真的产生正确合并 —— 把 auto 写成 2（只有 deny 能盖过）字面量照样在，
+  // 而那正是本断言要防的那个 bug。故改为**真实求值表 + 跑合并组合**。
+  ok('★★ MODE_STRICTNESS 覆盖全部动作，且 auto 不被 doomloop 的 ask 盖过（§9B）', (function () {
+    const m = src.match(/const MODE_STRICTNESS = (\{[^}]*\})/)
+    if (!m) return false
+    let T = null
+    try { T = new Function('return (' + m[1] + ')')() } catch (e) { return false }
+    if (!T || typeof T !== 'object') return false
+    // ① 表必须覆盖 MODES ∪ ALL_MODES 里的**每一个非 inherit** 动作 ——
+    //    inherit 不是可裁决动作（它由读取侧穿透），不进严格度表。
+    const allActions = ['ask', 'allow', 'deny', 'auto']
+    for (const a of allActions) if (typeof T[a] !== 'number') return false
+    // ② 序必须单调：allow < ask < deny（既有契约，不能因加 auto 被打乱）
+    if (!(T.allow < T.ask && T.ask < T.deny)) return false
+    // ③ 复算 out() 的合并（`if (b === undefined || d === undefined || d < b) return base`），
+    //    对每个 base 检查「doom 更严或相等时 doom 接管」。
+    const merge = (base, doom) => {
+      const b = T[base]
+      const d = T[doom]
+      if (b === undefined || d === undefined || d < b) return base
+      return doom
+    }
+    // `doom` 永不为 allow（它在 `d.action !== 'allow'` 时才构造 = 用户知情关闭检测），
+    // 故只需覆盖 ask / deny 两种 doom。
+    // ★ 关键断言：auto 作 base 时，doomloop 的 **ask 与 deny 都必须能盖过**它。
+    //   写 `auto: 2` 会让 ask 盖不过（`1 < 2` → return base）—— 重复调用的提醒对 auto
+    //   静默失效，方向 fail-open，正是 §9B 记录的那个 bug。
+    if (merge('auto', 'ask') !== 'ask') return false
+    if (merge('auto', 'deny') !== 'deny') return false
+    // 既有行为的回归护栏：allow/ask/deny 作 base 时合并方向不变
+    if (merge('allow', 'ask') !== 'ask' || merge('allow', 'deny') !== 'deny') return false
+    if (merge('ask', 'ask') !== 'ask' || merge('ask', 'deny') !== 'deny') return false
+    if (merge('deny', 'ask') !== 'deny' || merge('deny', 'deny') !== 'deny') return false
+    // ④ doom 自身为 auto 时（doomloop 分类被设成 auto，§9B 的另一半）也必须参与合并，
+    //    不能被 `d === undefined` 挡掉。取 1 与 ask 同档 → 对 deny 不接管、对 allow 接管。
+    if (merge('allow', 'auto') !== 'auto') return false
+    if (merge('deny', 'auto') !== 'deny') return false
+    return true
   })())
   // ★ 阈值：默认 6、下限 1、**无上限**（无 MAX 常量）。上限唯一的用途是「不许超过窗口」，
   // 窗口已删故不需要 —— 加回 MAX 就等于把「阈值 > 上限 = 静默失效」这个坑重新挖出来。
@@ -4328,13 +4397,18 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     }
     let E = null
     try {
+      // `actionAllowed` 从 src 抠真实实现（理由同 normalizeSubSetting 那条断言：
+      // 手抄副本会让判据失去鉴别力）。
+      const actionAllowedSrc2 = (src.match(/function actionAllowed\(action, allowed\) \{[\s\S]*?\n\}/) || [''])[0]
+      if (!actionAllowedSrc2) throw new Error('actionAllowed 未找到')
       E = new Function('EXC_CATS', 'MODES', 'normalizeException', 'normalizeText', [
         sliceFn3('setExceptionEntry'),
         'return { setExceptionEntry }',
       ].join('\n'))(EXC_L, ['ask', 'allow', 'deny'],
         // normalizeException 的真实实现（与 index.js 同源，从 src 里抠）
-        new Function('MODES', 'normalizeText', sliceFn3('normalizeException') + '; return normalizeException')(
-          ['ask', 'allow', 'deny'],
+        new Function('MODES', 'ALL_MODES', 'normalizeText',
+          actionAllowedSrc2 + '\n' + sliceFn3('normalizeException') + '; return normalizeException')(
+          ['ask', 'allow', 'deny'], ['ask', 'allow', 'deny', 'inherit'],
           (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)),
         (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined))
     } catch (e) {

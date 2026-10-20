@@ -7809,8 +7809,19 @@ export function tierSetOf(seg, labels, opts) {
  * **与 index.js 的 MODE_STRICTNESS 是同一个序**，但两处不能合并 —— 那个在宿主闭包里、
  * 这个在纯解析器里，解析器不能依赖宿主（它要能独立单元测试）。
  * 两处都只有一行，且都由测试断言钉住，漂移风险低于「把解析器耦合到宿主」的代价。
+ *
+ * ── `auto` 为什么必须在这里，且取值与 `ask` 相同 ─────────────────────────────────
+ * 破坏性命令的八个档位与其余分类同域（宿主的 MODES/ALL_MODES），故用户**可以**把某一档
+ * 设成 `auto`。本表缺这个键时 `TIER_STRICTNESS[ds[t]]` 是 `undefined`，`decisiveTierOf`
+ * 会 `continue` 跳过该档 —— 而它跳过的后果分两种：
+ *   · 别的档有具体动作 → 那些档里取最严，auto 那一档被**静默忽略**；
+ *   · 命中的档全是 auto → 返回 null → `strictestTierAction` 返回 `'inherit'`
+ *     → 落**大分类 mode**。大分类若是 allow，用户写的「这一档交给模型判」就变成了
+ *     **直接放行**（fail-open，且没有任何提示）。
+ * 取值 1 的理由与 MODE_STRICTNESS 处同源：auto 与 ask 一样是「要过一道关」的档位
+ * （ask 过关的是人，auto 过关的是模型），并列时由 `tiers` 的排列决定，不影响方向安全。
  */
-const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
+const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
 
 /**
  * 命中档位 → 动作：取**最严**（deny > ask > allow）。

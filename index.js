@@ -44,7 +44,63 @@ const MODES = ['ask', 'allow', 'deny']
 const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
 // 严格度序：allow < ask < deny（越大越严）。做法 A 的「取更严者」合并与面板的
 // warnSubMismatch 判据同源 —— 两处都表达「谁更严」，不该各写一份比较逻辑。
-const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
+//
+// ── `auto` 为什么是 1（与 `ask` 同档），而不是 0 或 2 ────────────────────────────
+// 先算准 `out()` 的合并规则（`if (d < b) return base` 的反面是 `d >= b` 时 doom 接管）：
+//   · `doom` **永不为 `allow`** —— 它只在 `d.action !== 'allow'` 时构造（用户把 doomloop
+//     设成 allow = 知情关闭检测），故 `d` 恒为 1 或 2；
+//   · 于是 `b = 0` 与 `b = 1` 的合并结果**完全相同**：`1 >= 0` 与 `1 >= 1` 都成立，
+//     doomloop 的 ask / deny 都能盖过它。那个差值永远用不上。
+// 真正可选的只有两类：
+//   · `auto ∈ {0, 1}` —— doomloop 的 ask 与 deny 都能盖过 auto（与 allow/ask 同构）；
+//   · `auto = 2`      —— 只有 deny 能盖过，**重复调用的提醒对 auto 失效**（fail-open）。
+// 取 `1` 而非 `0` 的理由不是「更严」（本函数里两者等价），而是**语义可读**：auto 与 ask
+// 一样是「要过一道关」的档位（ask 过关的是人，auto 过关的是模型），写成 0 会让人误读成
+// 「和 allow 同义」。取 2 则是错的，理由见上。
+//
+// ⚠️ 本表加入 `auto` **不会立刻生效**：`MODES` 目前还不含 `auto`，配置写不进这个动作
+// （归一化侧会丢弃），故 `decide()` 产不出 `auto`、合并里不可达。这是有意的 —— 档位表先
+// 固化设计决策，等评审段接线时再打开 `MODES` 这个阀门。**打开阀门时本表无需再改**，
+// 这正是现在就把键加进来的目的：避免「接线时忘了补这一档」导致 `b === undefined`
+// 静默 fail-open（§9B 记录的那个坑）。
+const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
+
+// ── 动作值的合法性判据（§9A 降级安全）────────────────────────────────────────────
+// 归一化侧原先一律是「不在白名单就丢弃」，这条纪律有两个相反方向的后果：
+//
+//   · 丢弃**垃圾值**（`action: true`、`action: {}`、空串）—— 正确，必须保留。
+//     全放行会让手改 config.json 的错字变成「每次调用都弹窗」的静默故障。
+//   · 丢弃**更高版本写入的动作**（如旧版读到 `action: 'auto'`）—— 有害。
+//     丢弃 = 规则/例外整条消失 = 不匹配 = 继续往下走，而 read / undo / subagent /
+//     outsideRead 四类的默认值是 allow，于是「模型判、失败就拒」那条规则在旧版里
+//     变成**直接放行**（fail-open，§9A.3 已推演）。而且用户**看不见**它消失了：
+//     面板上连这一条都不显示，任何一次设置页保存还会把它从磁盘上永久删掉。
+//
+// 故判据分三段，缺一不可：
+//   ① 在**本层**白名单里（全局层 MODES / 项目层 ALL_MODES）→ 合法，原样保留；
+//   ② 不在本层白名单，且**两个白名单里都没有**（完全未知的值，形如标识符）
+//      → **保留原值**，由 decide() 的 out() 折成 ask 执行；
+//   ③ 其余 → 丢弃，回落默认值。含「已知档位但本层语义非法」的情况
+//      （如全局层的 `inherit`：它在 ALL_MODES 里、却不是全局层能取的值），
+//      那是层级语义问题而非版本问题，仍按原行为归一化。
+//
+// ② 与 ③ 的分界为什么用「完全未知」而不是「不在本层白名单」：后者会把全局层的
+// `inherit` 也当成「未来动作」保留下来，而它的正确处置是回落默认值（既有行为，
+// 有测试钉着）。判据必须能区分「本层不该有的已知值」与「本版不认识的未来值」。
+//
+// 判据刻意只依赖两个白名单、不引入正则或别的模块级符号：normalizeException 与
+// normalizeSubSetting 会被 test/regressions.mjs 抠进 `new Function` 独立求值
+// （注入的自由变量是写死的一份清单），多引一个符号就会 ReferenceError 让断言变红。
+// 空串与纯空白不算「未来动作」—— 它是手改配置时最常见的残值，丢弃才不误导用户。
+function actionAllowed(action, allowed) {
+  if (typeof action !== 'string' || !action.trim()) return false
+  if (allowed.indexOf(action) !== -1) return true
+  // ③ 已知档位但不属于本层（inherit 在全局层）→ 交给调用方回落默认值
+  if (MODES.indexOf(action) !== -1 || ALL_MODES.indexOf(action) !== -1) return false
+  // ② 完全未知 → 保留（不在这里 warn：由 out() 在真正执行时说明，
+  //    那条路径才能讲清「保留之后实际怎么处理」，避免这里只报「保留了」却不说后果）
+  return true
+}
 // 档位名 → 存储键 的**映射单点**：`inside` 档由老键 `action` 承载（**老键义不变**，§7.1），
 // 其余七档各有一个同名键。读取侧（destructiveTiers）与写入侧（setCommandSub）都走它。
 //
@@ -1145,7 +1201,7 @@ export default {
 
     function normalizeException(r, key) {
       if (!r || typeof r !== 'object') return null
-      if (MODES.indexOf(r.action) === -1) return null
+      if (!actionAllowed(r.action, MODES)) return null
       const value = key === 'command' ? r.match : r.path
       if (typeof value !== 'string' || !value) return null
       const e = { id: r.id || 'e' + Math.random().toString(36).slice(2, 8), action: r.action }
@@ -1179,7 +1235,7 @@ export default {
     function normalizeSubSetting(raw, inheritDefault) {
       const r = raw && typeof raw === 'object' ? raw : {}
       const allowed = inheritDefault ? ALL_MODES : MODES
-      const actionOk = allowed.indexOf(r.action) !== -1
+      const actionOk = actionAllowed(r.action, allowed)
       // ── 合法性判据：`action` 合法 **或** 至少有一个合法档位键 ──────────────────────
       // 「只写一档」是面板的**主用法**：档位下拉框只写 `sub[tier]`、根本不碰 `action`，
       // 故它必须与「写了 action」同样合法。曾经的判据只看 `action`，后果（两轨独立实测）：
@@ -1189,7 +1245,7 @@ export default {
       //   ② 此后任意一次无关写盘（例如改 read 分类）会把内存配置整体序列化回磁盘，
       //      磁盘上那条 `{"wide":"deny"}` 被**永久抹掉**（destructive 变 undefined）。
       // 项目层同样复现。故「只写一档」必须是**合法**形态，而不是被丢弃的形态。
-      const tierOk = TIERS.some((t) => t !== 'inside' && allowed.indexOf(r[t]) !== -1)
+      const tierOk = TIERS.some((t) => t !== 'inside' && actionAllowed(r[t], allowed))
       if (!actionOk && !tierOk) return null
       const out = {}
       // `action` 缺失/非法 → **不补值**（不是补一个推导值）：缺键 = 本层未对 inside 表态，
@@ -1201,7 +1257,7 @@ export default {
       // 补在这里会经 persist 落盘成显式键，那就把「推导值」变成了「用户表态」。
       for (const t of TIERS) {
         if (t === 'inside') continue          // inside 由 action 承载，不重复存
-        if ((inheritDefault ? ALL_MODES : MODES).indexOf(r[t]) === -1) continue
+        if (!actionAllowed(r[t], allowed)) continue
         out[t] = r[t]
       }
       // per-tier 拒绝理由：只在**该档显式配成 deny** 时保留（与 action 侧同口径：
