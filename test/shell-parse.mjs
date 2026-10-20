@@ -33,6 +33,8 @@ import {
   // `widened ⊆ labels` 不变量的观测点（见 54D 判据④）：两个集合由它单点产出
   segmentLabelsCore,
   strictestTierAction, decisiveTierOf, tierLabel, TIERS, TIER_ORDER,
+  // 严格度序：AG 组直接断言 auto 档存在且与 ask 同档（缺键会让 decisiveTierOf 跳过该档）
+  TIER_STRICTNESS,
   // 语句关键字全表（54p 按**全表**穷举，不抽样 —— 新增关键字时漏改会立刻红灯）
   STATEMENT_KEYWORDS,
 } from '../shell-parse.js'
@@ -10026,10 +10028,14 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
     const consumers = (spSrc.match(/TIER_RANK\[/g) || []).length
     if (consumers !== 2) bad.push(['`TIER_RANK[...]` 消费点不是恰好两处（应只在 sortTiersByRank 内）', 'count=' + consumers])
     if (!spSrc.includes('sortTiersByRank(same)')) bad.push(['tierVerdict 未复用 sortTiersByRank'])
-    // `tierSetOf` 与整行分支仍须共用同一个排序函数
+    // `tierSetOf`、段级 `tierVerdict`、整行分支仍须共用同一个排序函数。
+    // 调用点从 3 处增到 5 处：`tierVerdict` 的 **auto 分支**（取并列档的回落值）与
+    // 整行读不懂分支的 auto 分支各多一处 —— 两处都复用同一个 `sortTiersByRank`，
+    // 正是本断言要守的「排序键只有一份实现」。计数只用于发现「新增调用点没走它」，
+    // 真正的判据是上面两条（`handCopy === 1` 且 `TIER_RANK[` 只在函数内出现）。
     const uses = (spSrc.match(/sortTiersByRank\(/g) || []).length
-    if (uses !== 4) bad.push(['sortTiersByRank 的调用点不是 3 处 + 定义 1 处', 'count=' + uses])
-    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、三处调用共用',
+    if (uses !== 5) bad.push(['sortTiersByRank 的调用点不是 4 处 + 定义 1 处', 'count=' + uses])
+    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、五处调用共用',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
   // ── 发现 6：整行分支的三档并入不得退化成「条件恒真」的死守卫 ─────────────────────
@@ -10061,6 +10067,63 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
       }
     }
     ok('★ AE 整行读不懂分支：形态契约与动作不回退（发现 6）', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 fail-open）')
+{
+  // ── 为什么这一组必须存在 ──────────────────────────────────────────────────────
+  // `auto` 是新增的第四档，它要穿过**两处**合并逻辑才可能到达裁决：
+  //   ① `TIER_STRICTNESS`（选档时按严格度取最严）—— 缺键则 `decisiveTierOf` 直接
+  //      `continue` 跳过该档，最坏情况返回 null → `strictestTierAction` 返回 inherit
+  //      → 落大分类 mode（若是 allow 就静默放行）；
+  //   ② `assessCommand` 末尾的**段间合并**（anyDeny / anyAsk / anyInherit / else allow）——
+  //      缺 `anyAuto` 这一支时 auto 段被当成「无表态」，直接落 `all-allow`（静默放行）。
+  // 两处都是「新增一档动作时忘了改合并逻辑」这一类，都不会报错、都只在真实使用 auto
+  // 时才暴露。故这一组用**真实求值**钉住它们，而不是只查源码里有没有那个字面量。
+  {
+    const bad = []
+    // ① TIER_STRICTNESS 必须含 auto，且与 ask 同档（理由见 shell-parse.js 的注释：
+    //    auto 与 ask 一样是「要过一道关」，并列时由 tiers 排列决定，不影响方向安全）
+    if (TIER_STRICTNESS.auto !== TIER_STRICTNESS.ask) bad.push(['TIER_STRICTNESS.auto 不等于 ask 档', String(TIER_STRICTNESS.auto)])
+    // 序不能被 auto 打乱
+    if (!(TIER_STRICTNESS.allow < TIER_STRICTNESS.ask && TIER_STRICTNESS.ask < TIER_STRICTNESS.deny)) {
+      bad.push(['严格度序被破坏', JSON.stringify(TIER_STRICTNESS)])
+    }
+    // ② decisiveTierOf 必须认得 auto：八档全 auto 时它要选出一档（不能返回 null）
+    const dsAllAuto = {}
+    for (const t of ['inside', 'outside', 'wide', 'proc', 'sys', 'priv', 'net', 'disk', 'unknown']) dsAllAuto[t] = 'auto'
+    if (decisiveTierOf(dsAllAuto, ['wide']) !== 'wide') bad.push(['decisiveTierOf 不认识 auto（返回 null 会落 inherit）'])
+    // strictestTierAction 同理：必须给出 auto，而不是 'inherit'
+    if (strictestTierAction(dsAllAuto, ['wide']) !== 'auto') bad.push(['strictestTierAction 把 auto 档读成了 inherit'])
+    // ③ 段间合并：一条命令里有段是 auto、其余段 allow → 整条必须是 auto（不是 allow）
+    //    用真实 assessCommand + 自造钩子触发（钩子契约见 tierTableOf 的注释）
+    const autoHook = () => ({ action: 'auto', autoFallbacks: { inside: 'deny', wide: 'deny' } })
+    const r1 = assessCommand('rm -rf /data', 'bash', { destructive: autoHook, category: () => ({ action: 'allow' }) })
+    if (r1.action !== 'auto') bad.push(['子设置给 auto 时整条命令不是 auto', r1.action])
+    // ④ 回落值必须随动作一起带出（否则 auto 生效了、回落值丢了 → 模型失败后按缺省 ask）
+    if (r1.autoFallback !== 'deny') bad.push(['auto 的回落值没有随判定带出', String(r1.autoFallback)])
+    // ⑤ 有 deny 段时必须压过 auto：模型不该有机会放行用户明确拒绝的段
+    //    ⚠️ `destructive` 钩子是**无参**调用（`h.destructive()`），拿不到段信息 ——
+    //    故这里用「第一次调用给 deny、之后给 auto」的方式构造混合命令，
+    //    而不是按 seg.text 判断（那样 seg 恒为 undefined，两段会拿到同一个结果，测了个空）。
+    const mixed = assessCommand('rm -rf /data; echo ok', 'bash', {
+      destructive: (() => { let n = 0; return () => (n++ === 0 ? { action: 'deny', reason: '拒绝' } : { action: 'auto' }) })(),
+      category: () => ({ action: 'allow' }),
+    })
+    if (mixed.action !== 'deny') bad.push(['deny 段没有压过 auto 段（方向错误）', mixed.action])
+    // ⑥ 有 ask 段时也必须压过 auto：人比模型更该被问
+    const mixedAsk = assessCommand('rm -rf /data; echo ok', 'bash', {
+      destructive: (() => { let n = 0; return () => (n++ === 0 ? { action: 'ask' } : { action: 'auto' }) })(),
+      category: () => ({ action: 'allow' }),
+    })
+    if (mixedAsk.action !== 'ask') bad.push(['ask 段没有压过 auto 段（auto 抢先 = 放宽）', mixedAsk.action])
+    // ⑦ 全 allow 时仍是 allow（auto 分支不得把无表态的命令也变成 auto）
+    const allAllow = assessCommand('echo ok', 'bash', { category: () => ({ action: 'allow' }) })
+    if (allAllow.action !== 'allow') bad.push(['无 auto 段的普通命令被误判为 auto', allAllow.action])
+    ok('★★ AG auto 的严格度表 + 段间合并 + 回落值带出（4 条 fail-open 路径）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
 }
 

@@ -1035,6 +1035,43 @@ ok('工作区外读图走合并矩阵单点（不被区外闸短路）', /if \(i
 // 防回退：read 也必须走合并矩阵（deny 例外与 read=ask 在跨工作区时必须生效）
 ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root, cwd\)/.test(src))
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
+// ★★ 区外合并矩阵必须认识 `auto`，且**排在 allow 之前**（§9A.4 的 fail-open）
+//
+// outsideMatrix 的合并是「任一道闸 deny → deny；任一道 ask → ask；否则 allow」。
+// 加 auto 时若只在上面两处补分支、忘了它，`auto` 会掉进最后的 allow 分支 ——
+// 即「用户把区外读设成 auto（交给模型判）」变成**直接放行**，且没有任何提示。
+// 这是本文件反复警告的那一类：新增一档动作时，漏改一处合并逻辑就是 fail-open。
+//
+// 判据取四件事：
+//   ① auto 分支存在；
+//   ② 顺序必须是 deny → **auto** → ask → allow。auto 排在 ask **之前**：ask 是「要问人」、
+//      auto 是「问模型」，人比模型更该被问 —— 若 auto 抢先，用户设的 ask 例外会被降级成
+//      「问模型」，那是**放宽**（模型可能直接放行）。同理 auto 必须在 allow 之前，
+//      否则掉进最后的 allow 分支就是静默放行。
+//   ③ auto 分支返回 `action: 'auto'` 并带从严合并后的回落值；
+//   ④ 四个调用点各有一条 auto 出口（漏一个 = 那一类区外操作仍会静默放行）。
+ok('★★ 区外合并矩阵认识 auto 且排在 allow 之前（漏改即 fail-open）', (function () {
+  const i = src.indexOf('function outsideMatrix(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  const iDeny = body.indexOf("if (d.action === 'deny' || e.action === 'deny')")
+  const iAuto = body.indexOf("if (d.action === 'auto' || e.action === 'auto')")
+  const iAsk = body.indexOf("if (d.action === 'ask' || e.action === 'ask')")
+  if (iDeny < 0 || iAsk < 0 || iAuto < 0) return false
+  // ② deny → auto → ask（更严在前；auto 抢在 ask 前就是放宽）
+  if (!(iDeny < iAuto && iAuto < iAsk)) return false
+  // ③ auto 分支必须返回 action: 'auto'（不是别的），并带上从严合并后的回落值
+  const seg = body.slice(iAuto, iAsk)
+  if (!/return \{ action: 'auto', autoFallback: af,/.test(seg)) return false
+  // ④ 四个调用点各一条 auto 出口
+  return (src.match(/if \(m\.action === 'auto'\) return out\(\{ action: 'auto', autoFallback: m\.autoFallback,/g) || []).length === 4
+})())
 ok('缩略图有体积上限', src.includes('const IMAGE_MAX_BYTES = 2 * 1024 * 1024'))
 ok('读图的文本预览分支已移除', !src.includes('图片内容不在此预览'))
 ok('client 有图片渲染块与文案', cli.includes('function ImageBlock({ data, onOpenSidebar })') && cli.includes("'app.imageTooLarge'") && cli.includes("'cat.image'"))
@@ -1090,7 +1127,24 @@ ok('同向去重按「同值 + 同向」判定（方向交替不再累积）', s
 ok('拒绝只提交 deny 方向规则，服务端二次拦截', cli.includes('const pickedDenyRules = (p) => pickedRules(p).filter((r) => r.decision === \'deny\')') && cli.includes("decide(p.id, 'deny', pickedDenyRules(p), reason || undefined)") && cli.includes('const enterDeny = (p) =>') && src.includes("if (!allow && r.decision === 'allow') continue"))
 ok('hasGlobMeta 只拦 * 与 ?（[ ] 是字面量）', src.includes('const hasGlobMeta = (p) => /[*?]/.test(String(p || \'\'))'))
 ok('例外落盘校验分类与类型自洽', src.includes("if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1)") && src.includes("if (kind === 'command' && cat === 'command')") && src.includes('if (!p) return false'))
-ok('工作区外 reason 前缀跟随决定闸', src.includes('const OUTSIDE_PREFIX = {') && (src.match(/m\.pz \+ /g) || []).length === 12)
+// 计数从 12 改为 16：新增了 4 处 `m.pz + `（四个区外分支各多一条 auto 出口）。
+// 这个数字本身不是语义，它守的是「每一处前缀都取自 OUTSIDE_PREFIX 而不是硬编码」。
+// 故判据 = ① 表里恰好 6 个分类（2 个计算属性名 + 4 个裸键）；② 16 处出口全部经 m.pz 取用。
+// ⚠️ 不要断言「表外没有硬编码前缀」：`m.pz` 本来就是前缀、而 reason 文案里另有
+// 「拒绝读取工作区外文件」这类完整句子，两者字面不同但都含「工作区外」，按子串判会误伤。
+ok('工作区外 reason 前缀跟随决定闸', (function () {
+  if (!src.includes('const OUTSIDE_PREFIX = {')) return false
+  const i = src.indexOf('const OUTSIDE_PREFIX = {')
+  const j = src.indexOf('\n    }', i)
+  if (i < 0 || j < 0) return false
+  const tbl = src.slice(i, j)
+  // 计算属性名 2 个（区外读/区外写）+ 裸键 4 个（read/image/edit/undo）
+  const computed = (tbl.match(/\[[A-Z_]+\]: \[/g) || []).length
+  const plain = (tbl.match(/^ {6}[a-z]+: \[/gm) || []).length
+  if (computed !== 2 || plain !== 4) return false
+  // 16 处出口全部经 m.pz（4 个区外分类 × deny/ask/auto/allow）
+  return (src.match(/m\.pz \+ /g) || []).length === 16
+})())
 ok('工作区外 allow 的 cat 与 ruleId 同源（不再硬编码 catKey）', src.includes("const cat = src === d ? gate : catKey") && !src.includes("return { action: 'allow', src: d.ruleId ? d : (e.ruleId ? e : null), cat: catKey"))
 ok('read/image 详情复用预检单点且跳过体积闸', (src.match(/skipSizeCheck: true/g) || []).length === 2)
 // 防回退：路径先规范化再判定（含 .. 的原文会写出不生效的例外）；文件级判重按候选要写的全部分类；
@@ -1365,7 +1419,28 @@ group('13. 例外三态（ask / allow / deny）：ask 是可写、可命中的�
 // 防回退：normalizeException 曾用 MODES 校验（已含 ask），但 reason 只认 deny、面板只给 allow/deny
 // reason 与 note 必须保持两个字段：前者是回给 AI 的拒绝原因，后者是命中时显示在弹窗上供日后回看的备注，不可合并
 ok('reason（deny→AI）与 note（ask→弹窗备注）按动作各归其位', src.includes("if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }") && src.includes("if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }") && !src.includes("if (r.action !== 'allow' && typeof r.reason === 'string'"))
-ok('resolveCategory 按动作分别带回 reason / note', (src.match(/reason: \(r\.action === 'deny' && r\.reason\) \? r\.reason : undefined, note: \(r\.action === 'ask' && r\.note\) \? r\.note : undefined/g) || []).length === 2)
+// 原断言钉的是「两处字面量各写一遍 reason/note 三元式」—— 那正是**同一个判据的两份副本**，
+// 加 autoFallback 时要在四个 return 处各补一遍，漏一处就是「动作 auto、回落值丢了」。
+// 现已收敛成 resolveCategory 内的 `pick()` 单点，故断言改为守**单点存在 + 四个出口都走它**，
+// 这才是原意（「按动作分别带回 reason/note」这件事只有一份实现）。
+ok('resolveCategory 按动作分别带回 reason / note（收敛到 pick 单点）', (function () {
+  const i = src.indexOf('function resolveCategory(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  if (body.indexOf('const pick = ') < 0) return false
+  // 三条动作专属字段都在单点里（deny→reason / ask→note / auto→autoFallback）
+  if (!/action === 'auto'/.test(body) || !/autoFallback/.test(body)) return false
+  // 四个出口全部走 pick，不再有裸 return {...}（后者就是「补漏一处」的来源）
+  const bare = (body.match(/return \{ action: /g) || []).length
+  const viaPick = (body.match(/return pick\(/g) || []).length
+  return bare === 0 && viaPick === 4
+})())
 // 防回退：note 必须与 reason **在数据层分离**。reason 会被 recordDecision 写入决策记录、
 // 再随 perm_status 的 recentDecisions 下发给 AI；note 只该在弹窗上给人看（走 entry.note →
 // /permgate/pending → 客户端 p.note 展示位）。曾把 note 拼进 reason 文案，等于搭着审计链路
@@ -1461,7 +1536,9 @@ ok('落盘时 reason 只随 deny、note 只随 ask（allow 两者都不存）', 
 // 防回退：addProjectException 曾自建一份 trim200（会对非字符串 String() 强转），与 normalizeText 分叉
 ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有第二份 trim200）', !src.includes('const trim200 =') && src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
 ok('同向去重命中后用 textPatch 回写（reason/note 各写各的）', src.includes('const textPatch = (hit) => {') && (src.match(/textPatch\(hit\)/g) || []).length === 2 && (src.match(/if \(reason\) hit\.reason = reason/g) || []).length === 1 && (src.match(/if \(note\) hit\.note = note/g) || []).length === 1)
-ok('工作区外 ask 分支回传例外来源（cat/ruleId 与文案同源）', src.includes("const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)") && (src.match(/m\.src \? m\.src\.ruleId : null/g) || []).length === 8)
+// `m.src ? m.src.ruleId : null` 从 8 处增到 12 处：四个区外分类各多一条 auto 出口
+// （auto 出口与 deny/ask/allow 同口径地回传例外来源 —— 正是本断言要守的东西）。
+ok('工作区外 ask 分支回传例外来源（cat/ruleId 与文案同源）', src.includes("const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)") && (src.match(/m\.src \? m\.src\.ruleId : null/g) || []).length === 12)
 ok('工作区外 ask 的文案在有例外时用例外备注、无例外时回落「需确认」', (src.match(/m\.src \? exReason\(m\.src\) : '（需确认）'/g) || []).length === 3 && src.includes("m.src ? exReason(m.src) : '（写入需确认）'"))
 ok('面板例外动作下拉复用宿主下发的 MODES（三态，不再硬编码两项）', cli.includes('sel(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES, busy)') && !cli.includes("React.createElement('option', { value: 'allow' }, T('panel.allow'))"))
 ok('面板两个输入框按动作二选一（deny→拒绝原因，ask→备注）', cli.includes("exOf(c).action === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh')") && cli.includes("exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh')"))
@@ -1740,13 +1817,75 @@ ok('分类默认值可带拒绝原因，且只在 deny 时保留', src.includes(
 // 防回退：写入单点曾把「未提供 reason」当成「清除 reason」，一次无关写入就会静默删掉用户写好的原因
 // 三处：setCategoryMode / setFallbackMode / setCommandSub（子设置与分类同口径）
 ok('未提供 reason 时保留原值（不再把 undefined 当成清除）', (src.match(/if \(reason === undefined\) return true/g) || []).length === 3 && src.includes("const t = reason === undefined ? prevReason : normalizeText(reason)"))
-ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透全局）', src.includes("if (pv && pv !== 'inherit') return { action: pv, ruleId: null, reason: normalizeText(pCat.reason) }") && src.includes("return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }"))
-ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', src.includes('function fallbackSetting(root) {') && src.includes("if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }") && src.includes("return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }") && src.includes('return fallbackSetting(root).mode'))
+// 判据改为结构性：项目层分支只读 pCat.*、全局层分支只读 gCat.*（mode 与 reason 同源），
+// 且 auto 时把同层的 autoFallback 一并带上。原断言钉两条 return 的字面形态，
+// 加 autoFallback 后必然要改；它守的「同源」这件事本身与字面无关。
+ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透全局）', (function () {
+  const i = src.indexOf('function resolveCategory(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  // 项目层出口：动作来自 pv，理由与回落值都来自 pCat
+  if (!/return pick\(pv, null, normalizeText\(pCat\.reason\), undefined, pCat\.autoFallback\)/.test(body)) return false
+  // 全局层出口：动作来自 gCat.mode，理由与回落值都来自 gCat
+  if (!/return pick\(gCat\.mode \|\| 'allow', null, normalizeText\(gCat\.reason\), undefined, gCat\.autoFallback\)/.test(body)) return false
+  // 穿透条件仍是「项目显式非 inherit」
+  return /if \(pv && pv !== 'inherit'\)/.test(body)
+})())
+// 判据从「两个 return 的字面量」改为**结构性**：fallbackSetting 必须把 mode 与 reason
+// 从**同一层**取用（同源），且 auto 时把该层的 autoFallback 一并带上。
+// 原断言钉死两条 return 的字面形态，加 autoFallback 就必须改它 —— 而它守的其实是
+// 「动作与文字同源」这件事，故改为按语义检查：项目层分支只读 proj.*、全局层只读 g/config.global.*。
+ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', (function () {
+  const i = src.indexOf('function fallbackSetting(root) {')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  // 项目层分支：mode 与 reason 都取自 proj（不得 mode 取项目、reason 取全局）
+  if (!/mode: pv/.test(body) || !/reason: normalizeText\(proj\.fallbackReason\)/.test(body)) return false
+  // 全局层分支：mode 与 reason 都取自 g
+  if (!/mode: gm/.test(body) || !/reason: normalizeText\(g\.fallbackReason\)/.test(body)) return false
+  // auto 时两层都要带上该层自己的 autoFallback（不得动作取项目、回落取全局）
+  if (!/o\.autoFallback = proj\.fallbackAutoFallback/.test(body)) return false
+  if (!/o\.autoFallback = g\.fallbackAutoFallback/.test(body)) return false
+  return src.includes('return fallbackSetting(root).mode')
+})())
 ok('兜底拒绝原因落盘并在切离 deny 时清除', src.includes("if (t) block.fallbackReason = t") && src.includes('else delete block.fallbackReason') && src.includes("if (mode !== 'deny') { delete block.fallbackReason; return true }") && src.includes("if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }"))
 ok('快捷工具改为 { action, reason? } 对象形态，老字符串由单一入口收敛', src.includes('function normalizeQuickEntry(v) {') && src.includes("const raw = typeof v === 'string' ? { action: v } : (v && typeof v === 'object' ? v : null)") && src.includes("if (raw.action === 'deny') { const t = normalizeText(raw.reason); if (t) out.reason = t }"))
 // 原本计数为 4（定义 + 弹窗候选 + 面板路由 + perm_set_quick 工具）；工具移除后为 3
 ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 3 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
-ok('quickAction 用取值函数取值，并保留防御性字符串回退（防非对象形态产出非法 action）', src.includes("const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)") && src.includes("const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)") && src.includes("return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]) }"))
+// 断言升级：原版要求两个 return 的**字面形态**（`return { action: modeOf(...), reason: reasonOf(...) }`），
+// 加 autoFallback 后必然要改它。它守的是「取值走函数、保留防御性字符串回退」这件事，故改为：
+// ① 两个取值函数存在（modeOf 有字符串回退，reasonOf/afOf 同口径）；② 两个 return 都经它们取值；
+// ③ afOf 只在动作是 auto 时给出回落值（与 reason 仅 deny 同一条纪律）。
+ok('quickAction 用取值函数取值，并保留防御性字符串回退（防非对象形态产出非法 action）', (function () {
+  const i = src.indexOf('function quickAction(')
+  if (i < 0) return false
+  let d = 0
+  let body = ''
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') d++
+    else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+  }
+  if (!body) return false
+  if (!body.includes("const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)")) return false
+  if (!body.includes("const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)")) return false
+  // afOf 必须带 `v.action === 'auto'` 这个前置：否则非 auto 的条目也会产出回落值
+  if (!/const afOf = \(v\) => \(v && typeof v === 'object' && v\.action === 'auto' \? v\.autoFallback : undefined\)/.test(body)) return false
+  // 两个 return（项目层 / 全局层）都必须经这三个取值函数，不得直接读 .action/.reason
+  const rets = body.match(/return \{ action: modeOf\((\w+)\[k\]\), reason: reasonOf\(\1\[k\]\), autoFallback: afOf\(\1\[k\]\) \}/g) || []
+  return rets.length === 2
+})())
 ok('三处 reason 都拼进回给 AI 的拒绝文案', src.includes("const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''") && src.includes("const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''") && src.includes("' 次相同调用' + exReason(d)"))
 // 工具已移除；三处默认动作的 reason 仍由面板路由承载，改测面板的输入控件与回填
 ok('分类 / 兜底 / 快捷工具三处都有 reason 输入控件',
@@ -2210,8 +2349,10 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     try {
       const actionAllowedSrc = (src.match(/function actionAllowed\(action, allowed\) \{[\s\S]*?\n\}/) || [''])[0]
       if (!actionAllowedSrc) return false
+      const afSrc = (src.match(/function normalizeAutoFallback\(v, action\) \{[\s\S]*?\n    \}/) || [''])[0]
+      if (!afSrc) return false
       F = new Function('MODES', 'ALL_MODES', 'TIERS', 'normalizeText',
-        actionAllowedSrc + '\n' + body + '\n; return normalizeSubSetting;')(
+        actionAllowedSrc + '\n' + afSrc + '\n' + body + '\n; return normalizeSubSetting;')(
         ['ask', 'allow', 'deny'], ['ask', 'allow', 'deny', 'inherit'], SP_TIERS,
         (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined))
     } catch (e) { return false }
@@ -2498,8 +2639,12 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const iNext = body.indexOf('return next()')
     return iUpg > 0 && iNote > iUpg && iNext > iNote
   })())
+  // 判据里的动作变量允许是 `d.action` 或已折算的 `act`：
+  // 后者是 §9A.5 的「未知动作折成 ask」闸引入的局部变量，语义与 `d.action` 等价
+  // （走到计数点时 act 必为 allow）。断言守的是「有 customReview 闸 + 排除 perm_*」这两件事，
+  // 不是变量名 —— 钉死变量名会让一次正确的重构变红。
   ok('★ perm_* 仍被排除在循环计数之外（权限查询反复调用不代表卡死）',
-    /if \(customReview && d\.action === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src))
+    /if \(customReview && (?:d\.action|act) === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src))
   // ★★ 做法 A：doomloop 从「命中即 return」改为「算候选 → 出口合并、取更严者」。
   // 这是本次最重要的改动（G2-2 / G2-4 两条 fail-open 的修复点），故按形状钉死：
   //   ① 候选只在 customReview 下读取（L-6：非该模式时 decide 首行就放行，不该读计数）；
@@ -2644,7 +2789,7 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 且计数点不带 customReview。
   ok('★★ 计数与清零都受 customReview 闸门约束（非审查模式不累积）',
     /if \(d\.action !== 'allow' \|\| !customReview\) resetStreak\(sk\)/.test(src)
-    && /if \(customReview && d\.action === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src)
+    && /if \(customReview && (?:d\.action|act) === 'allow' && \(typeof exec\.name !== 'string' \|\| exec\.name\.indexOf\('perm_'\) !== 0\)\) \{/.test(src)
     && src.includes("const customReview = sessionPresetName(exec) === 'custom-review'"))
 
 
@@ -4397,17 +4542,19 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     }
     let E = null
     try {
-      // `actionAllowed` 从 src 抠真实实现（理由同 normalizeSubSetting 那条断言：
-      // 手抄副本会让判据失去鉴别力）。
+      // `actionAllowed` / `normalizeAutoFallback` 都从 src 抠真实实现（理由同
+      // normalizeSubSetting 那条断言：手抄副本会让判据失去鉴别力）。
       const actionAllowedSrc2 = (src.match(/function actionAllowed\(action, allowed\) \{[\s\S]*?\n\}/) || [''])[0]
       if (!actionAllowedSrc2) throw new Error('actionAllowed 未找到')
+      const afSrc = (src.match(/function normalizeAutoFallback\(v, action\) \{[\s\S]*?\n    \}/) || [''])[0]
+      if (!afSrc) throw new Error('normalizeAutoFallback 未找到')
       E = new Function('EXC_CATS', 'MODES', 'normalizeException', 'normalizeText', [
         sliceFn3('setExceptionEntry'),
         'return { setExceptionEntry }',
       ].join('\n'))(EXC_L, ['ask', 'allow', 'deny'],
         // normalizeException 的真实实现（与 index.js 同源，从 src 里抠）
         new Function('MODES', 'ALL_MODES', 'normalizeText',
-          actionAllowedSrc2 + '\n' + sliceFn3('normalizeException') + '; return normalizeException')(
+          actionAllowedSrc2 + '\n' + afSrc + '\n' + sliceFn3('normalizeException') + '; return normalizeException')(
           ['ask', 'allow', 'deny'], ['ask', 'allow', 'deny', 'inherit'],
           (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)),
         (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined))
@@ -6054,6 +6201,26 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // 拒绝理由必须中英成对（与全文件 reason 口径一致）
   ok('★ 72 fail-safe 的拒绝理由中英成对',
     /uiLang === 'en' \? '[^']*' : '[^']*'/.test(preExecCatch.slice(preExecCatch.lastIndexOf('} catch (e) {'))))
+
+  // ★★ 未知动作必须折成 ask，**不得落到 next()**（§9A.5 的「强制 ask」）
+  //
+  // 这条守的是一个**只在降级场景下才会出现**的 fail-open，日常跑不出来：
+  //   归一化侧为了让「更高版本写入的 auto 规则」不被丢弃，改成**保留原值**（§9A.5 方向 A）；
+  //   而 pre-execute 的分支只认 ask / deny，其余一律落到 `return next()` = **放行**。
+  //   两者叠加 = 「配置里写了 auto，旧版读到后静默放行」，方向正是最危险的那一侧。
+  //
+  // 故必须存在一道归一闸：动作不在 allow/ask/deny 里 → 折成 ask，并且**后续分支读 `act`
+  // 而不是 `d.action`**（否则折了也不算，仍会落到 next()）。
+  // 判据取三件事同时成立，缺一不可：
+  //   ① KNOWN_ACTIONS 只含三档（把 auto 加进去就等于撤销这道闸）；
+  //   ② 折算表达式存在（`KNOWN_ACTIONS.indexOf(d.action) !== -1 ? d.action : 'ask'`）；
+  //   ③ ask 与 deny 两个分支都判 `act`（漏一处 = 那一处仍会落到 next()）。
+  // 变异验证：把 ① 里加上 'auto' → 本条变红（已实测）。
+  ok('★★ 未知动作折成 ask（不得落到 next() 静默放行）', (function () {
+    if (!/const KNOWN_ACTIONS = \['allow', 'ask', 'deny'\]/.test(preExecCatch)) return false
+    if (!/const act = KNOWN_ACTIONS\.indexOf\(d\.action\) !== -1 \? d\.action : 'ask'/.test(preExecCatch)) return false
+    return /if \(act === 'ask'\) \{/.test(preExecCatch) && /\} else if \(act === 'deny'\) \{/.test(preExecCatch)
+  })())
 
   // ── 27c. 客户端 factory 真实求值（本组唯一「执行」而非「匹配」的断言）──
   // 起因：PG_CARD_CSS 在模块顶层拼接了声明在其后的 const，命中 TDZ 抛 ReferenceError，

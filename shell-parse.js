@@ -7821,8 +7821,7 @@ export function tierSetOf(seg, labels, opts) {
  * 取值 1 的理由与 MODE_STRICTNESS 处同源：auto 与 ask 一样是「要过一道关」的档位
  * （ask 过关的是人，auto 过关的是模型），并列时由 `tiers` 的排列决定，不影响方向安全。
  */
-const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
-
+export const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
 /**
  * 命中档位 → 动作：取**最严**（deny > ask > allow）。
  *
@@ -9229,6 +9228,18 @@ export function assessCommand(source, shell, hooks) {
     if (ds.reason) for (const tier of TIERS) reasons[tier] = ds.reason
     if (ds.reason) t.reason = ds.reason
     if (ds.reason) t.reasons = reasons
+    // autoFallbacks 必须一起搬过来：这个分支会**重建**表对象，漏搬等于把回落值丢了。
+    // 后果不报错、不告警 —— auto 动作照常生效，但模型失败后按缺省 ask 处理，
+    // 与用户配的 deny 不符（且只在这条「旧契约 + auto」的组合下出现，日常测不出来）。
+    // 按档取同名键；旧契约的裸形态没有逐档回落值，故不回填（缺省由 tierVerdict 补 ask）。
+    if (ds.autoFallbacks && typeof ds.autoFallbacks === 'object') {
+      const afs = {}
+      for (const tier of TIERS) {
+        const v = ds.autoFallbacks[tier]
+        if (v === 'ask' || v === 'allow' || v === 'deny') afs[tier] = v
+      }
+      if (Object.keys(afs).length) t.autoFallbacks = afs
+    }
     return t
   }
   /**
@@ -9263,6 +9274,33 @@ export function assessCommand(source, shell, hooks) {
    */
   const tierVerdict = (ds, tiers) => {
     const action = strictestTierAction(ds, tiers)
+    // ── auto：回落值与动作**同源**取用 ──────────────────────────────────────────
+    // 与下面 deny 取理由的顺位完全同构：先取**决定动作的那一档**（动作就是它定的），
+    // 取不到再按 `TIER_RANK` 试并列档。不跨严格度取 —— 更松的档本来就不是 auto，
+    // 它的回落值不属于这次裁决（否则 wide 是 auto、inside 是 ask 时，会把 wide 的
+    // 回落值安到一次由 inside 决定的裁决上）。
+    // 缺省 ask：与 index.js 的 normalizeAutoFallback 同源（模型失败后问人，方向安全）。
+    if (action === 'auto' && ds) {
+      const afs = (ds.autoFallbacks && typeof ds.autoFallbacks === 'object') ? ds.autoFallbacks : null
+      const afOfTier = (t) => {
+        const v = (t && afs) ? afs[t] : null
+        return (v === 'ask' || v === 'allow' || v === 'deny') ? v : null
+      }
+      const t = decisiveTierOf(ds, tiers)
+      const v = t ? afOfTier(t) : null
+      if (v) return { action, reason: null, autoFallback: v }
+      const rank = TIER_STRICTNESS[action]
+      const same = []
+      for (const u of (Array.isArray(tiers) ? tiers : [])) {
+        if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
+      }
+      sortTiersByRank(same)
+      for (const u of same) {
+        const vu = afOfTier(u)
+        if (vu) return { action, reason: null, autoFallback: vu }
+      }
+      return { action, reason: null, autoFallback: 'ask' }
+    }
     if (action === 'deny' && ds) {
       const reasons = ds.reasons
       const reasonOfTier = (t) => {
@@ -9301,6 +9339,11 @@ export function assessCommand(source, shell, hooks) {
     matched: ruleId || null,
     reason: reason || null,
     note: null,
+    // 这条 base 用于「整行读不懂 / 空命令」等**没有段**的路径，动作来自大分类（catOf），
+    // 而 catOf 的 `{action, reason}` 契约里不含回落值（它是旧契约的兼容形态）。
+    // 故这里不给 autoFallback —— 动作若是 auto，由 commandDecision 回落缺省 ask，
+    // 与 normalizeAutoFallback 的缺省一致（方向安全：问人）。
+    autoFallback: undefined,
   })
 
   const d = decomposeCommand(source, sh)
@@ -9331,6 +9374,7 @@ export function assessCommand(source, shell, hooks) {
     let action = c.action
     let reason = c.reason
     let ruleId = null
+    let autoFallback = null
     if (code !== 'empty') {
       // 方言维度（本轮缺陷 2 的修法）：`rawCommandNames` 只收文本、内部按 bash 判赋值，
       // 而赋值判据是**方言相对**的（见 `rawCommandNamesWithShell`）——pwsh 侧不传方言
@@ -9442,15 +9486,21 @@ export function assessCommand(source, shell, hooks) {
         if (v.action !== 'inherit') {
           action = v.action
           reason = v.reason
+          if (v.autoFallback) autoFallback = v.autoFallback
         }
       }
     }
-    return base(action, code, reason, ruleId)
+    const r = base(action, code, reason, ruleId)
+    // auto 的回落值：base() 恒返回 undefined（它服务的是无段的路径），故在这里补 ——
+    // 整行读不懂但子设置给出了 auto 时，仍要有回落值。
+    if (autoFallback) r.autoFallback = autoFallback
+    return r
   }
 
   const out = []
   let anyDeny = false
   let anyAsk = false
+  let anyAuto = false
   let anyInherit = false
 
   // 例外匹配单点（opaque 段与可读段共用，避免两份实现漂移）。
@@ -9622,6 +9672,9 @@ export function assessCommand(source, shell, hooks) {
     let reason = null
     let note = null
     let ruleId = null
+    // auto 的回落值：只有 action 最终是 auto 时才会被赋值（见各分支）。
+    // 与 reason（仅 deny）/ note（仅 ask）同一条纪律 —— 其它动作时不建这个字段。
+    let autoFallback = null
 
     if (unparsable) {
       // 读不懂的段：只跳过**授权方向**的例外（allow），其余照常生效。
@@ -9653,6 +9706,8 @@ export function assessCommand(source, shell, hooks) {
         action = v.action
         source = 'destructive'
         reason = v.reason
+        // auto 的回落值：与动作同源（v 已按 decisive 档取过，见 tierVerdict）
+        if (v.autoFallback) autoFallback = v.autoFallback
       } else {
         const c = catOf()
         action = c.action
@@ -9696,6 +9751,8 @@ export function assessCommand(source, shell, hooks) {
         action = v.action
         source = 'destructive'
         reason = v.reason
+        // auto 的回落值：与动作同源（v 已按 decisive 档取过，见 tierVerdict）
+        if (v.autoFallback) autoFallback = v.autoFallback
       } else {
         // ③ command 分类默认值
         const c = catOf()
@@ -9721,6 +9778,7 @@ export function assessCommand(source, shell, hooks) {
 
     if (action === 'deny') anyDeny = true
     else if (action === 'ask') anyAsk = true
+    else if (action === 'auto') anyAuto = true
     else if (action === 'inherit') anyInherit = true
 
     // `words` / `opaque` 随段一起交回：判定内部已经算出了它们（`segmentLabelsCore(seg.words)`
@@ -9730,7 +9788,7 @@ export function assessCommand(source, shell, hooks) {
     // 后果是候选侧**无法知道某一段已经被放行**：`Get-ChildItem *` 已配成 allow 时，
     // 弹窗仍然给出 `get-childitem *` 候选，点一次就往配置里再写一条语义重复的例外。
     // 交回 words 后消费侧不必再解析，判定与候选看到的是**同一批段对象**。
-    out.push({ op: seg.op, text: seg.text, words: seg.words, opaque: seg.opaque, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers })
+    out.push({ op: seg.op, text: seg.text, words: seg.words, opaque: seg.opaque, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers, autoFallback })
   }
 
   // fail-closed 合并：拒绝面取并集、放行面取交集。
@@ -9744,6 +9802,14 @@ export function assessCommand(source, shell, hooks) {
   let code
   if (anyDeny) { action = 'deny'; code = 'segment-deny' }
   else if (anyAsk) { action = 'ask'; code = 'segment-ask' }
+  // ── auto 的合并位置：**deny 与 ask 之后、inherit 之前** ──────────────────────────
+  // 一条命令里若有段是 deny，整条就该 deny（模型不该有机会放行一个用户明确拒绝的段）；
+  // 有段是 ask 时同理 —— ask 是「要问人」，而 auto 是「问模型」，人比模型更该被问。
+  // 两者都不在时才轮到 auto：此时没有任何段要求人来定，而至少有一段要求模型看。
+  // 放在 inherit 之前：inherit 表示「该段没有表态」，auto 是**有**表态，故优先。
+  // 若把 auto 放到 inherit 之后（或漏掉），auto 段会被当成「无表态」→ 落到
+  // `all-allow` 分支**静默放行**（fail-open，正是 §9A.4 警告的那一类）。
+  else if (anyAuto) { action = 'auto'; code = 'segment-auto' }
   else if (anyInherit) { action = 'inherit'; code = 'all-inherit' }
   else { action = 'allow'; code = 'all-allow' }
 
@@ -9756,6 +9822,14 @@ export function assessCommand(source, shell, hooks) {
     matched: decisive ? decisive.ruleId : null,
     reason: decisive ? decisive.reason : null,
     note: decisive ? decisive.note : null,
+    // auto 的回落值：只有动作是 auto 时才有意义（宿主的 commandDecision 据此下发，
+    // 其它动作时恒为 undefined，不建键 —— 与 reason（仅 deny）/ note（仅 ask）同一条纪律）。
+    //
+    // 从 `decisive` 段带出，而 decisive 段的值来自宿主 `destructive` 钩子下发的
+    // `autoFallbacks[t]`（见 index.js 的 destructiveTiers）：即「决定最终动作的那一档」
+    // 的回落值，与动作**同源**。段与段之间不做从严合并 —— 回落值是「模型失败后干什么」，
+    // 不是权限判据，且它只在**整条命令最终是 auto** 时才被消费，那时决定权已归模型。
+    autoFallback: decisive ? decisive.autoFallback : undefined,
   }
 }
 

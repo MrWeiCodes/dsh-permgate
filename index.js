@@ -1199,6 +1199,27 @@ export default {
       return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined
     }
 
+    // ── `autoFallback` 的归一化单点（四档动作的回落值）──────────────────────────────
+    // 语义：`action/mode === 'auto'` 时「**模型没能给出结论**（失败/超时/协议非法/escalate/
+    // 熔断）之后执行哪一个动作」。取值域是 `ask | allow | deny` —— **不含 `inherit`**：
+    // 回落是「这次调用最后怎么办」的最终答案，必须是一个能直接执行的动作；
+    // `inherit` 是层级继承语义（项目层没表态 → 穿透全局），把它当回落值等于让回落本身
+    // 又要再解析一次层级，既无法表达「项目 auto、回落到全局」这种想法（全局也可能是 auto），
+    // 也会让「模型失败后到底干了什么」变得不可预测。
+    //
+    // **只在动作确实是 auto 时才有意义**：动作不是 auto 时返回 undefined，调用方据此**不存这个键**。
+    // 与 reason（仅 deny 存）/ note（仅 ask 存）同一条纪律 —— 存了也读不到的值，
+    // 日后只会变成「面板上显示一个不生效的回落值」那种面板说谎。
+    //
+    // 缺省值取 `ask`：**方向安全**。用户把某处设成 auto 却没写回落时，模型失败后弹窗问人，
+    // 而不是静默放行或静默拒绝。这也是唯一一个「不问就一定有代价」的方向里代价最小的。
+    function normalizeAutoFallback(v, action) {
+      if (action !== 'auto') return undefined
+      if (v === 'allow' || v === 'deny') return v
+      // 'ask' 与「未填 / 非法值」都归到 ask：缺省即 ask，非法值也回落 ask（fail-closed）
+      return 'ask'
+    }
+
     function normalizeException(r, key) {
       if (!r || typeof r !== 'object') return null
       if (!actionAllowed(r.action, MODES)) return null
@@ -1212,6 +1233,9 @@ export default {
       // note 就只是一句备注。它会不会被 AI 读到、算不算隐私问题——明确不管，不作为议题。
       if (r.action === 'deny') { const t = normalizeText(r.reason); if (t) e.reason = t }
       if (r.action === 'ask') { const t = normalizeText(r.note); if (t) e.note = t }
+      // auto 的回落值：与 reason/note 同一条纪律 —— 只在动作是 auto 时才存这个键。
+      const af = normalizeAutoFallback(r.autoFallback, r.action)
+      if (af !== undefined) e.autoFallback = af
       if (key === 'command') e.match = value
       else e.path = value
       return e
@@ -1291,6 +1315,21 @@ export default {
         const legacy = normalizeText(r.reason)
         if (legacy) out.reason = legacy
       }
+      // ── 每档的 auto 回落值：只在**该档显式是 auto** 时保留 ─────────────────────
+      // 与 reasons 同一条纪律（只认档位名做键、只在该档动作成立时存）。
+      // 值域是 ask/allow/deny（不含 inherit）：回落是最终要执行的动作，必须可直接执行
+      // （理由见 normalizeAutoFallback）。非法值**丢弃而不是回落 ask** —— 丢弃后由读取侧
+      // destructiveTiers 补 ask，两者结果相同，但丢弃能保证「磁盘上没有用户没写过的键」
+      // （否则一次纯加载就会把 ask 固化进配置文件，与 threshold 那个坑同构）。
+      const rawAfs = r.autoFallbacks && typeof r.autoFallbacks === 'object' ? r.autoFallbacks : null
+      const afs = {}
+      for (const t of TIERS) {
+        const explicit = t === 'inside' ? out.action : out[t]
+        if (explicit !== 'auto') continue
+        const v = rawAfs ? rawAfs[t] : null
+        if (v === 'ask' || v === 'allow' || v === 'deny') afs[t] = v
+      }
+      if (Object.keys(afs).length) out.autoFallbacks = afs
       if (Object.keys(reasons).length) out.reasons = reasons
       return out
     }
@@ -1319,6 +1358,9 @@ export default {
       // 分类默认值的拒绝原因：只在 deny 时有用（allow 不弹窗、ask 用自己的 note），
       // 与例外同口径存一个 reason，供 decide() 拼进拒绝文案回给 AI。
       if (cat.mode === 'deny') { const t = normalizeText(c.reason); if (t) cat.reason = t }
+      // auto 的回落值：与 reason 同一条纪律 —— 只在 mode 是 auto 时才存。
+      const af = normalizeAutoFallback(c.autoFallback, cat.mode)
+      if (af !== undefined) cat.autoFallback = af
       if (EXC_CATS.indexOf(key) !== -1) {
         cat.exceptions = Array.isArray(c.exceptions) ? c.exceptions.map((r) => normalizeException(r, key)).filter(Boolean) : []
       }
@@ -1359,6 +1401,9 @@ export default {
       const out = { action: raw.action }
       // 拒绝原因只在 deny 时有意义：allow 不弹窗、ask 有自己的备注，存了也不会被读到
       if (raw.action === 'deny') { const t = normalizeText(raw.reason); if (t) out.reason = t }
+      // auto 的回落值：同上，只在动作是 auto 时才存
+      const af = normalizeAutoFallback(raw.autoFallback, raw.action)
+      if (af !== undefined) out.autoFallback = af
       return out
     }
 
@@ -1395,6 +1440,9 @@ export default {
       if (r.path !== undefined && r.path !== null && r.path !== '') rule.path = String(r.path)
       if (r.args !== undefined && r.args !== null && r.args !== '') rule.args = String(r.args)
       if (r.reason !== undefined && r.reason !== null && r.reason !== '') rule.reason = String(r.reason)
+      // auto 的回落值：只在动作是 auto 时存（与 reason/note 同一条纪律）
+      const af = normalizeAutoFallback(r.autoFallback, r.action)
+      if (af !== undefined) rule.autoFallback = af
       return rule
     }
 
@@ -1415,6 +1463,12 @@ export default {
       const global = { quickTools: normalizeQuick(g.quickTools, needRetire, stats), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
       // 兜底拒绝原因：与分类同口径，只在 deny 时保留
       if (gFb === 'deny') { const t = normalizeText(g.fallbackReason); if (t) global.fallbackReason = t }
+      // 兜底的 auto 回落值：**字段名必须与分类/例外/快捷工具不同**（`fallbackAutoFallback`）——
+      // 兜底是**标量**（`fallbackMode: 'auto'`）而不是对象，没有地方挂 `autoFallback` 子键。
+      // 名字取「fallback + AutoFallback」而不是复用 `autoFallback`：后者与分类块里的同名键
+      // 语义不同、层级也不同，同名会让「哪个是兜底的」在阅读时永远要靠上下文猜。
+      const gFbAf = normalizeAutoFallback(g.fallbackAutoFallback, gFb)
+      if (gFbAf !== undefined) global.fallbackAutoFallback = gFbAf
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
       const projects = {}
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
@@ -1423,6 +1477,11 @@ export default {
         const pFb = ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit'
         const pb = { quickTools: normalizeQuick(p.quickTools, false), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
         if (pFb === 'deny') { const t = normalizeText(p.fallbackReason); if (t) pb.fallbackReason = t }
+        // 项目层兜底的 auto 回落值：与全局层同口径（只在 fallbackMode 是 auto 时存）。
+        // `inherit` 时 normalizeAutoFallback 返回 undefined → 不建键，符合「整体继承、
+        // 项目层无 fallback 字段」的语义（§2.3）。
+        const pFbAf = normalizeAutoFallback(p.fallbackAutoFallback, pFb)
+        if (pFbAf !== undefined) pb.fallbackAutoFallback = pFbAf
         for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
         projects[key] = pb
       }
@@ -2127,11 +2186,20 @@ export default {
     // 兜底策略：未匹配任何规则的调用如何处理（project 覆盖 global，默认 ask）。
     // 与分类默认值同构：mode 与它自己的拒绝原因同源取用——项目显式配置就取项目的，
     // 项目是 inherit 才穿透到全局的（否则会出现「动作来自项目、文字来自全局」的错配）。
+    // autoFallback 同理同源：动作是 auto 时才带上，且缺省 ask（见 normalizeAutoFallback）。
     function fallbackSetting(root) {
       const proj = projectBlock(root)
       const pv = proj && proj.fallbackMode
-      if (pv && pv !== 'inherit') return { mode: pv, reason: normalizeText(proj.fallbackReason) }
-      return { mode: config.global.fallbackMode || 'ask', reason: normalizeText(config.global.fallbackReason) }
+      if (pv && pv !== 'inherit') {
+        const o = { mode: pv, reason: normalizeText(proj.fallbackReason) }
+        if (pv === 'auto') o.autoFallback = proj.fallbackAutoFallback || 'ask'
+        return o
+      }
+      const g = config.global
+      const gm = g.fallbackMode || 'ask'
+      const o = { mode: gm, reason: normalizeText(g.fallbackReason) }
+      if (gm === 'auto') o.autoFallback = g.fallbackAutoFallback || 'ask'
+      return o
     }
 
     function fallbackMode(root) {
@@ -2177,19 +2245,30 @@ export default {
       const proj = projectBlock(root)
       const pCat = proj ? proj[catKey] : undefined
       const gCat = config.global[catKey] || freshCategory(catKey, false)
+      // 例外与分类默认值共用同一条「动作 + 附带字段」的取值口径：auto 的回落值必须与动作
+      // **同源**取用（动作来自项目、回落值来自全局就是错配），故这里做成一个出口包装，
+      // 而不是在四个 return 处各写一遍 —— 逐处写就是四个漏改点，而漏改的方向是
+      // 「auto 生效了、回落值却丢了」→ 模型失败后按缺省 ask 处理，与用户配置不符。
+      const pick = (action, ruleId, reason, note, af) => {
+        const o = { action, ruleId, reason, note }
+        // 只在动作是 auto 时带上：其它动作的 autoFallback 在归一化阶段就已不存，
+        // 这里再判一次是为了防「手改 config.json 塞进来的 autoFallback」被读到并误用。
+        if (action === 'auto') o.autoFallback = af || 'ask'
+        return o
+      }
       if (value !== null && value !== undefined && EXC_CATS.indexOf(catKey) !== -1) {
         const pl = pCat && Array.isArray(pCat.exceptions) ? pCat.exceptions : []
-        for (const r of pl) if (matchException(r, value, kind, root, cwd)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of pl) if (matchException(r, value, kind, root, cwd)) return pick(r.action, r.id, (r.action === 'deny' && r.reason) ? r.reason : undefined, (r.action === 'ask' && r.note) ? r.note : undefined, r.autoFallback)
         const gl = Array.isArray(gCat.exceptions) ? gCat.exceptions : []
-        for (const r of gl) if (matchException(r, value, kind, root, cwd)) return { action: r.action, ruleId: r.id, reason: (r.action === 'deny' && r.reason) ? r.reason : undefined, note: (r.action === 'ask' && r.note) ? r.note : undefined }
+        for (const r of gl) if (matchException(r, value, kind, root, cwd)) return pick(r.action, r.id, (r.action === 'deny' && r.reason) ? r.reason : undefined, (r.action === 'ask' && r.note) ? r.note : undefined, r.autoFallback)
       }
       // 没命中例外 → 落分类默认值：它的拒绝原因与 mode 同源取用（项目显式配置就取项目的，
       // 项目 inherit 才穿透全局），避免「动作来自项目、文字来自全局」的错配。
       const pv = pCat && pCat.mode
-      if (pv && pv !== 'inherit') return { action: pv, ruleId: null, reason: normalizeText(pCat.reason) }
+      if (pv && pv !== 'inherit') return pick(pv, null, normalizeText(pCat.reason), undefined, pCat.autoFallback)
       // 项目未显式配置（缺失或 inherit）才穿透全局：此处 pv 已确定不生效，
       // 故直接取全局值，不再经 firstEffective 传一个恒不命中的 projVal（与 fallbackSetting 同形）。
-      return { action: gCat.mode || 'allow', ruleId: null, reason: normalizeText(gCat.reason) }
+      return pick(gCat.mode || 'allow', null, normalizeText(gCat.reason), undefined, gCat.autoFallback)
     }
 
     // ── 「reason 为空时不建键」这条纪律的去处 ──────────────────────────────────────
@@ -2438,6 +2517,36 @@ export default {
         if (txt) reasons[t] = txt
       }
       out.source = source
+      // ── 每档的 auto 回落值（与动作**同源**取用）───────────────────────────────
+      // 存储形状：`destructive.autoFallbacks = { wide: 'deny', … }`，与 `reasons` 平级。
+      // 为什么必须有这个字段（计划里原先没有，是实现时发现的缺口）：
+      //   八档的动作可以是 auto（`setCommandSub` 放行 auto，§8.2），而 auto 的语义要求
+      //   「模型失败后执行什么」有明确落点。若不给八档各自的回落值，就只能全部共用
+      //   一个类别级回落 —— 但 wide（删系统目录）与 inside（普通命令）显然该有不同的落点，
+      //   共用一个等于把「逐档精细配置」这个卖点在 auto 这一档上取消掉。
+      //
+      // 取值次序与 `reasons` **完全同构**（本层 per-tier → 项目 → 全局）：动作来自哪一层，
+      // 回落值就优先取那一层的同名键。理由同 reasons 处：面板的档位下拉框只提交
+      // `{target, tier, action}`、不带回落值，于是「全局写了回落值 + 项目只改动作」时
+      // 只按动作来源层取会得到 undefined —— 那时回落到 ask（方向安全，但用户配的值丢了）。
+      // 跨层回落让这种常见形态仍能取到用户写过的值。
+      //
+      // 只在**该档最终是 auto** 时下发：与 reason（仅 deny）/ note（仅 ask）同一条纪律，
+      // 存了也读不到的值只会让面板显示一个不生效的配置。
+      const autoFallbacks = {}
+      const afOf = (sub, t) => {
+        if (!sub || !sub.autoFallbacks || typeof sub.autoFallbacks !== 'object') return undefined
+        const v = sub.autoFallbacks[t]
+        return v === 'ask' || v === 'allow' || v === 'deny' ? v : undefined
+      }
+      for (const t of TIERS) {
+        if (out[t] !== 'auto') continue
+        const from = explicitOf(t)
+        const v = afOf(from && from.from, t) || afOf(pSub, t) || afOf(gSub, t)
+        // 缺省 ask：与 normalizeAutoFallback 的缺省同源（模型失败后问人，方向安全）
+        autoFallbacks[t] = v || 'ask'
+      }
+      if (Object.keys(autoFallbacks).length) out.autoFallbacks = autoFallbacks
       if (Object.keys(reasons).length) out.reasons = reasons
       return out
     }
@@ -4001,15 +4110,18 @@ export default {
       // 注意与下面的 inherit 守卫不同：normalizeQuickEntry 用 ALL_MODES 校验，'inherit' 能存活。
       const modeOf = (v) => (v && typeof v === 'object' ? v.action : v)
       const reasonOf = (v) => (v && typeof v === 'object' ? v.reason : undefined)
+      // autoFallback 与 action 同源取用：只在动作是 auto 时才带上（否则 undefined，
+      // 由调用方决定要不要建键 —— 与 reason 的处理方式一致）。
+      const afOf = (v) => (v && typeof v === 'object' && v.action === 'auto' ? v.autoFallback : undefined)
       for (const k of Object.keys(pMap)) {
-        if (modeOf(pMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]) }
+        if (modeOf(pMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]), autoFallback: afOf(pMap[k]) }
       }
       const gMap = config.global.quickTools || {}
       for (const k of Object.keys(gMap)) {
         // 与项目分支同口径：全局层本不该出现 inherit（写入侧 setQuickAction 对 global+inherit
         // 走 delete），但手工编辑 config.json 可以塞进来。若不跳过，decide() 拿到的 action 既不是
         // ask 也不是 deny，pre-execute 会直接 next() —— 等于静默放行。
-        if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(gMap[k]), reason: reasonOf(gMap[k]) }
+        if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(gMap[k]), reason: reasonOf(gMap[k]), autoFallback: afOf(gMap[k]) }
       }
       // 预设工具的默认动作同样是「决策默认」：配置里缺席（升级前生成的老配置不含新键）时按
       // QUICK_DEFAULTS 裁决，与面板显示走同一条链（项目键 → 全局键 → 预设默认 → 兜底），
@@ -4616,6 +4728,26 @@ export default {
         const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
         return { action: 'deny', src, cat, pz: p[0], pe: p[1] }
       }
+      // ── auto：两道闸里任一道是 auto，就按 auto 处理 ─────────────────────────────
+      // 必须在 ask/allow 之前判，否则 auto 会**落到下面的 allow 分支被静默放行**。
+      // 为什么取「任一道 auto 即 auto」而不是别的合并方式：两道闸是**并列**关系
+      // （区外闸与分类闸都放行才算放行），与 deny/ask 的「任一道拦即拦」同构 ——
+      // auto 的语义是「这一道交给模型判」，它既不是放行也不是拒绝，故它出现时
+      // 必须让模型看过再决定，不能因为**另一道**是 allow 就把 auto 这一道抹掉。
+      // 两道的 autoFallback 不同时取**更严**的那个（deny > ask > allow）：
+      // 模型失败后两道闸各自要求的落点不同，此时按从严者执行，方向安全。
+      if (d.action === 'auto' || e.action === 'auto') {
+        const a = d.action === 'auto' ? d : null
+        const b = e.action === 'auto' ? e : null
+        const src = a || b
+        const cat = a ? gate : catKey
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
+        const afs = [a && a.autoFallback, b && b.autoFallback].filter((x) => x === 'ask' || x === 'allow' || x === 'deny')
+        // 从严：deny(2) > ask(1) > allow(0)；都缺时 ask（与 normalizeAutoFallback 的缺省同源）
+        const rank = { allow: 0, ask: 1, deny: 2 }
+        const af = afs.length ? afs.reduce((x, y) => (rank[y] > rank[x] ? y : x)) : 'ask'
+        return { action: 'auto', autoFallback: af, src, cat, pz: p[0], pe: p[1] }
+      }
       if (d.action === 'ask' || e.action === 'ask') {
         // 与 deny/allow 同口径：由**例外**触发的 ask 让 cat 跟随该例外所在闸，前缀与 ruleId 同源；
         // 纯模式默认值触发的 ask 沿用「区外闸优先」的既有取法（此时无 ruleId，文案回落「（需确认）」）。
@@ -4776,7 +4908,7 @@ export default {
       // 这里曾经写着「面板拖动排序是独立议题（尚未实现）」—— 那个议题已经落地，注释随之更新。
       for (const rule of rules) {
         if (ruleMatches(rule, name, args)) {
-          return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule' })
+          return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule', autoFallback: rule.autoFallback })
         }
       }
       if (isFileRead(name, args)) {
@@ -4789,12 +4921,13 @@ export default {
           const m = outsideMatrix('read', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('read', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
       }
       // 读图与读文件同一条判定链（工作区外先过**区外读闸**，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
@@ -4806,12 +4939,13 @@ export default {
           const m = outsideMatrix('image', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('image', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
       }
       if (isFileWrite(name, args)) {
         const fp = absTargetOf(pathArg(args), cwd)
@@ -4820,12 +4954,13 @@ export default {
           const m = outsideMatrix('edit', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('edit', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过**区外写闸**（区外写闸 + undo 合并矩阵）。
@@ -4835,19 +4970,20 @@ export default {
           const m = outsideMatrix('undo', fp, root, cwd)
           if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('undo', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
       }
       if (COMMAND_TOOLS[name]) {
         return out(commandDecision(exec, root, cwd, exReason, exReasonEn, exNote))
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
-        return out({ action: d.action, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null })
       }
       const q = quickAction(name, root)
       if (q) {
@@ -4857,14 +4993,14 @@ export default {
         // 该工具被显式设成 deny 且写了拒绝原因时带上它（回给 AI）；预设默认值没有原因
         const qr = q.action === 'deny' && q.reason ? '（' + q.reason + '）' : ''
         const qrEn = q.action === 'deny' && q.reason ? ' (' + q.reason + ')' : ''
-        return out({ action: q.action, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' })
+        return out({ action: q.action, autoFallback: q.autoFallback, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' })
       }
       const fb = fallbackSetting(root)
       if (fb.mode === 'allow') return out({ action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null })
       // 兜底的拒绝原因同样回给 AI（ask 时它只是弹窗文案的一部分，不参与回传）
       const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
       const frEn = fb.mode === 'deny' && fb.reason ? ' (' + fb.reason + ')' : ''
-      return out({ action: fb.mode, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
+      return out({ action: fb.mode, autoFallback: fb.autoFallback, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
     }
 
     // 段级判定摘要：把「哪一段被拦、命中哪一档」讲清楚。
@@ -5101,7 +5237,7 @@ export default {
         const fb = fallbackSetting(root)
         const fr = fb.mode === 'deny' && fb.reason ? '（' + fb.reason + '）' : ''
         const frEn = fb.mode === 'deny' && fb.reason ? ' (' + fb.reason + ')' : ''
-        return { action: fb.mode, reason: bi('执行命令：未配置判定，按兜底策略处理：' + fb.mode + fr, 'Run command: no verdict configured; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'command', value: cmd, kind: 'command', segments: a.segments }
+        return { action: fb.mode, autoFallback: fb.autoFallback, reason: bi('执行命令：未配置判定，按兜底策略处理：' + fb.mode + fr, 'Run command: no verdict configured; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'command', value: cmd, kind: 'command', segments: a.segments }
       }
       const exZh = exReason(a)
       const exEn = exReasonEn(a)
@@ -5111,6 +5247,10 @@ export default {
       // 见 blastRadiusOf 的注释（`rmdir /s /q B:\` 与删一个普通目录在判定链上完全一样）。
       return {
         action: a.action,
+        // auto 的回落值：`a.autoFallback` 由 assessCommand 从决定动作的那一段/那一档带出
+        // （见 shell-parse.js 的 decisive 取值与 destructiveTiers 的 autoFallbacks）。
+        // 动作不是 auto 时它是 undefined —— 与其它出口同口径，调用方据此不建键。
+        autoFallback: a.action === 'auto' ? (a.autoFallback || 'ask') : undefined,
         reason: bi('执行命令' + exZh, 'Run command' + exEn),
         note: exNote(a),
         ruleId: a.matched,
@@ -7323,7 +7463,31 @@ export default {
         // 它既不代表本插件做了判定，也和上面那条「不记决策」自相矛盾（记录都跳过了、日志还在刷）。
         // 判据仍用同一个 customReview，不另写一份。
         if (customReview) console.log('[permgate]', d.action, exec.name, L(d.reason, uiLang) || '')
-        if (d.action === 'ask') {
+        // ── 动作归一闸：**非 allow/ask/deny 一律折成 ask**（§9A.5 的「强制 ask」）──────
+        // 为什么必须有这一道，而不是靠「配置里写不出 auto」来保证：
+        //   ① 步骤一让归一化侧**保留未知动作**（为了不 fail-open），于是 `d.action` 现在
+        //      真的可能是 `auto` 或任何更高版本写入的值；
+        //   ② 下面的分支只认 ask / deny，其余一律落到 `next()` = **放行**。
+        // 两者叠加就是 §9A.4 点名的那个洞：「保留但不认识 = 静默放行」。
+        //
+        // 折成 ask 而不是 deny：这是**降级兼容**路径（旧版读到新版配置），用户的原始意图
+        // 是「让某个东西审一下」，退化成「问人」最接近原意，且方向安全（弹窗拦一次）。
+        // 折成 deny 会让回退期间所有 auto 规则变成硬拒绝，AI 无从继续。
+        //
+        // ⚠️ 这个闸在**评审段接线后仍然保留**：届时 `auto` 会在上面被 `reviewWithModel`
+        // 消化掉（产出 allow/deny/回落值），能走到这里的 `auto` 只可能是「评审段没接上」
+        // 或「模型层不可用且回落值本身非法」—— 两种情况都该问人，不该放行。
+        const KNOWN_ACTIONS = ['allow', 'ask', 'deny']
+        const act = KNOWN_ACTIONS.indexOf(d.action) !== -1 ? d.action : 'ask'
+        if (act !== d.action) {
+          // 只在**真发生了折算**时告警（不是每次调用都刷）：这条信息量在于「你的配置里
+          // 有个本版不认识的动作用上了」，同一份配置每次调用都会走到，逐次告警会淹没日志。
+          try {
+            console.warn('[permgate] 无法识别的动作 "' + d.action + '"（可能是更高版本写入），已按 ask 处理：'
+              + exec.name)
+          } catch (e) {}
+        }
+        if (act === 'ask') {
           const out = await askUser(exec, d)
           // 超时自动结案必须留痕：recordDecision 在审批**之前**执行且只记 d.action === 'ask'，
           // 若此处不补记，事后无法区分「人工批准」与「超时自动放行」——尤其 onTimeout === 'allow'
@@ -7335,7 +7499,7 @@ export default {
             console.warn('[permgate] approval timed out ->', out.kind, exec.name)
           }
           if (out.kind !== 'allow') return { kind: 'deny', reason: out.reason || (uiLang === 'en' ? 'User denied' : '用户拒绝') }
-        } else if (d.action === 'deny') {
+        } else if (act === 'deny') {
           // 判定直接拒绝（没有弹窗）时，AI 拿到的就是这条 —— 它是 AI 唯一的线索，
           // 故带上段摘要（「哪一段、命中哪一档」）。与决策日志同一份 segmentSummary，
           // 不是两处各拼一次：口径分叉时「AI 收到的理由」与「日志记的理由」会不一致，
@@ -7355,7 +7519,11 @@ export default {
         // `customReview` 是**硬前提**：非该模式下 decide() 恒 allow，若不挡就会攒出一个
         // 审查模式下从未发生过的连续次数（理由见上方清零处）。与清零用同一个变量，
         // 保证「跳过计数」与「清零」两个方向不会各自漂移。
-        if (customReview && d.action === 'allow' && (typeof exec.name !== 'string' || exec.name.indexOf('perm_') !== 0)) {
+        // 判据用 `act`（已折过的动作）而不是 `d.action`：走到这里说明 act 是 allow
+        // （ask/deny 两条分支都已 return），而若 d.action 是未知值、act 被折成 ask，
+        // 那也会在上面的 ask 分支 return —— 故两者在此等价，用 act 只是让「计数看的是
+        // 实际执行的动作」这件事在字面上成立。
+        if (customReview && act === 'allow' && (typeof exec.name !== 'string' || exec.name.indexOf('perm_') !== 0)) {
           noteLoopCall(sk, exec.name, exec.arguments)
         }
         return next()
