@@ -4494,6 +4494,9 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   }
   const T = 'my_tool'
   const A = { a: 1 }
+  // 读回磁盘配置。group22 里有一个同名局部函数（readCfg），但那是**另一组的闭包** ——
+  // 这里必须自己定义，否则跨组引用会 ReferenceError（实测踩过）。
+  const readCfgAuto = (home) => JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
 
   // ── A1：模型说 allow → 调用被放行（不是弹窗、不是拒绝）────────────────────────
   {
@@ -4763,6 +4766,95 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
       rmSync(h2.ws, { recursive: true, force: true }); rmSync(h2.home, { recursive: true, force: true })
     } catch (e) {}
+  }
+
+  // ── A20：设置路由 /permgate/set-auto-review 真的写盘并生效 ────────────────────
+  //
+  // 这一条守的是「设置项不只是存在，而是能被改、能落盘、能影响行为」。
+  // 只断言 statusView 里有字段是不够的 —— 那可能是个永远读默认值的死字段。
+  {
+    const { ws, home, h } = mkHostAuto({}, undefined, { fallbackAutoFallback: 'deny' })
+    // ① 初始：无显式配置
+    const st0 = await callRoute(h.routes, 'GET', '/permgate/status')
+    const ar0 = st0.data && st0.data.autoReview
+    ok('★ group24 A20: statusView 下发 autoReview（effective/defaults/explicit/llmAvailable）',
+      !!(ar0 && ar0.effective && ar0.defaults && Array.isArray(ar0.explicit) && typeof ar0.llmAvailable === 'boolean'),
+      JSON.stringify(ar0 && { e: ar0.effective, x: ar0.explicit, llm: ar0.llmAvailable }))
+    ok('★ group24 A20: 未配置时 effective 等于默认值、explicit 为空',
+      ar0.effective.timeoutMs === 20000 && ar0.effective.breakerThreshold === 10
+      && ar0.explicit.length === 0 && ar0.llmAvailable === false,
+      JSON.stringify({ t: ar0.effective.timeoutMs, b: ar0.effective.breakerThreshold, x: ar0.explicit }))
+
+    // ② 改超时为 0 → 落盘 → 生效（回落 deny + 超时 0 = 不弹窗直接拒绝）
+    const r1 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { timeoutMs: 0 } })
+    ok('★ group24 A20: set-auto-review 写盘成功且回带新值',
+      r1.data && r1.data.autoReview && r1.data.autoReview.effective.timeoutMs === 0
+      && r1.data.autoReview.explicit.indexOf('timeoutMs') !== -1,
+      JSON.stringify(r1.data && r1.data.autoReview))
+    // 真的落盘了（不只是内存）
+    const disk1 = readCfgAuto(home)
+    ok('★★ group24 A20: 设置真的写进 config.json（不是只在内存）',
+      disk1.global.autoReview && disk1.global.autoReview.timeoutMs === 0,
+      JSON.stringify(disk1.global.autoReview))
+    // ③ 行为真的变了：异常 + 回落 deny + 超时 0 → 不弹窗、直接 deny
+    const rr = await probeAuto(h, ws, 'a20', T, A)
+    ok('★★ group24 A20: 改超时为 0 后行为随之改变（异常时不再弹窗）',
+      rr === 'deny', JSON.stringify(rr))
+
+    // ④ 恢复默认 → 键被删掉，effective 回到 20000
+    const r2 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { clear: ['timeoutMs'] })
+    ok('★ group24 A20: clear 恢复默认（键被删除，effective 回默认值）',
+      r2.data && r2.data.autoReview && r2.data.autoReview.effective.timeoutMs === 20000
+      && r2.data.autoReview.explicit.indexOf('timeoutMs') === -1,
+      JSON.stringify(r2.data && r2.data.autoReview))
+    const disk2 = readCfgAuto(home)
+    ok('★ group24 A20: clear 之后磁盘上也没有残留键',
+      !disk2.global.autoReview || disk2.global.autoReview.timeoutMs === undefined,
+      JSON.stringify(disk2.global.autoReview))
+
+    // ⑤ 非法值被拒绝（不是静默落某个值）
+    const r3 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { timeoutMs: -5 } })
+    const ar3 = r3.data && r3.data.autoReview
+    ok('★ group24 A20: 非法值（负数）被丢弃，不写入',
+      ar3 && ar3.effective.timeoutMs === 20000 && ar3.explicit.indexOf('timeoutMs') === -1,
+      JSON.stringify(ar3 && { t: ar3.effective.timeoutMs, x: ar3.explicit }))
+
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A21：逐字段归一不整体替换（改一项不得把另一项冲掉）──────────────────────
+  {
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 3 }, undefined)
+    // 已有 breakerThreshold=3（来自初始配置），再改 timeoutMs —— 前者必须还在
+    await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { timeoutMs: 5000 } })
+    const disk = readCfgAuto(home)
+    ok('★★ group24 A21: 逐字段归一不整体替换（改超时不会把熔断阈值冲回默认）',
+      disk.global.autoReview && disk.global.autoReview.timeoutMs === 5000
+      && disk.global.autoReview.breakerThreshold === 3,
+      JSON.stringify(disk.global.autoReview))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A22：模型覆盖真的被用上（provider/model 成对才生效）──────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ provider: 'my-provider', model: 'my-model' }, llm)
+    await probeAuto(h, ws, 'a22', T, A)
+    ok('★ group24 A22: 设置页的模型覆盖生效（评审调用用了配置的 provider/model）',
+      llm.calls.length === 1 && llm.calls[0].provider === 'my-provider' && llm.calls[0].model === 'my-model',
+      JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A23：只填 provider 不填 model → 不算覆盖，回落会话模型 ────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ provider: 'only-provider' }, llm)
+    await probeAuto(h, ws, 'a23', T, A)
+    ok('★ group24 A23: provider/model 必须成对才生效（只填一个则跟随会话）',
+      llm.calls.length === 1 && llm.calls[0].provider === 'test-provider' && llm.calls[0].model === 'test-model',
+      JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 }
 

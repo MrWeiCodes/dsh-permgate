@@ -1479,6 +1479,31 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //    但那是一次静默补值 —— 面板上看到的与实际落盘的必须一致。
   ok('★ 切进 auto 时一并提交回落值（面板显示与实际落盘一致）',
     /if \(mode === 'auto'\) patch\[c \+ 'AutoFallback'\] = catAutoFallbackOf\(c\)/.test(cli))
+  // ⑤ 设置卡片：控件与宿主字段**一一对应**，且只出现在全局 tab。
+  //    缺一个控件 = 那个设置项只能手改 config.json（等于没做）；多一个 = 面板写了没人读。
+  ok('★★ auto 设置卡片的控件与宿主设置项一一对应（缺一个就等于没做）', (function () {
+    const i = cli.indexOf('const autoReviewCard = () => {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    // 只出现在全局 tab（不渲染禁用态 —— 那会让人以为项目层也能配）
+    if (!/if \(tab !== 'global'\) return null/.test(body)) return false
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 8 个键，每个都要有控件
+    const keys = ['timeoutMs', 'breakerThreshold', 'cacheEnabled', 'historyN', 'historyBudget', 'redactContentKeys', 'provider', 'model']
+    for (const k of keys) {
+      if (body.indexOf("'" + k + "'") === -1) return false
+    }
+    // 提交走单一端点（不得各写一个路由）
+    return /invoke\('permgate:set-auto-review'/.test(body)
+  })())
+  // ⑥ 评审能力不可用时必须显式提示：否则用户看到「auto 一直弹窗」无从判断原因。
+  ok('★ 无 llm 服务时面板显式提示（否则 auto 一直弹窗无从解释）',
+    cli.includes("'panel.autoNoLlm'") && /ar\.llmAvailable === false/.test(cli))
 }
 
 // ─────────────────────────────────────────────────────────────

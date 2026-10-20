@@ -6056,7 +6056,11 @@ export default {
       }
       const llm = getLlmService(ctx)
       if (!llm) return { verdict: 'escalate', code: 'infra-error', detail: 'llm service unavailable' }
-      const target = reviewTarget(agent, null)
+      // 模型覆盖：从设置页读（§4.2 第 ① 级）。**必须在这里读**，不能只把 null 传给
+      // reviewTarget —— 那会让「设置页配了 provider/model」完全失效（实测：A22 变红，
+      // 评审一直用会话模型，而面板上写着用户配的那个，又是一次面板说谎）。
+      const override = { provider: autoReviewSetting('provider'), model: autoReviewSetting('model') }
+      const target = reviewTarget(agent, override)
       if (!target) return { verdict: 'escalate', code: 'infra-error', detail: 'no model available' }
       let stream
       try {
@@ -7100,6 +7104,34 @@ export default {
           loopBuckets: streakBySession.size,
         },
         stats,
+        // ── 自动审批的设置项（§2.4）────────────────────────────────────────────
+        // 下发**生效值 + 默认值 + 本层是否显式配置**三样，面板据此：
+        //   · 输入框显示生效值（用户改过就是改过的值，没改过就是默认值）；
+        //   · placeholder / 提示写「默认 X」（用户清空时知道会回到哪）；
+        //   · 「已配置」标记区分「我设过」与「跟随默认」—— 没有它，用户无法判断
+        //     自己到底有没有改过某项（而清空输入框的操作需要这个前提才敢做）。
+        // 默认值必须下发：客户端硬编码一份会让「宿主改默认值」与「面板显示」分叉。
+        autoReview: {
+          effective: {
+            timeoutMs: autoReviewSetting('timeoutMs'),
+            breakerThreshold: autoReviewSetting('breakerThreshold'),
+            cacheEnabled: autoReviewSetting('cacheEnabled'),
+            historyN: autoReviewSetting('historyN'),
+            historyBudget: autoReviewSetting('historyBudget'),
+            redactContentKeys: autoReviewSetting('redactContentKeys'),
+            provider: autoReviewSetting('provider'),
+            model: autoReviewSetting('model'),
+          },
+          defaults: AUTO_REVIEW_DEFAULTS,
+          // 哪些键是用户显式写下的（决定面板是否显示「已配置」标记与「恢复默认」按钮）
+          explicit: (config.global.autoReview && typeof config.global.autoReview === 'object')
+            ? Object.keys(config.global.autoReview).filter((k) => Object.prototype.hasOwnProperty.call(AUTO_REVIEW_DEFAULTS, k))
+            : [],
+          // 评审能力是否可用：面板据此提示「未装 llm 服务时 auto 会全部走回落」。
+          // 这是**诊断信息**，不是开关 —— 用户看到它才知道为什么 auto 一直在弹窗。
+          llmAvailable: !!getLlmService(ctx),
+          ready: AUTO_REVIEW_READY,
+        },
         // 首屏只带 DECISIONS_PREVIEW 条（见其定义处）：本视图会被面板反复取（SSE 通知后重查、
         // 各写盘路由回带、perm_status 每次调用），全量下发会让每次下发都跟着内存窗口变重。
         // 展开走 /permgate/decisions。投影与展开通道共用 projectDecisions（见其说明）。
@@ -7863,6 +7895,37 @@ export default {
               if (typeof src[afKey] === 'string') setCategoryAutoFallback(rootOf(exec), t, c, src[afKey])
             }
           }
+          await persist(exec)
+          return json(res, statusView(exec))
+        }
+        // ── /permgate/set-auto-review：自动审批的工程参数（§2.4）────────────────────
+        // **只有全局层**：这些都是「评审机制怎么跑」的工程参数（超时、熔断、缓存、模型覆盖），
+        // 不是「某个项目的权限怎么定」。按项目配超时会带来一个荒唐的场景：同一份模型调用
+        // 在不同项目里超时不同，而评审结论本身是全局一致的 —— 参数跟着项目变只会让排查变难。
+        // 故这里**不接受 target**（也不落 ensureProject），与 set-sandbox 等项目级设置不同。
+        //
+        // 逐字段归一，**不整体替换**：面板一次只改一个控件，整体替换会让其它字段被未提交的
+        // 默认值覆盖。这与 normalizeAutoReview 的「只保留显式值」配合，保证「改超时不会
+        // 顺带把熔断阈值改回默认」。
+        //
+        // 传 `clear` 数组 = 恢复默认（删掉这些键，回到推导默认值）。不传与传 null 必须分开 ——
+        // 前者是「别动它」，后者是「我要它回默认」；否则用户清空输入框后那个值会永远粘在磁盘上。
+        if (pathname === '/permgate/set-auto-review' && method === 'POST') {
+          await init(exec)
+          const patch = a && typeof a.patch === 'object' ? a.patch : null
+          if (!patch && !(a && Array.isArray(a.clear))) return json(res, { error: '缺少 patch' })
+          if (!config.global.autoReview || typeof config.global.autoReview !== 'object') config.global.autoReview = {}
+          if (patch) {
+            const normalized = normalizeAutoReview(patch)
+            if (normalized) for (const k of Object.keys(normalized)) config.global.autoReview[k] = normalized[k]
+          }
+          if (a && Array.isArray(a.clear)) {
+            for (const k of a.clear) {
+              if (typeof k !== 'string') continue
+              if (Object.prototype.hasOwnProperty.call(AUTO_REVIEW_DEFAULTS, k)) delete config.global.autoReview[k]
+            }
+          }
+          if (!Object.keys(config.global.autoReview).length) delete config.global.autoReview
           await persist(exec)
           return json(res, statusView(exec))
         }

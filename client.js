@@ -437,6 +437,9 @@ window.__ModuleLoader__.load({
 			'permgate:set-category': ['POST', '/permgate/set-category'],
 			'permgate:set-command-sub': ['POST', '/permgate/set-command-sub'],
 			'permgate:set-doomloop': ['POST', '/permgate/set-doomloop'],
+			// 自动审批的工程参数（超时/熔断/缓存/模型覆盖）：**只有全局层**，
+			// 故不传 target（理由见宿主路由处注释：这些参数不该跟着项目变）。
+			'permgate:set-auto-review': ['POST', '/permgate/set-auto-review'],
 			'permgate:set-quick': ['POST', '/permgate/set-quick'],
 			'permgate:add-exception': ['POST', '/permgate/add-exception'],
 			// 就地修改一条例外（保 id、保下标）。**不是** add/remove 的组合：
@@ -1617,6 +1620,30 @@ window.__ModuleLoader__.load({
 				'mode.auto': '自动审批',
 				// 「模型失败后执行什么」的标签（仅在动作是 auto 时出现在下拉框左侧）
 				'panel.autoFallbackLabel': '失败后：',
+				// ── 自动审批的工程参数卡片 ──────────────────────────────────────
+				'panel.autoReview': '自动审批',
+				'panel.autoReviewHint': '这一档把调用交给模型判断。下面这些参数决定「模型不可用时怎么办」，只有全局设置。',
+				'panel.autoNoLlm': '当前没有可用的模型服务（llm），所有 auto 都会走回落。装上 provider 后自动恢复。',
+				'panel.autoTimeout': '弹窗超时（毫秒）',
+				'panel.autoTimeoutHint': '仅用于模型失败后回落为「允许/拒绝」时的插手窗口；0 = 不弹窗直接回落',
+				'panel.autoBreaker': '熔断阈值',
+				'panel.autoBreakerHint': '连续拒绝达到此数后转人工；0 = 永不启用',
+				'panel.autoCache': '缓存放行结论',
+				'panel.autoCacheHint': '只缓存放行，拒绝不缓存；会话结束即清空',
+				'panel.autoHistory': '历史深度',
+				'panel.autoHistoryHint': '条数 / 字符预算（发给模型看最近发生了什么）',
+				'panel.autoRedactContent': '截断内容类参数',
+				'panel.autoRedactContentHint': '默认不截断（模型需要看清要写什么）；更保守可开启',
+				'panel.autoModel': '模型覆盖',
+				'panel.autoProviderPh': 'provider（留空跟随会话）',
+				'panel.autoModelPh': 'model（留空跟随会话）',
+				'panel.autoModelHint': '两者都填才生效',
+				'panel.autoOn': '开',
+				'panel.autoOff': '关',
+				'panel.autoSaved': '已保存',
+				'panel.autoBadNumber': '请输入非负整数',
+				'panel.autoReset': '恢复默认',
+				'panel.autoResetDone': '已恢复默认',
 				// 审计专用动作值（宿主超时自动结案）：不在设置页下拉里，只出现在「最近决策」。
 				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
 				'mode.timeout-allow': '超时自动允许',
@@ -2018,6 +2045,29 @@ window.__ModuleLoader__.load({
 				'mode.inherit': 'Inherit global',
 				'mode.auto': 'Auto review',
 				'panel.autoFallbackLabel': 'if it fails:',
+				'panel.autoReview': 'Auto review',
+				'panel.autoReviewHint': 'This tier hands the call to a model. These settings decide what happens when the model is unavailable; global only.',
+				'panel.autoNoLlm': 'No model service (llm) is available, so every auto call falls back. Install a provider to restore it.',
+				'panel.autoTimeout': 'Dialog timeout (ms)',
+				'panel.autoTimeoutHint': 'only the intervention window when the fallback is allow/deny; 0 = no dialog',
+				'panel.autoBreaker': 'Breaker threshold',
+				'panel.autoBreakerHint': 'consecutive denials before handing back to a human; 0 = never',
+				'panel.autoCache': 'Cache allow verdicts',
+				'panel.autoCacheHint': 'allow only; denials are never cached; cleared when the session ends',
+				'panel.autoHistory': 'History depth',
+				'panel.autoHistoryHint': 'item count / character budget sent to the model',
+				'panel.autoRedactContent': 'Truncate content arguments',
+				'panel.autoRedactContentHint': 'off by default (the model needs to see what will be written)',
+				'panel.autoModel': 'Model override',
+				'panel.autoProviderPh': 'provider (empty = follow session)',
+				'panel.autoModelPh': 'model (empty = follow session)',
+				'panel.autoModelHint': 'both are required to take effect',
+				'panel.autoOn': 'on',
+				'panel.autoOff': 'off',
+				'panel.autoSaved': 'Saved',
+				'panel.autoBadNumber': 'enter a non-negative integer',
+				'panel.autoReset': 'Restore defaults',
+				'panel.autoResetDone': 'Defaults restored',
 				'mode.timeout-allow': 'Auto-allowed (timeout)',
 				'mode.timeout-deny': 'Auto-denied (timeout)',
 				'panel.status': 'Status',
@@ -3846,7 +3896,7 @@ window.__ModuleLoader__.load({
 			const WRITE_METHODS = [
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
 				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
-				'permgate:set-doomloop',
+				'permgate:set-doomloop', 'permgate:set-auto-review',
 				'permgate:add-exception', 'permgate:set-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 				'permgate:reorder',
@@ -4928,8 +4978,117 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
+			// ═══════════════════════════════════════════════════════════════════════
+			// 自动审批（auto）的工程参数卡片
+			// ═══════════════════════════════════════════════════════════════════════
+			//
+			// **只出现在全局 tab**：这些是「评审机制怎么跑」的参数（超时、熔断、缓存、
+			// 模型覆盖），不是「某个项目的权限怎么定」。按项目配超时会带来荒唐的场景：
+			// 同一份模型调用在不同项目里超时不同，而评审结论本身全局一致。
+			// 宿主路由同样不接受 target（见 /permgate/set-auto-review 的注释）。
+			//
+			// 与其它设置项一致的写法：每个控件改完立刻提交（无「保存」按钮），
+			// 因为这里全是单值参数，批量保存反而让用户不确定「改了没生效的是哪一项」。
+			const autoReviewCard = () => {
+				// 非全局 tab 不渲染整张卡片（而不是渲染成禁用态）：
+				// 渲染禁用态会让用户以为「项目层也能配、只是现在不能改」，
+				// 而事实是**这个设置根本没有项目层**。
+				if (tab !== 'global') return null;
+				const ar = (status && status.autoReview) || {};
+				const eff = ar.effective || {};
+				const dflt = ar.defaults || {};
+				const explicit = Array.isArray(ar.explicit) ? ar.explicit : [];
+				// 提交单个字段。null = 恢复默认（宿主 delete 该键）。
+				const setField = (key, value) => {
+					const args = value === null ? { clear: [key] } : { patch: { [key]: value } };
+					invoke('permgate:set-auto-review', args, () => setMsg(T('panel.autoSaved')));
+				};
+				// 数字输入：与宿主 normalizeAutoReview 同口径（非数字/负数 → 拒绝，不静默回落）
+				const numInput = (key, width) => {
+					const cur = eff[key];
+					const isDefault = explicit.indexOf(key) === -1;
+					return React.createElement('input', {
+						className: 'pg-field',
+						type: 'number',
+						style: Object.assign({ width: width || 90 }, isDefault ? { color: 'rgba(128,128,128,0.95)' } : null),
+						value: String(cur === undefined ? '' : cur),
+						// placeholder 显示默认值：用户清空后知道会回到哪
+						placeholder: String(dflt[key]),
+						// 用 onBlur 而不是 onChange：数字框每敲一个字符就提交会写入
+						// 一堆中间值（"2" → "20" → "200"），而每次都要走一遍 persist 写盘。
+						onBlur: (e) => {
+							const raw = String(e.target.value || '').trim();
+							if (raw === '') { setField(key, null); return; }
+							const n = Number(raw);
+							if (!Number.isFinite(n) || n < 0) { setNotice(T('panel.autoBadNumber')); return; }
+							setField(key, Math.floor(n));
+						},
+						disabled: busy,
+					});
+				};
+				const boolSel = (key, labelOn, labelOff) => {
+					const cur = eff[key] !== false;
+					return React.createElement('select', {
+						className: 'pg-field',
+						style: { padding: '2px 6px' },
+						value: cur ? 'on' : 'off',
+						onChange: (e) => setField(key, e.target.value === 'on'),
+						disabled: busy,
+					},
+						React.createElement('option', { value: 'on' }, labelOn),
+						React.createElement('option', { value: 'off' }, labelOff),
+					);
+				};
+				const row = (labelKey, ...children) => React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' } },
+					React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T(labelKey)),
+					...children,
+				);
+				return React.createElement('div', { style: card },
+					React.createElement('div', { style: h() }, T('panel.autoReview')),
+					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } }, T('panel.autoReviewHint')),
+					// 评审能力不可用时的醒目提示：用户看到「auto 一直在弹窗」时，
+					// 这里是唯一能解释原因的地方（否则只能去翻日志）。
+					ar.llmAvailable === false
+						? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 4 } }, T('panel.autoNoLlm'))
+						: null,
+					row('panel.autoTimeout', numInput('timeoutMs', 110),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoTimeoutHint'))),
+					row('panel.autoBreaker', numInput('breakerThreshold', 90),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoBreakerHint'))),
+					row('panel.autoCache', boolSel('cacheEnabled', T('panel.autoOn'), T('panel.autoOff')),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoCacheHint'))),
+					row('panel.autoHistory', numInput('historyN', 70), numInput('historyBudget', 90),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoHistoryHint'))),
+					row('panel.autoRedactContent', boolSel('redactContentKeys', T('panel.autoOn'), T('panel.autoOff')),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoRedactContentHint'))),
+					// 模型覆盖：留空 = 跟随会话当前模型（三级回落的第 ② 级）。
+					// 两个框必须**成对**才生效（reviewTarget 要求 provider 与 model 都在）——
+					// 只填一个等于没填，故提示里写明。
+					row('panel.autoModel',
+						React.createElement('input', {
+							className: 'pg-field', style: { width: 140 }, placeholder: T('panel.autoProviderPh'),
+							defaultValue: eff.provider || '', disabled: busy,
+							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('provider', v === '' ? null : v); },
+						}),
+						React.createElement('input', {
+							className: 'pg-field', style: { width: 180 }, placeholder: T('panel.autoModelPh'),
+							defaultValue: eff.model || '', disabled: busy,
+							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('model', v === '' ? null : v); },
+						}),
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoModelHint')),
+					),
+					// 恢复默认：一次性清掉本卡片所有显式配置（等价于「这块我没设过」）。
+					// 只在确实有显式配置时出现 —— 没有可恢复的东西时给个按钮是误导。
+					explicit.length ? React.createElement('div', { style: { marginTop: 8 } },
+						React.createElement('button', {
+							className: 'pg-btn', disabled: busy,
+							onClick: () => invoke('permgate:set-auto-review', { clear: explicit }, () => setMsg(T('panel.autoResetDone'))),
+						}, T('panel.autoReset')),
+					) : null,
+				);
+			};
 
+			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 			// 拒绝原因控件：四处（分类默认值 / 快捷工具 / 兜底 / 快捷工具新增行）共用一个渲染函数，
 			// 保证文案、宽度与交互一致；只有当前动作是 deny 时才显示。
 			// 已存在的行：默认只读展示当前原因（未填时灰色占位），点「编辑」才可输入、按钮变「保存」，
@@ -5578,6 +5737,7 @@ window.__ModuleLoader__.load({
 					),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
 				),
+				autoReviewCard(),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 0 8px' } },
 						React.createElement('div', { style: h() }, T('panel.decisions')),
