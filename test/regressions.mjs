@@ -350,11 +350,13 @@ ok('client 读取 status 下发的清单', cli.includes('s.cats') && cli.include
 //
 // 变异验证：把 ② 的过滤去掉 → 本条变红；把 ③ 的 auto 去掉 → 本条变红。
 ok('★★ auto 的存储与展示分离（MODES 含 auto，面板按 AUTO_REVIEW_READY 过滤）', (function () {
-  // ③ MODES / ALL_MODES 必须含 auto（存储侧）
+  // ③ MODES / ALL_MODES 必须含 auto（存储侧）—— 这条**与开关无关，永远成立**：
+  //    不含它的话，手写进配置的 auto 会被当未知动作丢弃 → §9A.3 的 fail-open。
   if (!/const MODES = \['ask', 'allow', 'deny', 'auto'\]/.test(src)) return false
   if (!/const ALL_MODES = \['ask', 'allow', 'deny', 'auto', 'inherit'\]/.test(src)) return false
-  // ① 开关存在（当前 false = 评审段未接线）
-  if (!/const AUTO_REVIEW_READY = false/.test(src)) return false
+  // ① 开关存在（值可以是 true 或 false，但**必须存在**且必须是布尔字面量 ——
+  //    它是「面板是否暴露 auto」的唯一决定点，不能散成别处的条件判断）
+  if (!/const AUTO_REVIEW_READY = (?:true|false)\b/.test(src)) return false
   // ② statusView 的两处下发都经它过滤
   return /modes: AUTO_REVIEW_READY \? MODES : MODES\.filter\(\(m\) => m !== 'auto'\)/.test(src)
     && /allModes: AUTO_REVIEW_READY \? ALL_MODES : ALL_MODES\.filter\(\(m\) => m !== 'auto'\)/.test(src)
@@ -1436,6 +1438,48 @@ ok('候选分类标签与设置面板一致（不再写「写入/编辑」）', 
 ok('两条候选路径写法一致（均取规范化绝对路径）', src.includes('const absVal = normAbsPath(entry.value, exCwd)') && src.includes('const fileVal = absVal') && src.includes("push(fileVal, fileVal, 'path',") && !src.includes(") + entry.value, entry.value, 'path'"))
 ok('判重/去重/匹配三处共用 pathKey（同一路径不同写法不重复写入、且能命中）', src.includes('function pathKey(p, root)') && src.includes('return normPathKey(normAbsPath(p, root))') && src.includes('pathKey(r.path, root) === pathKey(value, cwd || root)') && (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); return i >= 0 && j > i && src.slice(i, j).indexOf("indexOf('://')") !== -1 })())
 ok('相对 glob 不被绝对化（glob 不是文件路径，只做斜杠归一）', (function () { const i = src.indexOf('function normAbsPath'); const j = src.indexOf('function pathKey'); const body = i >= 0 && j > i ? src.slice(i, j) : ''; return body.indexOf('if (/[*?]/.test(s)) return s') !== -1 && body.indexOf('glob 不是文件路径') !== -1 })())
+
+// ─────────────────────────────────────────────────────────────
+group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择器）')
+// 这一组守的是「面板不说谎」—— auto 已经真正接线（AUTO_REVIEW_READY=true），
+// 故面板上必须能：① 认出这一档的名字；② 与 ask 在视觉上区分；
+// ③ 在选了 auto 时**看得见**模型失败后会怎样。
+{
+  // ① 文案：中英都要有，且中文是「自动审批」四字全称 ——
+  //    单写「自动」会与插件历史上「编辑器内核自动判别」的语义撞车（见计划 §2.1）。
+  ok('★ auto 有中英文案（中文用「自动审批」全称，不缩写为「自动」）',
+    cli.includes("'mode.auto': '自动审批'") && cli.includes("'mode.auto': 'Auto review'"))
+  // ② 颜色：auto 必须有自己的颜色，且**不得**复用 ask 的橙色 ——
+  //    复用会让状态点/徽标上 auto 与 ask 完全同色，而它们是两个不同概念
+  //    （问人 vs 问模型），那正是「同一概念两种编码」的反面：两个概念被编成同一色。
+  ok('★★ auto 有独立颜色且不复用 ask 的橙（状态点上一眼可分「谁在看」）', (function () {
+    const m = cli.match(/const MODE_COLORS = (\{[^}]*\})/)
+    if (!m) return false
+    let C = null
+    try { C = new Function('return (' + m[1] + ')')() } catch (e) { return false }
+    if (!C || typeof C.auto !== 'string') return false
+    return C.auto !== C.ask && C.auto !== C.allow && C.auto !== C.deny && C.auto !== C.inherit
+  })())
+  // ③ 回落值选择器：选了 auto 就必须**看得见**「失败后怎么办」。
+  //    没有它，用户以为自己在配 auto，实际连「模型挂了会怎样」都不知道 ——
+  //    而那是 auto 语义的核心（§2.1：选 auto 必须同时指定 autoFallback）。
+  ok('★★ 选了 auto 时面板出现回落值选择器（否则用户看不见「失败后怎么办」）', (function () {
+    // 只在 mode === 'auto' 时渲染（两个条件各出现一次：标签 + 下拉）
+    const gate = (cli.match(/mode === 'auto' \?/g) || []).length
+    if (gate !== 2) return false
+    if (!cli.includes("'panel.autoFallbackLabel'")) return false
+    // 回落值域必须是 ask/allow/deny（不含 inherit —— 回落必须是能直接执行的动作）
+    const m = cli.match(/const AUTO_FALLBACK_MODES = (\[[^\]]*\])/)
+    if (!m) return false
+    let arr = null
+    try { arr = new Function('return ' + m[1])() } catch (e) { return false }
+    return JSON.stringify(arr) === JSON.stringify(['ask', 'allow', 'deny'])
+  })())
+  // ④ 切进 auto 时必须**把回落值一起写下去**：宿主对「action=auto 但没写回落」会补 ask，
+  //    但那是一次静默补值 —— 面板上看到的与实际落盘的必须一致。
+  ok('★ 切进 auto 时一并提交回落值（面板显示与实际落盘一致）',
+    /if \(mode === 'auto'\) patch\[c \+ 'AutoFallback'\] = catAutoFallbackOf\(c\)/.test(cli))
+}
 
 // ─────────────────────────────────────────────────────────────
 group('13. 例外三态（ask / allow / deny）：ask 是可写、可命中的一等动作')
@@ -2641,9 +2685,22 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     // LRU 而非 FIFO：命中后必须把桶移到 Map 末尾（delete + set 重排插入顺序）。
     // 少了这一步就退化成 FIFO，会把**正在活跃**的会话桶淘汰掉（其计数凭空归零）。
     && /s\.count \+= 1[\s\S]{0,400}?streakBySession\.delete\(sessionKey\)\s*\n\s*streakBySession\.set\(sessionKey, s\)/.test(src))
-  ok('★ 会话键取不到时既不读也不写（不回落共享桶、也不每次建独立桶）',
-    /function loopSessionKey\(exec\) \{[\s\S]{0,300}?return typeof id === 'string' && id \? id : null/.test(src)
-    && (src.match(/if \(!sessionKey\) return/g) || []).length === 3)
+  // 计数从 3 增到 4：新增的 `clearAutoState`（auto 的熔断计数 + 缓存清理）是**第 4 处**
+  // 同语义守卫 —— 会话键取不到时不清理任何东西（没有桶可清）。
+  // 判据的**原意**是「所有按会话分桶的函数都必须有这道守卫，不得回落到共享桶」，
+  // 故这里除了计数，还逐个点名这 4 个函数各自都有守卫（计数只是防漏，点名才是语义）。
+  ok('★ 会话键取不到时既不读也不写（不回落共享桶、也不每次建独立桶）', (function () {
+    if (!/function loopSessionKey\(exec\) \{[\s\S]{0,300}?return typeof id === 'string' && id \? id : null/.test(src)) return false
+    if ((src.match(/if \(!sessionKey\) return/g) || []).length !== 4) return false
+    // 四个按会话分桶的函数各自都要有守卫（缺一个 = 那个表会回落到共享桶或建无主桶）
+    for (const fn of ['repeatStreak', 'noteLoopCall', 'resetStreak', 'clearAutoState']) {
+      const i = src.indexOf('function ' + fn + '(')
+      if (i < 0) return false
+      const head = src.slice(i, i + 400)
+      if (!/if \(!sessionKey\) return/.test(head)) return false
+    }
+    return true
+  })())
   // ★★ 计数口径：只有**静默放行**才计数，其余一律清零（L-2 / L-11）。
   // 三条都要在，缺任何一条都会静默改变语义：
   //   · 非 allow 先清零 —— 覆盖 ask 被拒 / deny / 升级被拒 / 抛错四条路径（逐条写就是四个漏改点）；
@@ -6232,17 +6289,26 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   //   而 pre-execute 的分支只认 ask / deny，其余一律落到 `return next()` = **放行**。
   //   两者叠加 = 「配置里写了 auto，旧版读到后静默放行」，方向正是最危险的那一侧。
   //
-  // 故必须存在一道归一闸：动作不在 allow/ask/deny 里 → 折成 ask，并且**后续分支读 `act`
-  // 而不是 `d.action`**（否则折了也不算，仍会落到 next()）。
-  // 判据取三件事同时成立，缺一不可：
+  // 故必须存在一道归一闸：动作不在 allow/ask/deny 里 → 折成 ask，并且**后续分支读
+  // 折算后的变量**（否则折了也不算，仍会落到 next()）。
+  //
+  // ⚠️ 判据里的变量是 `d2` 而不是 `d`：评审段接线后，`auto` 会先被 reviewWithModel
+  // 消化成 allow/deny/回落值，结果放在 `d2` 里；归一闸与后续分支都必须读 `d2`。
+  // 读 `d` 就等于「评审段的结论被忽略」，那会让 auto 永远走降级路径。
+  // 判据取四件事同时成立，缺一不可：
   //   ① KNOWN_ACTIONS 只含三档（把 auto 加进去就等于撤销这道闸）；
-  //   ② 折算表达式存在（`KNOWN_ACTIONS.indexOf(d.action) !== -1 ? d.action : 'ask'`）；
-  //   ③ ask 与 deny 两个分支都判 `act`（漏一处 = 那一处仍会落到 next()）。
+  //   ② 折算表达式存在且读 `d2.action`；
+  //   ③ ask 与 deny 两个分支都判 `act`（漏一处 = 那一处仍会落到 next()）；
+  //   ④ 评审段确实在归一闸**之前**（顺序反了 = auto 永远走降级）。
   // 变异验证：把 ① 里加上 'auto' → 本条变红（已实测）。
   ok('★★ 未知动作折成 ask（不得落到 next() 静默放行）', (function () {
     if (!/const KNOWN_ACTIONS = \['allow', 'ask', 'deny'\]/.test(preExecCatch)) return false
-    if (!/const act = KNOWN_ACTIONS\.indexOf\(d\.action\) !== -1 \? d\.action : 'ask'/.test(preExecCatch)) return false
-    return /if \(act === 'ask'\) \{/.test(preExecCatch) && /\} else if \(act === 'deny'\) \{/.test(preExecCatch)
+    if (!/const act = KNOWN_ACTIONS\.indexOf\(d2\.action\) !== -1 \? d2\.action : 'ask'/.test(preExecCatch)) return false
+    if (!/if \(act === 'ask'\) \{/.test(preExecCatch) || !/\} else if \(act === 'deny'\) \{/.test(preExecCatch)) return false
+    // ④ 评审段（reviewWithModel）必须在 KNOWN_ACTIONS 之前出现
+    const iReview = preExecCatch.indexOf('reviewWithModel(')
+    const iKnown = preExecCatch.indexOf('const KNOWN_ACTIONS')
+    return iReview > 0 && iKnown > iReview
   })())
 
   // ── 27c. 客户端 factory 真实求值（本组唯一「执行」而非「匹配」的断言）──

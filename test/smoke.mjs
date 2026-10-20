@@ -103,7 +103,7 @@ function makeRes() {
   }
 }
 
-function createHost({ workspaceRoot, dshHome, fsEncoding, connection }) {
+function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm }) {
   const registered = new Map()
   const routes = []
   const hooks = new Map()
@@ -128,10 +128,15 @@ function createHost({ workspaceRoot, dshHome, fsEncoding, connection }) {
     // connection 可选：传了就模拟 DSH 官方的 Host/Origin 栅栏 + 浏览器会话令牌认证
     // （真部署里由 dsh-client-connection 提供，是路由的第一层防线）。
     // 不传 = 该 service 不可用（Electron/shell 载体形态），路由退到兜底栅栏。
+    //
+    // llm 可选：模拟 `ctx.llm` 服务（`{ stream(options) }` 返回异步可迭代块流）。
+    // 不传 = 该服务不可用 → auto 走「llm service unavailable」的异常路径，
+    // 这正是「其他用户不一定装了 llm 服务」那个真实场景，必须能测到。
     get: (k) => {
       if (k === 'subprocess') return null
       if (k === 'fsEncoding') return fsEncoding
       if (k === 'connection') return connection
+      if (k === 'llm') return llm
       return undefined
     },
   }
@@ -4396,6 +4401,368 @@ group('23. 决策记录：首屏取「最近」N 条的方向判据（需越过�
       JSON.stringify({ got: all.map((d) => d.tool) }))
 
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / 缓存')
+{
+  // 本组全部走**真实 tools/pre-execute 链路**，用注入的假 `ctx.llm` 控制模型返回。
+  // 这是唯一能验证「auto 真的被消化成 allow/deny/回落」的层次 —— 源码断言只能证明
+  // 代码形状对，证明不了「模型说 allow 时调用真的被放行」。
+  //
+  // 假 llm 的形状与真服务一致：`stream(options)` 返回**异步可迭代**的块流，
+  // 末尾必须有一个 terminal finish。这也顺带验证了 permgate 没有误用 Promise 形态。
+  const mkLlm = (script) => {
+    const calls = []
+    return {
+      calls,
+      stream(options) {
+        calls.push(options)
+        const chunks = typeof script === 'function' ? script(options, calls.length) : script
+        return (async function* () { for (const c of chunks) yield c })()
+      },
+    }
+  }
+  // 一次「模型说 X」的完整块流
+  const verdict = (json) => [
+    { type: 'block-start', block: { type: 'text' } },
+    { type: 'text-delta', text: json },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  const mkHostAuto = (autoExtra, llm, globalExtra) => {
+    const ws = mkdtempSync(join(tmpdir(), 'pg-auto-ws-'))
+    const home = mkdtempSync(join(tmpdir(), 'pg-auto-home-'))
+    mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+    writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+      global: Object.assign({
+        // 兜底设 auto：未分类工具（my_tool）走它，正好隔离出 auto 这一段的行为
+        fallbackMode: 'auto',
+        fallbackAutoFallback: 'ask',
+        // 关闭循环检测的干扰（本组不测它，且默认 6 会在多次探测后触发）
+        doomloop: { mode: 'allow' },
+        autoReview: Object.assign({}, autoExtra || {}),
+      }, globalExtra || {}),
+      projects: {},
+    }, null, 2), 'utf8')
+    return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm }) }
+  }
+  // 探测一次：返回落点 'allow' | 'deny' | 'ask'
+  // 与 group22 的 probe 同构，但**不查 pending 就等 settle** 会漏掉 ask —— 故保留同样的两段式。
+  const probeAuto = async (h, ws, sess, name, args) => {
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name, arguments: args || {}, callId: 'c1', token: 't1',
+      // session 必须带 requestHeader()：reviewTarget 从它取会话当前模型（§4.2 第 ② 级）。
+      // 少了它 reviewTarget 返回 null → 走「no model available」异常路径，
+      // 于是所有 A1/A2 这类「模型说 X」的用例都会变成 ask，看起来像实现错了。
+      agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
+      signal: undefined,
+    }
+    let nexted = false
+    let settled = false
+    let result = null
+    const p = pre(exec, async () => { nexted = true; return { kind: 'allow' } })
+    p.then((r) => { settled = true; result = r }, () => { settled = true })
+    let items = []
+    const t0 = Date.now()
+    const deadline = t0 + 15000
+    const SUSPECT_MS = 30
+    while (Date.now() < deadline) {
+      if (nexted || settled) break
+      if (Date.now() - t0 >= SUSPECT_MS) {
+        const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+        items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === name)
+        if (items.length) break
+      }
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    if (nexted) return 'allow'
+    if (!items.length) {
+      if (result && result.kind === 'deny') return 'deny'
+      if (result && result.kind === 'allow') return 'allow'
+      if (!settled) throw new Error('probeAuto 超时')
+      return 'deny'
+    }
+    // 弹窗挂着 → 记录它带的信息（超时落点等），然后结案
+    const info = items[0]
+    for (const it of items) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    return { kind: 'ask', entry: info }
+  }
+  const T = 'my_tool'
+  const A = { a: 1 }
+
+  // ── A1：模型说 allow → 调用被放行（不是弹窗、不是拒绝）────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a1', T, A)
+    ok('★★ group24 A1: 模型 allow → 直接放行（不弹窗）', r === 'allow', JSON.stringify(r))
+    // 评审确实被调用了，且带的是固定策略 + 正确的 provider/model
+    ok('★ group24 A1: 评审调用带固定策略与模型路由',
+      llm.calls.length === 1 && typeof llm.calls[0].system === 'string'
+      && llm.calls[0].system.indexOf('final authorization reviewer') !== -1
+      && llm.calls[0].temperature === 0,
+      JSON.stringify(llm.calls[0] && { sys: String(llm.calls[0].system).slice(0, 40), t: llm.calls[0].temperature }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A2：模型说 deny → 调用被拒绝（不弹窗）─────────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"不可逆删除"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a2', T, A)
+    ok('★★ group24 A2: 模型 deny → 直接拒绝（不弹窗）', r === 'deny', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A3：无 llm 服务 → 走异常路径，回落 ask 时弹窗 ────────────────────────────
+  {
+    const { ws, home, h } = mkHostAuto({}, undefined)   // 不注入 llm
+    const r = await probeAuto(h, ws, 'a3', T, A)
+    ok('★★ group24 A3: 无 llm 服务 → 回落 ask 弹窗（插件不报错）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A4：模型返回 high+allow（矛盾）→ 异常路径，不是放行 ──────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a4', T, A)
+    ok('★★ group24 A4: 模型返回 high+allow（矛盾）→ 走异常路径，绝不放行',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A5：模型返回重复成员（攻击）→ 异常路径 ────────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"high","decision":"deny","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a5', T, A)
+    ok('★★ group24 A5: 重复 JSON 成员 → 协议非法 → 异常路径（不放行）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A5b：重复成员检测**单独**可观测（不能被矛盾检测代劳）──────────────────────
+  //
+  // 为什么必须单独一条：A5 的载荷是 `high + deny + deny→allow`，它同时触发了
+  // 「重复成员」与「high+allow 矛盾」两条判据 —— 去掉重复检测后 A5 仍然会被矛盾检测
+  // 拦下，于是**测不出重复检测是否还在**（实测：删掉重复检测，A5 照旧通过）。
+  //
+  // 这里改用一条**两条判据只有重复检测会拦**的载荷：
+  //   `{"risk":"low","decision":"allow","decision":"allow"}`
+  // 单看形态完全合法（low + allow、无 reason），JSON.parse 也只保留最后一个 decision，
+  // 故唯一能发现「这个输出被构造过」的就是顶层成员计数。
+  // 若重复检测失效，它会被当作合法 allow **直接放行** —— 那是 fail-open。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a5b', T, A)
+    ok('★★ group24 A5b: 重复成员检测单独生效（否则这条会被当作合法 allow 放行）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A6：模型 escalate → 异常路径 ─────────────────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"escalate","reason":"拿不准"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a6', T, A)
+    ok('★ group24 A6: 模型 escalate → 异常路径（弹窗问人）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A7：流没有 terminal finish → 异常路径（不是「读到什么算什么」）────────────
+  {
+    const llm = mkLlm([
+      { type: 'text-delta', text: '{"risk":"low","decision":"allow"}' },
+      // 故意不给 finish
+    ])
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a7', T, A)
+    ok('★★ group24 A7: 流无 terminal finish → 异常路径（不信任半个结果）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A8：缓存 —— 同样的调用第二次不再问模型 ────────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r1 = await probeAuto(h, ws, 'a8', T, A)
+    const r2 = await probeAuto(h, ws, 'a8', T, A)
+    ok('★★ group24 A8: 缓存命中（allow 缓存，第二次不再调用模型）',
+      r1 === 'allow' && r2 === 'allow' && llm.calls.length === 1,
+      JSON.stringify({ r1, r2, calls: llm.calls.length }))
+    // 不同参数**不得**命中同一缓存（否则不同内容的调用会互相授权）
+    const r3 = await probeAuto(h, ws, 'a8', T, { a: 2 })
+    ok('★★ group24 A8: 不同参数不共享缓存（否则内容不同却互相授权）',
+      r3 === 'allow' && llm.calls.length === 2,
+      JSON.stringify({ r3, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A9：deny 不缓存 —— 同样的调用第二次仍要重新问模型 ─────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    await probeAuto(h, ws, 'a9', T, A)
+    await probeAuto(h, ws, 'a9', T, A)
+    ok('★★ group24 A9: deny 不缓存（第二次仍调用模型，避免错误地持续拒绝）',
+      llm.calls.length === 2, JSON.stringify({ calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A10：熔断 —— 真·连续 3 次拒绝触发；中间一次 allow 清零 ────────────────────
+  {
+    // 每次都 deny，阈值设 3
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 3 }, llm)
+    const seq = []
+    for (let i = 0; i < 4; i++) seq.push(await probeAuto(h, ws, 'a10', T, { i }))
+    // 前 3 次：模型拒绝 → deny（不弹窗）。第 4 次：已熔断 → 不再问模型，走异常路径 → ask
+    ok('★★ group24 A10: 真·连续 3 次拒绝后熔断（第 4 次不再问模型，走异常路径）',
+      JSON.stringify(seq.slice(0, 3)) === JSON.stringify(['deny', 'deny', 'deny'])
+      && seq[3] && seq[3].kind === 'ask'
+      && llm.calls.length === 3,
+      JSON.stringify({ seq, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A11：熔断的关键差异 —— 中间一次 allow 必须**清零** ────────────────────────
+  {
+    // deny, deny, allow, deny, deny → 连续计数最多到 2，不该熔断
+    let n = 0
+    const llm = mkLlm(() => {
+      n++
+      // 第 3 次给 allow，其余 deny
+      return n === 3 ? verdict('{"risk":"low","decision":"allow"}') : verdict('{"risk":"medium","decision":"deny","reason":"no"}')
+    })
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 3 }, llm)
+    const seq = []
+    for (let i = 0; i < 5; i++) seq.push(await probeAuto(h, ws, 'a11', T, { i }))
+    ok('★★ group24 A11: 中间一次 allow 清零 → 不熔断（与参考工程的关键差异）',
+      JSON.stringify(seq) === JSON.stringify(['deny', 'deny', 'allow', 'deny', 'deny'])
+      && llm.calls.length === 5,
+      JSON.stringify({ seq, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A12：熔断阈值 0 = 永不启用 ───────────────────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 0 }, llm)
+    const seq = []
+    for (let i = 0; i < 5; i++) seq.push(await probeAuto(h, ws, 'a12', T, { i }))
+    ok('★ group24 A12: 熔断阈值 0 = 永不启用（5 次拒绝仍继续问模型）',
+      seq.every((v) => v === 'deny') && llm.calls.length === 5,
+      JSON.stringify({ seq, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A13：失败/escalate **不计入**熔断（怪线路，不怪模型判断）──────────────────
+  {
+    // 前 3 次都 escalate（失败），第 4 次才真拒绝 —— 若失败也计数，第 4 次就会被熔断
+    let n = 0
+    const llm = mkLlm(() => {
+      n++
+      return n <= 3
+        ? verdict('{"risk":"medium","decision":"escalate","reason":"拿不准"}')
+        : verdict('{"risk":"medium","decision":"deny","reason":"no"}')
+    })
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 3 }, llm)
+    for (let i = 0; i < 3; i++) await probeAuto(h, ws, 'a13', T, { i })
+    const r4 = await probeAuto(h, ws, 'a13', T, { x: 1 })
+    ok('★★ group24 A13: escalate/失败不计入熔断（第 4 次仍真的问模型并拿到 deny）',
+      r4 === 'deny' && llm.calls.length === 4,
+      JSON.stringify({ r4, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A14：异常路径 + 回落 allow + 超时 0 → **不弹窗**，直接放行 ────────────────
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, undefined, { fallbackAutoFallback: 'allow' })
+    const r = await probeAuto(h, ws, 'a14', T, A)
+    ok('★★ group24 A14: 异常 + 回落 allow + 超时 0 → 不弹窗、直接放行',
+      r === 'allow', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A15：异常路径 + 回落 deny + 超时 0 → 不弹窗，直接拒绝 ────────────────────
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, undefined, { fallbackAutoFallback: 'deny' })
+    const r = await probeAuto(h, ws, 'a15', T, A)
+    ok('★★ group24 A15: 异常 + 回落 deny + 超时 0 → 不弹窗、直接拒绝',
+      r === 'deny', JSON.stringify(r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A16：异常 + 回落 allow + 超时 > 0 → 弹窗，且弹窗带 deadline/onTimeout ─────
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, undefined, { fallbackAutoFallback: 'allow' })
+    const r = await probeAuto(h, ws, 'a16', T, A)
+    ok('★★ group24 A16: 异常 + 回落 allow + 超时>0 → 弹窗，并带 deadline 与 onTimeout',
+      r && r.kind === 'ask' && typeof r.entry.deadline === 'number' && r.entry.onTimeout === 'allow',
+      JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, onTimeout: r.entry.onTimeout } : r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A17：异常 + 回落 ask → 弹窗，且**永不超时**（无 deadline）─────────────────
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, undefined, { fallbackAutoFallback: 'ask' })
+    const r = await probeAuto(h, ws, 'a17', T, A)
+    ok('★★ group24 A17: 异常 + 回落 ask → 弹窗且永不超时（用户既然选了 ask 就是要被问）',
+      r && r.kind === 'ask' && r.entry.deadline === null,
+      JSON.stringify(r && r.entry ? { deadline: r.entry.deadline } : r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A18：非 auto 的 ask 行为完全不变（不传 timeoutMs，永不超时）───────────────
+  {
+    // 兜底改回 ask：这是最普通的「问人」，不该有任何超时
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, llm, { fallbackMode: 'ask' })
+    const r = await probeAuto(h, ws, 'a18', T, A)
+    ok('★★ group24 A18: 普通 ask（非 auto）不传 timeoutMs，永不超时（现有行为不变）',
+      r && r.kind === 'ask' && r.entry.deadline === null && llm.calls.length === 0,
+      JSON.stringify({ r: r && r.entry ? { deadline: r.entry.deadline } : r, calls: llm.calls.length }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A19：密钥脱敏 —— 模型不该看到 sk- 之类的凭据 ─────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    await probeAuto(h, ws, 'a19', T, { token: 'sk-abcdefghijklmnopqrstuvwx', normal: 'hello' })
+    const sent = JSON.stringify(llm.calls[0] && llm.calls[0].messages)
+    // 两层脱敏，分别验证：
+    //   · **键名**命中（`token`）→ 值整块替换为 `[redacted-secret-field]`，且值本身不外发
+    //   · **值形态**命中（`sk-...`）→ 无论键名是什么都替换为 `[redacted-secret]`
+    // 这里 `token` 是敏感键名，故走的是第一层。第二层由下面的 valueOnly 用例覆盖。
+    ok('★★ group24 A19: 敏感键名的值不发给模型（token 被整块替换）',
+      sent.indexOf('sk-abcdefghijklmnopqrstuvwx') === -1
+      && sent.indexOf('[redacted-secret-field]') !== -1
+      && sent.indexOf('hello') !== -1,
+      sent.slice(0, 300))
+    // 键名**不**敏感、但值长得像密钥 → 必须由第二层拦住
+    const llm2 = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const h2 = mkHostAuto({}, llm2)
+    await probeAuto(h2.h, h2.ws, 'a19b', T, { note: 'key is sk-abcdefghijklmnopqrstuvwx here' })
+    const sent2 = JSON.stringify(llm2.calls[0] && llm2.calls[0].messages)
+    ok('★★ group24 A19b: 值形态像密钥时也替换（键名不敏感也拦）',
+      sent2.indexOf('sk-abcdefghijklmnopqrstuvwx') === -1
+      && sent2.indexOf('[redacted-secret]') !== -1,
+      sent2.slice(0, 300))
+    try {
+      rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
+      rmSync(h2.ws, { recursive: true, force: true }); rmSync(h2.home, { recursive: true, force: true })
+    } catch (e) {}
   }
 }
 

@@ -1455,7 +1455,18 @@ window.__ModuleLoader__.load({
 		let MODES = ['ask', 'allow', 'deny'];
 		// 颜色键集必须覆盖 decisions 里所有可能的 action（含宿主超时自动结案的
 		// timeout-allow/timeout-deny），否则「最近决策」会回落灰色 #888，与人工决策无从区分。
-		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888', 'timeout-allow': '#e65100', 'timeout-deny': '#c62828' };
+		// 颜色语义：橙=要过一道关（问人）、绿=放行、红=拒绝、灰=继承。
+		// `auto` 取**紫色**而不是复用 ask 的橙：它和 ask 一样「要过一道关」，但过关的是
+		// **模型**不是人 —— 用户在状态点/徽标上一眼要能分清「这次谁在看」。
+		// 复用橙色会让 auto 与 ask 在面板上完全同色，那正是「同一概念两种编码」的反面：
+		// 两个不同概念被编成了同一个颜色。
+		// 取 `#6a1b9a`（深紫）而不是浅紫：状态点是 12px 小圆点，浅色在白底上几乎看不见。
+		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888', auto: '#6a1b9a', 'timeout-allow': '#e65100', 'timeout-deny': '#c62828' };
+		// auto 的回落值域：**不含 inherit**。回落是「这次调用最后怎么办」的最终答案，
+		// 必须是一个能直接执行的动作；inherit 是层级继承语义，把它当回落值等于让回落
+		// 本身又要再解析一次层级（理由见宿主 normalizeAutoFallback 的注释）。
+		// 与宿主的值域**同源**（宿主只接受 ask/allow/deny），不是各写一份。
+		const AUTO_FALLBACK_MODES = ['ask', 'allow', 'deny'];
 		// 快捷工具预设清单与默认动作都由宿主下发（permgate:status 的 quickPreset/quickDefaults），
 		// 与 CATS/MODES 同口径，避免宿主与浏览器各存一份清单、新增工具时漂移；
 		// 未显式配置的工具按「项目键 → 全局键 → 预设默认 → 会话兜底」显示，与服务端 quickAction 同链。
@@ -1600,6 +1611,12 @@ window.__ModuleLoader__.load({
 				'mode.allow': '允许',
 				'mode.deny': '拒绝',
 				'mode.inherit': '继承全局',
+				// 第四档：交给模型判断。文案取「自动审批」而不是「自动」——
+				// 「自动」一词在本插件历史上有别的含义（编辑器内核的自动判别），
+				// 面板上必须能一眼区分，故用四字全称（见计划 §2.1 的命名决策）。
+				'mode.auto': '自动审批',
+				// 「模型失败后执行什么」的标签（仅在动作是 auto 时出现在下拉框左侧）
+				'panel.autoFallbackLabel': '失败后：',
 				// 审计专用动作值（宿主超时自动结案）：不在设置页下拉里，只出现在「最近决策」。
 				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
 				'mode.timeout-allow': '超时自动允许',
@@ -1999,6 +2016,8 @@ window.__ModuleLoader__.load({
 				'mode.allow': 'Allow',
 				'mode.deny': 'Deny',
 				'mode.inherit': 'Inherit global',
+				'mode.auto': 'Auto review',
+				'panel.autoFallbackLabel': 'if it fails:',
 				'mode.timeout-allow': 'Auto-allowed (timeout)',
 				'mode.timeout-deny': 'Auto-denied (timeout)',
 				'panel.status': 'Status',
@@ -3957,13 +3976,33 @@ window.__ModuleLoader__.load({
 				// 切离 deny 时作废该格的编辑态：控件会被卸载，若留着，切回 deny 时同一格会
 				// 莫名其妙又处于可输入状态（用户并没有点「编辑」）。
 				if (mode !== 'deny') exitEditOf('cat', c);
-				invoke('permgate:set-categories', { [tab]: { [c]: mode } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+				// 切**进** auto 时必须同时把回落值写下去：宿主侧 `normalizeAutoFallback` 对
+				// 「action=auto 但没写回落」会补 'ask'（安全方向），但那是一次**静默补值** ——
+				// 用户看不到自己"选了 auto 但回落是 ask"。这里显式带上当前显示值，
+				// 使「面板上看到的回落」与「实际落盘的回落」始终一致。
+				const patch = { [c]: mode };
+				if (mode === 'auto') patch[c + 'AutoFallback'] = catAutoFallbackOf(c);
+				invoke('permgate:set-categories', { [tab]: patch }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 				// 大分类刚变（mode 是新值）；子设置取**该层的显式配置**（未配置则传 undefined）。
 				// 不能传 subDestructive[tab] —— 它是面板**显示值**（未配置的档取的是宿主下发的
 				// 生效值，见 applyStatus），而拿显示值去比较会产生**假警告**：
 				// 实测 global command 由 ask 改为 deny、用户从未设过子设置时，会弹出
 				// 「破坏性命令会按『询问』处理」—— 而读取侧按新 mode 推导出的实际动作是 deny。
 				if (c === 'command') warnSubMismatchTiers(mode);
+			};
+
+			// auto 的回落值：显示值取自宿主下发的分类块（catAutoFallback 字段），
+			// 缺省 'ask'（与宿主 normalizeAutoFallback 的缺省**同源**，不是各写一份）。
+			const catAutoFallbackOf = (c) => {
+				const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
+				const v = block && block[c] ? block[c].autoFallback : undefined;
+				return v === 'allow' || v === 'deny' ? v : 'ask';
+			};
+			// 改回落值：只改这一个字段，不动 mode。单独一个端点参数（autoFallback），
+			// 与 mode 一起走 set-categories 的批量补丁通道。
+			const changeCatAutoFallback = (c) => (e) => {
+				const v = e.target.value;
+				invoke('permgate:set-categories', { [tab]: { [c + 'AutoFallback']: v } }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 			};
 
 			// 大分类 mode 与子设置动作不协调时的提示（只提示，不改写 —— 理由见 changeCat）。
@@ -5006,6 +5045,13 @@ window.__ModuleLoader__.load({
 									// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
 									() => revertReason('cat', c),
 								),
+								// ── auto 的回落值选择器：**仅当本分类是 auto 时出现** ────────────
+								// 为什么必须紧挨着动作下拉：选了 auto 却不填回落，等于把「模型失败后
+								// 干什么」交给一个隐含默认值（ask）。那个默认值是安全的，但用户**看不见**
+								// 它 —— 而 auto 的核心语义就是「失败后落到哪」，看不见就等于没配。
+								// 故放在动作下拉的左边（读序：动作 → 失败后怎么办）。
+								mode === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
+								mode === 'auto' ? sel(catAutoFallbackOf(c), changeCatAutoFallback(c), AUTO_FALLBACK_MODES, busy) : null,
 								sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 							),
 						),
