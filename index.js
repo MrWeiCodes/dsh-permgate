@@ -40,8 +40,39 @@ const CATS = ['command', OUTSIDE_READ_CAT, OUTSIDE_WRITE_CAT, 'read', 'edit', 'i
 // 可挂例外的分类（不含 subagent/doomloop）。顺序同样无依赖 —— 全仓只用于成员判定（indexOf）
 // 与面板的分支开关（client.js 的 catBlock）。这里与 CATS 的前缀保持一致，仅为便于对照。
 const EXC_CATS = ['command', OUTSIDE_READ_CAT, OUTSIDE_WRITE_CAT, 'read', 'image', 'edit', 'undo']
-const MODES = ['ask', 'allow', 'deny']
-const ALL_MODES = ['ask', 'allow', 'deny', 'inherit']
+// ── 动作值域：`MODES` 是「配置里能写什么」，不是「面板上显示什么」 ────────────────
+// 这两个问题必须分开，否则加 `auto` 时会走进一个死结：
+//   · 若 `auto` **不进** `MODES` → `actionAllowed` 把它当「未知动作」保留（对，不能丢），
+//     但 `pre-execute` 的归一闸会把它折成 ask 并**每次都告警「无法识别的动作」** ——
+//     而它其实是本版认识的、只是还没接线。用户主动写了 auto，得到的却是一条
+//     「你的配置有错」的告警，这是误导。
+//   · 若 `auto` 进 `MODES` → 归一化正确、不告警、面板也能选。但评审段没接线时
+//     引擎仍会把它折成 ask（`pre-execute` 的归一闸）—— 面板写着「自动审批」、
+//     实际每次弹窗，是**面板说谎**。
+// 结论：`auto` 进 `MODES`（值域 = 本版能正确**存储与降级**的动作），
+// 而「面板上暂不提供这一档」由 **UI 侧**决定（见 statusView 下发的 `modes`：
+// 那里给的是 `MODES`，接线完成后无需再改；在此之前 auto 只是不主动出现在下拉里，
+// 手写进配置也照样能被正确读入、并在执行时折成 ask + 一条**说明性**告警）。
+//
+// ⚠️ 接线（reviewWithModel）完成后再放开面板：那时 auto 会被真正消化掉，
+// 折成 ask 的路径只作为「模型层不可用」的兜底，不再是常态。
+const MODES = ['ask', 'allow', 'deny', 'auto']
+const ALL_MODES = ['ask', 'allow', 'deny', 'auto', 'inherit']
+
+// ── 自动审批（auto）是否**已接线到评审段** ────────────────────────────────────────
+// 一个开关，只回答「面板上能不能选 auto」这一个问题。它**不**影响：
+//   · 配置能不能存 auto（能，`MODES` 已含）；
+//   · 读到 auto 之后怎么处理（折成 ask，见 pre-execute 的归一闸）；
+//   · 判定链认不认识 auto（认识，各处合并逻辑都已支持并有断言守着）。
+// 只影响 `statusView` 下发的 `modes` / `allModes` 是否含 auto。
+//
+// 为什么需要这个开关而不是「直接放进 MODES 就完事」：评审段（reviewWithModel）
+// 尚未实现时，用户若能在面板上选 auto，得到的实际行为是**每次都弹窗** ——
+// 面板写着「自动审批」、实际按 ask 走，正是本文件反复警告的面板说谎。
+// 让一个**还不工作的档位**不出现在下拉里，比让它出现却名不副实要好。
+//
+// ⚠️ 接线 reviewWithModel 之后，把这里改成 `true` 即可（这是唯一需要改的地方）。
+const AUTO_REVIEW_READY = false
 // 严格度序：allow < ask < deny（越大越严）。做法 A 的「取更严者」合并与面板的
 // warnSubMismatch 判据同源 —— 两处都表达「谁更严」，不该各写一份比较逻辑。
 //
@@ -6740,8 +6771,16 @@ export default {
           }
           return out
         })(),
-        modes: MODES,
-        allModes: ALL_MODES,
+        // ── 下发给面板的动作清单：**不是**直接给 MODES ────────────────────────────
+        // `MODES` 是「本版能正确存储与降级的动作」，它已含 `auto`；而面板上能不能**选**
+        // 是另一个问题 —— 评审段未接线时选 auto 只会被折成 ask（每次都弹窗），
+        // 那就是面板说谎。故这里按 `AUTO_REVIEW_READY` 决定是否把 auto 暴露给下拉框。
+        //
+        // 关键：**存储与展示分离**。手写进 config.json 的 auto 仍会被正确读入、
+        // 正确降级（折成 ask + 一条说明性告警），只是它不主动出现在下拉里。
+        // 接线完成后把 AUTO_REVIEW_READY 置真即可，无需再动这一处。
+        modes: AUTO_REVIEW_READY ? MODES : MODES.filter((m) => m !== 'auto'),
+        allModes: AUTO_REVIEW_READY ? ALL_MODES : ALL_MODES.filter((m) => m !== 'auto'),
       }
     }
 
@@ -7477,14 +7516,20 @@ export default {
         // ⚠️ 这个闸在**评审段接线后仍然保留**：届时 `auto` 会在上面被 `reviewWithModel`
         // 消化掉（产出 allow/deny/回落值），能走到这里的 `auto` 只可能是「评审段没接上」
         // 或「模型层不可用且回落值本身非法」—— 两种情况都该问人，不该放行。
+        //
+        // 告警分两种措辞，因为它们是**两件不同的事**：
+        //   · `auto` —— 本版**认识**它（在 MODES 里、判定链各处都已支持），只是评审段
+        //     还没接线，故暂时按 ask 执行。说「无法识别」是错的，会让用户去查自己的配置。
+        //   · 其它值 —— 真的不认识（更高版本写入的），那才该提示「可能是更高版本」。
         const KNOWN_ACTIONS = ['allow', 'ask', 'deny']
         const act = KNOWN_ACTIONS.indexOf(d.action) !== -1 ? d.action : 'ask'
         if (act !== d.action) {
-          // 只在**真发生了折算**时告警（不是每次调用都刷）：这条信息量在于「你的配置里
-          // 有个本版不认识的动作用上了」，同一份配置每次调用都会走到，逐次告警会淹没日志。
           try {
-            console.warn('[permgate] 无法识别的动作 "' + d.action + '"（可能是更高版本写入），已按 ask 处理：'
-              + exec.name)
+            if (d.action === 'auto') {
+              console.warn('[permgate] 本次判定为 auto，但自动审批尚未接线，已按 ask 处理（弹窗询问）：' + exec.name)
+            } else {
+              console.warn('[permgate] 无法识别的动作 "' + d.action + '"（可能是更高版本写入），已按 ask 处理：' + exec.name)
+            }
           } catch (e) {}
         }
         if (act === 'ask') {

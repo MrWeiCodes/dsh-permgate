@@ -336,6 +336,29 @@ group('7. 浏览器半部分：清单以宿主下发为准')
 ok('client 清单为可变并保留默认', cli.includes("let CATS = ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'];") && cli.includes("let EXC_CATS = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'];"))
 ok('client applyStatusLists 覆盖清单', cli.includes('function applyStatusLists(s) {') && cli.includes('applyStatusLists(s);'))
 ok('client 读取 status 下发的清单', cli.includes('s.cats') && cli.includes('s.excCats') && cli.includes('s.modes') && cli.includes('s.allModes'))
+// ★★ `auto` 的「存储」与「展示」必须分离（本轮加第四档时最容易做错的一处）
+//
+// 背景：`MODES` 已含 auto（配置能存、判定链认识、降级正确），但评审段尚未接线 ——
+// 此时若把 auto 直接下发给面板，用户选了它实际会按 ask 走（每次都弹窗），
+// 面板写着「自动审批」而实际不是 = 面板说谎。
+//
+// 故 statusView 的 modes/allModes 必须经 AUTO_REVIEW_READY 过滤，**不得**直接下发 MODES：
+//   ① 常量存在且当前为 false（接线前）；
+//   ② statusView 里两处都走它过滤（漏一处 = 那处仍会暴露 auto）；
+//   ③ `MODES` 本身**必须**含 auto —— 否则手写进配置的 auto 会被当未知动作丢弃
+//      （§9A.3 的 fail-open），而那是比面板说谎更严重的问题。
+//
+// 变异验证：把 ② 的过滤去掉 → 本条变红；把 ③ 的 auto 去掉 → 本条变红。
+ok('★★ auto 的存储与展示分离（MODES 含 auto，面板按 AUTO_REVIEW_READY 过滤）', (function () {
+  // ③ MODES / ALL_MODES 必须含 auto（存储侧）
+  if (!/const MODES = \['ask', 'allow', 'deny', 'auto'\]/.test(src)) return false
+  if (!/const ALL_MODES = \['ask', 'allow', 'deny', 'auto', 'inherit'\]/.test(src)) return false
+  // ① 开关存在（当前 false = 评审段未接线）
+  if (!/const AUTO_REVIEW_READY = false/.test(src)) return false
+  // ② statusView 的两处下发都经它过滤
+  return /modes: AUTO_REVIEW_READY \? MODES : MODES\.filter\(\(m\) => m !== 'auto'\)/.test(src)
+    && /allModes: AUTO_REVIEW_READY \? ALL_MODES : ALL_MODES\.filter\(\(m\) => m !== 'auto'\)/.test(src)
+})())
 ok('client 无 editorKernel 残留（面板入口已移除）', !cli.includes('editorKernel') && !cli.includes('set-editor-kernel'))
 ok('client set-fallback 通道在', cli.includes("'permgate:set-fallback'") && cli.includes("invoke('permgate:set-fallback'"))
 
