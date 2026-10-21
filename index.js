@@ -1485,12 +1485,11 @@ export default {
     // 非法值**丢弃**而不是落默认 —— 落默认会经 persist 变成「用户表态」。
     //
     // 值域：
-    //   timeoutMs        ≥ 0 的有限数（0 = 不弹窗，直接回落）
+    //   timeoutMs        ≥ 0 的有限数（0 = 不弹窗，直接按回落值执行）
     //   breakerThreshold ≥ 0 的有限数（0 = 永不启用）
     //   cacheEnabled     布尔
     //   historyN         1..100 的整数
     //   historyBudget    200..100000 的整数
-    //   redactContentKeys 布尔
     //   provider / model 非空字符串（成对才有意义，但这里不强制成对 ——
     //                     reviewTarget 要求两者都在才用，缺一个就回落会话模型）
     function normalizeAutoReview(raw) {
@@ -1506,7 +1505,6 @@ export default {
       num('historyN', 1, 100)
       num('historyBudget', 200, 100000)
       if (typeof raw.cacheEnabled === 'boolean') out.cacheEnabled = raw.cacheEnabled
-      if (typeof raw.redactContentKeys === 'boolean') out.redactContentKeys = raw.redactContentKeys
       if (typeof raw.provider === 'string' && raw.provider.trim()) out.provider = raw.provider.trim().slice(0, 100)
       if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim().slice(0, 200)
       return Object.keys(out).length ? out : null
@@ -5689,77 +5687,53 @@ export default {
       'Use "escalate" only when you genuinely cannot decide — never guess.',
     ].join('\n')
 
-    // ── 脱敏：密钥类（第 6 层防线）────────────────────────────────────────────
-    // 内容类键**默认不截断**（照搬官方：截断会显著降低判断质量 —— 模型不知道要写什么），
-    // 但密钥类必须替换：它们是纯粹的凭据，对判断毫无帮助，而外发代价很高。
-    // 做成可配开关（设置页），默认开。
-    const SECRET_PATTERNS = [
-      /\bsk-[A-Za-z0-9_-]{16,}/g,                       // OpenAI 风格
-      /\bghp_[A-Za-z0-9]{20,}/g,                        // GitHub PAT
-      /\bAKIA[0-9A-Z]{16}\b/g,                          // AWS access key id
-      /\bBearer\s+[A-Za-z0-9._-]{16,}/gi,               // Bearer token
-      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-    ]
-    // 键名判定：这些名字的**值**一律替换（不看值长什么样）。
+    // ── 参数的**结构限制**（不是脱敏）────────────────────────────────────────────
+    // 只做一件事：防止「一份巨大参数把请求撑爆」。深度/数组/键数/单串长度都有上限，
+    // 超出部分截断并标注。这与信任无关，纯粹是请求体积的硬保护，故不可关。
     //
-    // 判据必须同时认出三种写法 —— 只认下划线版本会漏掉绝大多数真实配置：
-    //   · 下划线：`api_key` / `auth_token` / `client_secret`
-    //   · 驼峰：`apiKey` / `authToken` / `privateKey`   ← 最常见的 JSON 写法
-    //   · 全大写：`API_KEY` / `PASSWORD`
-    // 故不用「单词边界 + 下划线」的写法，改为「在这些词的前后插入分隔后匹配」：
-    // 先按驼峰与大小写边界切成词，再看有没有敏感词。
+    // ── 为什么这里**没有**密钥脱敏（曾经有，已删除）──────────────────────────────
+    // 曾经有一层 `SECRET_PATTERNS` / `isSecretKey`，把 `sk-…`、`AKIA…`、PEM 私钥、
+    // 以及 `apiKey` / `authToken` 这类键的值替换成占位符。已全部删除。
     //
-    // 为什么不能简单 `indexOf('key')`：那会把 `monkey` / `keyboard` / `publicKey`
-    // 一并脱敏 —— `publicKey` 不是秘密（它就是要公开的），误伤它会让模型看不到
-    // 关键上下文（例如「这次操作要用公钥加密」）。故按**整词**匹配，`private` 才算。
-    const SECRET_KEY_WORDS = ['api', 'auth', 'secret', 'password', 'passwd', 'token', 'cookie', 'credential', 'signature', 'private']
-    // 把 `apiKey` / `API_KEY` / `api-key` / `api.key` 都切成 ['api','key']
-    function keyWords(k) {
-      return String(k)
-        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')   // 驼峰边界：apiKey → api Key
-        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2') // 连续大写后接词：APIKey → API Key
-        .split(/[^A-Za-z0-9]+/)                    // 下划线/连字符/点/空格
-        .filter(Boolean)
-        .map((w) => w.toLowerCase())
-    }
-    function isSecretKey(k) {
-      const words = keyWords(k)
-      return words.some((w) => SECRET_KEY_WORDS.indexOf(w) !== -1)
-    }
-
-    function redactText(s) {
-      let t = String(s)
-      for (const re of SECRET_PATTERNS) t = t.replace(re, '[redacted-secret]')
-      return t
-    }
-
-    // 结构化脱敏：递归处理参数对象，返回**新对象**（不改原对象 —— 它属于调用方）。
-    // 结构限制（深度/数组/键数/单串长度）是防「一份巨大参数把请求撑爆」的硬保护，
-    // 与脱敏无关，故它不受开关控制。
+    // 删除理由（用户原话，比任何论证都直接）：
+    //   「如果不信任模型，就不该评审操作；能泄露给一个模型，就不能泄露给另一个模型？」
+    //
+    // 展开来是两条，任一都足以否定那一层：
+    //   1. **它防不住任何东西**：`exec.arguments` 里的内容，绝大多数是**模型自己生成的**
+    //      （它决定调 `write`，内容就是它写的）；少数是从工具返回值搬来的
+    //      （read 一个 `.env` 再 write 出去）—— 那也已经进了模型上下文。
+    //      把模型已经知道的东西再「脱敏」一次发给同一个模型，是自欺。
+    //   2. **它与「信任模型做评审」这件事直接矛盾**：把调用交给模型判断，
+    //      前提就是「相信它能正确处理这些内容」。一边请它判断、一边遮住它要判断的
+    //      东西，逻辑上不能同时成立 —— 那等于承认「我发给你但不信任你」。
+    //      而如果真的不信任，正确的做法是**不把这类调用交给 auto**（设成 ask 或 deny），
+    //      不是发一份残缺的副本。
+    //
+    // 由此还得到一个副产品：**评审材料必须是完整真实的**。模型看不到真实参数，
+    // 判断质量必然下降，而判断质量正是 auto 唯一的产出。
+    //
+    // 与官方的做法一致：`dsh-experimental-auto-review` 同样不做任何内容脱敏，
+    // 它把完整 `arguments` 发给模型，靠来源角色分级 + 严格协议防护（§4.4）。
     const REDACT_MAX_DEPTH = 3
     const REDACT_MAX_ARRAY = 25
     const REDACT_MAX_KEYS = 50
     const REDACT_MAX_TEXT = 1000
-    function redactValue(v, depth, redactKeys) {
+    function limitShape(v, depth) {
       if (v === null || v === undefined) return v
       if (typeof v === 'string') {
-        const cut = v.length > REDACT_MAX_TEXT ? v.slice(0, REDACT_MAX_TEXT) + '…[truncated ' + (v.length - REDACT_MAX_TEXT) + ' chars]' : v
-        return redactText(cut)
+        return v.length > REDACT_MAX_TEXT ? v.slice(0, REDACT_MAX_TEXT) + '…[truncated ' + (v.length - REDACT_MAX_TEXT) + ' chars]' : v
       }
       if (typeof v === 'number' || typeof v === 'boolean') return v
       if (depth >= REDACT_MAX_DEPTH) return '[depth-limit]'
       if (Array.isArray(v)) {
-        const out = v.slice(0, REDACT_MAX_ARRAY).map((x) => redactValue(x, depth + 1, redactKeys))
+        const out = v.slice(0, REDACT_MAX_ARRAY).map((x) => limitShape(x, depth + 1))
         if (v.length > REDACT_MAX_ARRAY) out.push('[+' + (v.length - REDACT_MAX_ARRAY) + ' more]')
         return out
       }
       if (typeof v === 'object') {
         const out = {}
         const keys = Object.keys(v)
-        for (const k of keys.slice(0, REDACT_MAX_KEYS)) {
-          if (redactKeys && isSecretKey(k)) { out[k] = '[redacted-secret-field]'; continue }
-          out[k] = redactValue(v[k], depth + 1, redactKeys)
-        }
+        for (const k of keys.slice(0, REDACT_MAX_KEYS)) out[k] = limitShape(v[k], depth + 1)
         if (keys.length > REDACT_MAX_KEYS) out['…'] = '[+' + (keys.length - REDACT_MAX_KEYS) + ' more keys]'
         return out
       }
@@ -5845,8 +5819,13 @@ export default {
     // REVIEW_POLICY / ENVIRONMENT / PROJECT_INSTRUCTIONS / FILTERED_HISTORY / PENDING_ACTION
     // 这里只负责组装**用户消息**部分（策略是 system），并且**不含任何 agent 生成的
     // 解释性文本**（§6.3 reasoning-blind）：`d.reason`、工具输出、assistant 散文一律不进。
-    const REVIEW_HISTORY_N = 10
-    const REVIEW_HISTORY_BUDGET = 4000
+    //
+    // ⚠️ 历史深度/预算**不在这里定常量**，一律走 `autoReviewSetting('historyN'/'historyBudget')`
+    //    （默认值在 AUTO_REVIEW_DEFAULTS 里，单一事实源）。
+    //    这里曾有一对常量 REVIEW_HISTORY_N/BUDGET = 10/4000，且调用处直接用了常量 ——
+    //    后果是面板上「给模型看的历史 10 次 / 4000 字符」两个输入框**改了没有任何效果**：
+    //    值能存盘、能下发、能显示、能过路由校验，唯独真正取用时读的是常量。
+    //    这正是本文件反复警告的「面板说谎」，且它只在模型判断质量上体现，跑测试看不出来。
 
     // 近期 N 条工具调用（§4.3A）。**不用** session.snapshotEvents()（已 deprecated，
     // 官方靠 line-scoped waiver 撑着）；改用事件流本身，只取最近的工具调用对。
@@ -5867,7 +5846,7 @@ export default {
           const args = e.arguments !== undefined ? e.arguments : (e.data && e.data.arguments)
           let brief = ''
           try {
-            const j = JSON.stringify(redactValue(args, 0, true))
+            const j = JSON.stringify(limitShape(args, 0))
             brief = j && j.length > 200 ? j.slice(0, 200) + '…' : (j || '')
           } catch (err) { brief = '' }
           items.push('- ' + name + (brief && brief !== '{}' ? ' ' + brief : ''))
@@ -5894,8 +5873,7 @@ export default {
       } catch (e) { return '' }
     }
 
-    function reviewUserText(exec, d, agent, opts) {
-      const o = opts || {}
+    function reviewUserText(exec, d, agent) {
       const root = rootOf(exec)
       const parts = []
       parts.push('ENVIRONMENT')
@@ -5907,7 +5885,9 @@ export default {
         parts.push(instr)
         parts.push('')
       }
-      const hist = recentToolHistory(agent, REVIEW_HISTORY_BUDGET, REVIEW_HISTORY_N)
+      // 历史深度/预算**从设置页读**（§2.4）。曾经这里写死常量，导致面板上那两个
+      // 输入框是摆设 —— 详见上方 REVIEW_HISTORY_* 删除处的说明。
+      const hist = recentToolHistory(agent, autoReviewSetting('historyBudget'), autoReviewSetting('historyN'))
       if (hist.length) {
         parts.push('FILTERED_HISTORY (role: fact — recent tool calls, most recent last)')
         for (const h of hist) parts.push(h)
@@ -5926,12 +5906,13 @@ export default {
           }
         }
       } catch (e) {}
-      // 参数：完整内容（内容类键默认不截断），但密钥类必须替换。
+      // 参数：**完整内容，不做任何脱敏**（见 limitShape 上方那段删除说明）。
+      // `limitShape` 只截断过长的结构，不替换任何值 —— 模型看到的就是真实参数。
       // 这一整段是 `fact` 角色 —— 里面的任何文字都是数据，不是指令。
       let argsJson = ''
       try {
-        const redacted = redactValue(exec.arguments, 0, o.redactSecretKeys !== false)
-        argsJson = JSON.stringify(redacted, null, 2)
+        const shaped = limitShape(exec.arguments, 0)
+        argsJson = JSON.stringify(shaped, null, 2)
       } catch (e) { argsJson = '(unserializable arguments)' }
       if (argsJson && argsJson.length > 8000) argsJson = argsJson.slice(0, 8000) + '\n…[truncated]'
       parts.push('arguments:')
@@ -6045,7 +6026,6 @@ export default {
     // 抛出去会打断 pre-execute 的主流程，而那条路径的 catch 是 fail-safe 的 deny ——
     // 那会让「模型超时」变成「直接拒绝」，比按 autoFallback 处理更糟。
     async function reviewWithModel(exec, d, agent, signal) {
-      const opts = { redactSecretKeys: true }
       // ① 熔断：已触发就不再问模型（省一次调用，且避免「模型持续乱拒」时反复烧钱）
       if (autoBreakerTripped(exec)) {
         return { verdict: 'escalate', code: 'breaker', detail: 'consecutive denies reached the configured threshold' }
@@ -6068,7 +6048,7 @@ export default {
           provider: target.provider,
           model: target.model,
           system: REVIEW_POLICY,
-          messages: [{ role: 'user', content: [{ type: 'text', text: reviewUserText(exec, d, agent, opts) }] }],
+          messages: [{ role: 'user', content: [{ type: 'text', text: reviewUserText(exec, d, agent) }] }],
           // temperature 0：判定要可复现，不要创造性
           temperature: 0,
           signal,
@@ -6108,8 +6088,9 @@ export default {
     // 不物化默认值：与 threshold 同一条纪律 —— 落盘只承载用户显式写下的值，
     // 否则日后改默认值对存量配置零效果（详见 normalizeThreshold 的注释）。
     const AUTO_REVIEW_DEFAULTS = {
-      // 弹窗超时（毫秒）：仅用于**异常路径**（模型失败后回落 allow/deny 时的插手窗口）。
-      // 0 = 不弹窗、直接回落。默认 20 秒。
+      // 弹窗超时（毫秒）：仅用于**异常路径**（模型失败后回落 allow/deny 时，弹窗等你多久）。
+      // 0 = 不弹窗，直接按回落值执行。默认 20 秒。
+      // 回落值设成 ask 时本项**不起作用**：那时一律弹窗且永不超时（用户就是要被问）。
       timeoutMs: 20000,
       // 熔断：真·连续拒绝达到此数触发。0 = 永不启用。默认 10（理由见 §3.5）。
       breakerThreshold: 10,
@@ -6118,8 +6099,6 @@ export default {
       // 历史深度（§4.3A）
       historyN: 10,
       historyBudget: 4000,
-      // 内容类键截断开关：默认关（照搬官方，不截断），需要更保守的用户可开
-      redactContentKeys: false,
       // 模型覆盖（provider + model 成对，留空则跟随会话）
       provider: '',
       model: '',
@@ -6244,15 +6223,18 @@ export default {
     }
 
     // 审批弹窗。opts（可选）：
-    //   opts.timeoutMs  超时时长（毫秒）。0 / 未传 = 永不超时（默认，现有行为）。
+    //   opts.timeoutMs  超时时长（毫秒）。0 / 未传 = 永不超时（弹窗照常弹，挂到用户处理为止）。
     //   opts.onTimeout  超时后的动作，只能是 'allow' | 'deny'。
     //   opts.note       附加说明（异常原因等），随弹窗下发，供人判断「为什么走到这一步」。
     //                   注意：d.note（命中的 ask 例外备注）优先于它，二者都只进 entry.note，
     //                   绝不拼进 reason（reason 会被记入决策记录并随 perm_status 回给 AI）。
-    // 机制本身是通用的（不写死为 auto 专用），但**当前仓库内没有任何调用方传入 opts**
-    // （唯一调用点是本文件 tools/pre-execute 的 askUser(exec, d)）：auto 的异常回落路径
-    // 目前只存在于 .plan/auto-approval-plan.md（尚未实现）。所以超时是给 auto 预留的能力，
-    // 接线前它在生产中不可达。onTimeout 只能是 allow/deny 的论证：能走到超时机制的配置，
+    //
+    // ⚠️ `timeoutMs === 0` 在这里是「**弹窗已弹出，还等多久**」的答案：0 = 一直等。
+    //    它与「要不要弹窗」是两个问题。auto 的异常路径在**调用方**就消化了 0
+    //    （不弹窗、直接按回落值执行），故永远不会带着 0 走到这里来。
+    //    两层各自含义清晰、且调用方保证了组合不成立，不是两份真相。
+    //
+    // onTimeout 只能是 allow/deny 的论证：能走到超时机制的配置，
     // 其 autoFallback 必然不是 ask（若为 ask，异常与正常失败本来就都弹窗，不需要超时），
     // 故落点必然二选一。
     function askUser(exec, d, opts) {
@@ -7118,7 +7100,6 @@ export default {
             cacheEnabled: autoReviewSetting('cacheEnabled'),
             historyN: autoReviewSetting('historyN'),
             historyBudget: autoReviewSetting('historyBudget'),
-            redactContentKeys: autoReviewSetting('redactContentKeys'),
             provider: autoReviewSetting('provider'),
             model: autoReviewSetting('model'),
           },
@@ -8296,15 +8277,29 @@ export default {
             // 异常原因写进 note（弹窗上给人看「为什么模型没用上」），**不进 reason** ——
             // reason 会经 recordDecision 落进决策记录并随 perm_status 下发给 AI。
             const why = (rv.code || 'infra-error') + (rv.detail ? ': ' + rv.detail : '')
+            // 超时时长只在这条异常路径上有意义，故在此算一次（下面两个分支共用）。
+            const tmo = autoReviewTimeoutMs()
             if (fb === 'ask') {
-              // 用户选了 ask 回落 = 就是要被问。此时**永不超时**（不传 timeoutMs）：
-              // 「异常」与「正常失败」本来就都会弹窗，不需要靠超时结案。
+              // 用户选了 ask 回落 = 就是要被问。此时**永不超时**，与 timeoutMs 的取值无关：
+              // 「异常」与「正常失败」本来就都会弹窗，不需要靠超时结案，也不该被超时打断。
               d2 = { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断', 'Auto review could not decide; human decision required'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback', fallbackReason: why }
-            } else {
-              // allow / deny 回落：给用户一个**可配时长的插手窗口**（默认 20 秒，0 = 不弹窗）。
-              // 语义不是「自动结案」，而是「异常情况下给用户一个插手窗口」：用户在窗口内
-              // 可以接管，不理则按用户预设的回落走。故这里**先弹窗**，超时才落 fb。
+            } else if (tmo > 0) {
+              // allow / deny 回落：弹窗等你这么久（默认 20 秒），超时就按回落值执行。
+              // 语义不是「自动结案」，而是「异常时先问你，你不理才按预设走」。
               d2 = { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断（' + (fb === 'allow' ? '超时后放行' : '超时后拒绝') + '）', 'Auto review could not decide; human decision required (timeout will ' + fb + ')'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback', fallbackReason: why, timeoutFallback: fb }
+            } else {
+              // tmo === 0 = **不弹窗，直接按回落值执行**（用户显式表示「这种异常别问我」）。
+              //
+              // 直接产出 allow/deny 而不是再走一次 ask：这样后续逻辑（沙箱升级闸、
+              // 计数、放行/拒绝分支）与「模型直接给出该结论」完全同形，不新增第三条路径。
+              //
+              // 这是一条**无人在环**的放行/拒绝，必须留痕（见下面的 recordDecision）：
+              // 否则事后无法区分「用户设了 0、系统按预设直接放行」与「模型判断放行」。
+              d2 = { action: fb, reason: bi('自动审批未能给出结论，按你的设置直接' + (fb === 'allow' ? '放行' : '拒绝'), 'Auto review could not decide; ' + (fb === 'allow' ? 'allowed' : 'denied') + ' by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback-direct', fallbackReason: why }
+              // 用独立 action 而不是复用 timeout-allow/deny：后者的语义是「倒计时结束、
+              // 无人应答」，而这里是「用户预先说了别问」—— 混用会让审计记录说谎，
+              // 用户看到 timeout-* 会以为「我设了 20 秒但没人理」，实际是他自己设了 0。
+              recordDecision({ action: fb === 'allow' ? 'fallback-allow' : 'fallback-deny', ruleId: null, reason: d2.reason }, exec)
             }
           }
           if (customReview) {
@@ -8347,18 +8342,16 @@ export default {
           // 不该被超时打断。这保证「能走到超时机制的，必然 autoFallback 是 allow 或 deny」，
           // 于是超时后**必然有明确落点**，不存在「超时了但不知道干什么」。
           //
-          // timeoutMs 取设置页配的值（默认 20 秒）；0 = 不弹窗直接回落（在下面处理）。
+          // ── timeoutMs === 0 的语义：**不弹窗，直接按回落值执行** ────────────────────
+          // 这条路径在评审段就已经消化掉了（见上面的 else 分支），走不到这里：
+          // 那里直接产出 allow/deny，不产出 ask。故此处 `tf` 恒有值且 `timeoutMs > 0`。
+          //
+          // 注意 askUser 内部的 `timeoutMs === 0` 含义**不同**：它表示「不建定时器 =
+          // 永不超时」。两者不冲突 —— 那是「弹窗已经弹出来了，还等多久」，而这里说的是
+          // 「弹不弹窗」。同一个数字在两层指两件事，是因为**层不同、问题也不同**；
+          // 调用方已保证走不到「弹窗 + 0」这个组合（0 会在上面被直接消化成 allow/deny）。
           const tf = d2.timeoutFallback
           const timeoutMs = tf ? autoReviewTimeoutMs() : 0
-          if (tf && timeoutMs === 0) {
-            // 超时设为 0 = 用户要求「异常时别问我，直接按回落走」。
-            // 不弹窗、不建定时器 —— 这条路径**必须在 askUser 之前**，否则会弹一个
-            // 永远没人理会的窗（那正是用户想避免的）。
-            recordDecision({ action: tf === 'allow' ? 'auto-fallback-allow' : 'auto-fallback-deny', ruleId: null, reason: bi('自动审批异常，按回落直接' + (tf === 'allow' ? '放行' : '拒绝'), 'auto review failed; fallback ' + tf) }, exec)
-            if (tf === 'deny') return { kind: 'deny', reason: uiLang === 'en' ? 'Auto review could not decide and fallback denied this call' : '自动审批未能给出结论，按回落策略拒绝本次调用' }
-            // tf === 'allow'：继续往下走（放行）
-            d2 = { action: 'allow', reason: d2.reason, ruleId: d2.ruleId, cat: d2.cat, value: d2.value, kind: d2.kind, via: 'auto-fallback' }
-          } else {
           const out = await askUser(exec, d2, timeoutMs ? { timeoutMs, onTimeout: tf } : undefined)
           // 人工决定 = 用户已在环里 → 熔断计数清零（§3.5：人决定 → 清零）。
           // 这条必须在**任何 return 之前**执行：用户无论是允许还是拒绝，都已经亲自看过
@@ -8374,7 +8367,6 @@ export default {
             console.warn('[permgate] approval timed out ->', out.kind, exec.name)
           }
           if (out.kind !== 'allow') return { kind: 'deny', reason: out.reason || (uiLang === 'en' ? 'User denied' : '用户拒绝') }
-          }
         } else if (act === 'deny') {
           // 判定直接拒绝（没有弹窗）时，AI 拿到的就是这条 —— 它是 AI 唯一的线索，
           // 故带上段摘要（「哪一段、命中哪一档」）。与决策日志同一份 segmentSummary，

@@ -4688,21 +4688,31 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 
-  // ── A14：异常路径 + 回落 allow + 超时 0 → **不弹窗**，直接放行 ────────────────
+  // ── A14：异常路径 + 回落 allow + 超时 0 → **不弹窗，直接放行** ─────────────────
+  //
+  // 语义（这条订正过两次，最终以用户实际意图为准）：
+  //   `timeoutMs = 0` = **不弹窗，直接按回落值执行**。
+  //   `timeoutMs > 0` = 弹窗等这么久，超时后按回落值执行。
+  //   回落值 = ask 时本项不起作用，一律弹窗且永不超时。
+  //
+  // 依据：`AUTO_REVIEW_DEFAULTS` 的注释从一开始就是这么写的（「0 = 不弹窗、直接回落」），
+  // 是**代码**后来偏离了它，不是文案没跟上。
   {
     const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, undefined, { fallbackAutoFallback: 'allow' })
     const r = await probeAuto(h, ws, 'a14', T, A)
-    ok('★★ group24 A14: 异常 + 回落 allow + 超时 0 → 不弹窗、直接放行',
-      r === 'allow', JSON.stringify(r))
+    ok('★★ group24 A14: 异常 + 回落 allow + 超时 0 → 不弹窗，直接放行',
+      r === 'allow',
+      JSON.stringify(r))
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 
-  // ── A15：异常路径 + 回落 deny + 超时 0 → 不弹窗，直接拒绝 ────────────────────
+  // ── A15：异常路径 + 回落 deny + 超时 0 → 同上（不弹窗、直接拒绝）───────────────
   {
     const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, undefined, { fallbackAutoFallback: 'deny' })
     const r = await probeAuto(h, ws, 'a15', T, A)
-    ok('★★ group24 A15: 异常 + 回落 deny + 超时 0 → 不弹窗、直接拒绝',
-      r === 'deny', JSON.stringify(r))
+    ok('★★ group24 A15: 异常 + 回落 deny + 超时 0 → 不弹窗，直接拒绝',
+      r === 'deny',
+      JSON.stringify(r))
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 
@@ -4713,6 +4723,27 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A16: 异常 + 回落 allow + 超时>0 → 弹窗，并带 deadline 与 onTimeout',
       r && r.kind === 'ask' && typeof r.entry.deadline === 'number' && r.entry.onTimeout === 'allow',
       JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, onTimeout: r.entry.onTimeout } : r))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A14b：超时 0 直接执行是**无人在环**的放行/拒绝，必须留痕 ────────────────────
+  //
+  // 若不补记，事后无法区分「用户设了 0、系统按预设直接放行」与「模型判断放行」——
+  // 前者用户可能完全不知情，后者是他授权模型判断的，责任归属不同。
+  // 用独立的 `fallback-allow/deny` 而不是复用 `timeout-allow/deny`：后者的语义是
+  // 「倒计时结束、无人应答」，混用会让审计记录说谎。
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, undefined, { fallbackAutoFallback: 'allow' })
+    await probeAuto(h, ws, 'a14b', T, A)
+    const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    const list = (dec.data && dec.data.decisions) || []
+    const hit = list.filter((x) => x.action === 'fallback-allow')
+    ok('★★ group24 A14b: 超时 0 直接放行留下 fallback-allow 记录（与模型放行可区分）',
+      hit.length === 1,
+      JSON.stringify(list.map((x) => x.action)))
+    ok('★ group24 A14b: 留痕不含 timeout-allow（不能把「用户设了 0」说成「超时」）',
+      !list.some((x) => x.action === 'timeout-allow'),
+      JSON.stringify(list.map((x) => x.action)))
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 
@@ -4738,29 +4769,40 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 
-  // ── A19：密钥脱敏 —— 模型不该看到 sk- 之类的凭据 ─────────────────────────────
+  // ── A19：参数**原样**发给模型（不脱敏，这是有意的）────────────────────────────
+  //
+  // 这里曾经验证「密钥被替换成 [redacted-secret]」。那一层已**整体删除**，
+  // 理由（用户原话）：
+  //   「如果不信任模型，就不该评审操作；能泄露给一个模型，就不能泄露给另一个模型？」
+  //
+  // 展开来是两条：
+  //   1. 它防不住任何东西 —— `exec.arguments` 的内容绝大多数是**模型自己生成的**；
+  //      少数从工具返回值搬来的，那也已经在模型上下文里了。把模型已知的东西再
+  //      「脱敏」一次发给同一个模型，是自欺。
+  //   2. 它与「信任模型做评审」直接矛盾 —— 一边请它判断、一边遮住它要判断的东西，
+  //      逻辑上不能同时成立。真不信任就该**不把这类调用交给 auto**，而不是发残缺副本。
+  //
+  // 故现在的断言方向**反过来**：参数必须**完整**到达模型。
+  // 若哪天有人「好心」把脱敏加回来，这条会变红 —— 那正是我们要的。
   {
     const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
     const { ws, home, h } = mkHostAuto({}, llm)
-    await probeAuto(h, ws, 'a19', T, { token: 'sk-abcdefghijklmnopqrstuvwx', normal: 'hello' })
+    const SECRET = 'sk-abcdefghijklmnopqrstuvwx'
+    await probeAuto(h, ws, 'a19', T, { token: SECRET, normal: 'hello' })
     const sent = JSON.stringify(llm.calls[0] && llm.calls[0].messages)
-    // 两层脱敏，分别验证：
-    //   · **键名**命中（`token`）→ 值整块替换为 `[redacted-secret-field]`，且值本身不外发
-    //   · **值形态**命中（`sk-...`）→ 无论键名是什么都替换为 `[redacted-secret]`
-    // 这里 `token` 是敏感键名，故走的是第一层。第二层由下面的 valueOnly 用例覆盖。
-    ok('★★ group24 A19: 敏感键名的值不发给模型（token 被整块替换）',
-      sent.indexOf('sk-abcdefghijklmnopqrstuvwx') === -1
-      && sent.indexOf('[redacted-secret-field]') !== -1
-      && sent.indexOf('hello') !== -1,
+    ok('★★ group24 A19: 参数完整发给模型（不脱敏 —— 见上方删除说明）',
+      sent.indexOf(SECRET) !== -1
+      && sent.indexOf('hello') !== -1
+      && sent.indexOf('[redacted') === -1,
       sent.slice(0, 300))
-    // 键名**不**敏感、但值长得像密钥 → 必须由第二层拦住
+    // 结构限制仍然生效（那是防请求撑爆，与信任无关，不是脱敏）
     const llm2 = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
     const h2 = mkHostAuto({}, llm2)
-    await probeAuto(h2.h, h2.ws, 'a19b', T, { note: 'key is sk-abcdefghijklmnopqrstuvwx here' })
+    const longText = 'x'.repeat(1500)
+    await probeAuto(h2.h, h2.ws, 'a19b', T, { content: longText })
     const sent2 = JSON.stringify(llm2.calls[0] && llm2.calls[0].messages)
-    ok('★★ group24 A19b: 值形态像密钥时也替换（键名不敏感也拦）',
-      sent2.indexOf('sk-abcdefghijklmnopqrstuvwx') === -1
-      && sent2.indexOf('[redacted-secret]') !== -1,
+    ok('★ group24 A19b: 超长字符串仍被结构限制截断（防请求撑爆，与脱敏无关）',
+      sent2.indexOf(longText) === -1 && sent2.indexOf('[truncated') !== -1,
       sent2.slice(0, 300))
     try {
       rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true })
@@ -4796,10 +4838,15 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A20: 设置真的写进 config.json（不是只在内存）',
       disk1.global.autoReview && disk1.global.autoReview.timeoutMs === 0,
       JSON.stringify(disk1.global.autoReview))
-    // ③ 行为真的变了：异常 + 回落 deny + 超时 0 → 不弹窗、直接 deny
+    // ③ 行为真的变了：异常 + 回落 deny + 超时 0 → **不弹窗，直接拒绝**。
+    //
+    // 这条验证的是「设置影响行为」，用的是**可观测差异**：超时>0 时弹窗带 deadline，
+    // 超时=0 时根本不弹窗、直接落回落值。用「弹不弹窗」这个差异是因为它最直观，
+    // 且正是用户对 0 的期待（「别问我」）。
     const rr = await probeAuto(h, ws, 'a20', T, A)
-    ok('★★ group24 A20: 改超时为 0 后行为随之改变（异常时不再弹窗）',
-      rr === 'deny', JSON.stringify(rr))
+    ok('★★ group24 A20: 改超时为 0 后行为随之改变（不弹窗，直接按回落值拒绝）',
+      rr === 'deny',
+      JSON.stringify(rr))
 
     // ④ 恢复默认 → 键被删掉，effective 回到 20000
     const r2 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { clear: ['timeoutMs'] })
@@ -4854,6 +4901,103 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★ group24 A23: provider/model 必须成对才生效（只填一个则跟随会话）',
       llm.calls.length === 1 && llm.calls[0].provider === 'test-provider' && llm.calls[0].model === 'test-model',
       JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A24：historyN / historyBudget 必须**真的读设置**，不是读常量 ──────────────
+  //
+  // 这两个设置项曾经是**死设置**：能存盘、能下发、能在面板显示、能过路由校验，
+  // 唯独 `reviewUserText` 里取用的是文件顶部的常量 REVIEW_HISTORY_N/BUDGET(10/4000)。
+  // 后果：面板上改成 3 或改成 50，发给模型的历史**一个字都不变** —— 又是一次面板说谎。
+  //
+  // 之所以此前所有测试都没抓到：常量恰好等于默认值 10/4000，
+  // 于是「读常量」和「读默认值」表现完全一致。**必须把设置改成非默认值**才区分得开。
+  //
+  // 判据：改 historyN = 3 后，发给模型的 FILTERED_HISTORY 段里恰好只有 3 条。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ historyN: 3, historyBudget: 100000 }, llm)
+    // 造 8 条工具调用事件，让「最多给几条」这件事有可观测差异
+    const events = []
+    for (let i = 0; i < 8; i++) {
+      events.push({ type: 'tool/call', name: 'hist_tool_' + i, arguments: { i } })
+    }
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: {
+        cwd: ws,
+        session: {
+          id: 'a24',
+          requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }),
+          events: () => events,
+        },
+      },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    const shown = (text.match(/^- hist_tool_\d+/gm) || []).length
+    ok('★★ group24 A24: historyN 真的生效（设 3 → 只给模型 3 条历史，不是常量 10）',
+      llm.calls.length === 1 && shown === 3,
+      JSON.stringify({ calls: llm.calls.length, shown, hasHist: text.indexOf('FILTERED_HISTORY') !== -1 }))
+    // 让挂起的审批结案，避免 p 悬着
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  }
+
+  // ── A25：historyBudget 同样必须真的读设置 ────────────────────────────────────
+  //
+  // 与 A24 同源，但验的是「预算」这一维。
+  // 注意预算的**最小值是 200**（normalizeAutoReview 的 historyBudget 下限），
+  // 而一条 `- budget_tool_0 {"i":0}` 约 24 字符 —— 8 条才 ~190，低于 200 预算，
+  // 一条都不会被丢。故这里必须让每条**足够长**才能触发裁剪，否则断言测的是空气。
+  //
+  // 循环条件 `items.length > 1` 保证至少留 1 条，故极小预算下结果是 1 而不是 0。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ historyN: 10, historyBudget: 200 }, llm)
+    const events = []
+    for (let i = 0; i < 8; i++) {
+      // 参数塞长串，让每条 ~120 字符 → 8 条 ~960，远超 200 预算
+      events.push({ type: 'tool/call', name: 'budget_tool_' + i, arguments: { pad: 'x'.repeat(100) } })
+    }
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: {
+        cwd: ws,
+        session: {
+          id: 'a25',
+          requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }),
+          events: () => events,
+        },
+      },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    const shown = (text.match(/^- budget_tool_\d+/gm) || []).length
+    ok('★★ group24 A25: historyBudget 真的生效（预算 200 → 历史被压到 1 条）',
+      llm.calls.length === 1 && shown === 1,
+      JSON.stringify({ calls: llm.calls.length, shown }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
     try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
   }
 }

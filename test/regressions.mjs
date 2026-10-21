@@ -1464,9 +1464,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //    没有它，用户以为自己在配 auto，实际连「模型挂了会怎样」都不知道 ——
   //    而那是 auto 语义的核心（§2.1：选 auto 必须同时指定 autoFallback）。
   ok('★★ 选了 auto 时面板出现回落值选择器（否则用户看不见「失败后怎么办」）', (function () {
-    // 只在 mode === 'auto' 时渲染（两个条件各出现一次：标签 + 下拉）
-    const gate = (cli.match(/mode === 'auto' \?/g) || []).length
-    if (gate !== 2) return false
+    // ⚠️ 判据是「**每一处**渲染分类动作下拉的地方都配了回落选择器」，不是「某处有」。
+    //    command 是唯一把动作下拉放在**块底部**的分类（三层布局），它的渲染走
+    //    commandRestRow 而不是标题行那套 —— 最初漏了这一处，后果是「执行命令」设为
+    //    auto 后回落值**无处可设**（面板上看不到那个下拉框，只能用隐含默认 ask）。
+    //    故这里按 `sel(mode, changeCat(...))` 的调用点逐个数：有几个动作下拉，
+    //    就必须有几个 `mode === 'auto'` 的回落选择器。
+    const catSels = (cli.match(/sel\(mode, changeCat\('?[a-z]*'?\)/g) || []).length
+    const fallbackSels = (cli.match(/mode === 'auto' \? sel\(catAutoFallbackOf\(/g) || []).length
+    if (catSels !== 2) return false          // 标题行（其余分类）+ commandRestRow
+    if (fallbackSels !== 2) return false     // 两处都要有
     if (!cli.includes("'panel.autoFallbackLabel'")) return false
     // 回落值域必须是 ask/allow/deny（不含 inherit —— 回落必须是能直接执行的动作）
     const m = cli.match(/const AUTO_FALLBACK_MODES = (\[[^\]]*\])/)
@@ -1475,12 +1482,90 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     try { arr = new Function('return ' + m[1])() } catch (e) { return false }
     return JSON.stringify(arr) === JSON.stringify(['ask', 'allow', 'deny'])
   })())
-  // ④ 切进 auto 时必须**把回落值一起写下去**：宿主对「action=auto 但没写回落」会补 ask，
+  // ★★ 顺序：**动作下拉在前，回落选择器在后**。
+  //
+  // 「失败后」是从句，它修饰的是左边（原先）/右边（现在）那个动作下拉。写反了不只是
+  // 不好看 —— 用户从左往右读时先看到「失败后：询问」，会以为那是一个**独立设置项**，
+  // 不知道它在修饰哪个控件。曾经就这样排反了，而同一处的注释却写着「读序：动作 →
+  // 失败后怎么办」，注释与实现直接矛盾（用户一眼看出来的正是这个）。
+  //
+  // 判据：每个回落选择器之前，必须**先**出现 `sel(mode, changeCat(...))`。
+  // 两处渲染（标题行 + commandRestRow）都要满足。
+  ok('★★ 回落选择器排在动作下拉之后（「失败后」是从句，必须跟在被修饰项后面）', (function () {
+    const iBar = cli.indexOf("tabBtn('auto'")
+    let n = 0
+    // 逐处检查：找到每个 `sel(catAutoFallbackOf(`，看它前面最近的 `sel(mode, changeCat(` 是否更近
+    const re = /mode === 'auto' \? sel\(catAutoFallbackOf\(/g
+    let m
+    while ((m = re.exec(cli))) {
+      n++
+      const before = cli.slice(Math.max(0, m.index - 2000), m.index)
+      const iAction = before.lastIndexOf('sel(mode, changeCat(')
+      // 动作下拉必须出现在这段窗口里（否则说明它排到了回落之后）
+      if (iAction < 0) return false
+      // 且两者之间不得再出现另一个回落选择器（那意味着顺序乱了）
+      const between = before.slice(iAction)
+      if (between.indexOf('sel(catAutoFallbackOf(') !== -1) return false
+    }
+    return n === 2
+  })())
+  // ⑤ 超时文案必须说清「询问时到底弹不弹窗」。
+  //
+  // 这条文案改错过两次，两次都是**语义反了**而不是错别字：
+  //   第一次：「0 = 一直等，不自动结案」—— 与当时的实现一致，但那是错误实现；
+  //   第二次：「注意「失败后」设为询问时**不弹这个窗**」—— 凭空造出「这个窗」，
+  //           暗示存在两个弹窗。实际只有一个：询问时**恰恰一定弹**，只是不计时。
+  //           用户读到的却是「询问时不弹窗」，与事实相反。
+  //
+  // 判据分两半：
+  //   ① 必须正面写出「询问时弹窗照常弹 / 一直等你」；
+  //   ② 不得出现「询问时不弹」这类反向组合（含「不弹这个窗」这种造词）。
+  ok('★★ 超时文案写明「询问时照常弹窗、只是不计时」（不得说成询问时不弹窗）', (function () {
+    const m = cli.match(/'panel\.autoTimeoutHint':\s*'([^']*)'/)
+    if (!m) return false
+    const zh = m[1]
+    // ① 正面表述必须在
+    if (zh.indexOf('询问时') < 0) return false
+    if (!/询问时[^。]*弹窗照常弹/.test(zh) && !/询问时[^。]*一直等你/.test(zh)) return false
+    // ② 反向表述不得出现：「询问」附近说「不弹」
+    if (/询问[^。]{0,12}不弹/.test(zh)) return false
+    // ③ 不得出现「这个窗」这种把单一弹窗说成两个的措辞
+    if (zh.indexOf('这个窗') !== -1) return false
+    return true
+  })())
+  // ⑥ 熔断文案不得说成「每次都问你」。
+  //
+  // 熔断触发后走的是**统一异常路径**，最终动作由 `autoFallback` 决定：
+  //   autoFallback = ask      → 弹窗，永不超时      ← 只有这一种是「每次都问你」
+  //   autoFallback = allow/deny + 时限 > 0 → 弹窗倒计时，超时按预设执行
+  //   autoFallback = allow/deny + 时限 = 0 → 不弹窗，直接按预设执行  ← 离「问你」最远
+  //
+  // 原文案写「改为每次都问你」，只在第一种情况下成立；后两种情况下
+  // 用户读到的是「会来问我」，实际却是「悄悄按预设执行」—— 面板在替系统许诺
+  // 一个它不会做的行为。故文案必须说「改按「失败后」的设置处理」。
+  ok('★★ 熔断文案不得说成「每次都问你」（触发后实际按「失败后」设置处理）', (function () {
+    const m = cli.match(/'panel\.autoBreakerHint':\s*'([^']*)'/)
+    if (!m) return false
+    const zh = m[1]
+    // ① 必须指向「失败后」设置，这是触发后的真实去向
+    if (zh.indexOf('失败后') < 0) return false
+    // ② 不得声称「每次都问你」
+    if (zh.indexOf('每次都问你') !== -1) return false
+    // ③ 「0 = 不启用」太含糊：不启用的是**熔断**（暂停问模型），不是整个 auto
+    if (/0\s*=\s*不启用/.test(zh)) return false
+    return true
+  })())
+  // ⑦ 切进 auto 时必须**把回落值一起写下去**：宿主对「action=auto 但没写回落」会补 ask，
   //    但那是一次静默补值 —— 面板上看到的与实际落盘的必须一致。
   ok('★ 切进 auto 时一并提交回落值（面板显示与实际落盘一致）',
     /if \(mode === 'auto'\) patch\[c \+ 'AutoFallback'\] = catAutoFallbackOf\(c\)/.test(cli))
-  // ⑤ 设置卡片：控件与宿主字段**一一对应**，且只出现在全局 tab。
+  // ⑤ 设置卡片：控件与宿主字段**一一对应**，且只由 auto tab 可达。
   //    缺一个控件 = 那个设置项只能手改 config.json（等于没做）；多一个 = 面板写了没人读。
+  //
+  // ⚠️ 判据已从「卡片内有 `if (tab !== 'global') return null`」改为「**tab 栏之后的分流**」：
+  //    auto 设置改成了独立的第三个 tab（它与全局/项目是两个不同层级的东西），
+  //    若仍在卡片里判 tab，就是两份判据。真正的保证是：`tab === 'auto'` 时只渲染这张卡片，
+  //    其余全部设置卡片被 `tab === 'auto' ? null : <Fragment>` 挡住。
   ok('★★ auto 设置卡片的控件与宿主设置项一一对应（缺一个就等于没做）', (function () {
     const i = cli.indexOf('const autoReviewCard = () => {')
     if (i < 0) return false
@@ -1491,15 +1576,60 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
-    // 只出现在全局 tab（不渲染禁用态 —— 那会让人以为项目层也能配）
-    if (!/if \(tab !== 'global'\) return null/.test(body)) return false
-    // 宿主 AUTO_REVIEW_DEFAULTS 的 8 个键，每个都要有控件
-    const keys = ['timeoutMs', 'breakerThreshold', 'cacheEnabled', 'historyN', 'historyBudget', 'redactContentKeys', 'provider', 'model']
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 7 个键，每个都要有控件
+    //
+    // 曾经有第 8 个 `redactContentKeys`（「隐藏参数内容」），已删除：它**从未接线**
+    // （`reviewUserText` 一次都没读过它），而它的设计前提也是错的 ——
+    // 截断参数只会让模型看不清要写什么、判断变差，不是该提供给用户的选项。
+    // 密钥脱敏（`sk-`/AKIA/PEM/敏感键名）是**始终开启**的另一层，与它无关。
+    const keys = ['timeoutMs', 'breakerThreshold', 'cacheEnabled', 'historyN', 'historyBudget', 'provider', 'model']
     for (const k of keys) {
       if (body.indexOf("'" + k + "'") === -1) return false
     }
     // 提交走单一端点（不得各写一个路由）
-    return /invoke\('permgate:set-auto-review'/.test(body)
+    if (!/invoke\('permgate:set-auto-review'/.test(body)) return false
+    // 卡片内**不再**判 tab（判据在调用点，见下一条断言）
+    return body.indexOf("if (tab !== 'global') return null") === -1
+  })())
+  // ⑥ auto 是独立的第三个 tab，且它**完全挡掉**其余设置卡片。
+  //
+  // 为什么这条重要：`tab === 'global' ? A : B` 在这个文件里有 100+ 处。
+  // 若让 `tab='auto'` 流进那一片代码，它们会**集体**走「项目层」分支 ——
+  // 既显示错误的配置，又会向宿主发 `{ target: 'auto' }` 这种它不认识的值。
+  // 故必须在 tab 栏之后立刻分流，让那片代码对 auto tab 完全不可达。
+  ok('★★ auto 是独立 tab，且挡掉其余设置卡片（100+ 处 tab 判断不可被污染）', (function () {
+    // ① tab 栏里有第三个按钮
+    if (!/tabBtn\('auto', T\('panel\.tabAuto'\)\)/.test(cli)) return false
+    if (!cli.includes("'panel.tabAuto'")) return false
+    // ② tab 栏之后有分流：auto 只渲染卡片
+    const iBar = cli.indexOf("tabBtn('auto', T('panel.tabAuto'))")
+    if (iBar < 0) return false
+    const iFork = cli.indexOf("tab === 'auto' ? autoReviewCard() : null", iBar)
+    if (iFork < 0) return false
+    // ③ 其余卡片被包在 `tab === 'auto' ? null : <Fragment>` 里
+    const iFrag = cli.indexOf("tab === 'auto' ? null : React.createElement(React.Fragment, null,", iFork)
+    if (iFrag < 0) return false
+    // ④ 那个 Fragment 必须覆盖**全部**设置卡片（逐一检查几个代表性标题）
+    let d = 0
+    let end = -1
+    let inStr = null
+    let esc = false
+    const j = cli.indexOf('React.createElement', iFrag)
+    for (let k = j; k < cli.length; k++) {
+      const c = cli[k]
+      if (inStr) { if (esc) { esc = false; continue } if (c === '\\') { esc = true; continue } if (c === inStr) inStr = null; continue }
+      if (c === "'" || c === '"' || c === '`') { inStr = c; continue }
+      if (c === '(' || c === '[' || c === '{') d++
+      else if (c === ')' || c === ']' || c === '}') { d--; if (d === 0) { end = k; break } }
+    }
+    if (end < 0) return false
+    const frag = cli.slice(j, end + 1)
+    for (const marker of ["T('panel.sandbox')", "T('panel.quick')", "T('panel.rules')", "T('panel.fallback')", "T('panel.decisions')", 'CATS.map((c, i)']) {
+      if (frag.indexOf(marker) === -1) return false
+    }
+    // ⑤ auto 卡片**不在**那个 Fragment 里（否则它会被 `tab === 'auto' ? null` 挡掉，
+    //    auto tab 就什么都不显示 —— 这是个静默的全空页面）
+    return frag.indexOf('autoReviewCard()') === -1
   })())
   // ⑥ 评审能力不可用时必须显式提示：否则用户看到「auto 一直弹窗」无从判断原因。
   ok('★ 无 llm 服务时面板显式提示（否则 auto 一直弹窗无从解释）',

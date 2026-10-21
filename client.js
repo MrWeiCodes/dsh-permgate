@@ -1456,15 +1456,18 @@ window.__ModuleLoader__.load({
 		const diffFetching = new Set();
 		let ALL_MODES = ['ask', 'allow', 'deny', 'inherit'];
 		let MODES = ['ask', 'allow', 'deny'];
-		// 颜色键集必须覆盖 decisions 里所有可能的 action（含宿主超时自动结案的
-		// timeout-allow/timeout-deny），否则「最近决策」会回落灰色 #888，与人工决策无从区分。
+		// 颜色键集必须覆盖 decisions 里所有可能的 action（含宿主无人在环结案的
+		// timeout-allow/timeout-deny/fallback-allow/fallback-deny），否则「最近决策」
+		// 会回落灰色 #888，与人工决策无从区分。
 		// 颜色语义：橙=要过一道关（问人）、绿=放行、红=拒绝、灰=继承。
+		// timeout-* 用橙：虽然结果是放行/拒绝，但**没人拍板**，用户该一眼看出「这条要复核」。
+		// fallback-* 同理用橙：它是用户预设的兜底，不是本次判断的结果。
 		// `auto` 取**紫色**而不是复用 ask 的橙：它和 ask 一样「要过一道关」，但过关的是
 		// **模型**不是人 —— 用户在状态点/徽标上一眼要能分清「这次谁在看」。
 		// 复用橙色会让 auto 与 ask 在面板上完全同色，那正是「同一概念两种编码」的反面：
 		// 两个不同概念被编成了同一个颜色。
 		// 取 `#6a1b9a`（深紫）而不是浅紫：状态点是 12px 小圆点，浅色在白底上几乎看不见。
-		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888', auto: '#6a1b9a', 'timeout-allow': '#e65100', 'timeout-deny': '#c62828' };
+		const MODE_COLORS = { ask: '#e65100', allow: '#2e7d32', deny: '#c62828', inherit: '#888', auto: '#6a1b9a', 'timeout-allow': '#e65100', 'timeout-deny': '#c62828', 'fallback-allow': '#e65100', 'fallback-deny': '#e65100' };
 		// auto 的回落值域：**不含 inherit**。回落是「这次调用最后怎么办」的最终答案，
 		// 必须是一个能直接执行的动作；inherit 是层级继承语义，把它当回落值等于让回落
 		// 本身又要再解析一次层级（理由见宿主 normalizeAutoFallback 的注释）。
@@ -1622,32 +1625,35 @@ window.__ModuleLoader__.load({
 				'panel.autoFallbackLabel': '失败后：',
 				// ── 自动审批的工程参数卡片 ──────────────────────────────────────
 				'panel.autoReview': '自动审批',
-				'panel.autoReviewHint': '这一档把调用交给模型判断。下面这些参数决定「模型不可用时怎么办」，只有全局设置。',
-				'panel.autoNoLlm': '当前没有可用的模型服务（llm），所有 auto 都会走回落。装上 provider 后自动恢复。',
-				'panel.autoTimeout': '弹窗超时（毫秒）',
-				'panel.autoTimeoutHint': '仅用于模型失败后回落为「允许/拒绝」时的插手窗口；0 = 不弹窗直接回落',
-				'panel.autoBreaker': '熔断阈值',
-				'panel.autoBreakerHint': '连续拒绝达到此数后转人工；0 = 永不启用',
-				'panel.autoCache': '缓存放行结论',
-				'panel.autoCacheHint': '只缓存放行，拒绝不缓存；会话结束即清空',
-				'panel.autoHistory': '历史深度',
-				'panel.autoHistoryHint': '条数 / 字符预算（发给模型看最近发生了什么）',
-				'panel.autoRedactContent': '截断内容类参数',
-				'panel.autoRedactContentHint': '默认不截断（模型需要看清要写什么）；更保守可开启',
-				'panel.autoModel': '模型覆盖',
-				'panel.autoProviderPh': 'provider（留空跟随会话）',
-				'panel.autoModelPh': 'model（留空跟随会话）',
-				'panel.autoModelHint': '两者都填才生效',
+				'panel.autoReviewHint': '把某个分类设成「自动审批」后，每次调用先问模型，模型说行就直接过。下面这些是它的运行参数，全局生效。',
+				'panel.autoNoLlm': '没检测到可用的模型服务。现在所有「自动审批」都会退回你设的兜底动作。',
+				'panel.autoTimeout': '等待人工的时限',
+				'panel.autoTimeoutHint': '模型判断失败时，弹窗等你多久。仅当「失败后」是允许/拒绝时有效：超时就按它执行；填 0 则不弹窗、直接执行。「失败后」是询问时本项不生效，弹窗照常弹，一直等你决定',
+				'panel.autoBreaker': '连续拒绝上限',
+				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
+				'panel.autoCache': '记住放行过的调用',
+				'panel.autoCacheHint': '同一个调用第二次直接放行，不再问模型。只记放行过的，拒绝过的照常问',
+				'panel.autoHistory': '给模型看的历史',
+				'panel.autoHistoryHint': '左边是带几条最近的调用，右边是这些文字的总长上限（超了从最早的开始丢）',
+				'panel.autoModel': '用哪个模型',
+				'panel.autoProviderPh': '服务商，留空用当前会话的',
+				'panel.autoModelPh': '模型名，留空用当前会话的',
+				'panel.autoModelHint': '两个都填才生效',
 				'panel.autoOn': '开',
 				'panel.autoOff': '关',
 				'panel.autoSaved': '已保存',
-				'panel.autoBadNumber': '请输入非负整数',
-				'panel.autoReset': '恢复默认',
+				'panel.autoBadNumber': '请输入 0 或正整数',
+				'panel.autoMsUnit': '毫秒',
+				'panel.autoTimesUnit': '次',
+				'panel.autoCharsUnit': '字符',
+				'panel.autoReset': '全部恢复默认',
 				'panel.autoResetDone': '已恢复默认',
-				// 审计专用动作值（宿主超时自动结案）：不在设置页下拉里，只出现在「最近决策」。
+				// 审计专用动作值（宿主无人在环结案）：不在设置页下拉里，只出现在「最近决策」。
 				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
 				'mode.timeout-allow': '超时自动允许',
 				'mode.timeout-deny': '超时自动拒绝',
+				'mode.fallback-allow': '按设置直接放行',
+				'mode.fallback-deny': '按设置直接拒绝',
 				'panel.status': '状态',
 				'panel.sessionPerm': '当前会话权限',
 				'panel.customReview': '自定义审查',
@@ -1667,6 +1673,7 @@ window.__ModuleLoader__.load({
 				'panel.fenceUnauthenticated': '浏览器凭据缺失或已过期（401）。请从 dsh web 打印的地址重新打开本页面以完成认证。',
 				'panel.tabGlobal': '全局',
 				'panel.tabProject': '项目',
+				'panel.tabAuto': '自动审批',
 				'panel.editGlobal': '正在编辑全局设置（所有项目的默认）。',
 				'panel.editProject': '正在编辑当前项目（{p}），项目设置优先于全局。',
 				'panel.sandbox': '底层沙箱',
@@ -2046,30 +2053,33 @@ window.__ModuleLoader__.load({
 				'mode.auto': 'Auto review',
 				'panel.autoFallbackLabel': 'if it fails:',
 				'panel.autoReview': 'Auto review',
-				'panel.autoReviewHint': 'This tier hands the call to a model. These settings decide what happens when the model is unavailable; global only.',
-				'panel.autoNoLlm': 'No model service (llm) is available, so every auto call falls back. Install a provider to restore it.',
-				'panel.autoTimeout': 'Dialog timeout (ms)',
-				'panel.autoTimeoutHint': 'only the intervention window when the fallback is allow/deny; 0 = no dialog',
-				'panel.autoBreaker': 'Breaker threshold',
-				'panel.autoBreakerHint': 'consecutive denials before handing back to a human; 0 = never',
-				'panel.autoCache': 'Cache allow verdicts',
-				'panel.autoCacheHint': 'allow only; denials are never cached; cleared when the session ends',
-				'panel.autoHistory': 'History depth',
-				'panel.autoHistoryHint': 'item count / character budget sent to the model',
-				'panel.autoRedactContent': 'Truncate content arguments',
-				'panel.autoRedactContentHint': 'off by default (the model needs to see what will be written)',
-				'panel.autoModel': 'Model override',
-				'panel.autoProviderPh': 'provider (empty = follow session)',
-				'panel.autoModelPh': 'model (empty = follow session)',
-				'panel.autoModelHint': 'both are required to take effect',
+				'panel.autoReviewHint': 'When a category is set to Auto review, each call is checked by a model first. These are its runtime settings, global to all projects.',
+				'panel.autoNoLlm': 'No model service is available. Every Auto review call will fall back to the action you chose.',
+				'panel.autoTimeout': 'Wait for a human',
+				'panel.autoTimeoutHint': 'when the model fails, how long the dialog waits. Only used when "if it fails" is allow/deny: on timeout that action runs; 0 means no dialog, run it right away. When "if it fails" is ask this setting does nothing — the dialog still appears and waits for you',
+				'panel.autoBreaker': 'Consecutive denials',
+				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
+				'panel.autoCache': 'Remember allowed calls',
+				'panel.autoCacheHint': 'a repeat of the same call is allowed straight away without asking the model. Only allowed calls are remembered; denied ones are asked again',
+				'panel.autoHistory': 'History shown to the model',
+				'panel.autoHistoryHint': 'how many recent calls to include on the left, and the total length cap for that text on the right (oldest dropped first)',
+				'panel.autoModel': 'Which model',
+				'panel.autoProviderPh': 'provider, empty = this session',
+				'panel.autoModelPh': 'model, empty = this session',
+				'panel.autoModelHint': 'both are required',
 				'panel.autoOn': 'on',
 				'panel.autoOff': 'off',
 				'panel.autoSaved': 'Saved',
-				'panel.autoBadNumber': 'enter a non-negative integer',
-				'panel.autoReset': 'Restore defaults',
-				'panel.autoResetDone': 'Defaults restored',
+				'panel.autoBadNumber': 'enter 0 or a positive integer',
+				'panel.autoMsUnit': 'ms',
+				'panel.autoTimesUnit': 'times',
+				'panel.autoCharsUnit': 'chars',
+				'panel.autoReset': 'Reset all to defaults',
+				'panel.autoResetDone': 'Reset to defaults',
 				'mode.timeout-allow': 'Auto-allowed (timeout)',
 				'mode.timeout-deny': 'Auto-denied (timeout)',
+				'mode.fallback-allow': 'Allowed by setting',
+				'mode.fallback-deny': 'Denied by setting',
 				'panel.status': 'Status',
 				'panel.sessionPerm': 'Current session permission',
 				'panel.customReview': 'Custom Review',
@@ -2089,6 +2099,7 @@ window.__ModuleLoader__.load({
 				'panel.fenceUnauthenticated': 'Browser credentials are missing or expired (401). Reopen this page from the URL printed by dsh web to authenticate.',
 				'panel.tabGlobal': 'Global',
 				'panel.tabProject': 'Project',
+				'panel.tabAuto': 'Auto review',
 				'panel.editGlobal': 'Editing global settings (default for all projects).',
 				'panel.editProject': 'Editing current project ({p}); project settings override global.',
 				'panel.sandbox': 'Sandbox',
@@ -4858,7 +4869,20 @@ window.__ModuleLoader__.load({
 								// 取消：把草稿还原成服务端当前值（不是清空 —— 用户可能只是改错了想放弃）
 								() => revertReason('cat', 'command'),
 							),
+							// auto 的回落值选择器：与标题行那套**同一判据、同一组件、同一顺序**
+							// （动作在前、回落在后；仅 mode === 'auto' 时出现）。
+							//
+							// ⚠️ 这一处曾经漏掉：command 是唯一把动作下拉放在**块底部**的分类
+							// （它有三层：例外 → 破坏性子设置 → 其余情况），而回落选择器最初只加在了
+							// 标题行那套渲染里。后果是「执行命令」设为自动审批后**回落值无处可设** ——
+							// 面板上根本看不到那个下拉框，只能用隐含默认 ask，而用户以为自己配好了。
+							//
+							// 判据与顺序都与标题行逐字一致，不是抄一份新的：
+							// 两处若分叉，就会出现「标题行分类能配回落、command 不能」，
+							// 或「一处动作在左、一处回落在前」这种按分类而异的怪状态。
 							sel(mode, changeCat('command'), tab === 'project' ? ALL_MODES : MODES, busy),
+							mode === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
+							mode === 'auto' ? sel(catAutoFallbackOf('command'), changeCatAutoFallback('command'), AUTO_FALLBACK_MODES, busy) : null,
 						),
 					),
 				);
@@ -4990,10 +5014,9 @@ window.__ModuleLoader__.load({
 			// 与其它设置项一致的写法：每个控件改完立刻提交（无「保存」按钮），
 			// 因为这里全是单值参数，批量保存反而让用户不确定「改了没生效的是哪一项」。
 			const autoReviewCard = () => {
-				// 非全局 tab 不渲染整张卡片（而不是渲染成禁用态）：
-				// 渲染禁用态会让用户以为「项目层也能配、只是现在不能改」，
-				// 而事实是**这个设置根本没有项目层**。
-				if (tab !== 'global') return null;
+				// 只在 auto tab 渲染 —— 但**判据不在这里**：调用点是 tab 栏之后的分流
+				// （`tab === 'auto' ? autoReviewCard() : null`），此处若再判一次就是两份判据。
+				// 这里只负责「拿到数据、画出卡片」，不判断「该不该画」。
 				const ar = (status && status.autoReview) || {};
 				const eff = ar.effective || {};
 				const dflt = ar.defaults || {};
@@ -5004,10 +5027,14 @@ window.__ModuleLoader__.load({
 					invoke('permgate:set-auto-review', args, () => setMsg(T('panel.autoSaved')));
 				};
 				// 数字输入：与宿主 normalizeAutoReview 同口径（非数字/负数 → 拒绝，不静默回落）
-				const numInput = (key, width) => {
+				//
+				// unit 是**单位后缀**：光秃秃的 `20000` 没人看得出是毫秒还是秒，
+				// 而这两个字段的单位恰恰是最容易搞错的地方（填 20 以为是 20 秒、实际 20 毫秒）。
+				// 单位写在下拉框右边而不是塞进 placeholder —— placeholder 在有值时看不见。
+				const numInput = (key, width, unit) => {
 					const cur = eff[key];
 					const isDefault = explicit.indexOf(key) === -1;
-					return React.createElement('input', {
+					const input = React.createElement('input', {
 						className: 'pg-field',
 						type: 'number',
 						style: Object.assign({ width: width || 90 }, isDefault ? { color: 'rgba(128,128,128,0.95)' } : null),
@@ -5025,6 +5052,11 @@ window.__ModuleLoader__.load({
 						},
 						disabled: busy,
 					});
+					if (!unit) return input;
+					return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+						input,
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, unit),
+					);
 				};
 				const boolSel = (key, labelOn, labelOff) => {
 					const cur = eff[key] !== false;
@@ -5051,16 +5083,14 @@ window.__ModuleLoader__.load({
 					ar.llmAvailable === false
 						? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 4 } }, T('panel.autoNoLlm'))
 						: null,
-					row('panel.autoTimeout', numInput('timeoutMs', 110),
+					row('panel.autoTimeout', numInput('timeoutMs', 110, T('panel.autoMsUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoTimeoutHint'))),
-					row('panel.autoBreaker', numInput('breakerThreshold', 90),
+					row('panel.autoBreaker', numInput('breakerThreshold', 90, T('panel.autoTimesUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoBreakerHint'))),
 					row('panel.autoCache', boolSel('cacheEnabled', T('panel.autoOn'), T('panel.autoOff')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoCacheHint'))),
-					row('panel.autoHistory', numInput('historyN', 70), numInput('historyBudget', 90),
+					row('panel.autoHistory', numInput('historyN', 70, T('panel.autoTimesUnit')), numInput('historyBudget', 90, T('panel.autoCharsUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoHistoryHint'))),
-					row('panel.autoRedactContent', boolSel('redactContentKeys', T('panel.autoOn'), T('panel.autoOff')),
-						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoRedactContentHint'))),
 					// 模型覆盖：留空 = 跟随会话当前模型（三级回落的第 ② 级）。
 					// 两个框必须**成对**才生效（reviewTarget 要求 provider 与 model 都在）——
 					// 只填一个等于没填，故提示里写明。
@@ -5204,14 +5234,18 @@ window.__ModuleLoader__.load({
 									// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
 									() => revertReason('cat', c),
 								),
-								// ── auto 的回落值选择器：**仅当本分类是 auto 时出现** ────────────
-								// 为什么必须紧挨着动作下拉：选了 auto 却不填回落，等于把「模型失败后
-								// 干什么」交给一个隐含默认值（ask）。那个默认值是安全的，但用户**看不见**
-								// 它 —— 而 auto 的核心语义就是「失败后落到哪」，看不见就等于没配。
-								// 故放在动作下拉的左边（读序：动作 → 失败后怎么办）。
+								// ── 动作下拉在前，回落值在后 ────────────────────────────────────
+								// 读序必须是「**先选动作，再看它失败后怎么办**」：
+								//   读取文件   [自动审批 ▾]  失败后：[询问 ▾]
+								//
+								// 之前这里写反了（回落值排在动作左边），而同一处的注释却写着
+								// 「读序：动作 → 失败后怎么办」—— 注释与实现直接矛盾。
+								// 排反的后果不只是不好看：用户从左往右读时，先看到「失败后：询问」
+								// 会以为这是一个**独立的设置项**，而不知道它在修饰右边那个下拉。
+								// 「失败后」这三个字本身是**从句**，它必须跟在它所修饰的主句之后。
+								sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 								mode === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
 								mode === 'auto' ? sel(catAutoFallbackOf(c), changeCatAutoFallback(c), AUTO_FALLBACK_MODES, busy) : null,
-								sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
 							),
 						),
 					// 循环检测（doomloop）的阈值与状态提示。该分类**不挂例外**（EXC_CATS 不含它），
@@ -5631,7 +5665,31 @@ window.__ModuleLoader__.load({
 				React.createElement('div', { style: { display: 'flex', marginBottom: 12, borderBottom: '1px solid rgba(128,128,128,0.35)' } },
 					tabBtn('global', T('panel.tabGlobal')),
 					tabBtn('project', T('panel.tabProject')),
+					// ── 第三个 tab：自动审批（auto）的工程参数 ────────────────────────
+					// 它**不是**「第三个配置层」，而是与前两个 tab 不同的东西：
+					// 前两个回答「某个项目的权限怎么定」，这一个回答「评审机制怎么跑」。
+					// 放在 tab 栏而不是下面某张卡片，理由：
+					//   · 它是**全局专属**的，塞进 global tab 会让人以为项目层也能配；
+					//   · 它和「分类/例外/快捷工具/兜底」是并列的两类设置，不该挂在其中某一类下面
+					//     （原先放在兜底卡片之后，读起来像「兜底的一部分」）。
+					//
+					// ⚠️ 这个 tab **不参与** `tab === 'global' / 'project'` 的任何判断：
+					// 下面在 tab 栏之后立刻分流（`tab === 'auto'` 时直接渲染这张卡片并返回），
+					// 故 100+ 处依赖 tab 的代码一行都不用改、也不会被误触。
+					tabBtn('auto', T('panel.tabAuto')),
 				),
+				// ── auto tab：只渲染自动审批的设置，**不渲染任何项目层设置** ──────────
+				// 分流必须在这里（tab 栏之后、所有设置卡片之前）：下面的卡片全部按
+				// `tab === 'global' ? 全局 : 项目` 取数，若让 `tab='auto'` 流下去，
+				// 它们会集体走「项目层」分支 —— 那是 100+ 处同时出错，且会向宿主发
+				// `{ target: 'auto' }` 这种它不认识的值。
+				// 用一个三元的 Fragment 把它们整体挡住，那一片代码对 auto tab **完全不可达**。
+				//
+				// 为什么不用 `if (tab === 'auto') return ...`：那样会提前返回、连带把下面
+				// 的 `notice` / `msg` 状态提示也跳过（用户在 auto tab 里改设置就看不到「已保存」）。
+				// 用三元挡板可以把提示留在外面，让任何 tab 都能看到。
+				tab === 'auto' ? autoReviewCard() : null,
+				tab === 'auto' ? null : React.createElement(React.Fragment, null,
 				React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 8 } },
 					tab === 'global' ? T('panel.editGlobal') : T('panel.editProject').replace('{p}', status ? status.projectKey : ''),
 				),
@@ -5737,7 +5795,6 @@ window.__ModuleLoader__.load({
 					),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),
 				),
-				autoReviewCard(),
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '0 0 8px' } },
 						React.createElement('div', { style: h() }, T('panel.decisions')),
@@ -5775,6 +5832,13 @@ window.__ModuleLoader__.load({
 					// 与 expandedList 的判据一致 —— 该态**不算展开**，故按钮仍是可重试的「展开」。
 					(decisionsExpanded && decisionsExpanded.error) ? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 6 } }, T('panel.decisionsFailed') + '：' + decisionsExpanded.error) : null,
 				),
+				// 闭合上面 `tab === 'auto' ? null : <Fragment>` 的 Fragment（global/project 的全部设置卡片）
+				),
+				// ── 状态提示：**在所有 tab 之外**（不在上面那个 Fragment 里）────────────
+				// `notice` 与 `msg` 是「上一次操作的结果」，任何 tab 都要能看到 ——
+				// 尤其 auto tab：那张卡片的每个控件都靠 setMsg 反馈「已保存」，
+				// 若把它留在 Fragment 内，用户在 auto tab 里改设置会**看不到任何反馈**
+				// （点了没反应 = 以为没生效，然后重复点）。
 				notice ? React.createElement('div', { style: { fontSize: 12, color: '#bf8700', background: 'rgba(191,135,0,0.08)', border: '1px solid rgba(191,135,0,0.35)', borderRadius: 6, padding: '6px 8px', marginBottom: 8, lineHeight: 1.5 } }, '⚠ ' + notice) : null,
 				msg ? React.createElement('div', { style: { fontSize: 12, color: '#1e88e5', marginBottom: 8 } }, msg) : null,
 			);
