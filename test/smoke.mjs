@@ -5931,6 +5931,224 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
     releaseTmp(ws, home)
   }
+
+  // ── A41：ENVIRONMENT.cwd 必须是**当前目录**，不是项目根 ──────────────────────
+  //
+  // 这里曾经用 `rootOf(exec)`（= `session.header.cwd`），它是**权限边界**、
+  // 原始项目、`cd` 之后不改变。于是 agent `cd build` 后 `rm -rf *`，
+  // 材料里写的仍是项目根 —— 模型按材料判断的破坏面和实际作用对象不是同一个目录。
+  //
+  // 官方取的是 `ctx.workingDirectory.ensure(agent, signal)`（`lib/index.js:399`）。
+  // 本插件的等价物是 `cwdOf(exec)`，它读 `sessionProjections.stateOf(session,
+  // 'workingDirectory')`，取不到才回落 header.cwd。
+  //
+  // 断言方式：让 header.cwd 与 workingDirectory 投影**不同**，看材料用的是哪个。
+  // 只造一个目录（两者相同）时这条断言测的是空气 —— 实测那种写法在回退到
+  // rootOf 后仍然全绿。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const SUBDIR = join(ws, 'build')
+    // sessionProjections 是 ctx.get('sessionProjections')，宿主 mock 若没有就装一个。
+    // 真实环境里由 dsh-session-projections 提供，stateOf(session, 'workingDirectory')。
+    const sess = sessionMock([humanMsg('删掉 build 里的东西', 'r1')], { id: 'a41', cwd: ws })
+    h.ctx.get = ((orig) => (name) => (
+      name === 'sessionProjections'
+        ? { stateOf: (s, key) => (key === 'workingDirectory' && s === sess ? SUBDIR : undefined) }
+        : orig(name)
+    ))(h.ctx.get.bind(h.ctx))
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sess },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    const sec = parseSections(text)
+    const cwd = sec.ENVIRONMENT && sec.ENVIRONMENT.cwd
+    ok('★★ group24 A41: ENVIRONMENT.cwd 是当前目录（cd 之后变了），不是项目根',
+      typeof cwd === 'string' && cwd.replace(/\\/g, '/').endsWith('/build'),
+      JSON.stringify({ cwd, ws: ws.replace(/\\/g, '/'), bad: sec.__bad }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A42：决策记录带 via / rawOutput，能分清「模型拍的板」与「规则拍的板」───
+  //
+  // 记录点曾经在 `decide()` 之后、auto 消化**之前** —— 于是 `d.action === 'auto'`
+  // 被原样写进决策记录，而 `via`（auto-allow / auto-deny / …）与模型原始输出
+  // 只进了 console.log。日志滚掉之后，面板上「模型放行」与「规则放行」完全同形
+  // （都是绿色 allow），而 §7.3 第一条要求的正是「事后能分辨」。
+  //
+  // 两条断言分别守两个方向：
+  //   ① 模型放行 → 记录里 action 是 allow（不是 auto）、via 是 auto-allow、有 rawOutput
+  //   ② 记录里**不得**出现 action === 'auto'（那说明记录点又跑到消化之前去了）
+  {
+    const RAW = '{"risk":"low","decision":"allow"}'
+    const llm = mkLlm(verdict(RAW))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    await probeAuto(h, ws, 'a42', T, A)
+    const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    const list = (dec.data && dec.data.decisions) || []
+    const hit = list.filter((x) => x.via === 'auto-allow')
+    ok('★★ group24 A42: 模型放行留下 via=auto-allow 记录（不再是裸 auto）',
+      hit.length === 1 && hit[0].action === 'allow',
+      JSON.stringify(list.map((x) => ({ a: x.action, v: x.via }))))
+    ok('★★ group24 A42: 记录带模型原始输出（出问题时可复现它到底说了什么）',
+      hit.length === 1 && hit[0].rawOutput === RAW,
+      JSON.stringify(hit.map((x) => x.rawOutput)))
+    ok('★★ group24 A42: 决策记录里不出现 action=auto（记录点必须在 auto 消化之后）',
+      !list.some((x) => x.action === 'auto'),
+      JSON.stringify(list.map((x) => x.action)))
+    releaseTmp(ws, home)
+  }
+
+  // ── A43：模型拒绝时同样带 via=auto-deny 与 reason ────────────────────────────
+  {
+    const RAW = '{"risk":"medium","decision":"deny","reason":"不可逆删除"}'
+    const llm = mkLlm(verdict(RAW))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    await probeAuto(h, ws, 'a43', T, A)
+    const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    const list = (dec.data && dec.data.decisions) || []
+    const hit = list.filter((x) => x.via === 'auto-deny')
+    ok('★★ group24 A43: 模型拒绝留下 via=auto-deny 且带模型理由',
+      hit.length === 1 && hit[0].action === 'deny' && hit[0].modelReason === '不可逆删除',
+      JSON.stringify(list.map((x) => ({ a: x.action, v: x.via, m: x.modelReason }))))
+    releaseTmp(ws, home)
+  }
+
+  // ── A44：图片块作为 fact 进材料（元数据，不含内容）──────────────────────────
+  //
+  // 曾经这里把非 text 块整个丢掉，理由是「纯文本材料塞占位符会让模型以为
+  // 有个文件但看不到」。那个理由只对了一半：「有没有附件」本身就是事实 ——
+  // 用户贴截图说「删掉这个」时，模型不知道有附件就会把 PENDING_ACTION 里的
+  // 路径当唯一依据；知道「有一份我没看到的视觉材料」则会倾向于 escalate。
+  //
+  // 官方同样收（`filteredUserEntries`，非 text 块一律 role: 'fact'）。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const IMG_NAME = 'screenshot.png'
+    const events = [{
+      type: 'user/message',
+      surfaceOp: 'append',
+      data: {
+        role: 'user',
+        source: { kind: 'user', rpcId: 'r1' },
+        content: [
+          { type: 'text', text: '删掉截图里那个文件' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: 'att-1', mediaType: 'image/png', bytes: 12345,
+              width: 800, height: 600, name: IMG_NAME,
+            },
+          },
+        ],
+      },
+    }]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a44' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    const sec = parseSections(text)
+    const uiList = Array.isArray(sec.USER_INSTRUCTIONS) ? sec.USER_INSTRUCTIONS : []
+    const img = uiList.filter((x) => x && x.kind === 'image')
+    ok('★★ group24 A44: 图片附件作为 fact 进材料（模型知道「有份没看到的材料」）',
+      img.length === 1 && img[0].role === 'fact' && img[0].name === IMG_NAME,
+      JSON.stringify({ list: uiList.map((x) => ({ r: x.role, k: x.kind, n: x.name })), bad: sec.__bad }))
+    ok('★★ group24 A44: 附件只给元数据、明确标注内容未包含（材料不能说谎）',
+      img.length === 1 && img[0].contentIncluded === false && img[0].bytes === 12345
+      && img[0].width === 800,
+      JSON.stringify(img[0] || null))
+    ok('★ group24 A44: 同一消息里的文本仍按 human-instruction 收（不被附件挤掉）',
+      uiList.some((x) => x.role === 'human-instruction' && String(x.text || '').indexOf('删掉截图') !== -1),
+      JSON.stringify(uiList.map((x) => x.role)))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A45：PTC 内层调用进历史，并标 mode=ptc-inner ─────────────────────────────
+  //
+  // PTC 模式下模型只看得见 `run_code` 这一个外层调用，内层 `tools.write(...)` 等
+  // 是程序里的语句。此前历史里只有 `run_code` 一条，评审内层 `write` 时模型完全
+  // 不知道此前还调过什么 —— 只能从源码人肉推。官方把内层调用作为独立历史条目
+  // （`mode: 'ptc-inner'`）补上。
+  //
+  // `tool/ptc-dispatch-start` 的数据里**没有 turn/step**，归属只能靠扫描时跟踪
+  // step/start 与 step/end —— 故本用例必须造出完整的 step 边界，
+  // 否则测的是「没有 step 时也能认出来」这件不成立的事。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ historyN: 10, historyBudget: 100000 }, llm)
+    const events = [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'step/start', data: { turn: 1, step: 1 } },
+      ...toolCallEvents(1, 1, 'root1', 'run_code', { code: 'await tools.write({path:"x"})' }),
+      // 内层派发：没有 turn/step，靠扫描时跟踪的 openStep 归属
+      {
+        type: 'tool/ptc-dispatch-start',
+        data: {
+          rootCallId: 'root1', parentCallId: 'root1', subCallId: 'root1:ptc:1',
+          name: 'write', arguments: { path: 'x', content: 'hi' },
+        },
+      },
+      { type: 'step/end', data: { turn: 1, step: 1 } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a45' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    const sec = parseSections(text)
+    const hist = Array.isArray(sec.FILTERED_HISTORY) ? sec.FILTERED_HISTORY : []
+    const inner = hist.filter((x) => x && x.mode === 'ptc-inner')
+    ok('★★ group24 A45: PTC 内层调用进历史并标 mode=ptc-inner',
+      inner.length === 1 && inner[0].name === 'write',
+      JSON.stringify({ hist: hist.map((x) => ({ n: x.name, m: x.mode })), bad: sec.__bad }))
+    ok('★★ group24 A45: 外层 run_code 仍在历史里（内层要知道自己从哪发起）',
+      hist.some((x) => x.name === 'run_code'),
+      JSON.stringify(hist.map((x) => x.name)))
+    ok('★ group24 A45: 内层调用的参数完整保留',
+      inner.length === 1 && inner[0].arguments && inner[0].arguments.path === 'x',
+      JSON.stringify(inner[0] || null))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
 }
 
 if (fail.length) {

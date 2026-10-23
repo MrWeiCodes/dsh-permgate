@@ -5165,12 +5165,43 @@ export default {
       return bi(base.zh + partsOf('zh'), base.en + partsOf('en'))
     }
 
-    function recordDecision(d, exec) {
+    // 模型原始输出的留痕上限。协议本身限制了合法形态（最多 3 个成员、reason 是字符串），
+    // 但 **raw 是截断之前的原文** —— 模型可以先写一个 100KB 的 reason 再收尾，`raw` 就是
+    // 100KB。而 decisions 是 100 条的环形缓冲，展开通道会全量下发，无上限等于把面板撑爆。
+    // 取 2000：合法输出的正常长度（含 1000 字符 reason 的 JSON 包装）远低于它。
+    const RAW_OUTPUT_MAX = 2000
+
+    // 记录一次决策。第三个参数 actionOverride 用于「记录的档位与执行档位不同」的少数情况
+    // （目前只有 auto 异常回落且 timeoutMs === 0：执行档位是 allow/deny，但记录必须写成
+    // fallback-allow/fallback-deny，否则事后看不出这条是无人在环的自动放行）。
+    function recordDecision(d, exec, actionOverride) {
       // code 一并留痕：它是「为什么问这一次」的机器可读答案（destructive / unparsable /
       // write-outside / segment-* ），与 reason 那种人读长文本互补。
       // 此前 commandDecision 已经把 code 放进返回值，但这里没写 —— 注释声称「决策日志记 code」
       // 而日志里没有这个字段，属于写了没人读的死数据。
-      decisions.push({ ts: new Date().toISOString(), tool: exec.name, action: d.action, ruleId: d.ruleId || null, code: d.code || null, reason: segmentSummary(d) })
+      const rec = {
+        ts: new Date().toISOString(),
+        tool: exec.name,
+        action: actionOverride || d.action,
+        ruleId: d.ruleId || null,
+        code: d.code || null,
+        reason: segmentSummary(d),
+      }
+      // ── auto 专有字段：**必须在记录里**，否则事后分不清是谁拍的板 ──────────────
+      // 这四个字段此前只进了 console.log（`[permgate] auto -> …`），日志滚掉之后
+      // 「模型放行」与「规则放行」在面板上完全同形（都是绿色 allow）。
+      // 而 §7.3 第一条要求的正是「事后能分辨」——只写在 stderr 里等于没写。
+      //
+      // 只在有值时写入，不给普通决策记录塞一堆 null 字段（那会让每条记录都变宽）。
+      if (d.via) rec.via = String(d.via)
+      if (d.modelReason) rec.modelReason = String(d.modelReason).slice(0, REVIEW_REASON_MAX)
+      if (d.fallbackReason) rec.fallbackReason = String(d.fallbackReason)
+      if (typeof d.rawOutput === 'string' && d.rawOutput) {
+        rec.rawOutput = d.rawOutput.length > RAW_OUTPUT_MAX
+          ? d.rawOutput.slice(0, RAW_OUTPUT_MAX) + '…[truncated ' + (d.rawOutput.length - RAW_OUTPUT_MAX) + ' chars]'
+          : d.rawOutput
+      }
+      decisions.push(rec)
       if (decisions.length > MAX_DECISIONS) decisions.splice(0, decisions.length - MAX_DECISIONS)
     }
 
@@ -5937,6 +5968,48 @@ export default {
           if (d.callId === undefined) continue
           byStepId.set(d.turn + '\u0000' + d.step + '\u0000' + d.callId, d)
         }
+        // ①b PTC 内层派发索引：`(turn, step, parentCallId)` → 该父调用发起的内层调用列表
+        //
+        // ── 为什么必须自己归属 step ────────────────────────────────────────────
+        // `tool/ptc-dispatch-start` 的数据里**没有 turn / step**（只有
+        // rootCallId / parentCallId / subCallId / name / arguments），
+        // 因为它在 `run_code` 程序内部派发时写入，那时没有「当前 step」这个字段可抄。
+        // 归属只能靠**扫描时跟踪**：`step/start` 记下当前 step，`step/end` / `turn/end`
+        // 清空。官方 `scopePtcStarts`（`lib/index.js:152-179`）就是这么做的，且它在
+        // 「派发时没有打开的 step」时**直接抛错**（`a PTC call has no owning step`）——
+        // 因为那意味着日志不自洽，任何猜测都会把内层调用挂到错误的父调用下面。
+        //
+        // 这里不抛（本函数整体是「取不到就少给点」的语义），改为跳过该条：
+        // 少一条历史不会让裁决变错，挂错父调用会。
+        //
+        // ── 为什么需要它 ──────────────────────────────────────────────────────
+        // PTC 模式下模型只看得见 `run_code` 这一个外层调用，内层 `tools.write(...)` 等
+        // 是程序里的语句。若历史里只有 `run_code` 一条，评审内层 `write` 时模型完全
+        // 不知道此前还调过什么 —— 它只能从 `run_code` 的源码里人肉推。
+        // 官方把内层调用作为独立历史条目（`mode: 'ptc-inner'`）补上，这里对齐。
+        const ptcByParent = new Map()
+        {
+          let openStep = null
+          for (const e of view.events) {
+            if (!e) continue
+            const t = e.type
+            if (t === 'turn/start' || t === 'turn/end' || t === 'step/end') { openStep = null; continue }
+            if (t === 'step/start') {
+              const d = e.data || {}
+              openStep = { turn: d.turn, step: d.step }
+              continue
+            }
+            if (t !== 'tool/ptc-dispatch-start') continue
+            if (openStep === null) continue
+            const d = e.data || {}
+            if (d.parentCallId === undefined) continue
+            const key = openStep.turn + '\u0000' + openStep.step + '\u0000' + d.parentCallId
+            const bucket = ptcByParent.get(key)
+            const rec = { name: d.name, args: d.arguments, subCallId: d.subCallId }
+            if (bucket === undefined) ptcByParent.set(key, [rec])
+            else bucket.push(rec)
+          }
+        }
         // ② 按可见顺序收集 tool-call 块（**只有它们代表模型当前看得见的调用**）
         const calls = []
         for (const { event } of visibleEvents(view)) {
@@ -5953,12 +6026,22 @@ export default {
             // —— 于是父调用 `run_code` **保留**在历史里，与官方语义一致
             // （内层调用需要知道自己是哪次 run_code 发起的）。
             if (selfCallId !== undefined && b.id === selfCallId) continue
-            const logged = byStepId.get(data.turn + '\u0000' + data.step + '\u0000' + b.id)
+            const stepKey = data.turn + '\u0000' + data.step + '\u0000' + b.id
+            const logged = byStepId.get(stepKey)
             const name = (logged && logged.name) || b.name
             if (!name) continue
             // 参数优先取日志里的 `tool/call.arguments`（模型产出的原始 JSON 串）；
             // 取不到才退回块里的（同一份内容，只是块可能被投影改写过）。
             calls.push({ name, args: logged && logged.arguments !== undefined ? logged.arguments : b.arguments })
+            // 紧跟在这个父调用之后，补上它发起过的内层调用。
+            // 顺序与真实发生顺序一致：内层派发发生在 `run_code` 块之后。
+            const inner = ptcByParent.get(stepKey)
+            if (!inner) continue
+            for (const s of inner) {
+              // 正在评审的这一次内层调用同样排除（它已在 PENDING_ACTION 段）。
+              if (selfCallId !== undefined && s.subCallId === selfCallId) continue
+              calls.push({ name: s.name, args: s.args, ptcInner: true })
+            }
           }
         }
         // ③ 从新到旧取 maxN 条
@@ -5981,6 +6064,10 @@ export default {
             args = limitShape(args, 0)
           } catch (err) { args = String(c.args === undefined ? '' : c.args); parseFailed = true }
           const rec = { role: 'fact', name: c.name, arguments: args }
+          // 内层调用必须标出来：否则模型会把 `tools.write(...)` 当成一次
+          // 「模型直接发起的原生调用」，而它实际是 `run_code` 程序里的一步 ——
+          // 两者的授权语义不同（内层调用不经模型逐条决策）。
+          if (c.ptcInner) rec.mode = 'ptc-inner'
           if (parseFailed) rec.argumentsNotJson = true
           items.push(rec)
         }
@@ -6130,18 +6217,62 @@ export default {
           // 父代理创建子代理时写的任务正文（同 kind 同无 rpcId，只能靠 seq 认）
           else if (initialSeq !== undefined && event.seq === initialSeq) role = 'direct-parent-instruction'
           if (!role) continue
-          // 只取 text 块。图片/附件块跳过：它们的价值在内容本身，而评审材料是纯文本，
-          // 塞一个占位符只会让模型以为「有个文件但我看不到」。
+          // text 块按上面的角色收；**非 text 块（图片 / 文件附件）单独走 fact**。
+          //
+          // 曾经这里把非 text 块整个丢掉，理由是「评审材料是纯文本，塞占位符会让模型
+          // 以为有个文件但看不到」。那个理由只对了一半：
+          //   · 对的部分：我们不能（也不该）把图片字节发给评审模型 —— 那是另一套多模态
+          //     计费与传输路径，且评审只需要判断「这次调用该不该放行」。
+          //   · 错的部分：**「有没有附件」本身就是事实**。用户贴一张截图说「删掉这个」，
+          //     模型若完全不知道有附件，会把 PENDING_ACTION 里那个路径当成唯一依据；
+          //     知道「用户提供了一份我没看到的视觉材料」则会倾向于 escalate。
+          //     完全抹掉信息，等于把「我缺信息」这件事也一起抹掉了。
+          //
+          // 官方的做法同构（`filteredUserEntries`，`lib/index.js:128-135`）：逐块一条，
+          // text 块按 textRole 分级，**非 text 块一律 `role: 'fact'`**。
+          // 这里对齐，但只给元数据（类型/尺寸/字节数/文件名），不含任何内容。
           const blocks = Array.isArray(data.content) ? data.content : []
-          const texts = blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-          for (const b of texts) {
-            const t = b.text
-            if (!t) continue
-            out.push({ role, text: t })
+          for (const b of blocks) {
+            if (!b) continue
+            if (b.type === 'text') {
+              const t = b.text
+              if (typeof t !== 'string' || !t) continue
+              out.push({ role, text: t })
+              continue
+            }
+            const att = attachmentFact(b)
+            if (att) out.push(att)
           }
         }
       } catch (e) { return out }
       return out
+    }
+
+    // 把一个图片/文件块投影成**只有元数据**的事实条目。内容一律不带。
+    //
+    // 返回 null 表示「这个块没有可陈述的事实」（未知类型 / 缺 attachment），
+    // 那时不产出条目 —— 编造一个 `{type:'unknown'}` 只会让模型去猜它是什么。
+    //
+    // 注意 `attachmentId` 是内部句柄，模型用不上（它读不了），但**留痕有用**：
+    // 事后能定位「这次评审看到的是哪一份附件」。体积上它是个短 id，可忽略。
+    function attachmentFact(b) {
+      try {
+        const att = b.attachment
+        if (!att || typeof att !== 'object') return null
+        const f = { role: 'fact', kind: String(b.type) }
+        if (typeof att.mediaType === 'string') f.mediaType = att.mediaType
+        if (typeof att.name === 'string' && att.name) f.name = att.name
+        if (typeof att.bytes === 'number') f.bytes = att.bytes
+        if (typeof att.width === 'number' && typeof att.height === 'number') {
+          f.width = att.width
+          f.height = att.height
+        }
+        if (typeof att.attachmentId === 'string') f.attachmentId = att.attachmentId
+        // 明确告诉模型「内容不在材料里」。不写这一句时，元数据本身会被误读成
+        // 「我看到了这张图」，而实际只看到了它的尺寸 —— 那是材料说谎。
+        f.contentIncluded = false
+        return f
+      } catch (e) { return null }
     }
 
     // 按预算裁剪：**从最早的开始丢**（保留最近的是关键 —— 用户最新的要求最相关）。
@@ -6149,11 +6280,26 @@ export default {
     // 为什么是「丢最早」而不是「两头都保」：后者实现复杂，且「会话开头的长期约束」
     // 在 permgate 的语义里已经由 PROJECT_INSTRUCTIONS（AGENTS.md）承担；
     // 用户临时说的话，越新越相关。
+    //
+    // 口径按**序列化后的长度**算，不是 `x.text.length`：条目现在有两种形状 ——
+    // 文本条目 `{ role, text }` 和附件条目 `{ role, kind, mediaType, … }`（没有 text）。
+    // 沿用 `x.text.length` 会在遇到附件条目时抛 TypeError，而调用方 `reviewUserText`
+    // 没有 try/catch —— 整个评审会崩成异常路径。即便包一层，被吞掉的结果也是
+    // 「USER_INSTRUCTIONS 段消失」，与本文件反复记录的三个静默失效同族。
+    //
+    // 用 JSON 长度而不是「text 长度 + 固定估算」：与 FILTERED_HISTORY 的口径一致
+    // （那边也是 `JSON.stringify(x).length`），且它就是最终进材料的字符量。
     function trimUserInstructions(items, budget) {
-      let total = items.reduce((n, x) => n + x.text.length, 0)
+      const lenOf = (x) => {
+        try {
+          if (x && typeof x.text === 'string') return x.text.length
+          return JSON.stringify(x).length
+        } catch (e) { return 0 }
+      }
+      let total = items.reduce((n, x) => n + lenOf(x), 0)
       let start = 0
       while (start < items.length - 1 && total > budget) {
-        total -= items[start].text.length
+        total -= lenOf(items[start])
         start += 1
       }
       return items.slice(start)
@@ -6313,9 +6459,20 @@ export default {
     }
 
     function reviewUserText(exec, d, agent) {
-      const root = rootOf(exec)
       const parts = []
-      parts.push(reviewSection('ENVIRONMENT', { cwd: root || null }))
+      // `cwd` 必须是**当前目录**（`cd` 之后会变），不是项目根。
+      //
+      // 这里曾经用 `rootOf(exec)` —— 它取 `session.header.cwd`，是**权限边界**、
+      // 原始项目、`cd` 不改变它。于是 agent `cd build` 之后 `rm -rf *`，材料里
+      // 写的仍是项目根：模型按材料判断「要删项目根下的东西」，实际删的是 build。
+      // 方向是**高估**破坏面，看似安全，但判据本身是错的 —— 同一次误判在
+      // `cd <更敏感目录>` 时方向反过来。
+      //
+      // 官方取的是 `ctx.workingDirectory.ensure(agent, signal)`
+      // （`dsh-experimental-auto-review/lib/index.js:399`），即当前目录。
+      // 本文件早就有等价的 `cwdOf(exec)`（见其注释：workingDirectory 是当前目录，
+      // fs/pwsh 用它解析相对路径），只是评审材料这一处漏用了。
+      parts.push(reviewSection('ENVIRONMENT', { cwd: cwdOf(exec) || null }))
       // 项目约束（role: constraint —— 只能收窄动作范围，不能授权）
       const instr = projectInstructionsOf(agent)
       if (instr.length) parts.push(reviewSection('PROJECT_INSTRUCTIONS', instr))
@@ -6341,7 +6498,16 @@ export default {
       const ui = trimUserInstructions(userInstructionsOf(agent), USER_INSTRUCTION_BUDGET)
       if (ui.length) {
         // 每条独立成对象并带 role：只在段首标一次时，模型会把后续条目也当同一角色。
-        parts.push(reviewSection('USER_INSTRUCTIONS', ui.map((x) => ({ role: x.role, text: x.text }))))
+        //
+        // ⚠️ 这里**不能**写成 `ui.map((x) => ({ role: x.role, text: x.text }))`。
+        // 那样会把附件条目的所有字段投影掉，只剩 `{ role: 'fact', text: undefined }`
+        // —— 而 `JSON.stringify` 会丢掉 undefined 值，最终材料里是一个**空对象**
+        // `{"role":"fact"}`：模型既不知道那是什么附件，也不知道它有没有内容。
+        // 实测踩过：A44 断言 `img[0].name === 'screenshot.png'` 失败，拿到的是 `{}`。
+        //
+        // 条目形状现在有两种（文本 `{role,text}` / 附件 `{role,kind,mediaType,…}`），
+        // 故直接透传，只做一次浅拷贝防止下游改到原对象。
+        parts.push(reviewSection('USER_INSTRUCTIONS', ui.map((x) => Object.assign({}, x))))
       }
       // 历史深度/预算**从设置页读**（§2.4）。曾经这里写死常量，导致面板上那两个
       // 输入框是摆设 —— 详见上方 REVIEW_HISTORY_* 删除处的说明。
@@ -8665,11 +8831,18 @@ export default {
         // 故不会漂移。这里需要它是因为计数点在 decide() 之外，而计数必须受同一个闸门约束。
         const customReview = sessionPresetName(exec) === 'custom-review'
         const d = decide(exec)
-        // 决策记录只记**本插件真正参与过**的调用：非「自定义审查」会话下 decide() 恒返回
-        // 一个无理由的 allow（它自己第一行就早退），记下来只会把「最近决策」刷成噪音、
-        // 把真正被审查过的记录挤出窗口。判据用**同一个 customReview**（上面刚算的，
-        // 与 decide() 内部那一处同源），不是第二份判据。
-        if (customReview) recordDecision(d, exec)
+        // ── 决策记录**不在这里**写 ─────────────────────────────────────────────
+        // 曾经这里就是 `if (customReview) recordDecision(d, exec)`，即记录发生在
+        // **auto 消化之前** —— 于是 `d.action === 'auto'` 被原样写进决策记录，
+        // 而 `via`（auto-allow / auto-deny / auto-fallback / auto-fallback-direct）
+        // 和模型的原始输出只进了下面那行 console.log。
+        //
+        // 后果：面板上「模型放行」与「规则放行」完全同形（都是绿色 allow），
+        // 日志滚掉之后无法分辨谁拍的板 —— 而 §7.3 第一条要求的正是「事后能分辨」。
+        // 只写 stderr 等于没写。
+        //
+        // 现在记录挪到 auto 消化之后（见下方 recordDecision 调用），记的是**最终结论**。
+        // 一次调用仍然只产生一条记录：中途不写「auto」，只写它落到了哪。
         // ── 循环检测的计数口径（L-2 / L-11）──────────────────────────────────
         // 只有**真正静默放行并执行了**的调用才推进连续计数；其余一切路径都清零。
         // 为什么清零要在这里先做：`d.action !== 'allow'`（deny / ask）无论后面弹窗结果如何，
@@ -8704,12 +8877,25 @@ export default {
         // `d2` 是**消化后的判定**，后面所有分支都读它（不再读 d）。这样「模型放行」与
         // 「规则放行」在后续逻辑里完全同形 —— 沙箱升级闸、计数、日志都照常生效。
         let d2 = d
+        // 记录档位覆盖：只有 auto 异常回落且 tmo === 0 时才被赋值（fallback-allow/deny）。
+        // 其余情况为 undefined，recordDecision 用 d2.action 记录。
+        let recordAction
         if (d.action === 'auto') {
           const rv = await reviewWithModel(exec, d, exec.agent, exec.signal)
+          // `code` 与 `segments` 必须从 `d` 继承过来，否则决策日志里的段摘要会消失。
+          //
+          // `segmentSummary(d)` 读的是 `d.reason`（bi 对象）+ `d.segments`。这里产出的
+          // `d2.reason` 是 auto 自己的一句话，**没有 segments** —— 直接拿 d2 去记录，
+          // 摘要会退化成「自动审批：模型拒绝」这一句，而「命中哪一段、哪一档」全丢。
+          // 那正是 segmentSummary 存在的理由（§8.2 的 23d）。
+          //
+          // `rawOutput` 是模型的**原始输出**（§7.3 第二条）：出问题时可复现它到底说了什么，
+          // 而不是只看我们解析出来的 risk/decision。截断在 recordDecision 里做。
+          const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, rawOutput: rv.raw }
           if (rv.verdict === 'allow') {
-            d2 = { action: 'allow', reason: bi('自动审批：模型放行', 'Auto review: allowed by model'), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-allow', modelReason: rv.reason || '' }
+            d2 = Object.assign({}, carry, { action: 'allow', reason: bi('自动审批：模型放行', 'Auto review: allowed by model'), via: 'auto-allow', modelReason: rv.reason || '' })
           } else if (rv.verdict === 'deny') {
-            d2 = { action: 'deny', reason: bi('自动审批：模型拒绝' + (rv.reason ? '（' + rv.reason + '）' : ''), 'Auto review: denied by model' + (rv.reason ? ' (' + rv.reason + ')' : '')), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-deny', modelReason: rv.reason || '' }
+            d2 = Object.assign({}, carry, { action: 'deny', reason: bi('自动审批：模型拒绝' + (rv.reason ? '（' + rv.reason + '）' : ''), 'Auto review: denied by model' + (rv.reason ? ' (' + rv.reason + ')' : '')), via: 'auto-deny', modelReason: rv.reason || '' })
           } else {
             // 【统一异常路径】§3.4：所有失败走同一套机制，不为每种失败单独设计。
             // 回落值缺省 ask（normalizeAutoFallback 已保证存下来的值合法，这里是防御）。
@@ -8722,29 +8908,42 @@ export default {
             if (fb === 'ask') {
               // 用户选了 ask 回落 = 就是要被问。此时**永不超时**，与 timeoutMs 的取值无关：
               // 「异常」与「正常失败」本来就都会弹窗，不需要靠超时结案，也不该被超时打断。
-              d2 = { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断', 'Auto review could not decide; human decision required'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback', fallbackReason: why }
+              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断', 'Auto review could not decide; human decision required'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why })
             } else if (tmo > 0) {
               // allow / deny 回落：弹窗等你这么久（默认 20 秒），超时就按回落值执行。
               // 语义不是「自动结案」，而是「异常时先问你，你不理才按预设走」。
-              d2 = { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断（' + (fb === 'allow' ? '超时后放行' : '超时后拒绝') + '）', 'Auto review could not decide; human decision required (timeout will ' + fb + ')'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback', fallbackReason: why, timeoutFallback: fb }
+              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断（' + (fb === 'allow' ? '超时后放行' : '超时后拒绝') + '）', 'Auto review could not decide; human decision required (timeout will ' + fb + ')'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why, timeoutFallback: fb })
             } else {
               // tmo === 0 = **不弹窗，直接按回落值执行**（用户显式表示「这种异常别问我」）。
               //
               // 直接产出 allow/deny 而不是再走一次 ask：这样后续逻辑（沙箱升级闸、
               // 计数、放行/拒绝分支）与「模型直接给出该结论」完全同形，不新增第三条路径。
               //
-              // 这是一条**无人在环**的放行/拒绝，必须留痕（见下面的 recordDecision）：
-              // 否则事后无法区分「用户设了 0、系统按预设直接放行」与「模型判断放行」。
-              d2 = { action: fb, reason: bi('自动审批未能给出结论，按你的设置直接' + (fb === 'allow' ? '放行' : '拒绝'), 'Auto review could not decide; ' + (fb === 'allow' ? 'allowed' : 'denied') + ' by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, via: 'auto-fallback-direct', fallbackReason: why }
+              // 记录档位由下面的 recordAction 单独指定（fallback-allow / fallback-deny）：
+              // 执行档位是 allow/deny，但记录必须写成 fallback-*，否则事后看不出
+              // 「用户设了 0、系统按预设直接放行」与「模型判断放行」的区别 ——
+              // 前者是一条**无人在环**的放行，用户可能完全不知情。
+              //
               // 用独立 action 而不是复用 timeout-allow/deny：后者的语义是「倒计时结束、
               // 无人应答」，而这里是「用户预先说了别问」—— 混用会让审计记录说谎，
               // 用户看到 timeout-* 会以为「我设了 20 秒但没人理」，实际是他自己设了 0。
-              recordDecision({ action: fb === 'allow' ? 'fallback-allow' : 'fallback-deny', ruleId: null, reason: d2.reason }, exec)
+              d2 = Object.assign({}, carry, { action: fb, reason: bi('自动审批未能给出结论，按你的设置直接' + (fb === 'allow' ? '放行' : '拒绝'), 'Auto review could not decide; ' + (fb === 'allow' ? 'allowed' : 'denied') + ' by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback-direct', fallbackReason: why })
+              recordAction = fb === 'allow' ? 'fallback-allow' : 'fallback-deny'
             }
           }
+          // 记录**最终结论**（一次调用一条）。auto 的三种落点在这里统一写入：
+          // 模型放行 / 模型拒绝 / 异常回落。`via` 与 `rawOutput` 随记录一起落盘，
+          // 面板上因此能区分「模型拍的板」与「规则拍的板」。
+          if (customReview) recordDecision(d2, exec, recordAction)
           if (customReview) {
             console.log('[permgate] auto ->', d2.action, exec.name, 'via', d2.via || '?', d2.fallbackReason ? ('(' + d2.fallbackReason + ')') : '')
           }
+        } else if (customReview) {
+          // 非 auto 的判定：这里就是它唯一的记录点（曾经在 decide() 之后无条件记）。
+          // 判据仍是同一个 customReview —— 非「自定义审查」会话下 decide() 恒返回
+          // 一个无理由的 allow（它自己第一行就早退），记下来只会把「最近决策」刷成
+          // 噪音、把真正被审查过的记录挤出窗口。
+          recordDecision(d, exec)
         }
         // ── 动作归一闸：**非 allow/ask/deny 一律折成 ask**（§9A.5 的「强制 ask」）──────
         // 为什么必须有这一道，而不是靠「配置里写不出 auto」来保证：

@@ -9875,8 +9875,40 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
   // ── 非审查会话不记决策 ──────────────────────────────────────────
   // 判据必须用 decide() 外面那个 customReview（与 decide() 内部同源），
   // 且**不能**退化成「无条件记录」或「无条件不记」——两者都会让面板失真。
+  //
+  // ⚠️ 这条守卫**曾经被自己的注释文本命中**：记录点从 `decide()` 之后挪到 auto 消化
+  // 之后时，我把旧写法原样写进了说明注释（「曾经这里就是 `if (customReview)
+  // recordDecision(d, exec)`」），于是正则照样命中、断言全绿，而真正的记录点已经
+  // 换了形状。实测：去掉注释行后命中数为 0，留着注释时为 1。
+  //
+  // 现在钉的是**当前真实形态**，并且先剥掉注释行再匹配 —— 这类「注释里引用旧代码」
+  // 的写法在本文件里是常态（每处改动都要说明「曾经是什么」），不剥注释的守卫
+  // 迟早会被下一段说明文字命中。
+  const codeOnly = src.split('\n').map((l) => (/^\s*(\/\/|\*|\/\*)/.test(l) ? '' : l)).join('\n')
   ok('★★ 非审查会话不写决策记录（用 decide() 外的同一个 customReview 作闸门）',
-    /if \(customReview\) recordDecision\(d, exec\)/.test(src))
+    // 非 auto 分支：`else if (customReview) recordDecision(d, exec)`
+    /^\s*\} else if \(customReview\) \{$/m.test(codeOnly)
+    && /^\s*recordDecision\(d, exec\)$/m.test(codeOnly)
+    // auto 分支：记的是消化后的 d2
+    && /^\s*if \(customReview\) recordDecision\(d2, exec, recordAction\)$/m.test(codeOnly)
+    // 反面对照：**判定路径**（d / d2）上的每一次记录，都必须处在 customReview 闸门之内。
+    // 判据逐行回看上一行是否有闸门，而不是匹配「裸调用」的文本形态 ——
+    // 本插件的写法就是「闸门单独一行，记录在下一行」（两处都如此），
+    // 按文本形态判会把合法写法本身当成违规（实测：`else if (customReview) {` 下一行的
+    // `recordDecision(d, exec)` 被误判为裸调用）。
+    && (() => {
+      const lines = codeOnly.split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        if (!/^\s*recordDecision\((d|d2), exec/.test(lines[i])) continue
+        if (/customReview/.test(lines[i])) continue
+        // 回看**非空行**：本插件把闸门与记录分成两行写，中间可能夹注释
+        // （注释已被上面的 codeOnly 清成空行）。
+        let j = i - 1
+        while (j >= 0 && lines[j].trim() === '') j -= 1
+        if (j < 0 || !/customReview/.test(lines[j])) return false
+      }
+      return true
+    })())
   // ★★ 控制台日志是同一个漏点的**第二个出口**：记录跳过了、日志还在刷，
   // 用户看到「[permgate] allow read」一串会以为本插件在审查这些调用。
   // 两个出口必须同一条判据 —— 只挡一个就是「面板干净了、控制台还在说谎」。
