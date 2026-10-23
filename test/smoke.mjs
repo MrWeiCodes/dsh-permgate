@@ -6155,6 +6155,56 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
     releaseTmp(ws, home)
   }
+
+  // ── A46：allow 可以带 reason（曾经判协议错，实测 45% 的合法授权因此弹窗）──────
+  //
+  // 回归背景：旧解析器有 `if (decision === 'allow' && hasReason) return protocol-error`。
+  // 理由写的是「模型想通过理由影响主模型，那是一条注入通道」—— 但 `reason` 只进
+  // `rec.modelReason`（决策记录/面板），**从不回传主模型**，故那道防线拦的不是注入，
+  // 而是「模型顺手解释了一句」。
+  //
+  // 实测代价（真模型，材料相同跑 20 次）：用户明确授权「把 src 目录整个删掉，
+  // 不用再问了」时，11 次返回纯 allow、9 次返回 allow + reason。
+  // 那 9 次被判协议错 → autoFallback（默认 ask）→ 弹窗。
+  //
+  // 这条断言钉的是「合规的 allow+reason 必须被接受并放行」，且 reason 仍要留痕。
+  {
+    const RAW = '{"risk":"medium","decision":"allow","reason":"用户已明确授权删除 src"}'
+    const llm = mkLlm(verdict(RAW))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a46', T, A)
+    ok('★★ group24 A46: allow 带 reason 不再判协议错（直接放行，不弹窗）',
+      r === 'allow', JSON.stringify({ r, calls: llm.calls.length }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    const rec = ((list.data && list.data.decisions) || []).find((x) => x && x.via === 'auto-allow')
+    ok('★ group24 A46: allow 的 reason 仍被记录（只进审计，不丢）',
+      !!rec && String(rec.modelReason || '').indexOf('用户已明确授权删除 src') !== -1,
+      JSON.stringify(rec && { via: rec.via, modelReason: rec.modelReason }))
+    releaseTmp(ws, home)
+  }
+
+  // ── A47：放宽后**没有**顺带放过真正的矛盾形态 ─────────────────────────────────
+  //
+  // A4/A5b 已覆盖 high+allow 与重复成员。这里补两条「放宽 reason 后可能被顺手放开」
+  // 的形态，防止有人把 `hasReason` 的检查删过头：
+  //   · low + deny + reason —— 形态矛盾，仍必须拒
+  //   · allow + reason 且 reason 不是字符串 —— 仍必须拒
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"deny","reason":"看起来危险"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a47', T, A)
+    ok('★★ group24 A47: low+deny 仍是形态矛盾（放宽 reason 不等于放宽矛盾）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    releaseTmp(ws, home)
+  }
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"allow","reason":123}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a48', T, A)
+    ok('★★ group24 A48: allow 的 reason 不是字符串 → 仍判协议错（不放行）',
+      r && r.kind === 'ask', JSON.stringify(r))
+    releaseTmp(ws, home)
+  }
 }
 
 if (fail.length) {

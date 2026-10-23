@@ -9878,6 +9878,51 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
     // 两处都不得再出现各自的 Object.assign + L 投影（共用之后它们应已消失）
     && (src.match(/reason: L\(d\.reason, (l|lang)\)/g) || []).length === 1)
 
+  // ★★ 反向守卫：`allow` 不得再被判「带 reason 就是协议错」。
+  //
+  // 回归背景（实测数据）：旧解析器有 `if (decision === 'allow' && hasReason) return
+  // protocol-error`。它防的是「模型借理由注入主模型」，但 `reason` 只进 `rec.modelReason`
+  // （决策记录 + 面板），**从不回传主模型** —— 于是它拦下的只是「模型顺手解释了一句」。
+  //
+  // 代价实测（真模型 group/deepseek-v4.1-f，材料相同跑 20 次）：用户明确授权
+  // 「把 src 目录整个删掉，不用再问了」时，11 次纯 allow、9 次 allow + reason。
+  // 那 9 次被判协议错 → autoFallback（默认 ask）→ 弹窗。最该自动放行的场景里 45% 退回人工。
+  //
+  // 这条守卫钉的是**解析器源码里不得再有那条判据**（smoke 的 A46 钉行为，
+  // 这条钉形状 —— 两条一起才能既防行为回退、又防「用别的方式再拦一次」）。
+  ok('★★ 解析器不再把 allow+reason 判成协议错（实测 45% 的合法授权因此弹窗）', (function () {
+    // 剥注释：本文件的注释里成段引用旧代码是常态（见上方非审查会话那条守卫的说明）
+    const codeOnly = src.split('\n').map((l) => (/^\s*(\/\/|\*|\/\*)/.test(l) ? '' : l)).join('\n')
+    // ① 那条判据本身不得存在
+    if (/decision === 'allow' && hasReason/.test(codeOnly)) return false
+    // ② 也不得以任何形式返回 'allow with reason' 这个 detail（换个写法再拦一次也算回退）
+    if (/allow with reason/.test(codeOnly)) return false
+    // ③ 正断言：reason 的类型检查**仍在**（放宽的是「能不能带」，不是「能带什么」）
+    if (!/hasReason && typeof obj\.reason !== 'string'/.test(codeOnly)) return false
+    // ④ 正断言：形态矛盾检查仍在（放宽 reason 不得顺带放开 low+deny / high+allow）
+    return /risk === 'low' && decision !== 'allow'/.test(codeOnly)
+      && /risk === 'high' && decision !== 'deny'/.test(codeOnly)
+  })())
+  // ★★ 策略文本必须与解析器同源：声明了 allow+reason 合法，解析器就得收。
+  //
+  // 曾经的不一致是双向的：策略写着「Never return … a reason with allow」，
+  // 而模型照样会带 —— 说明这条约束既没被遵守、也没被正确执行（判成了协议错）。
+  // 现在两边都放开，这条守卫防的是「只改一边」：策略放开、解析器没放开（等于没改），
+  // 或解析器放开、策略还写着禁止（模型会继续被误导）。
+  ok('★★ REVIEW_POLICY 与解析器对 allow+reason 的口径一致', (function () {
+    const i = src.indexOf('const REVIEW_POLICY = [')
+    if (i < 0) return false
+    const j = src.indexOf("].join('\\n')", i)
+    if (j < 0) return false
+    const policy = src.slice(i, j)
+    // ① 策略里必须把 allow+reason 列为合法形态（至少 medium 那条）
+    if (policy.indexOf('{"risk":"medium","decision":"allow","reason":"..."}') === -1) return false
+    // ② 策略里不得再出现「带 reason 的 allow 非法」这种表述
+    if (/a reason with allow/i.test(policy)) return false
+    // ③ 但仍必须禁止真正的矛盾形态（否则是「一起放过头」）
+    return /Never return low with deny, or high with allow\./.test(policy)
+  })())
+
   // ── 非审查会话不记决策 ──────────────────────────────────────────
   // 判据必须用 decide() 外面那个 customReview（与 decide() 内部同源），
   // 且**不能**退化成「无条件记录」或「无条件不记」——两者都会让面板失真。

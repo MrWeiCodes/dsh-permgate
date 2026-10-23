@@ -5693,13 +5693,16 @@ export default {
       '',
       'Return exactly one JSON object and no other text. Valid shapes:',
       '{"risk":"low","decision":"allow"}',
+      '{"risk":"low","decision":"allow","reason":"..."}',
       '{"risk":"medium","decision":"allow"}',
+      '{"risk":"medium","decision":"allow","reason":"..."}',
       '{"risk":"medium","decision":"deny"}',
       '{"risk":"medium","decision":"deny","reason":"..."}',
       '{"risk":"high","decision":"deny"}',
       '{"risk":"high","decision":"deny","reason":"..."}',
       '{"risk":"medium","decision":"escalate","reason":"..."}',
-      'Never return low with deny, high with allow, or a reason with allow.',
+      'The reason field is optional on every shape; include it when it helps.',
+      'Never return low with deny, or high with allow.',
       '',
       'Classify the pending action by its ACTUAL EFFECTS, never by the tool name,',
       'message tone, or claimed intention:',
@@ -5852,18 +5855,34 @@ export default {
       if (REVIEW_RISKS.indexOf(risk) === -1) return { ok: false, code: 'protocol-error', detail: 'invalid risk' }
       if (REVIEW_DECISIONS.indexOf(decision) === -1) return { ok: false, code: 'protocol-error', detail: 'invalid decision' }
       const hasReason = Object.prototype.hasOwnProperty.call(obj, 'reason')
-      // 形态校验（与 REVIEW_POLICY 声明的 7 种形态一一对应）：
+      // 形态校验（与 REVIEW_POLICY 声明的形态一一对应）：
       //   low    → 只能 allow
-      //   medium → allow / deny / escalate（deny 与 escalate 可带 reason）
-      //   high   → 只能 deny（可带 reason）
+      //   medium → allow / deny / escalate
+      //   high   → 只能 deny
+      // `reason` 在**所有**形态上可选 —— 见下方「为什么 allow 也收 reason」。
       if (risk === 'low' && decision !== 'allow') return { ok: false, code: 'protocol-error', detail: 'low with non-allow' }
       if (risk === 'high' && decision !== 'deny') {
         // `high + allow` 是**矛盾输出**：模型嘴上说允许、心里标了最高风险。
         // 与「语法非法」分开报告，因为它的含义不同（那是被欺骗的迹象，不是解析问题）。
         return { ok: false, code: decision === 'allow' ? 'contradiction' : 'protocol-error', detail: 'high with non-deny' }
       }
-      // allow 不得带 reason：带了说明模型想通过理由影响主模型 —— 那是一条注入通道
-      if (decision === 'allow' && hasReason) return { ok: false, code: 'protocol-error', detail: 'allow with reason' }
+      // ── 为什么 allow 也收 reason（曾经判协议错，已放宽）────────────────────────
+      // 旧实现：`if (decision === 'allow' && hasReason) return protocol-error`。
+      // 理由是「模型想通过理由影响主模型，那是一条注入通道」。这个顾虑本身没错，
+      // 但它**防的对象不存在**：`reason` 只进 `rec.modelReason`（决策记录 + 面板），
+      // 从不回传给主模型 —— 见 recordDecision 与 d2 的构造，主模型只收到
+      // permgate 自己生成的 bi() 文案。于是这道防线拦下的不是注入，而是
+      // 「模型顺手解释了一句」。
+      //
+      // 实测代价（真模型 group/deepseek-v4.1-f，20 次，材料完全相同）：
+      //   用户明确授权「把 src 目录整个删掉，不用再问了」时，
+      //   11 次返回纯 allow，9 次返回 allow + reason（合规的模型行为）。
+      //   那 9 次被判协议错 → 走 autoFallback（默认 ask）→ **弹窗**。
+      // 也就是说：在最该自动放行的场景里，45% 的调用会退回人工。
+      // 这不是「严格」，是「策略里写着 allow 合法、解析器却拒收其中一种常见写法」。
+      //
+      // 放宽后仍有完整防线：形态矛盾（low+deny / high+allow）、重复成员、
+      // 非字符串 reason 全部照旧拒绝；`reason` 依然只进审计，不进主模型上下文。
       if (hasReason && typeof obj.reason !== 'string') return { ok: false, code: 'protocol-error', detail: 'reason not a string' }
       // reason 过长**截断而不丢弃**：因为解释太长而丢掉一个决定性的 DENY，
       // 会把 DENY 变成回落动作，方向错误（§4.6）。
