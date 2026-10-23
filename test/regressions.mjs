@@ -329,6 +329,98 @@ group('6b. lint 工具链：配置声称的覆盖范围必须真的被跑')
   ok('★ globals 声明 setImmediate（smoke.mjs 真的在用，缺则 no-undef）',
     /setImmediate:\s*'readonly'/.test(cfg)
     && readFileSync(pathJoin(ROOT, 'test/smoke.mjs'), 'utf8').includes('setImmediate('))
+  // ★★ smoke.mjs 的临时目录必须**统一登记 + 退出兜底**，不能只靠各块手写 rmSync。
+  //
+  // 背景：该文件有 100+ 处 `mkdtempSync`，此前每块结尾手写 `rmSync` 清理。问题是
+  // 断言失败 / 抛异常 / 提前 return 时那行根本执行不到 —— 实测两周攒下
+  // **4404 个临时目录、164 MB**（`%TEMP%\pg-*`）。
+  //
+  // 判据三条（缺一条都会重新漏）：
+  //   ① 存在 `tmpdirFor()` 且内部登记到集合；
+  //   ② 存在 `process.on('exit', ...)` 兜底；
+  //   ③ **没有**残留的直接 `mkdtempSync(join(tmpdir(), ...))` 调用（有就说明有人绕过了登记）。
+  {
+    const smokeSrc = readFileSync(pathJoin(ROOT, 'test/smoke.mjs'), 'utf8')
+    ok('★★ smoke.mjs 临时目录统一登记（tmpdirFor + 退出兜底），不靠各块手写 rmSync',
+      /function tmpdirFor\(prefix\)\s*\{/.test(smokeSrc)
+      && /TMP_DIRS\.add\(/.test(smokeSrc)
+      && /process\.on\('exit',\s*cleanupTmp\)/.test(smokeSrc))
+    // ③ 是关键的**反向**判据：新增测试若直接调 mkdtempSync 就绕过了登记，
+    //    下次断言失败又会漏目录。只允许 tmpdirFor 内部那一处。
+    const direct = (smokeSrc.match(/mkdtempSync\(join\(tmpdir\(\)/g) || []).length
+    ok('★★ smoke.mjs 没有绕过登记的直接 mkdtempSync 调用（只允许 tmpdirFor 内部一处）',
+      direct === 1,
+      'direct mkdtempSync(join(tmpdir(),...)) count = ' + direct)
+  }
+  // ★★ auto 评审段的 session mock 必须走 `sessionMock()`，不得手写宽松的 `surface.nodes`。
+  //
+  // 背景：这里连踩两次同一个坑，两次都是**mock 比真实 API 宽松**：
+  //   ① mock 提供了 `session.events()` —— 那个方法在真实 DSH 里不存在；
+  //   ② mock 写 `surface: { nodes: events.map((_, i) => i) }`，把**所有**事件都塞进 surface
+  //      —— 而 `tool/call` 不是 surface 事件（实测顶层键只有 type/seq/time/data，
+  //      无 `surfaceOp`），真实环境里**永远不在** surface.nodes 里。
+  //
+  // 两次的后果一样：一个在真实环境里恒返回空数组的实现，在测试里全绿。
+  // 教训不是「改那个 bug」，而是**mock 必须照抄真实 API 的形状** ——
+  // 所以把「按真实 surface 规则推导 nodes」收进 `sessionMock()` 一个入口，
+  // 并用反向判据禁止再手写。
+  //
+  // 允许的唯一例外：`sessionMock()` 自己内部那一处（它就是推导逻辑）。
+  // 注释里出现的同名字符串不算（正则要求出现在赋值语境 `surface: { nodes:` 且不是注释行）。
+  {
+    const smokeSrc = readFileSync(pathJoin(ROOT, 'test/smoke.mjs'), 'utf8')
+    ok('★★ smoke.mjs 提供 sessionMock()：按真实 surface 规则推导 nodes',
+      /const sessionMock = \(events, extra\) => \{/.test(smokeSrc)
+      && /const SURFACE_TYPES = new Set\(/.test(smokeSrc)
+      && /surface: \{ nodes \}/.test(smokeSrc))
+    // 反向判据：手写 `surface: { nodes: ... }`（非 sessionMock 内部）一律视为回归。
+    // 逐行判，跳过注释行 —— 注释里提到这个写法是在解释为什么禁止它。
+    const offenders = []
+    smokeSrc.split(/\r?\n/).forEach((line, i) => {
+      const t = line.trim()
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return
+      if (/surface:\s*\{\s*nodes:\s*(?!\})/.test(t)) offenders.push(i + 1)
+    })
+    ok('★★ smoke.mjs 没有手写宽松的 surface.nodes（必须走 sessionMock）',
+      offenders.length === 0,
+      'offending lines = ' + JSON.stringify(offenders))
+
+    // 反向判据二：sessionMock 必须提供**真实 Session 有、而 mock 容易漏**的三个成员。
+    //
+    // 三者都是「缺了不报错、只是功能静默失效」那一类，与本组此前两个 bug 同族：
+    //   · `header`      —— 真实 Session 的 `readonly header` 恒有值；子代理判据
+    //                      （origin / parentSession）只读它。缺了 → 所有会话都被当主会话，
+    //                      direct-parent-instruction 永远为空，看起来像「这次确实没有父指令」。
+    //   · `isOwnSeq`    —— fork 继承前缀的唯一判据。缺了 → 继承来的历史被当本会话内容。
+    //   · 事件带 `seq`  —— 真实事件每条都有 seq；缺了 → 任何按 seq 定位的实现恒失败。
+    //                     这一条尤其阴：`directParentInitialPromptSeq` 靠 seq 认「创建时的
+    //                     那条 prompt」，mock 不带 seq 时它恒返回 undefined，与「主会话」不可区分。
+    //
+    // ⚠️ 必须**逐行扫、跳过注释行**，且只在 `sessionMock` 的**默认返回块**内匹配：
+    //   · 跳过注释：判据是「这行代码里有这个键」，而解释它的注释里往往逐字写着同一个
+    //     片段（本轮实测：注释里那句 `header: { version: 4` 让守卫在真的删掉该键之后
+    //     仍然通过 —— 守卫自己被注释骗过，等于没有）。
+    //   · 限定范围：各用例自己的 `sessionMock(events, { header: ... })` 覆盖值里也有同样
+    //     的片段（A36/A38 都写着 `header: { version: 4`），全文匹配会一直命中它们，
+    //     于是**默认块被删空也照样通过**。
+    const mockBlock = (function () {
+      const a = smokeSrc.indexOf('const sessionMock = (events, extra) => {')
+      if (a === -1) return ''
+      const b = smokeSrc.indexOf('}, extra || {})', a)
+      if (b === -1) return ''
+      return smokeSrc.slice(a, b).split(/\r?\n/).filter((line) => {
+        const t = line.trim()
+        return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+      }).join('\n')
+    })()
+    ok('★★ smoke.mjs 的 sessionMock 默认返回块提供 header（真实 Session 恒有，子代理判据只读它）',
+      /header:\s*\{\s*version:\s*4/.test(mockBlock),
+      JSON.stringify({ found: /header:\s*\{\s*version:\s*4/.test(mockBlock) }))
+    ok('★★ smoke.mjs 的 sessionMock 默认返回块提供 isOwnSeq（fork 继承前缀的唯一判据）',
+      /isOwnSeq:\s*\(seq\)\s*=>/.test(mockBlock))
+    ok('★★ smoke.mjs 的 sessionMock 给每条事件补 seq（按 seq 定位的实现全靠它）',
+      /withSeq/.test(mockBlock) && /Object\.assign\(\{ seq: i \}, e\)/.test(mockBlock))
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

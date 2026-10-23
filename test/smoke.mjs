@@ -168,8 +168,55 @@ function makeExec(workspaceRoot, name, args, session) {
   }
 }
 
-const workspace = mkdtempSync(join(tmpdir(), 'pg-smoke-ws-'))
-const dshHome = mkdtempSync(join(tmpdir(), 'pg-smoke-home-'))
+// ── 临时目录的**统一清理** ────────────────────────────────────────────────────
+//
+// 本文件有 100+ 处 `mkdtempSync`，此前靠每块手写 `rmSync` 收尾。问题是：
+// 断言失败 / 抛异常 / 提前 return 时那行 `rmSync` 根本执行不到 —— 实测两周攒下
+// **4404 个临时目录、164 MB**（`%TEMP%\pg-*`）。
+//
+// 修法不是「再补几处 rmSync」，而是**统一登记 + 进程退出时兜底**：
+//   · `tmpdirFor(prefix)` 取代直接调 `mkdtempSync`，创建即登记；
+//   · 各块原有的 `rmSync` 保持不变（正常路径立刻释放，不让磁盘等到退出）；
+//   · 无论怎么结束（正常 / 断言失败 / 抛错 / Ctrl+C），`process.on('exit')` 兜底删掉残留。
+//
+// 为什么用 `exit` 而不是 `SIGINT` 单独处理：`exit` 在正常结束和 `process.exit(1)`
+// 时都会触发；Ctrl+C 默认会走 `exit`（除非被 SIGINT handler 拦下）。这里再加
+// SIGINT/SIGTERM 转发，覆盖「手动中断」这一路。
+const TMP_DIRS = new Set()
+function tmpdirFor(prefix) {
+  const d = mkdtempSync(join(tmpdir(), prefix))
+  TMP_DIRS.add(d)
+  return d
+}
+// 登记已有的 rmSync 清理：调用方释放后从集合里移除，退出时不再重复删。
+function releaseTmp(...dirs) {
+  for (const d of dirs) {
+    if (!d) continue
+    TMP_DIRS.delete(d)
+    try { rmSync(d, { recursive: true, force: true }) } catch (e) {}
+  }
+}
+let tmpCleanupDone = false
+function cleanupTmp() {
+  if (tmpCleanupDone) return
+  tmpCleanupDone = true
+  // 直接遍历删除，不调 releaseTmp —— 后者会 delete 集合元素，
+  // 在 for...of 遍历中修改集合虽然对 Set 是安全的，但这里意图更直白。
+  for (const d of TMP_DIRS) {
+    try { rmSync(d, { recursive: true, force: true }) } catch (e) {}
+  }
+  TMP_DIRS.clear()
+}
+process.on('exit', cleanupTmp)
+// 手动中断（Ctrl+C）也走一遍清理。注意 handler 里必须自己 exit，否则进程不会退出。
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  try {
+    process.on(sig, () => { cleanupTmp(); process.exit(1) })
+  } catch (e) {}
+}
+
+const workspace = tmpdirFor('pg-smoke-ws-')
+const dshHome = tmpdirFor('pg-smoke-home-')
 mkdirSync(join(dshHome, 'dsh-permgate'), { recursive: true })
 
 const host = createHost({ workspaceRoot: workspace, dshHome })
@@ -192,8 +239,8 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
   // 会把 edit 分类的默认值改掉，后面所有依赖「edit 默认 ask 才会弹审批」的用例
   // 都会被静默短路（group 1 的 insert 预览就是这样挂掉的）。
   const fh = createHost({
-    workspaceRoot: mkdtempSync(join(tmpdir(), 'pg-fence-ws-')),
-    dshHome: mkdtempSync(join(tmpdir(), 'pg-fence-home-')),
+    workspaceRoot: tmpdirFor('pg-fence-ws-'),
+    dshHome: tmpdirFor('pg-fence-home-'),
   })
   const browserHdr = { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' }
   const allow = await callRoute(fh.routes, 'GET', '/permgate/status', undefined, browserHdr)
@@ -280,8 +327,8 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
 // 实际裁决 allow，且此后每次 persist 都把 allow 固化）。这里钉住收敛行为：
 // 仅当「值恰好等于历史默认」且「当前默认已不同」时才丢弃该键，让新默认接管。
 {
-  const ws = mkdtempSync(join(tmpdir(), 'pg-retired-ws-'))
-  const home = mkdtempSync(join(tmpdir(), 'pg-retired-home-'))
+  const ws = tmpdirFor('pg-retired-ws-')
+  const home = tmpdirFor('pg-retired-home-')
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
   // 存量配置：cordis_define 显式 allow（旧默认）、cordis_run 显式 deny（用户改过的值，不得动）、
   // 以及一个用户手填的自定义工具名（同样不得动）
@@ -362,8 +409,8 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
   // 名单仍为空 → 该显式 allow 会被当成待收敛值删掉。上面各用例都带写操作，
   // 写操作会顺带落盘而掩盖这个缺陷，故这里用「只加载、不写任何东西」的干净场景单独钉住。
   {
-    const ws2 = mkdtempSync(join(tmpdir(), 'pg-gate-ws-'))
-    const home2 = mkdtempSync(join(tmpdir(), 'pg-gate-home-'))
+    const ws2 = tmpdirFor('pg-gate-ws-')
+    const home2 = tmpdirFor('pg-gate-home-')
     mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
     // 配置里该键已是新默认 ask（无需收敛），但 migrations 名单为空 —— 升级后的真实形态
     writeFileSync(join(home2, 'dsh-permgate', 'config.json'), JSON.stringify({
@@ -390,8 +437,8 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
 // 且不再退回兜底（否则伪造头又能写盘，等于修复失效）。
 {
   const fh = createHost({
-    workspaceRoot: mkdtempSync(join(tmpdir(), 'pg-conn-ws-')),
-    dshHome: mkdtempSync(join(tmpdir(), 'pg-conn-home-')),
+    workspaceRoot: tmpdirFor('pg-conn-ws-'),
+    dshHome: tmpdirFor('pg-conn-home-'),
     // 桩：与官方 requestRejection 同构 —— 非回环 Host 或 cross-site → 403；
     // 有 Host 但无有效会话 cookie → 401；两者都过 → undefined（放行）
     connection: {
@@ -568,8 +615,8 @@ group('3. view + view_range（end=-1 到文件尾）')
 group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，global 被忽略）')
 {
   // 迁移只在 home 配置不存在时发生，故必须用一个干净的 home（前面的 set-category 已经写过配置）
-  const ws2 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws2-'))
-  const home2 = mkdtempSync(join(tmpdir(), 'pg-smoke-home2-'))
+  const ws2 = tmpdirFor('pg-smoke-ws2-')
+  const home2 = tmpdirFor('pg-smoke-home2-')
   mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
   const host2 = createHost({ workspaceRoot: ws2, dshHome: home2 })
   mkdirSync(join(ws2, '.dsh'), { recursive: true })
@@ -614,8 +661,8 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
     ]
     const tierBad = []
     for (const [label, cfg] of tierCases) {
-      const wsT2 = mkdtempSync(join(tmpdir(), 'pg-ll-ws-'))
-      const homeT2 = mkdtempSync(join(tmpdir(), 'pg-ll-home-'))
+      const wsT2 = tmpdirFor('pg-ll-ws-')
+      const homeT2 = tmpdirFor('pg-ll-home-')
       mkdirSync(join(homeT2, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeT2, 'dsh-permgate', 'config.json'), JSON.stringify(cfg, null, 2), 'utf8')
       const hT2 = createHost({ workspaceRoot: wsT2, dshHome: homeT2 })
@@ -629,7 +676,7 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
         bad.push('commandSub 八档未完整下发: ' + JSON.stringify(csT2 && Object.keys(csT2)))
       }
       if (bad.length) tierBad.push(label + ' → ' + bad.join(' | '))
-      try { rmSync(wsT2, { recursive: true, force: true }); rmSync(homeT2, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(wsT2, homeT2)
     }
     ok('★★ perm_status 在九种配置态下都满足 lossless-JSON（含「deny 无理由」这个上一轮的雷区）',
       tierBad.length === 0, JSON.stringify(tierBad))
@@ -654,7 +701,7 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
   try { parsed2 = JSON.parse(readFileSync(homeCfg, 'utf8')) } catch (e) {}
   ok('保存后 home 配置写入 edit=deny', !!(parsed2 && parsed2.global && parsed2.global.edit && parsed2.global.edit.mode === 'deny'), JSON.stringify(parsed2 && parsed2.global && parsed2.global.edit))
 
-  try { rmSync(ws2, { recursive: true, force: true }); rmSync(home2, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws2, home2)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -662,8 +709,8 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
 {
   // 用干净 home 写一份「老配置代际」：quickTools 只有旧 5 键，其余预设键缺席；
   // 并故意混入 1.5.x 时代落盘的、已移除的权限写工具键（含一条 allow，用于验证清理与 fail-open 防线）
-  const ws3 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws3-'))
-  const home3 = mkdtempSync(join(tmpdir(), 'pg-smoke-home3-'))
+  const ws3 = tmpdirFor('pg-smoke-ws3-')
+  const home3 = tmpdirFor('pg-smoke-home3-')
   mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(home3, 'dsh-permgate', 'config.json'), JSON.stringify({
     global: {
@@ -744,7 +791,7 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   const rpLegacy = await probe('perm_add_exception')
   ok('★ group5: 残留 allow 不会让已移除工具被静默放行', rpLegacy.nexted === false, JSON.stringify(rpLegacy.out))
 
-  try { rmSync(ws3, { recursive: true, force: true }); rmSync(home3, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws3, home3)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -790,11 +837,11 @@ group('6. 读图独立分类（image）：默认 ask、判定链 + 缩略图 + �
 group('11. 工作区外 allow 的 cat / reason 前缀 / ruleId 同源')
 {
   const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
-  const ext = mkdtempSync(join(tmpdir(), 'pg-out-a-'))
+  const ext = tmpdirFor('pg-out-a-')
   const img = join(ext, 'o.png')
   writeFileSync(img, Buffer.from(PNG, 'base64'))
-  const ws = mkdtempSync(join(tmpdir(), 'pg-smoke-ws4-'))
-  const home = mkdtempSync(join(tmpdir(), 'pg-smoke-home4-'))
+  const ws = tmpdirFor('pg-smoke-ws4-')
+  const home = tmpdirFor('pg-smoke-home4-')
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
   const h = createHost({ workspaceRoot: ws, dshHome: home })
   const pre4 = h.hooks.get('tools/pre-execute')
@@ -820,7 +867,7 @@ group('11. 工作区外 allow 的 cat / reason 前缀 / ruleId 同源')
   ok('工作区外 allow：确实放行未弹窗', nextedA === true)
 
   // (b) 区外读闸为 allow 且无例外（无 ruleId）→ cat 落回自身分类
-  const ext2 = mkdtempSync(join(tmpdir(), 'pg-out-b-'))
+  const ext2 = tmpdirFor('pg-out-b-')
   const img2 = join(ext2, 'p.png')
   writeFileSync(img2, Buffer.from(PNG, 'base64'))
   await setCat4('outsideRead', 'allow')
@@ -830,7 +877,7 @@ group('11. 工作区外 allow 的 cat / reason 前缀 / ruleId 同源')
   const iId = iAdd.data && iAdd.data.added && iAdd.data.added.id
   ok('工作区外 allow：区外读闸无例外时前缀落回自身分类', !!dB && dB.ruleId === iId && /读取图片权限/.test(String(dB.reason)) && !/工作区外读取权限/.test(String(dB.reason)), JSON.stringify(dB && { ruleId: dB.ruleId, want: iId, reason: String(dB.reason).slice(0, 50) }))
 
-  try { rmSync(ext, { recursive: true, force: true }); rmSync(ext2, { recursive: true, force: true }); rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ext, ext2, ws, home)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -868,8 +915,8 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   //   ① 新条目确实在**末尾**（不是头部）；
   //   ② 它**看得见**（在列表里，用户能找到并拖到前面）—— 这是「让用户自己调整」的前提；
   //   ③ 手动把它调到前面后立即生效（顺序确实即优先级）。
-  const ws5 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws5-'))
-  const home5 = mkdtempSync(join(tmpdir(), 'pg-smoke-home5-'))
+  const ws5 = tmpdirFor('pg-smoke-ws5-')
+  const home5 = tmpdirFor('pg-smoke-home5-')
   mkdirSync(join(home5, 'dsh-permgate'), { recursive: true })
   const h5 = createHost({ workspaceRoot: ws5, dshHome: home5 })
   const pre5 = h5.hooks.get('tools/pre-execute')
@@ -900,15 +947,15 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
     ok('★★ 用户手动把新例外调到前面后立即生效（顺序 = 优先级）',
       !!out5b && out5b.kind === 'deny', JSON.stringify(out5b))
   }
-  try { rmSync(ws5, { recursive: true, force: true }); rmSync(home5, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws5, home5)
 
   // (c) 拒绝语义下即便携带 allow 规则，服务端也必须拦截（不写 allow 例外）
-  const ws6 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws6-'))
-  const home6 = mkdtempSync(join(tmpdir(), 'pg-smoke-home6-'))
+  const ws6 = tmpdirFor('pg-smoke-ws6-')
+  const home6 = tmpdirFor('pg-smoke-home6-')
   mkdirSync(join(home6, 'dsh-permgate'), { recursive: true })
   const h6 = createHost({ workspaceRoot: ws6, dshHome: home6 })
   const pre6 = h6.hooks.get('tools/pre-execute')
-  const ext6 = mkdtempSync(join(tmpdir(), 'pg-out-c-'))
+  const ext6 = tmpdirFor('pg-out-c-')
   const img6 = join(ext6, 'z.png')
   writeFileSync(img6, Buffer.from(PNG, 'base64'))
   // read_image 走「区外读闸 + image」两道闸，故两道都设 ask：弹窗由 image 触发（读闸默认 allow
@@ -930,15 +977,15 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   // 断言照常绿，但本意要覆盖的读闸例外列表没被检查。
   const gateRows6 = ((((st6.data || {}).categories || {}).project || {}).outsideRead || {}).exceptions || []
   ok('拒绝时携带 allow 规则不落 allow 例外（两个分类都没写）', !!(item6 && cand6) && rows6.length === 0 && gateRows6.length === 0, JSON.stringify({ decisions: (denied6.data || {}).ruleAdded, rows: rows6.map((e) => e.action), gateRows: gateRows6.map((e) => e.action) }))
-  try { rmSync(ws6, { recursive: true, force: true }); rmSync(home6, { recursive: true, force: true }); rmSync(ext6, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws6, home6, ext6)
 
   // (d) 反向确认：拒绝态下勾选的「拒绝此项」必须照常落盘（过滤只针对 allow 方向）
-  const ws7 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws7-'))
-  const home7 = mkdtempSync(join(tmpdir(), 'pg-smoke-home7-'))
+  const ws7 = tmpdirFor('pg-smoke-ws7-')
+  const home7 = tmpdirFor('pg-smoke-home7-')
   mkdirSync(join(home7, 'dsh-permgate'), { recursive: true })
   const h7 = createHost({ workspaceRoot: ws7, dshHome: home7 })
   const pre7 = h7.hooks.get('tools/pre-execute')
-  const ext7 = mkdtempSync(join(tmpdir(), 'pg-out-d-'))
+  const ext7 = tmpdirFor('pg-out-d-')
   const img7 = join(ext7, 'w.png')
   writeFileSync(img7, Buffer.from(PNG, 'base64'))
   // 同 (c)：读图走「区外读闸 + image」，两道都设 ask（弹窗实际由 image 触发）
@@ -959,11 +1006,11 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   // deny 方向下区外闸被过滤（区外闸的 deny 例外不落盘），image 侧照常落盘。
   const gate7Rows = ((((st7.data || {}).categories || {}).project || {}).outsideRead || {}).exceptions || []
   ok('拒绝时勾选「拒绝此项」仍照常落盘（image 记 deny、区外读闸不连带）', !!cand7 && img7Rows.length === 1 && img7Rows[0].action === 'deny' && gate7Rows.length === 0, JSON.stringify({ img: img7Rows.map((e) => e.action), gate: gate7Rows.map((e) => e.action) }))
-  try { rmSync(ws7, { recursive: true, force: true }); rmSync(home7, { recursive: true, force: true }); rmSync(ext7, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws7, home7, ext7)
 
   // (e) 例外删除严格按 id：删掉被遮蔽的 allow 不影响生效中的 deny；方向交替写入也不累积同向条目
-  const ws8 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws8-'))
-  const home8 = mkdtempSync(join(tmpdir(), 'pg-smoke-home8-'))
+  const ws8 = tmpdirFor('pg-smoke-ws8-')
+  const home8 = tmpdirFor('pg-smoke-home8-')
   mkdirSync(join(home8, 'dsh-permgate'), { recursive: true })
   const h8 = createHost({ workspaceRoot: ws8, dshHome: home8 })
   const pre8 = h8.hooks.get('tools/pre-execute')
@@ -999,7 +1046,7 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   const item8 = (Array.isArray(list8.data) ? list8.data : []).filter((x) => x.tool === 'read_image').pop()
   if (item8) await callRoute(h8.routes, 'POST', '/permgate/decide', { id: item8.id, action: 'deny', lang: 'zh' })
   await Promise.race([p8, new Promise((r) => setTimeout(r, 200))])
-  try { rmSync(ws8, { recursive: true, force: true }); rmSync(home8, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws8, home8)
 
   // (e2) 大小写等价的例外：删掉其中一条时，remaining 必须与读侧 alreadyInProject、写侧
   // addProjectException 同源（命令分类走 cmdExcKey，因为例外真正生效的 matchCommand 大小写不敏感）。
@@ -1017,8 +1064,8 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   //
   // 用预置配置文件而不是走 add-exception：写侧判重修复后已不会再产出第二条等价条目，
   // 而这里要守的恰是**存量配置**里已经并存两条的形态（历史遗留，用户删不掉印象里的那条）。
-  const wsEq = mkdtempSync(join(tmpdir(), 'pg-smoke-wseq-'))
-  const homeEq = mkdtempSync(join(tmpdir(), 'pg-smoke-homeeq-'))
+  const wsEq = tmpdirFor('pg-smoke-wseq-')
+  const homeEq = tmpdirFor('pg-smoke-homeeq-')
   mkdirSync(join(homeEq, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(homeEq, 'dsh-permgate', 'config.json'), JSON.stringify({
     global: {
@@ -1045,7 +1092,7 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
     !!(delEq.data && delEq.data.removed) && delEq.data.removedCount === 1 && delEq.data.remaining === 1 &&
     JSON.stringify(rowsEqB.map((r) => r.id)) === JSON.stringify(['eLower', 'eSpaced']),
     JSON.stringify({ count: delEq.data && delEq.data.removedCount, remaining: delEq.data && delEq.data.remaining, rows: rowsEqB.map((r) => r.id + '=' + r.match) }))
-  try { rmSync(wsEq, { recursive: true, force: true }); rmSync(homeEq, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(wsEq, homeEq)
 
   // (f) 同向重复写入：命中的旧条目**原地更新文字**（不移动位置）。
   //
@@ -1053,8 +1100,8 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   // 去重命中只回写 reason/note，不动顺序。故断言改为：
   //   ① 同向重复写入**不新增条目**（去重仍生效，否则列表会堆成一串）；
   //   ② 位置不变（先 deny 后 allow 之后，再写 deny 不会把它挪到前面）。
-  const ws9 = mkdtempSync(join(tmpdir(), 'pg-smoke-ws9-'))
-  const home9 = mkdtempSync(join(tmpdir(), 'pg-smoke-home9-'))
+  const ws9 = tmpdirFor('pg-smoke-ws9-')
+  const home9 = tmpdirFor('pg-smoke-home9-')
   mkdirSync(join(home9, 'dsh-permgate'), { recursive: true })
   const h9 = createHost({ workspaceRoot: ws9, dshHome: home9 })
   const pre9 = h9.hooks.get('tools/pre-execute')
@@ -1090,15 +1137,15 @@ group('12. 本轮修复：尺寸未知不内联、面板例外最新先生效')
   await add9('deny', '更新后的理由')
   const denyRow9 = (await rows9()).find((e) => e.action === 'deny')
   ok('同向重复写入会更新既有条目的 reason', !!denyRow9 && denyRow9.reason === '更新后的理由', JSON.stringify(denyRow9 && denyRow9.reason))
-  try { rmSync(ws9, { recursive: true, force: true }); rmSync(home9, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(ws9, home9)
 }
 
 // ─────────────────────────────────────────────────────────────
 group('13. 复合权限（工作区外 + 各自分类）的候选：四种都带分类自适应的灰色小字')
 {
-  const outDir = mkdtempSync(join(tmpdir(), 'pg-cand-out-'))
-  const ws5 = mkdtempSync(join(tmpdir(), 'pg-cand-ws-'))
-  const home5 = mkdtempSync(join(tmpdir(), 'pg-cand-home-'))
+  const outDir = tmpdirFor('pg-cand-out-')
+  const ws5 = tmpdirFor('pg-cand-ws-')
+  const home5 = tmpdirFor('pg-cand-home-')
   mkdirSync(join(home5, 'dsh-permgate'), { recursive: true })
   const h5 = createHost({ workspaceRoot: ws5, dshHome: home5 })
   const pre5 = h5.hooks.get('tools/pre-execute')
@@ -1147,15 +1194,15 @@ group('13. 复合权限（工作区外 + 各自分类）的候选：四种都带
       && gateCats.indexOf(cat) !== -1,
       JSON.stringify({ wantCats, gateCats }))
   }
-  try { rmSync(outDir, { recursive: true, force: true }); rmSync(ws5, { recursive: true, force: true }); rmSync(home5, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(outDir, ws5, home5)
 }
 
 // ─────────────────────────────────────────────────────────────
 group('14. 相对 glob 例外不被绝对化（`**/*.env` 仍匹配任意目录）')
 {
-  const wsG = mkdtempSync(join(tmpdir(), 'pg-glob-ws-'))
-  const homeG = mkdtempSync(join(tmpdir(), 'pg-glob-home-'))
-  const outG = mkdtempSync(join(tmpdir(), 'pg-glob-out-'))
+  const wsG = tmpdirFor('pg-glob-ws-')
+  const homeG = tmpdirFor('pg-glob-home-')
+  const outG = tmpdirFor('pg-glob-out-')
   mkdirSync(join(homeG, 'dsh-permgate'), { recursive: true })
   const hG = createHost({ workspaceRoot: wsG, dshHome: homeG })
   const preG = hG.hooks.get('tools/pre-execute')
@@ -1178,15 +1225,15 @@ group('14. 相对 glob 例外不被绝对化（`**/*.env` 仍匹配任意目录�
   ok('group14: 工作区外的 .env 被该例外放行（未被绝对化收窄）', hitG.nexted === true, JSON.stringify(hitG.out))
   const missG = await probeG(join(outG, 'plain.txt'))
   ok('group14: 非匹配文件仍走审批（例外没被放宽）', missG.nexted === false, JSON.stringify(missG.out))
-  try { rmSync(wsG, { recursive: true, force: true }); rmSync(homeG, { recursive: true, force: true }); rmSync(outG, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(wsG, homeG, outG)
 }
 
 // ─────────────────────────────────────────────────────────────
 group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携带自己的备注')
 {
-  const wsA = mkdtempSync(join(tmpdir(), 'pg-excask-ws-'))
-  const homeA = mkdtempSync(join(tmpdir(), 'pg-excask-home-'))
-  const outA = mkdtempSync(join(tmpdir(), 'pg-excask-out-'))
+  const wsA = tmpdirFor('pg-excask-ws-')
+  const homeA = tmpdirFor('pg-excask-home-')
+  const outA = tmpdirFor('pg-excask-out-')
   mkdirSync(join(homeA, 'dsh-permgate'), { recursive: true })
   const hA = createHost({ workspaceRoot: wsA, dshHome: homeA })
   const preA = hA.hooks.get('tools/pre-execute')
@@ -1282,8 +1329,8 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
   }
 
   // (f) 工作区外的 ask 例外：cat / ruleId 同源，说明随弹窗展示
-  const wsA2 = mkdtempSync(join(tmpdir(), 'pg-excask2-ws-'))
-  const homeA2 = mkdtempSync(join(tmpdir(), 'pg-excask2-home-'))
+  const wsA2 = tmpdirFor('pg-excask2-ws-')
+  const homeA2 = tmpdirFor('pg-excask2-home-')
   mkdirSync(join(homeA2, 'dsh-permgate'), { recursive: true })
   const hA2 = createHost({ workspaceRoot: wsA2, dshHome: homeA2 })
   const preA2 = hA2.hooks.get('tools/pre-execute')
@@ -1317,13 +1364,13 @@ group('15. 例外三态（ask / allow / deny）：ask 例外照常弹窗并携�
     rmSync(outA, { recursive: true, force: true })
   } catch (e) {}
 }
-try { rmSync(workspace, { recursive: true, force: true }); rmSync(dshHome, { recursive: true, force: true }) } catch (e) {}
+releaseTmp(workspace, dshHome)
 
 // ─────────────────────────────────────────────────────────────
 group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三处都能写，且只随 deny 回给 AI')
 {
-  const wsR = mkdtempSync(join(tmpdir(), 'pg-reason-ws-'))
-  const homeR = mkdtempSync(join(tmpdir(), 'pg-reason-home-'))
+  const wsR = tmpdirFor('pg-reason-ws-')
+  const homeR = tmpdirFor('pg-reason-home-')
   mkdirSync(join(homeR, 'dsh-permgate'), { recursive: true })
   const hR = createHost({ workspaceRoot: wsR, dshHome: homeR })
   const preR = hR.hooks.get('tools/pre-execute')
@@ -1450,7 +1497,7 @@ group('16. 拒绝原因（reason）：分类默认值 / 兜底 / 快捷工具三
   const clearFb = await post('/permgate/set-fallback', { target: 'project', mode: 'deny', reason: '' })
   ok('group16: 面板清空兜底原因（reason=""）真的清除', !!(clearFb.data && clearFb.data.fallback.projectReason === null), JSON.stringify(clearFb.data && clearFb.data.fallback))
 
-  try { rmSync(wsR, { recursive: true, force: true }); rmSync(homeR, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(wsR, homeR)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1471,8 +1518,8 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
     const o = opts || {}
     const tool = o.tool || 'read'
     const category = o.category || (tool === 'read' ? 'read' : 'edit')
-    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-svc-home-'))
+    const ws = tmpdirFor('pg-svc-ws-')
+    const home = tmpdirFor('pg-svc-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding })
     const pre = h.hooks.get('tools/pre-execute')
@@ -1495,7 +1542,7 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
     const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
     return diff.data
   }
 
@@ -1525,8 +1572,8 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
 
   // ⑤ 回归：UTF-8 文件在两种部署下都必须正常（服务不该被调用）
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-utf8-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-svc-utf8h-'))
+    const ws = tmpdirFor('pg-svc-utf8-')
+    const home = tmpdirFor('pg-svc-utf8h-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     let called = false
     const spy = { tryDecode: async () => { called = true; return { ok: true, result: { text: 'x', encoding: 'gbk', decided: 'guessed' } } } }
@@ -1545,7 +1592,7 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
     ok('group17: UTF-8 文件预览正常且未调用解码服务', !!(d && d.ok === true && String(d.text).indexOf('你好，世界') === 0 && called === false), JSON.stringify(d && { ok: d.ok, called: called }))
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ⑥ 大文件必须仍可预览：交给解码服务的字节上限曾误取 DIFF_MAX_CHARS(1MiB)，
@@ -1606,8 +1653,8 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
   // 共享可变状态），而 file-diff 路由无按 id 串行化——两个并发请求会交错读写同一
   // 字段，先完成的那次会丢掉标注、或拿到另一次请求的编码（实测复现）。
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-svc-race-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-svc-raceh-'))
+    const ws = tmpdirFor('pg-svc-race-')
+    const home = tmpdirFor('pg-svc-raceh-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     let seq = 0
     // 交替返回两种可区分的编码，便于识别「拿到别人的值」
@@ -1633,7 +1680,7 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
       JSON.stringify({ a: da && { enc: da.encoding, dec: da.decided }, b: db && { enc: db.encoding, dec: db.decided } }))
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await Promise.race([pending, new Promise((r) => setTimeout(r, 200))])
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 }
 
@@ -1658,8 +1705,8 @@ group('18. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入 edit
   // 分类全 deny + 兜底 allow：命中分类闸 → 弹窗（ask 态记为 cat）；掉到兜底 → 直接放行。
   // 这样「是否被闸住」与「落在哪个分类」一次跑出来。
   async function probe18(sreDef, name, args, askCat) {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-g18-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-g18-home-'))
+    const ws = tmpdirFor('pg-g18-ws-')
+    const home = tmpdirFor('pg-g18-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const h = createHost({ workspaceRoot: ws, dshHome: home })
     h.ctx.tools.get = () => sreDef
@@ -1700,7 +1747,7 @@ group('18. dsh-fs-encoding 的 insert / str_replace_editor.undo_edit 并入 edit
     const cat = /撤销权限/.test(reason) ? 'undo'
       : (/编辑权限/.test(reason) ? 'edit'
         : (/读取权限/.test(reason) ? 'read' : null))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
     return { verdict, cat, diff }
   }
 
@@ -1748,8 +1795,8 @@ group('18b. 撤销分类默认值 = allow（缺键回落），显式落盘的值
 {
   // seed 非空时预置隔离 config.json，模拟「老用户已落盘」的配置
   async function freshUndo(seed) {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-g18b-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-g18b-home-'))
+    const ws = tmpdirFor('pg-g18b-ws-')
+    const home = tmpdirFor('pg-g18b-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     if (seed) writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(seed), 'utf8')
     const h = createHost({ workspaceRoot: ws, dshHome: home })
@@ -1768,7 +1815,7 @@ group('18b. 撤销分类默认值 = allow（缺键回落），显式落盘的值
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await withTimeout(p, 'g18b settle')
     const verdict = item ? 'ask' : (nextCalled ? 'allow' : 'deny')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
     // 整个 effective 一并返回：对照断言要能检查 undo 之外的分类是否被顺手放宽
     return { eff: st.data && st.data.effective && st.data.effective.undo, effective: (st.data && st.data.effective) || null, verdict }
   }
@@ -1814,9 +1861,9 @@ group('18c. 工作区外读写拆分：存量 directory 配置零迁移、读写
   // 预置一份**存量**配置：写闸（老键 directory）显式 deny + 一条 allow 例外，
   // 且带 global.mode 之外的分类键 —— 故 isOld 判别为 false、走 buildConfig 而非 migrateOld。
   async function seedSplit(seed) {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-split-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-split-home-'))
-    const out = mkdtempSync(join(tmpdir(), 'pg-split-out-'))
+    const ws = tmpdirFor('pg-split-ws-')
+    const home = tmpdirFor('pg-split-home-')
+    const out = tmpdirFor('pg-split-out-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(seed), 'utf8')
     const h = createHost({ workspaceRoot: ws, dshHome: home })
@@ -1832,7 +1879,7 @@ group('18c. 工作区外读写拆分：存量 directory 配置零迁移、读写
       const item = await awaitPending(name, done, h)
       if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
       const out2 = await withTimeout(p, 'g18c settle')
-      try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(ws, home, out)
       return { verdict: item ? 'ask' : (nexted ? 'allow' : 'deny'), reason: String((item && item.reason) || (out2 && out2.reason) || '') }
     }
     return { eff, excOf, probe, out, ws }
@@ -1961,8 +2008,8 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
 
   const mk = async (label, records, opts) => {
     const o = opts || {}
-    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-memo-home-'))
+    const ws = tmpdirFor('pg-memo-ws-')
+    const home = tmpdirFor('pg-memo-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const h = createHost({ workspaceRoot: ws, dshHome: home, fsEncoding: o.svc !== undefined ? o.svc : mkSvc(records) })
     const pre = h.hooks.get('tools/pre-execute')
@@ -1982,7 +2029,7 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
     const diff = await callRoute(h.routes, 'POST', '/permgate/file-diff', { id: item && item.id, lang: 'zh' })
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await withTimeout(pending, label + ' settle')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
     return { item, data: diff.data, sessionId: item && item.sessionId }
   }
 
@@ -1994,8 +2041,8 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
   }
   // 用真实 key（sessionId|targetKey）构造记录：targetKey 是 realpath，先算出来
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-k-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-memo-kh-'))
+    const ws = tmpdirFor('pg-memo-k-')
+    const home = tmpdirFor('pg-memo-kh-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const p = join(ws, 'gbk.txt')
     writeFileSync(p, GBK)
@@ -2027,7 +2074,7 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
       !!(d && d.ok && d.decided === 'guessed'), JSON.stringify(d && { enc: d.encoding, dec: d.decided }))
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await withTimeout(pending, 'g19-1 settle')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
   // ② 无记录（服务回 undefined）→ 退回原行为：服务拒绝则原样报错，不崩
   {
@@ -2037,8 +2084,8 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
   }
   // ③ 记录过期（服务对版本不符回 undefined）→ 同样退回原行为
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-s-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-memo-sh-'))
+    const ws = tmpdirFor('pg-memo-s-')
+    const home = tmpdirFor('pg-memo-sh-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const p = join(ws, 'gbk.txt')
     writeFileSync(p, GBK)
@@ -2063,7 +2110,7 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
     ok('group19: 过期判定由服务负责（预览不自行比较 version）', !!tk)
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await withTimeout(pending, 'g19-3 settle')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
   // ④ 老版服务（只有 tryDecode，没有 recordedEncoding）→ 不崩、退回原行为
   {
@@ -2076,8 +2123,8 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
   // 若它漏传版本，服务会把记录判为过期 → 预览退回原报错（静默失效，不报错）。
   // 这条用例让桩**照实**实现 1.4.0 语义（undefined → 判 stale），故能捕获"漏传版本"。
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-fc-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-memo-fch-'))
+    const ws = tmpdirFor('pg-memo-fc-')
+    const home = tmpdirFor('pg-memo-fch-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const p = join(ws, 'gbk.txt')
     writeFileSync(p, GBK)
@@ -2115,7 +2162,7 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
     if (item2) await callRoute(h2.routes, 'POST', '/permgate/decide', { id: item2.id, action: 'deny', lang: 'zh' })
     await withTimeout(pending, 'g19-4b settle')
     await withTimeout(pending2, 'g19-4b2 settle')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
   // ⑤ read 审批 + AI 透传 encoding → 工具透传优先（这条路径不依赖记录）
   {
@@ -2129,8 +2176,8 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
   // ⑤ 只有透传、没有记录，故证明不了优先级——实测把 wantEncoding 的顺序反过来
   // （`recEnc || encodingHint`）后 ⑤ 照样通过。这一条才是有区分力的对照。
   {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-memo-p-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-memo-ph-'))
+    const ws = tmpdirFor('pg-memo-p-')
+    const home = tmpdirFor('pg-memo-ph-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     const p = join(ws, 'gbk.txt')
     writeFileSync(p, GBK)
@@ -2157,7 +2204,7 @@ group('19. 会话记录的编码驱动预览（recordedEncoding 端到端）')
       !!(d && d.ok && d.decided === 'hint'), JSON.stringify(d && { enc: d.encoding, dec: d.decided }))
     if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
     await withTimeout(pending, 'g19-6 settle')
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 }
 
@@ -2169,8 +2216,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   // 本组走**真实 tools/pre-execute 链路**复现那 11 条，断言它们不再整条静默放行。
   // 断言口径是「不返回 next()」（即不无条件放行），而不是钉死 ask/deny ——
   // 具体落点由配置决定，测试不该把某个默认值固化成语义。
-  const ws = mkdtempSync(join(tmpdir(), 'pg-seg-ws-'))
-  const home = mkdtempSync(join(tmpdir(), 'pg-seg-home-'))
+  const ws = tmpdirFor('pg-seg-ws-')
+  const home = tmpdirFor('pg-seg-home-')
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
   const EXC = ['git status *', 'git log *', 'git diff *', 'Get-ChildItem *', 'Get-Content *',
     'Copy-Item *', 'cd *', 'node --check *', 'docker ps *', 'grep *']
@@ -2290,8 +2337,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     JSON.stringify(cs && cs.labels.filter((l) => l === 'mv' || l === 'cp' || l === 'rm')))
 
   // ★ 老配置（无 destructive 键）加载后补默认值 ask
-  const ws2 = mkdtempSync(join(tmpdir(), 'pg-seg2-ws-'))
-  const home2 = mkdtempSync(join(tmpdir(), 'pg-seg2-home-'))
+  const ws2 = tmpdirFor('pg-seg2-ws-')
+  const home2 = tmpdirFor('pg-seg2-home-')
   mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(home2, 'dsh-permgate', 'config.json'), JSON.stringify({
     global: { fallbackMode: 'ask', command: { mode: 'ask', exceptions: [] } }, projects: {},
@@ -2329,8 +2376,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   // 用户看到后会去设置里逐档调 —— 弹窗本身就是发现入口。
   // 方向仍是 fail-closed（ask 一定拦得住，不存在静默放行），故下面同时断言「没有 next」。
   // 反例（实测变红）：把八档末级兜底改回按 mode 推导，本条即失败。
-  const ws3 = mkdtempSync(join(tmpdir(), 'pg-seg3-ws-'))
-  const home3 = mkdtempSync(join(tmpdir(), 'pg-seg3-home-'))
+  const ws3 = tmpdirFor('pg-seg3-ws-')
+  const home3 = tmpdirFor('pg-seg3-home-')
   mkdirSync(join(home3, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(home3, 'dsh-permgate', 'config.json'), JSON.stringify({
     global: { fallbackMode: 'ask', command: { mode: 'deny', reason: '命令一律拒绝' } }, projects: {},
@@ -2388,8 +2435,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   ]
   const orderResults = []
   for (const [label, runSteps] of orderCases) {
-    const wsO = mkdtempSync(join(tmpdir(), 'pg-order-ws-'))
-    const homeO = mkdtempSync(join(tmpdir(), 'pg-order-home-'))
+    const wsO = tmpdirFor('pg-order-ws-')
+    const homeO = tmpdirFor('pg-order-home-')
     mkdirSync(join(homeO, 'dsh-permgate'), { recursive: true })
     const hO = createHost({ workspaceRoot: wsO, dshHome: homeO })
     await runSteps(hO.routes)
@@ -2415,7 +2462,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       destructive === 'timeout', 'got=' + destructive)
     ok('★★ group20d: ' + label + ' → 普通命令落大分类（deny）',
       plain === 'deny', 'got=' + plain)
-    try { rmSync(wsO, { recursive: true, force: true }); rmSync(homeO, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(wsO, homeO)
   }
   ok('★★ group20d: 两种设置顺序结果完全一致（无顺序依赖）',
     orderResults.length === 2 && JSON.stringify(orderResults[0].subAction) === JSON.stringify(orderResults[1].subAction)
@@ -2440,8 +2487,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ['group20e: permissive → 八档全 ask', 'permissive', 'ask', 'ask', 'timeout'],
     ['group20e: off → 八档全 ask', 'off', 'ask', 'ask', 'timeout'],
   ]) {
-    const wsM = mkdtempSync(join(tmpdir(), 'pg-old-ws-'))
-    const homeM = mkdtempSync(join(tmpdir(), 'pg-old-home-'))
+    const wsM = tmpdirFor('pg-old-ws-')
+    const homeM = tmpdirFor('pg-old-home-')
     mkdirSync(join(homeM, 'dsh-permgate'), { recursive: true })
     // 老格式：只有 global.mode，没有分类键（触发 migrateOld）
     writeFileSync(join(homeM, 'dsh-permgate', 'config.json'), JSON.stringify({ global: { mode: oldMode } }, null, 2), 'utf8')
@@ -2459,7 +2506,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     const gotM = nextedM ? 'allow' : ((outM && outM.kind) || 'timeout')
     ok('★★ group20e: ' + oldMode + ' 老配置下工作区外破坏性命令落点 = ' + wantVerdict + '（弹窗，不得静默放行）',
       gotM === wantVerdict, 'got=' + gotM)
-    try { rmSync(wsM, { recursive: true, force: true }); rmSync(homeM, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(wsM, homeM)
   }
 
   // ★★ group20f：间接执行的破坏性命令必须被用户的 deny 例外拦住（例外视野与子设置对称）。
@@ -2471,8 +2518,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   // 修法：例外匹配抽成单一实现 resolveException，opaque 段与可读段共用、都试全部 label。
   // 用**独立 host**：本组需要一条 `rm *`=deny 例外，它会按「顺序即优先级」压过 group20 里
   // 已有的 allow 例外，污染后续断言（实测踩过）。
-  const wsF = mkdtempSync(join(tmpdir(), 'pg-segF-ws-'))
-  const homeF = mkdtempSync(join(tmpdir(), 'pg-segF-home-'))
+  const wsF = tmpdirFor('pg-segF-ws-')
+  const homeF = tmpdirFor('pg-segF-home-')
   mkdirSync(join(homeF, 'dsh-permgate'), { recursive: true })
   writeFileSync(join(homeF, 'dsh-permgate', 'config.json'), JSON.stringify({
     global: {
@@ -2508,7 +2555,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     if (r.nexted !== true) fpInd.push(c + ' → ' + r.verdict)
   }
   ok('group20f: 无关命令不被 rm 例外误伤（额外 label 不引入误报）', fpInd.length === 0, JSON.stringify(fpInd))
-  try { rmSync(wsF, { recursive: true, force: true }); rmSync(homeF, { recursive: true, force: true }) } catch (e) {}
+  releaseTmp(wsF, homeF)
 
   // ═══════════════════════════════════════════════════════════════════════════
   // group20g：八档体系的端到端（计划 blast-tier-plan.md §6.1 / §5.5 / §7.3）
@@ -2518,8 +2565,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   //   ② 同一配置下 `rm -rf B:\` / `sudo ls` / `kill 1234` **仍然要问** —— D-6 的核心。
   // 两条必须一起断言：只测 ① 会漏掉「把七档也一起放开了」这种致命放松。
   {
-    const wsT = mkdtempSync(join(tmpdir(), 'pg-tier-ws-'))
-    const homeT = mkdtempSync(join(tmpdir(), 'pg-tier-home-'))
+    const wsT = tmpdirFor('pg-tier-ws-')
+    const homeT = tmpdirFor('pg-tier-home-')
     mkdirSync(join(homeT, 'dsh-permgate'), { recursive: true })
     // 大分类 allow、子设置**一个字都不写** —— 让读取侧按 mode 推导（这才是新装用户的形态）
     writeFileSync(join(homeT, 'dsh-permgate', 'config.json'), JSON.stringify({
@@ -2557,8 +2604,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     // `global.action === undefined` 全部失败 —— 实测踩过（残留把两条断言一起弄红）。
     // 本组只关心「显式设置能否生效」，不需要污染 hT 的配置。
     {
-      const wsI = mkdtempSync(join(tmpdir(), 'pg-inside-ws-'))
-      const homeI = mkdtempSync(join(tmpdir(), 'pg-inside-home-'))
+      const wsI = tmpdirFor('pg-inside-ws-')
+      const homeI = tmpdirFor('pg-inside-home-')
       mkdirSync(join(homeI, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeI, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [] } }, projects: {},
@@ -2582,7 +2629,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       // 且此时 wide 档仍是 ask（设 inside 不得连带放开其它档 —— 「逐档」的意义）
       ok('★ group20g: 设 inside=allow 不得连带放开 wide 档（rm -rf C:/Windows 仍不是 allow）',
         (await probeI('rm -rf C:/Windows')) !== 'allow')
-      try { rmSync(wsI, { recursive: true, force: true }); rmSync(homeI, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(wsI, homeI)
     }
 
     // ② 红线：同一配置下这些**必须仍然要问**（D-6 的核心，保护范围收窄但没消失）
@@ -2673,8 +2720,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     //   ③ 全局层**显式** wide=deny → probe.wide 必须是 deny（修复不得把全局 tab 变成恒 ask）。
     {
       // ① 独立宿主：全局层一个字都不写，项目层只写 wide=deny
-      const wsP = mkdtempSync(join(tmpdir(), 'pg-probe-ws-'))
-      const homeP = mkdtempSync(join(tmpdir(), 'pg-probe-home-'))
+      const wsP = tmpdirFor('pg-probe-ws-')
+      const homeP = tmpdirFor('pg-probe-home-')
       mkdirSync(join(homeP, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeP, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: { fallbackMode: 'ask', command: { mode: 'ask', exceptions: [] } }, projects: {},
@@ -2694,7 +2741,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       ok('★★ 48e-2 方向相反的同一污染：项目显式 wide=allow 时 globalEffectiveProbe.wide 仍是 ask（全局 tab 不得显示成「允许」）',
         !!(csP2 && csP2.globalEffectiveProbe && csP2.globalEffectiveProbe.wide === 'ask' && csP2.effective.wide === 'allow'),
         JSON.stringify(csP2 && { probe: csP2.globalEffectiveProbe && csP2.globalEffectiveProbe.wide, eff: csP2.effective.wide }))
-      try { rmSync(wsP, { recursive: true, force: true }); rmSync(homeP, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(wsP, homeP)
     }
     // ② `{action:'deny'}` + mode=allow → probe 里**只有 inside 档是 deny**，其余七档 ask
     //
@@ -2704,8 +2751,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     //    「按本层 mode 推导档位」规则）**已整体删除**，不存在第二来源可回落。
     //    故这里钉**真正要守的东西**：probe 与真实裁决必须一致（下一条 48e-4）。
     {
-      const wsQ = mkdtempSync(join(tmpdir(), 'pg-probe2-ws-'))
-      const homeQ = mkdtempSync(join(tmpdir(), 'pg-probe2-home-'))
+      const wsQ = tmpdirFor('pg-probe2-ws-')
+      const homeQ = tmpdirFor('pg-probe2-home-')
       mkdirSync(join(homeQ, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeQ, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: { fallbackMode: 'ask', command: { mode: 'allow', destructive: { action: 'deny' }, exceptions: [] } }, projects: {},
@@ -2736,7 +2783,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       const outQ2 = await Promise.race([pQ2, new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), 300))])
       ok('★★ 48e-4b inside 档的 deny 仍然生效：rm -rf ./build（区内）→ deny',
         !nextedQ2 && outQ2 && outQ2.kind === 'deny', JSON.stringify({ nexted: nextedQ2, kind: outQ2 && outQ2.kind }))
-      try { rmSync(wsQ, { recursive: true, force: true }); rmSync(homeQ, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(wsQ, homeQ)
     }
     // ③ 全局层**显式**配置必须正常显示（防空转对照：probe 不得恒 ask）
     {
@@ -2766,8 +2813,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     //   ④ 防空转：不带 `$TARGET` 的基线形态本来就带理由 —— 否则「加了 $TARGET 才有理由」
     //      这句话无从谈起（差异确实由本修法引入）。
     {
-      const ws6 = mkdtempSync(join(tmpdir(), 'pg-r60-ws-'))
-      const home6 = mkdtempSync(join(tmpdir(), 'pg-r60-home-'))
+      const ws6 = tmpdirFor('pg-r60-ws-')
+      const home6 = tmpdirFor('pg-r60-home-')
       mkdirSync(join(home6, 'dsh-permgate'), { recursive: true })
       // 用户显式配：outside 与 unknown 两档都是 deny，但**只为 outside 写了理由**。
       //
@@ -2831,7 +2878,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
           && cs6.effective.outside === 'deny'),
         JSON.stringify({ bad60e, seen60e, base: [base60e.kind, base60e.reason.slice(0, 60)],
           panel: cs6 && { reasons: cs6.globalReasons, eff: cs6.effective } }))
-      try { rmSync(ws6, { recursive: true, force: true }); rmSync(home6, { recursive: true, force: true }) } catch (e) {}
+      releaseTmp(ws6, home6)
     }
 
     // ⑦ §7.2d 的缺陷回归：改 wide 的理由**不得**改动 inside 的动作
@@ -2935,8 +2982,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       inheritOut.txt !== 'allow' && inheritOut.win === 'deny', JSON.stringify(inheritOut))
 
     // ⑩ 存量 `reason` 字符串读进 inside 档，且**不搬家**（`reason` 键原样留在盘上）
-    const legacyHome = mkdtempSync(join(tmpdir(), 'pg-legacy-home-'))
-    const legacyWs = mkdtempSync(join(tmpdir(), 'pg-legacy-ws-'))
+    const legacyHome = tmpdirFor('pg-legacy-home-')
+    const legacyWs = tmpdirFor('pg-legacy-ws-')
     mkdirSync(join(legacyHome, 'dsh-permgate'), { recursive: true })
     const legacyCfg = JSON.stringify({
       global: { fallbackMode: 'ask', command: { mode: 'allow', destructive: { action: 'deny', reason: 'rm 危险' } } }, projects: {},
@@ -3029,7 +3076,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       !!(csL && csL.globalReasons && csL.globalReasons.inside === 'rm 危险'
         && !csL.globalReasons.wide && !csL.globalReasons.proc && !csL.globalReasons.priv),
       JSON.stringify(csL && csL.globalReasons))
-    try { rmSync(legacyWs, { recursive: true, force: true }); rmSync(legacyHome, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(legacyWs, legacyHome)
 
     // ── ★★ 动作来源层 ≠ 理由来源层：裸 `reason` 必须跨层回落（两个方向都要）────────────
     // 缺陷原状（本差异引入）：`destructiveTiers` ③ 只按**该档自己的显式来源**（`explicitOf(t).from`）
@@ -3060,8 +3107,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       { name: '方向①动作在项目、理由在全局', g: { action: 'deny', reason: '全局那句理由' }, p: { tier: 'wide', action: 'deny' }, want: '全局那句理由' },
       { name: '方向②动作在全局、理由在项目', g: { wide: 'deny' }, p: { tier: 'inside', action: 'deny', reason: '项目那句理由' }, want: '项目那句理由' },
     ]) {
-      const wsX = mkdtempSync(join(tmpdir(), 'pg-xlayer-ws-'))
-      const homeX = mkdtempSync(join(tmpdir(), 'pg-xlayer-home-'))
+      const wsX = tmpdirFor('pg-xlayer-ws-')
+      const homeX = tmpdirFor('pg-xlayer-home-')
       mkdirSync(join(homeX, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeX, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: dir.g } }, projects: {},
@@ -3086,8 +3133,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
           && csX && csX.effective && csX.effective.wide === 'deny'),
         JSON.stringify({ dir: dir.name, nexted: outX.nexted, kind: outX.kind, reason: outX.reason, wide: csX && csX.effective && csX.effective.wide }))
       // ③ 防空转对照：**两层都没写任何理由**时，同一命令仍是 deny，但 reason 里不含上面两句
-      const wsY = mkdtempSync(join(tmpdir(), 'pg-xlayer2-ws-'))
-      const homeY = mkdtempSync(join(tmpdir(), 'pg-xlayer2-home-'))
+      const wsY = tmpdirFor('pg-xlayer2-ws-')
+      const homeY = tmpdirFor('pg-xlayer2-home-')
       mkdirSync(join(homeY, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(homeY, 'dsh-permgate', 'config.json'), JSON.stringify({
         global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: { action: 'deny' } } }, projects: {},
@@ -3136,8 +3183,8 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     // 读取侧对反方向的次序由 regressions.mjs 直接喂原始块覆盖（那里绕开归一化）。
     {
       const mkXHost = async (globalDestructive, projectCalls) => {
-        const w = mkdtempSync(join(tmpdir(), 'pg-tierr-ws-'))
-        const h = mkdtempSync(join(tmpdir(), 'pg-tierr-home-'))
+        const w = tmpdirFor('pg-tierr-ws-')
+        const h = tmpdirFor('pg-tierr-home-')
         mkdirSync(join(h, 'dsh-permgate'), { recursive: true })
         writeFileSync(join(h, 'dsh-permgate', 'config.json'), JSON.stringify({
           global: { fallbackMode: 'ask', command: { mode: 'allow', exceptions: [], destructive: globalDestructive } }, projects: {},
@@ -3202,7 +3249,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       try { rmSync(cC.w, { recursive: true, force: true }); rmSync(cC.h, { recursive: true, force: true }) } catch (e) {}
     }
 
-    try { rmSync(wsT, { recursive: true, force: true }); rmSync(homeT, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(wsT, homeT)
   }
 
   try {
@@ -3217,8 +3264,8 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
 {
   // 背景：曾把规则改成「最严命中」，实测毁掉「具体规则覆盖宽泛规则」这个最自然的写法。
   // 本组把两种意图都钉住：顺序即优先级是**能力**，不是缺陷。
-  const ws = mkdtempSync(join(tmpdir(), 'pg-rule-ws-'))
-  const home = mkdtempSync(join(tmpdir(), 'pg-rule-home-'))
+  const ws = tmpdirFor('pg-rule-ws-')
+  const home = tmpdirFor('pg-rule-home-')
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
   // 判定探针：跑一次 `tools/pre-execute`，返回 `{ nexted, verdict }`。
   // `nexted` = 是否走到 `next()`（放行）；`verdict` = 宿主返回的 `kind`。
@@ -3358,8 +3405,8 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
   // ★★ 例外列表的排序（同一原语，kind='exception'）：例外的顺序同样是「首条命中即生效」。
   // 用独立 host + 独立配置文件，避免污染上面的规则组。
   {
-    const wsE = mkdtempSync(join(tmpdir(), 'pg-exc-ws-'))
-    const homeE = mkdtempSync(join(tmpdir(), 'pg-exc-home-'))
+    const wsE = tmpdirFor('pg-exc-ws-')
+    const homeE = tmpdirFor('pg-exc-home-')
     mkdirSync(join(homeE, 'dsh-permgate'), { recursive: true })
     const setExcs = (exceptions) => {
       writeFileSync(join(homeE, 'dsh-permgate', 'config.json'), JSON.stringify({
@@ -3408,7 +3455,7 @@ group('21. 自定义规则：数组顺序 = 优先级（首条命中即返回）
     // 例外排序必须校验分类：EXC_CATS 之外的分类一律拒绝（否则会往 doomloop 这类无例外列表上写）
     const badCat = await callRoute(h6.routes, 'POST', '/permgate/reorder', { target: 'global', kind: 'exception', category: 'doomloop', id: 'e1', anchor: 'e2', position: 'before', lang: 'zh' })
     ok('★ group21: 例外 reorder 拒绝不支持例外的分类（doomloop）', !!(badCat.data && badCat.data.error), JSON.stringify(badCat.data))
-    try { rmSync(wsE, { recursive: true, force: true }); rmSync(homeE, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(wsE, homeE)
   }
 
   try {
@@ -3427,8 +3474,8 @@ group('23. 爆炸半径与破坏性候选：盘根删除的警告与候选范围
   //   ② 判定链不区分「整个盘」与「一个目录」，两者动作与候选完全相同 ——
   //      故额外下发 blast 分档，让审批人有信息可依。
   // 盘符用 B:（本机不存在该盘），示例不会被误当成真实目标。
-  const wsB = mkdtempSync(join(tmpdir(), 'pg-blast-ws-'))
-  const homeB = mkdtempSync(join(tmpdir(), 'pg-blast-home-'))
+  const wsB = tmpdirFor('pg-blast-ws-')
+  const homeB = tmpdirFor('pg-blast-home-')
   mkdirSync(join(homeB, 'dsh-permgate'), { recursive: true })
   const bootB = (cfg) => {
     writeFileSync(join(homeB, 'dsh-permgate', 'config.json'), JSON.stringify(cfg, null, 2), 'utf8')
@@ -3597,7 +3644,7 @@ group('23. 爆炸半径与破坏性候选：盘根删除的警告与候选范围
       ok('★ group23(对照): 仍需审批的段照常给候选（Get-Location → get-location *）',
         vals.some((v) => /get-location/i.test(v)), JSON.stringify(vals))
     }
-    try { rmSync(homeB, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(homeB)
   }
 
   // ── 洞 2 后半：例外列表的标注（statusView.exceptionBlast）────────────────
@@ -3682,7 +3729,7 @@ group('23. 爆炸半径与破坏性候选：盘根删除的警告与候选范围
         && eb2.global !== eb2.project,
         JSON.stringify({ global: Object.keys(g2), project: Object.keys(p2), newId: newId }))
     }
-    try { rmSync(wsB, { recursive: true, force: true }); rmSync(homeB, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(wsB, homeB)
   }
 }
 
@@ -3750,8 +3797,8 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
   // 配置工厂：只写全局层（项目层另有专门用例）。fallbackMode=allow 让 my_tool 这类
   // 未分类工具的判定完全由兜底决定 —— 计数的前进/中断都能被单独观察，不受分类默认值干扰。
   const mkHost = (globalExtra, projects) => {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-loop-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-loop-home-'))
+    const ws = tmpdirFor('pg-loop-ws-')
+    const home = tmpdirFor('pg-loop-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
       global: Object.assign({ fallbackMode: 'allow' }, globalExtra || {}),
@@ -3787,7 +3834,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★ group22 S1: 默认阈值不物化落盘（推导值不得变成用户表态）',
       !disk.global.doomloop || disk.global.doomloop.threshold === undefined,
       JSON.stringify(disk.global.doomloop))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S2：T9（threshold=1 原样接受 → 第 2 次触发，**不钳到 2**）──────────────
@@ -3801,7 +3848,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const seq = await run(h, ws, 's2', 2)
     ok('★★ group22 T9: 阈值 1 = 第 2 次触发（先查后记的直接推论，不是「每次都问」）',
       seq[0] === 'allow' && seq[1] === 'ask', JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S3：T10b（threshold=13 > 旧数组窗口 12 → 第 14 次触发）───────────────
@@ -3814,7 +3861,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const seq = await run(h, ws, 's3', 14)
     ok('★★ group22 T10: 阈值 13（> 旧窗口 12）仍能触发 —— 窗口已删，不存在「阈值超窗口即静默失效」',
       seq.slice(0, 13).every((v) => v === 'allow') && seq[13] === 'ask', JSON.stringify(seq.slice(10)))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S4：T1（会话分桶：A 的连续计数不得牵连 B 的第 1 次）──────────────────
@@ -3829,7 +3876,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const a4 = await probe(h, ws, 'sessA', T, A)
     ok('★★ group22 T1: 同一配置下 A 的第 4 次确实触发（对照，证明计数在工作）',
       a4 === 'ask', JSON.stringify({ a4: a4 }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S5：T7（A/B 交错：各自独立计数，都不提前触发）──────────────────────
@@ -3848,7 +3895,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const b4 = await probe(h, ws, 'sessB', T, A)
     ok('★★ group22 T7: 交错之后 A/B 各自的第 4 次都触发（两条独立的连续链都数满了）',
       a4 === 'ask' && b4 === 'ask', JSON.stringify({ a4: a4, b4: b4 }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S6：T8（断链：中途一次别的调用即重新计数）──────────────────────────
@@ -3866,7 +3913,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
       [s1, s2, s3, s4, s5, s6].every((v) => v === 'allow'), JSON.stringify([s1, s2, s3, s4, s5, s6]))
     ok('★★ group22 T8: 断链后重新数满 3 次才触发（第 4 次）—— 证明计数确实从断链处重来',
       s7 === 'ask', JSON.stringify({ s7: s7 }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S7：T6（精确键的已知边界：参数微调即换键 → 全部放行）────────────────
@@ -3878,7 +3925,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     for (let i = 0; i < 8; i++) seq.push(await probe(h, ws, 's7', T, { dir: 'dir' + i }))
     ok('★ group22 T6: 参数微调 8 次全部放行（精确键的已知边界，记录为有意行为）',
       seq.every((v) => v === 'allow'), JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S8：T11 + T15（doomloop=deny：被拒调用不推进计数，触发后清零）─────────
@@ -3890,7 +3937,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★ group22 T11+T15: doomloop=deny 时 3 次放行→拒绝，之后**重新数**（被拒不计数且清零）',
       JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'allow', 'deny', 'allow', 'allow', 'allow', 'deny']),
       JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S9：T12（用户点「允许」的 ask 调用不计入）───────────────────────────
@@ -3908,7 +3955,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★ group22 T12: 弹窗批准的调用不计入（弹过窗 = 用户已经知道，提醒是冗余的）',
       JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'ask', 'allow', 'allow', 'ask']),
       JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S10：T13（用户点「拒绝」的 ask 调用不计入且清零）────────────────────
@@ -3924,7 +3971,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★ group22 T13: 弹窗拒绝的调用不计入且清零（与「允许」同口径）',
       JSON.stringify(seq) === JSON.stringify(['allow', 'allow', 'ask', 'allow', 'allow', 'ask']),
       JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S11：T16（非静默放行清零：4 次放行 → 一次 ask 被拒 → 再 4 次放行不得触发）──
@@ -3942,7 +3989,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★ group22 T16: 一次弹窗（被拒）把连续计数清零 —— 之后再 4 次放行不得触发',
       first.every((v) => v === 'allow') && asked === 'ask' && second.every((v) => v === 'allow'),
       JSON.stringify({ first: first, asked: asked, second: second }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S12：T14 + T3（做法 A 的核心：doomloop 命中时下游是 deny → 取更严者）──
@@ -3984,7 +4031,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
         a1 === 'allow' && a2 === 'deny', JSON.stringify({ a1: a1, a2: a2 }))
       try { rmSync(r2.ws, { recursive: true, force: true }); rmSync(r2.home, { recursive: true, force: true }) } catch (e) {}
     }
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S13：T2（command 收紧为 deny 后，doomloop 不得把它降级为 ask）────────
@@ -4000,7 +4047,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     ok('★★★ group22 T2: command=deny 后 doomloop=ask 不得削弱它 —— 6 次全 DENY、一次 ASK 都不出现',
       pre3.every((v) => v === 'allow') && after.every((v) => v === 'deny'),
       JSON.stringify({ pre3: pre3, after: after }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S14：T2 字面形态（command=deny 全程 6 次 → 6 次全 DENY）────────────
@@ -4014,7 +4061,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     for (let i = 0; i < 6; i++) seq.push(await probe(h, ws, 's14', 'bash', { command: 'rm -rf x' }))
     ok('★★ group22 T2(字面): command=deny + inside 档显式 deny 全程 6 次 → 6 次全 DENY（无一次 ASK）',
       seq.every((v) => v === 'deny'), JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S15：T4（doomloop=allow = 知情关闭：行为不变，但 status 必须能让面板提示）──
@@ -4029,7 +4076,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const seq = await run(h, ws, 's15', 10)
     ok('★ group22 T4: doomloop=allow 时连续 10 次同一调用全部放行（知情关闭，行为不变）',
       seq.every((v) => v === 'allow'), JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S16：阈值可配的归一化与层级（T9/T10 的配置面）────────────────────────
@@ -4084,7 +4131,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const seq = await run(h, ws, 's16', 3)
     ok('★★ group22 S16: 项目层阈值在真实判定链上生效（阈值 2 → 第 3 次触发）',
       seq[0] === 'allow' && seq[1] === 'allow' && seq[2] === 'ask', JSON.stringify(seq))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S17：T17（计数实现的等价性：模型级对拍）──────────────────────────────
@@ -4180,7 +4227,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const lruLast = await probe(h, ws, 'lru-39', T, A)
     ok('★★ group22 T18: LRU 保留最近活动的桶（lru-39 的第 2 次仍能触发 → 它的桶未被淘汰）',
       lruLast === 'ask', JSON.stringify({ lruLast: lruLast }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
   // ── S19：T18 补 —— LRU 而非 FIFO（淘汰的必须是「最久未更新」，不是「最早创建」）──
   // 为什么单独测：LRU 与 FIFO 在「桶数不超限」这条断言下**完全等价**（都压到 32），
@@ -4205,7 +4252,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
       b1 === 32 && b2 === 32, JSON.stringify({ b1: b1, b2: b2 }))
     ok('★★ group22 T18: 淘汰的是最久未更新的桶（LRU）—— 被重新活动过的老会话计数不丢',
       s3 === 'allow' && s4 === 'ask', JSON.stringify({ s3: s3, s4: s4 }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S20：计数点必须在**所有拦截之后**（沙箱升级被拒 = 未执行 → 不计数）────────
@@ -4219,7 +4266,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const { ws, home, h } = mkHost({ doomloop: { mode: 'ask', threshold: 3 } })
     // 工作区外写入 + 编辑/目录分类都 allow → decide 给 allow，但 needsUpgrade 为真
     await callRoute(h.routes, 'POST', '/permgate/set-categories', { target: 'global', global: { edit: 'allow', directory: 'allow' }, lang: 'zh', sessionId: 'sess-1' })
-    const outDir = mkdtempSync(join(tmpdir(), 'pg-loop-out-'))
+    const outDir = tmpdirFor('pg-loop-out-')
     const outFile = join(outDir, 'x.txt')
     h.ctx.sandboxPolicy.overrideOf = () => 'workspace-write'
     const deniedSeq = []
@@ -4231,7 +4278,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     const s4 = await probe(h, ws, 's20', 'write', { file_path: outFile, content: 'x' })
     ok('★★ group22 S20: 被沙箱升级闸拦下的调用不推进连续计数（第 4 次仍放行，未误触发）',
       s4 === 'allow', JSON.stringify({ denied: deniedSeq, s4: s4 }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); rmSync(outDir, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home, outDir)
   }
 
   // ── S21：perm_* 的排除保持现状（权限查询反复调用不代表卡死，不是循环）──────────
@@ -4249,7 +4296,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     for (let i = 0; i < 3; i++) ctl.push(await probe(h, ws, 's21b', T, A))
     ok('★★ group22 S21(对照): 同一配置下普通工具第 3 次触发（证明阈值 2 确实生效）',
       ctl[0] === 'allow' && ctl[1] === 'allow' && ctl[2] === 'ask', JSON.stringify(ctl))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── S22：非「自定义审查」模式不累积计数（切回审查模式不得凭空触发）──────────────
@@ -4335,7 +4382,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
       (full.data.decisions || []).slice(-(onSt.recentDecisions || []).length)
         .every((d, i) => d.reason === onSt.recentDecisions[i].reason),
       JSON.stringify({ full: (full.data.decisions || []).slice(-1)[0], preview: (onSt.recentDecisions || []).slice(-1)[0] }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 }
 
@@ -4348,8 +4395,8 @@ group('23. 决策记录：首屏取「最近」N 条的方向判据（需越过�
   {
     // 自建宿主（group22 的 mkHost 是那个块的局部函数，这里取不到）。
     // createHost 是模块级函数，直接调；dshHome 指向临时目录，避免写进真实 home。
-    const ws = mkdtempSync(join(tmpdir(), 'pg-dec-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-dec-home-'))
+    const ws = tmpdirFor('pg-dec-ws-')
+    const home = tmpdirFor('pg-dec-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     writeFileSync(join(home, 'dsh-permgate', 'config.json'),
       JSON.stringify({ global: { fallbackMode: 'allow' }, projects: {} }, null, 2), 'utf8')
@@ -4400,7 +4447,7 @@ group('23. 决策记录：首屏取「最近」N 条的方向判据（需越过�
       JSON.stringify(all.map((d) => d.tool)) === JSON.stringify(names),
       JSON.stringify({ got: all.map((d) => d.tool) }))
 
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 }
 
@@ -4431,8 +4478,8 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   const mkHostAuto = (autoExtra, llm, globalExtra) => {
-    const ws = mkdtempSync(join(tmpdir(), 'pg-auto-ws-'))
-    const home = mkdtempSync(join(tmpdir(), 'pg-auto-home-'))
+    const ws = tmpdirFor('pg-auto-ws-')
+    const home = tmpdirFor('pg-auto-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
     writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
       global: Object.assign({
@@ -4447,6 +4494,99 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     }, null, 2), 'utf8')
     return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm }) }
   }
+
+  // ── 真实形状的 session mock（**必须用它，不要手写 surface.nodes**）───────────
+  //
+  // 为什么必须有这个 helper：本组此前每个用例都手写
+  //   `surface: { nodes: events.map((_, i) => i) }`
+  // 把**所有**事件都塞进 surface。真实 DSH 里 `tool/call` **不是** surface 事件
+  // （实测顶层键只有 type/seq/time/data，无 surfaceOp），永远不进 `surface.nodes`。
+  // 于是那个 mock 让「遍历 surface 找 tool/call」这种在真实环境里恒为空的实现
+  // 通过了全部测试 —— mock 比真实 API 宽松，掩盖了「这条路径根本走不通」。
+  //
+  // 这里按 DSH 的 surface 规则推导 nodes，与真实行为一致：
+  //   · 只有 SURFACE_EVENT_TYPES 里的类型进 nodes；
+  //   · `tool/call` / `tool/result` 之外的日志事件（turn/step/request 等）不进；
+  //   · 带 `surfaceOp: {op:'replace'}` 的做区间替换（压缩摘要用）。
+  //
+  // 事件形状也按真实来：工具调用在 **assistant/message 的 content 里是 tool-call 块**，
+  // 另外在日志里有一条独立的 `tool/call` 记录（带原始 arguments 字符串）。
+  const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
+  const sessionMock = (events, extra) => {
+    // 真实事件**每条都带 `seq`**（新建会话里 seq === 下标）。mock 此前不带，
+    // 于是任何「按 seq 定位事件」的实现（如 directParentInitialPromptSeq 找 descriptor
+    // 之后的第一条 user/message）在测试里恒失败 —— 而失败被 catch 吞成「没有内容」，
+    // 看起来像「这次确实没有」，与真实环境里的 bug 无法区分。
+    // 故这里补上 seq，并提供 isOwnSeq（真实 Session 有它；新建会话里恒 true）。
+    const withSeq = events.map((e, i) => (e && typeof e.seq === 'number' ? e : Object.assign({ seq: i }, e)))
+    const nodes = []
+    withSeq.forEach((e, i) => {
+      if (!SURFACE_TYPES.has(e.type)) return
+      const op = e.surfaceOp
+      if (op && typeof op === 'object' && op.op === 'replace') {
+        const a = nodes.indexOf(op.startSeq)
+        const b = nodes.indexOf(op.endSeq)
+        if (a >= 0 && b >= a) { nodes.splice(a, b - a + 1, i); return }
+        return
+      }
+      nodes.push(i)
+    })
+    return Object.assign({
+      id: 'sess-mock',
+      // header 必须存在：真实 Session 的 `session.header` 恒有值（见 dsh-session 的
+      // `readonly header: SessionHeader`），子代理判据（origin / parentSession）只读它。
+      header: { version: 4, id: 'sess-mock', createdAt: 0, isSeeded: false },
+      requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }),
+      snapshotEvents: () => withSeq,
+      isOwnSeq: (seq) => typeof seq === 'number' && seq >= 0 && seq < withSeq.length,
+      surface: { nodes },
+    }, extra || {})
+  }
+  // 造一次「模型发起了工具调用」的**完整真实形状**：
+  //   assistant/message（content 里有 tool-call 块，surface 事件）
+  // + tool/call（日志事件，带原始 arguments，**不在 surface 里**）
+  // 返回两条事件，调用方按顺序 push 进 events 即可。
+  const toolCallEvents = (turn, step, callId, name, args, id) => ([
+    {
+      type: 'assistant/message',
+      surfaceOp: 'append',
+      data: {
+        turn, step,
+        message: { role: 'assistant', content: [{ type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) }] },
+        stream: [],
+      },
+    },
+    {
+      type: 'tool/call',
+      data: { turn, step, callId, name, arguments: JSON.stringify(args) },
+    },
+  ])
+  // 一条人类指令（真实形状：source 带 rpcId）
+  const humanMsg = (text, rpcId) => ({
+    type: 'user/message',
+    surfaceOp: 'append',
+    data: { role: 'user', source: { kind: 'user', rpcId: rpcId || 'r1' }, content: [{ type: 'text', text }] },
+  })
+  // 一条 agent-instructions（AGENTS.md 注入；baseline 决定替换语义）
+  const instrMsg = (text, baseline) => ({
+    type: 'user/message',
+    surfaceOp: 'append',
+    data: {
+      role: 'user',
+      source: Object.assign({ kind: 'agent-instructions', form: 'instructions', changes: [] }, baseline === undefined ? {} : { baseline }),
+      content: [{ type: 'text', text }],
+    },
+  })
+  // 一条压缩摘要
+  const checkpointMsg = (blocks, compactionId) => ({
+    type: 'user/message',
+    surfaceOp: 'append',
+    data: {
+      role: 'user',
+      source: { kind: 'compact-checkpoint', compactionId: compactionId || 'c1' },
+      content: blocks.map((t) => ({ type: 'text', text: t })),
+    },
+  })
   // 探测一次：返回落点 'allow' | 'deny' | 'ask'
   // 与 group22 的 probe 同构，但**不查 pending 就等 settle** 会漏掉 ask —— 故保留同样的两段式。
   const probeAuto = async (h, ws, sess, name, args) => {
@@ -4510,7 +4650,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       && llm.calls[0].system.indexOf('final authorization reviewer') !== -1
       && llm.calls[0].temperature === 0,
       JSON.stringify(llm.calls[0] && { sys: String(llm.calls[0].system).slice(0, 40), t: llm.calls[0].temperature }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A2：模型说 deny → 调用被拒绝（不弹窗）─────────────────────────────────────
@@ -4519,7 +4659,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const { ws, home, h } = mkHostAuto({}, llm)
     const r = await probeAuto(h, ws, 'a2', T, A)
     ok('★★ group24 A2: 模型 deny → 直接拒绝（不弹窗）', r === 'deny', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A3：无 llm 服务 → 走异常路径，回落 ask 时弹窗 ────────────────────────────
@@ -4528,7 +4668,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a3', T, A)
     ok('★★ group24 A3: 无 llm 服务 → 回落 ask 弹窗（插件不报错）',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A4：模型返回 high+allow（矛盾）→ 异常路径，不是放行 ──────────────────────
@@ -4538,7 +4678,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a4', T, A)
     ok('★★ group24 A4: 模型返回 high+allow（矛盾）→ 走异常路径，绝不放行',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A5：模型返回重复成员（攻击）→ 异常路径 ────────────────────────────────────
@@ -4548,7 +4688,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a5', T, A)
     ok('★★ group24 A5: 重复 JSON 成员 → 协议非法 → 异常路径（不放行）',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A5b：重复成员检测**单独**可观测（不能被矛盾检测代劳）──────────────────────
@@ -4568,7 +4708,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a5b', T, A)
     ok('★★ group24 A5b: 重复成员检测单独生效（否则这条会被当作合法 allow 放行）',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A6：模型 escalate → 异常路径 ─────────────────────────────────────────────
@@ -4578,7 +4718,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a6', T, A)
     ok('★ group24 A6: 模型 escalate → 异常路径（弹窗问人）',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A7：流没有 terminal finish → 异常路径（不是「读到什么算什么」）────────────
@@ -4591,7 +4731,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const r = await probeAuto(h, ws, 'a7', T, A)
     ok('★★ group24 A7: 流无 terminal finish → 异常路径（不信任半个结果）',
       r && r.kind === 'ask', JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A8：缓存 —— 同样的调用第二次不再问模型 ────────────────────────────────────
@@ -4608,7 +4748,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A8: 不同参数不共享缓存（否则内容不同却互相授权）',
       r3 === 'allow' && llm.calls.length === 2,
       JSON.stringify({ r3, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A9：deny 不缓存 —— 同样的调用第二次仍要重新问模型 ─────────────────────────
@@ -4619,7 +4759,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     await probeAuto(h, ws, 'a9', T, A)
     ok('★★ group24 A9: deny 不缓存（第二次仍调用模型，避免错误地持续拒绝）',
       llm.calls.length === 2, JSON.stringify({ calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A10：熔断 —— 真·连续 3 次拒绝触发；中间一次 allow 清零 ────────────────────
@@ -4635,7 +4775,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       && seq[3] && seq[3].kind === 'ask'
       && llm.calls.length === 3,
       JSON.stringify({ seq, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A11：熔断的关键差异 —— 中间一次 allow 必须**清零** ────────────────────────
@@ -4654,7 +4794,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       JSON.stringify(seq) === JSON.stringify(['deny', 'deny', 'allow', 'deny', 'deny'])
       && llm.calls.length === 5,
       JSON.stringify({ seq, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A12：熔断阈值 0 = 永不启用 ───────────────────────────────────────────────
@@ -4666,7 +4806,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★ group24 A12: 熔断阈值 0 = 永不启用（5 次拒绝仍继续问模型）',
       seq.every((v) => v === 'deny') && llm.calls.length === 5,
       JSON.stringify({ seq, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A13：失败/escalate **不计入**熔断（怪线路，不怪模型判断）──────────────────
@@ -4685,7 +4825,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A13: escalate/失败不计入熔断（第 4 次仍真的问模型并拿到 deny）',
       r4 === 'deny' && llm.calls.length === 4,
       JSON.stringify({ r4, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A14：异常路径 + 回落 allow + 超时 0 → **不弹窗，直接放行** ─────────────────
@@ -4703,7 +4843,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A14: 异常 + 回落 allow + 超时 0 → 不弹窗，直接放行',
       r === 'allow',
       JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A15：异常路径 + 回落 deny + 超时 0 → 同上（不弹窗、直接拒绝）───────────────
@@ -4713,7 +4853,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A15: 异常 + 回落 deny + 超时 0 → 不弹窗，直接拒绝',
       r === 'deny',
       JSON.stringify(r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A16：异常 + 回落 allow + 超时 > 0 → 弹窗，且弹窗带 deadline/onTimeout ─────
@@ -4723,7 +4863,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A16: 异常 + 回落 allow + 超时>0 → 弹窗，并带 deadline 与 onTimeout',
       r && r.kind === 'ask' && typeof r.entry.deadline === 'number' && r.entry.onTimeout === 'allow',
       JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, onTimeout: r.entry.onTimeout } : r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A14b：超时 0 直接执行是**无人在环**的放行/拒绝，必须留痕 ────────────────────
@@ -4744,7 +4884,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★ group24 A14b: 留痕不含 timeout-allow（不能把「用户设了 0」说成「超时」）',
       !list.some((x) => x.action === 'timeout-allow'),
       JSON.stringify(list.map((x) => x.action)))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A17：异常 + 回落 ask → 弹窗，且**永不超时**（无 deadline）─────────────────
@@ -4754,7 +4894,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A17: 异常 + 回落 ask → 弹窗且永不超时（用户既然选了 ask 就是要被问）',
       r && r.kind === 'ask' && r.entry.deadline === null,
       JSON.stringify(r && r.entry ? { deadline: r.entry.deadline } : r))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A18：非 auto 的 ask 行为完全不变（不传 timeoutMs，永不超时）───────────────
@@ -4766,7 +4906,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A18: 普通 ask（非 auto）不传 timeoutMs，永不超时（现有行为不变）',
       r && r.kind === 'ask' && r.entry.deadline === null && llm.calls.length === 0,
       JSON.stringify({ r: r && r.entry ? { deadline: r.entry.deadline } : r, calls: llm.calls.length }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A19：参数**原样**发给模型（不脱敏，这是有意的）────────────────────────────
@@ -4866,7 +5006,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       ar3 && ar3.effective.timeoutMs === 20000 && ar3.explicit.indexOf('timeoutMs') === -1,
       JSON.stringify(ar3 && { t: ar3.effective.timeoutMs, x: ar3.explicit }))
 
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A21：逐字段归一不整体替换（改一项不得把另一项冲掉）──────────────────────
@@ -4879,7 +5019,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       disk.global.autoReview && disk.global.autoReview.timeoutMs === 5000
       && disk.global.autoReview.breakerThreshold === 3,
       JSON.stringify(disk.global.autoReview))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A22：模型覆盖真的被用上（provider/model 成对才生效）──────────────────────
@@ -4890,7 +5030,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★ group24 A22: 设置页的模型覆盖生效（评审调用用了配置的 provider/model）',
       llm.calls.length === 1 && llm.calls[0].provider === 'my-provider' && llm.calls[0].model === 'my-model',
       JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A23：只填 provider 不填 model → 不算覆盖，回落会话模型 ────────────────────
@@ -4901,7 +5041,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★ group24 A23: provider/model 必须成对才生效（只填一个则跟随会话）',
       llm.calls.length === 1 && llm.calls[0].provider === 'test-provider' && llm.calls[0].model === 'test-model',
       JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A24：historyN / historyBudget 必须**真的读设置**，不是读常量 ──────────────
@@ -4914,25 +5054,23 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   // 于是「读常量」和「读默认值」表现完全一致。**必须把设置改成非默认值**才区分得开。
   //
   // 判据：改 historyN = 3 后，发给模型的 FILTERED_HISTORY 段里恰好只有 3 条。
+  //
+  // ⚠️ 事件形状必须是**真实的**：工具调用在 assistant/message 的 content 里是
+  // tool-call 块，日志里另有 tool/call 记录。旧版这里造的是 8 条裸 `{type:'tool/call'}`
+  // 并把它们全塞进 surface.nodes —— 真实环境里 tool/call 不进 surface，
+  // 于是「遍历 surface 找 tool/call」这种恒空的实现照样通过（见 sessionMock 的说明）。
   {
     const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
     const { ws, home, h } = mkHostAuto({ historyN: 3, historyBudget: 100000 }, llm)
     // 造 8 条工具调用事件，让「最多给几条」这件事有可观测差异
     const events = []
     for (let i = 0; i < 8; i++) {
-      events.push({ type: 'tool/call', name: 'hist_tool_' + i, arguments: { i } })
+      events.push(...toolCallEvents(1, i + 1, 'hist' + i, 'hist_tool_' + i, { i }))
     }
     const pre = h.hooks.get('tools/pre-execute')
     const exec = {
       name: T, arguments: A, callId: 'c1', token: 't1',
-      agent: {
-        cwd: ws,
-        session: {
-          id: 'a24',
-          requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }),
-          events: () => events,
-        },
-      },
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a24' }) },
       signal: undefined,
     }
     const p = pre(exec, async () => ({ kind: 'allow' }))
@@ -4951,7 +5089,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
     }
     await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 
   // ── A25：historyBudget 同样必须真的读设置 ────────────────────────────────────
@@ -4968,19 +5106,12 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const events = []
     for (let i = 0; i < 8; i++) {
       // 参数塞长串，让每条 ~120 字符 → 8 条 ~960，远超 200 预算
-      events.push({ type: 'tool/call', name: 'budget_tool_' + i, arguments: { pad: 'x'.repeat(100) } })
+      events.push(...toolCallEvents(1, i + 1, 'bud' + i, 'budget_tool_' + i, { pad: 'x'.repeat(100) }))
     }
     const pre = h.hooks.get('tools/pre-execute')
     const exec = {
       name: T, arguments: A, callId: 'c1', token: 't1',
-      agent: {
-        cwd: ws,
-        session: {
-          id: 'a25',
-          requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }),
-          events: () => events,
-        },
-      },
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a25' }) },
       signal: undefined,
     }
     const p = pre(exec, async () => ({ kind: 'allow' }))
@@ -4998,7 +5129,633 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
     }
     await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
-    try { rmSync(ws, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } catch (e) {}
+    releaseTmp(ws, home)
+  }
+
+  // ── A26：只给真实 API 形状也必须能取到历史（守两个真实 bug）───────────────────
+  //
+  // 这里连踩两次，都是「mock 比真实 API 宽松」：
+  //   ① 旧代码调 `session.events()` —— 当前 DSH 的 Session 没有这个方法，
+  //      它恒为 undefined → 历史恒为空。当时 mock **提供了** `events()`，掩盖了它。
+  //   ② 改用 snapshotEvents() + surface.nodes 后方法名对了，**数据源仍然错**：
+  //      `tool/call` 不是 surface 事件（实测无 surfaceOp），永远不在 surface.nodes 里，
+  //      于是「遍历 surface 找 tool/call」恒不成立 → 历史**仍然**恒为空。
+  //      当时 mock 把全部事件塞进 surface.nodes，又掩盖了它。
+  //
+  // 本断言用 sessionMock（按真实 surface 规则推导 nodes）+ toolCallEvents（真实形状），
+  // 两个 bug 任一复发都会让它变红。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      humanMsg('看看这个文件', 'r1'),
+      ...toolCallEvents(1, 1, 'prev1', 'real_api_tool', { z: 1 }),
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      // **只提供真实 API**：没有 events()；surface.nodes 按真实规则推导
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a26' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A26: 只给真实 API（snapshotEvents + surface.nodes）也能取到历史',
+      text.indexOf('real_api_tool') !== -1 && text.indexOf('FILTERED_HISTORY') !== -1,
+      JSON.stringify({ has: text.indexOf('real_api_tool') !== -1, hasHist: text.indexOf('FILTERED_HISTORY') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A27：用户指令进材料，且只认带 rpcId 的 kind:'user' ────────────────────────
+  //
+  // 实测本会话 1592 条 user/message 有 25 种 source.kind，其中 kind:'user' 993 条：
+  // 992 条带 rpcId（用户打的字）、**1 条不带**（注入的系统提示）。
+  // 只判 kind 会把注入提示当成人类授权 —— 那比不补更糟。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      // 人类指令（带 rpcId）
+      humanMsg('把 build 目录清掉重新构建', 'r1'),
+      // 注入提示（kind:user 但无 rpcId）—— 绝不能当成人类授权
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'INJECTED_SYSTEM_PROMPT' }] } },
+      // 压缩摘要
+      checkpointMsg(['CHECKPOINT_SUMMARY_TEXT']),
+      // 运行时上下文（应排除）
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'runtime-context', form: 'snapshot' }, content: [{ type: 'text', text: 'RUNTIME_CONTEXT_NOISE' }] } },
+      // 技能目录（应排除）
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'skill-catalog', form: 'catalog' }, content: [{ type: 'text', text: 'SKILL_CATALOG_NOISE' }] } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a27' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A27: 人类指令进材料并标 human-instruction',
+      text.indexOf('USER_INSTRUCTIONS') !== -1 && text.indexOf('[human-instruction] 把 build 目录清掉重新构建') !== -1,
+      JSON.stringify({ hasSection: text.indexOf('USER_INSTRUCTIONS') !== -1 }))
+    ok('★★ group24 A27: 无 rpcId 的 kind:user 注入提示**不**进材料',
+      text.indexOf('INJECTED_SYSTEM_PROMPT') === -1,
+      JSON.stringify({ leaked: text.indexOf('INJECTED_SYSTEM_PROMPT') !== -1 }))
+    ok('★★ group24 A27: 压缩摘要进材料但标 checkpoint（不冒充人类指令）',
+      text.indexOf('[checkpoint] CHECKPOINT_SUMMARY_TEXT') !== -1
+      && text.indexOf('[human-instruction] CHECKPOINT_SUMMARY_TEXT') === -1,
+      JSON.stringify({ hasCp: text.indexOf('[checkpoint] CHECKPOINT_SUMMARY_TEXT') !== -1 }))
+    ok('★ group24 A27: 运行时上下文/技能目录不进材料（25 种 source.kind 只收 2 种）',
+      text.indexOf('RUNTIME_CONTEXT_NOISE') === -1 && text.indexOf('SKILL_CATALOG_NOISE') === -1,
+      JSON.stringify({ rt: text.indexOf('RUNTIME_CONTEXT_NOISE') !== -1, sc: text.indexOf('SKILL_CATALOG_NOISE') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A28：用户指令超预算时丢最早的，保留最近的 ────────────────────────────────
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    // 每条约 12000 字符，5 条 = 60000 > 50000 预算 → 应丢掉最早的 1 条
+    const big = 'A'.repeat(12000)
+    const events = []
+    for (let i = 0; i < 5; i++) {
+      events.push(humanMsg('MARK' + i + '_' + big, 'r' + i))
+    }
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a28' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A28: 用户指令超预算丢最早的（MARK0 消失）',
+      text.indexOf('MARK0_') === -1,
+      JSON.stringify({ m0: text.indexOf('MARK0_') !== -1 }))
+    ok('★★ group24 A28: 用户指令超预算保留最近的（MARK4 仍在）',
+      text.indexOf('MARK4_') !== -1,
+      JSON.stringify({ m4: text.indexOf('MARK4_') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A29：压缩摘要只取**最后一份**，且整份合成一条 ────────────────────────────
+  //
+  // 实测真实会话：44 份摘要（历次压缩累积，后者包含前者），每份 3 个 text 块
+  // （321 + ~14000 + 20 字符）。全收会重复且撑爆预算；按块拆条会产出
+  // 「</compacted-summary>」这种纯标签碎片单独占位。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      checkpointMsg(['OLD_CHECKPOINT_HEAD', 'OLD_CHECKPOINT_BODY', '</compacted-summary>'], 'c1'),
+      humanMsg('HUMAN_SAID_THIS', 'r1'),
+      // 每份摘要必须**足够长**（真实约 14000 字符），否则「整份保留 vs 截断」测不出差异 ——
+      // 实测截断到 300 的变异在短数据上逃逸过一次。
+      checkpointMsg([
+        'NEW_CHECKPOINT_HEAD',
+        'NEW_CHECKPOINT_BODY' + 'X'.repeat(2000) + 'NEW_CHECKPOINT_BODY_TAIL',
+        '</compacted-summary>',
+      ], 'c2'),
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a29' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A29: 压缩摘要只取最后一份（OLD_CHECKPOINT 不出现）',
+      text.indexOf('OLD_CHECKPOINT_HEAD') === -1 && text.indexOf('NEW_CHECKPOINT_HEAD') !== -1,
+      JSON.stringify({ old: text.indexOf('OLD_CHECKPOINT_HEAD') !== -1, neu: text.indexOf('NEW_CHECKPOINT_HEAD') !== -1 }))
+    // ①「合成一条」= 三个块**都在同一条**里，且中间没有被切掉。
+    //   只断言 HEAD 存在是不够的：截断到 300 字符时 HEAD 仍在、尾部被切，
+    //   断言照样通过（实测这个变异逃逸过一次）。故必须同时检查**首、中、尾**三段。
+    ok('★★ group24 A29: 一份摘要的多个 text 块完整合成一条（首/中/尾都在）',
+      text.indexOf('NEW_CHECKPOINT_HEAD') !== -1
+      && text.indexOf('NEW_CHECKPOINT_BODY') !== -1
+      && text.indexOf('</compacted-summary>') !== -1,
+      JSON.stringify({
+        head: text.indexOf('NEW_CHECKPOINT_HEAD') !== -1,
+        body: text.indexOf('NEW_CHECKPOINT_BODY') !== -1,
+        tail: text.indexOf('</compacted-summary>') !== -1,
+      }))
+    // ② 不得出现「以标签开头的独立条目」——那是按块拆条的产物。
+    //   注意不能用 `[checkpoint] </compacted-summary>` 判：合成一条后这一串
+    //   仍然存在于正文**内部**（因为整份摘要是同一条）。必须判「行首即标签」。
+    ok('★ group24 A29: 不产生纯标签碎片行（按块拆条的产物）',
+      !/^\[checkpoint\] <\/compacted-summary>\s*$/m.test(text),
+      JSON.stringify({ frag: /^\[checkpoint\] <\/compacted-summary>\s*$/m.test(text) }))
+    ok('★ group24 A29: 摘要在独立段里，不与人类指令混在同一段',
+      text.indexOf('COMPACTED_CHECKPOINT') !== -1
+      && text.indexOf('[human-instruction] HUMAN_SAID_THIS') !== -1,
+      JSON.stringify({ cpSec: text.indexOf('COMPACTED_CHECKPOINT') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A30：摘要有独立预算，不挤占人类指令 ──────────────────────────────────────
+  //
+  // 实测真实会话：摘要共 646384 字符、人类指令仅 67503。共用一份 50000 预算时
+  // 摘要会吃掉 90%，把用户真正的原话几乎全挤掉 —— 与本功能的目的正好相反。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      // 摘要 40000 字符（未超独立预算 50000，应当完整保留）
+      checkpointMsg(['CP_MARK_' + 'C'.repeat(40000)], 'c1'),
+      // 人类指令 30000 字符（若与摘要共用预算，会被摘要挤掉大半）
+      humanMsg('HUMAN_MARK_' + 'H'.repeat(30000), 'r1'),
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a30' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A30: 摘要与人类指令各有独立预算（两者同时在场，互不挤占）',
+      text.indexOf('CP_MARK_') !== -1 && text.indexOf('HUMAN_MARK_') !== -1,
+      JSON.stringify({ cp: text.indexOf('CP_MARK_') !== -1, human: text.indexOf('HUMAN_MARK_') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A31：PROJECT_INSTRUCTIONS 真的进材料（守「调了不存在的方法」这个 bug）─────
+  //
+  // 旧实现调 `session.instructions()` —— 实测 `typeof session.instructions === 'undefined'`，
+  // 该方法**不存在**。于是 projectInstructionsOf 恒返回 ''，PROJECT_INSTRUCTIONS 段
+  // 从来没出现在任何一次评审里。
+  //
+  // 为什么测试没抓到：A24-A30 的 mock session 都**没有** instructions 方法，
+  // 于是旧实现走 `typeof s.instructions === 'function'` 的假分支返回 ''，
+  // 而所有断言都只关心 USER_INSTRUCTIONS / FILTERED_HISTORY / COMPACTED_CHECKPOINT，
+  // **没有任何一条断言检查 PROJECT_INSTRUCTIONS 是否存在**。
+  //
+  // 这条断言同时钉住「只认 agent-instructions 这一个 kind」：
+  // runtime-context / skill-catalog 这些注入同样带 system-reminder 外壳，绝不能混进来。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      instrMsg('Instructions from: AGENTS.md\nPROJECT_RULE_ALPHA', true),
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'runtime-context', form: 'snapshot' }, content: [{ type: 'text', text: 'RUNTIME_NOISE_BETA' }] } },
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'skill-catalog', form: 'catalog' }, content: [{ type: 'text', text: 'SKILL_NOISE_GAMMA' }] } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a31' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A31: PROJECT_INSTRUCTIONS 段真的出现，且内容是 agent-instructions',
+      text.indexOf('PROJECT_INSTRUCTIONS') !== -1 && text.indexOf('PROJECT_RULE_ALPHA') !== -1,
+      JSON.stringify({ sec: text.indexOf('PROJECT_INSTRUCTIONS') !== -1, rule: text.indexOf('PROJECT_RULE_ALPHA') !== -1 }))
+    ok('★ group24 A31: 只有 agent-instructions 进约束段（runtime-context / skill-catalog 不混入）',
+      text.indexOf('RUNTIME_NOISE_BETA') === -1 && text.indexOf('SKILL_NOISE_GAMMA') === -1,
+      JSON.stringify({ rt: text.indexOf('RUNTIME_NOISE_BETA') !== -1, sc: text.indexOf('SKILL_NOISE_GAMMA') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A32：baseline 语义 = 替换，只取最后一份 + 其后的增量 ──────────────────────
+  //
+  // 实测本会话 surface 上有 29 条 agent-instructions、共 33324 字符，
+  // 按内容去重只有 5 种 —— 平台每次重新渲染都把**完整**指令集再发一遍。
+  // 全收等于把同一份 AGENTS.md 发 20 多遍。
+  //
+  // 平台自己的语义就是「替换」：
+  //   "This complete workspace instruction baseline replaces all earlier
+  //    workspace instruction baselines."
+  // 故取最后一个 baseline:true 及其之后的增量事件。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      instrMsg('OLD_BASELINE_TEXT', true),
+      // baseline 之前的增量：它属于旧 baseline，必须被一起丢掉
+      instrMsg('OLD_INCREMENT_TEXT', false),
+      instrMsg('NEW_BASELINE_TEXT', true),
+      // baseline 之后的增量：必须保留（它是对新 baseline 的补充）
+      instrMsg('NEW_INCREMENT_TEXT', false),
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a32' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A32: 只取最后一个 baseline（旧的 baseline 与其后的增量都丢掉）',
+      text.indexOf('NEW_BASELINE_TEXT') !== -1
+      && text.indexOf('OLD_BASELINE_TEXT') === -1
+      && text.indexOf('OLD_INCREMENT_TEXT') === -1,
+      JSON.stringify({
+        neu: text.indexOf('NEW_BASELINE_TEXT') !== -1,
+        oldBase: text.indexOf('OLD_BASELINE_TEXT') !== -1,
+        oldInc: text.indexOf('OLD_INCREMENT_TEXT') !== -1,
+      }))
+    ok('★★ group24 A32: 最后一份 baseline 之后的增量保留（不是只留 baseline 一条）',
+      text.indexOf('NEW_INCREMENT_TEXT') !== -1,
+      JSON.stringify({ inc: text.indexOf('NEW_INCREMENT_TEXT') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A33：正在评审的这次调用不进历史（否则模型把「待审」当「已发生」）──────────
+  //
+  // 官方同样排除（`lib/index.js:289`）。这里 exec.callId 是 'self1'，
+  // 会话里有一条同 id 的 tool-call 块 —— 它必须只出现在 PENDING_ACTION 段，
+  // 不出现在 FILTERED_HISTORY 段。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      humanMsg('做点事', 'r1'),
+      ...toolCallEvents(1, 1, 'prev1', 'PREVIOUS_TOOL', { a: 1 }),
+      ...toolCallEvents(1, 2, 'self1', 'CURRENT_TOOL', { b: 2 }),
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: 'CURRENT_TOOL', arguments: { b: 2 }, callId: 'self1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a33' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    // 只统计 FILTERED_HISTORY 段内的行，避免把 PENDING_ACTION 的 name: 也算进去
+    const histSec = (function () {
+      const a = text.indexOf('FILTERED_HISTORY')
+      if (a === -1) return ''
+      const b = text.indexOf('PENDING_ACTION', a)
+      return text.slice(a, b === -1 ? undefined : b)
+    })()
+    ok('★★ group24 A33: 正在评审的这次调用不进历史（避免「待审」被当成「已发生」）',
+      histSec.indexOf('CURRENT_TOOL') === -1,
+      JSON.stringify({ inHist: histSec.indexOf('CURRENT_TOOL') !== -1 }))
+    ok('★ group24 A33: 之前的调用仍在历史里（排除的是「这一次」，不是全部）',
+      histSec.indexOf('PREVIOUS_TOOL') !== -1,
+      JSON.stringify({ prev: histSec.indexOf('PREVIOUS_TOOL') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A34：PENDING_ACTION 必须带工具的参数表（JSON Schema）─────────────────────
+  //
+  // 曾经只带 `description` 和 `arguments`：模型看得到「传了什么」，看不到
+  // 「这个工具还有哪些字段、哪些必填」。官方一直带整份 `parameters`
+  // （`lib/index.js:181-193`），且**缺失即抛错**。
+  //
+  // 两级取值都要测，因为它们来自完全不同的 API：
+  //   ① `session.requestHeader().tools` —— 模型这次请求真正看到的那份（权威）
+  //   ② `ctx.tools.get(name, agent)`     —— 回落
+  // 只测 ① 会漏掉「旧会话没有 requestHeader」这条真实路径；只测 ② 会漏掉优先级。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const PARAM_MARK = 'PARAM_SCHEMA_MARKER'
+    const events = [humanMsg('做点事', 'r1')]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: {
+        cwd: ws,
+        session: sessionMock(events, {
+          id: 'a34',
+          // ① requestHeader 带 tools（真实 EpochHeader 的字段名就是 `tools`）
+          requestHeader: () => ({
+            config: { provider: 'test-provider', model: 'test-model' },
+            tools: [{
+              name: T,
+              description: 'HEADER_DESCRIPTION_MARK',
+              parameters: { type: 'object', properties: { [PARAM_MARK]: { type: 'string', description: 'from-header' } }, required: [PARAM_MARK] },
+            }],
+          }),
+        }),
+      },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A34: PENDING_ACTION 带工具的 parameters（JSON Schema）',
+      text.indexOf('parameters (JSON Schema of this tool)') !== -1 && text.indexOf(PARAM_MARK) !== -1,
+      JSON.stringify({ sec: text.indexOf('parameters (JSON Schema of this tool)') !== -1, mark: text.indexOf(PARAM_MARK) !== -1 }))
+    ok('★ group24 A34: schema 优先取 requestHeader().tools（模型这次真正看到的那份）',
+      text.indexOf('HEADER_DESCRIPTION_MARK') !== -1,
+      JSON.stringify({ fromHeader: text.indexOf('HEADER_DESCRIPTION_MARK') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A35：requestHeader 没有 tools 时回落到 ctx.tools.get ────────────────────
+  //
+  // 旧会话 / header 尚未落盘时 `requestHeader()` 不带 tools（甚至整个返回 undefined）。
+  // 这条路径不能因为 ① 缺失就整段消失 —— 那等于「老会话的评审材料少一块」。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const FALLBACK_MARK = 'FALLBACK_PARAM_MARK'
+    // ctx.tools.get 返回一个带 parameters 的定义（真实 defineTool 编译后的形状）
+    h.ctx.tools.get = (name) => (name === T
+      ? { name: T, description: 'FALLBACK_DESCRIPTION_MARK', parameters: { type: 'object', properties: { [FALLBACK_MARK]: { type: 'number' } } } }
+      : null)
+    const events = [humanMsg('做点事', 'r1')]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      // requestHeader 只有 config、没有 tools —— 正是「旧会话」的形状
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a35' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A35: requestHeader 无 tools 时回落到 ctx.tools.get（老会话也有 schema）',
+      text.indexOf(FALLBACK_MARK) !== -1 && text.indexOf('FALLBACK_DESCRIPTION_MARK') !== -1,
+      JSON.stringify({ param: text.indexOf(FALLBACK_MARK) !== -1, desc: text.indexOf('FALLBACK_DESCRIPTION_MARK') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A36：子代理会话里父代理的任务正文进材料，标 direct-parent-instruction ──────
+  //
+  // 这是「角色少一档」的守门断言。三条判据必须同时成立：
+  //   ① `agent-message` 且 `senderSessionId === header.parentSession` → 父指令
+  //   ② `kind:'user'` 无 rpcId、且在 `subagent/descriptor` **之后**的首条 → 父指令
+  //   ③ 主会话（非 subagent）里同样形状的无 rpcId 消息 → **不是**父指令（无父）
+  //
+  // ③ 是反向判据，不能省：主会话里那条「你是代码审查专家」注入提示与 ② 形状完全
+  // 相同，唯一的区别是「没有 descriptor / header.origin 不是 subagent」。少了它，
+  // 把判据写成「所有无 rpcId 的 kind:user 都算父指令」也能通过 —— 那是错的。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const PARENT_ID = 'session-parent-abc'
+    const events = [
+      // descriptor 在**日志里但不在 surface 上**（实测形状）—— 判据必须扫全量 events
+      { type: 'subagent/descriptor', data: { version: 3, mode: 'one-shot', provider: 'spawn', label: 'x' } },
+      // 父代理创建子代理时写的任务正文：kind:'user' 但无 rpcId
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'PARENT_INITIAL_TASK_TEXT' }] } },
+      // 人类在子代理会话里插的话（带 rpcId）
+      humanMsg('HUMAN_IN_SUBAGENT', 'r1'),
+      // 父代理事后 relay 的消息
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'agent-message', form: 'relay', senderSessionId: PARENT_ID }, content: [{ type: 'text', text: 'PARENT_RELAY_TEXT' }] } },
+      // 第三方会话转发的消息（senderSessionId 不是本会话的父）—— 不该标父指令
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-someone-else' }, content: [{ type: 'text', text: 'THIRD_PARTY_RELAY_TEXT' }] } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: {
+        cwd: ws,
+        session: sessionMock(events, {
+          id: 'a36',
+          header: { version: 4, id: 'a36', createdAt: 0, isSeeded: false, origin: 'subagent', parentSession: PARENT_ID, delegationDepth: 1 },
+        }),
+      },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A36: 父代理创建时的任务正文标 direct-parent-instruction（不是 human-instruction）',
+      text.indexOf('[direct-parent-instruction] PARENT_INITIAL_TASK_TEXT') !== -1
+      && text.indexOf('[human-instruction] PARENT_INITIAL_TASK_TEXT') === -1,
+      JSON.stringify({ dp: text.indexOf('[direct-parent-instruction] PARENT_INITIAL_TASK_TEXT') !== -1, hi: text.indexOf('[human-instruction] PARENT_INITIAL_TASK_TEXT') !== -1 }))
+    ok('★★ group24 A36: 父代理 relay 的消息也标 direct-parent-instruction',
+      text.indexOf('[direct-parent-instruction] PARENT_RELAY_TEXT') !== -1,
+      JSON.stringify({ dp: text.indexOf('[direct-parent-instruction] PARENT_RELAY_TEXT') !== -1 }))
+    ok('★ group24 A36: 人类在子代理会话里说的话仍是 human-instruction（不被父指令吞掉）',
+      text.indexOf('[human-instruction] HUMAN_IN_SUBAGENT') !== -1,
+      JSON.stringify({ hi: text.indexOf('[human-instruction] HUMAN_IN_SUBAGENT') !== -1 }))
+    ok('★ group24 A36: 第三方会话的 relay 不算父指令（senderSessionId 必须严格等于 parentSession）',
+      text.indexOf('THIRD_PARTY_RELAY_TEXT') === -1,
+      JSON.stringify({ leaked: text.indexOf('THIRD_PARTY_RELAY_TEXT') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A37：主会话里「无 rpcId 的 kind:user」**不是**父指令 ─────────────────────
+  //
+  // A36 的反向判据。没有它，「所有无 rpcId 的 kind:user 都算父指令」也能让 A36 通过，
+  // 而那个实现会把主会话里注入的「你是代码审查专家」提示当成父代理授权。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const events = [
+      // 主会话：没有 descriptor、header 无 origin
+      humanMsg('真正的人类指令', 'r1'),
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'MAIN_SESSION_INJECTED_PROMPT' }] } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: sessionMock(events, { id: 'a37' }) },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A37: 主会话无 rpcId 的 kind:user 不标 direct-parent-instruction',
+      text.indexOf('[direct-parent-instruction] MAIN_SESSION_INJECTED_PROMPT') === -1
+      && text.indexOf('MAIN_SESSION_INJECTED_PROMPT') === -1,
+      JSON.stringify({ dp: text.indexOf('[direct-parent-instruction] MAIN_SESSION_INJECTED_PROMPT') !== -1, leaked: text.indexOf('MAIN_SESSION_INJECTED_PROMPT') !== -1 }))
+    ok('★ group24 A37: 对照 —— 主会话的人类指令照常进材料（否则上面那条是空转）',
+      text.indexOf('[human-instruction] 真正的人类指令') !== -1,
+      JSON.stringify({ hi: text.indexOf('[human-instruction] 真正的人类指令') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
+  }
+
+  // ── A38：fork 继承的前缀（isOwnSeq === false）不算父指令 ──────────────────────
+  //
+  // 实测 1104 个子代理会话里只有 **1 个** 的 `subagent/descriptor` 不在开头
+  // （`isSeeded: true` 的 fork 会话，descriptor 在位置 40859），它前面是一整段
+  // 从父会话继承来的历史。`isOwnSeq` 就是为排除这一段而存在的 —— 少了它，
+  // 继承前缀里的无 rpcId 消息会被当成本会话的父指令。
+  //
+  // 这里用 isOwnSeq 把 descriptor 之后的一条消息标记成「继承来的」，它**不该**进材料；
+  // 另一条本会话的父指令作对照。两条同 kind 同无 rpcId，唯一差别是 isOwnSeq。
+  {
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const PARENT_ID = 'session-parent-xyz'
+    const events = [
+      { type: 'subagent/descriptor', data: { version: 3, mode: 'one-shot', provider: 'spawn', label: 'x' } },
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'INHERITED_FROM_PARENT_SESSION' }] } },
+      { type: 'user/message', surfaceOp: 'append', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'OWN_PARENT_INITIAL_TASK' }] } },
+    ]
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: {
+        cwd: ws,
+        session: sessionMock(events, {
+          id: 'a38',
+          header: { version: 4, id: 'a38', createdAt: 0, isSeeded: true, origin: 'subagent', parentSession: PARENT_ID, delegationDepth: 1 },
+          // 第 0 条（descriptor）与第 2 条是本会话自己的；第 1 条是 fork 继承来的。
+          isOwnSeq: (seq) => seq === 0 || seq === 2,
+        }),
+      },
+      signal: undefined,
+    }
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    const t0 = Date.now()
+    while (!llm.calls.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 1))
+    const text = llm.calls.length
+      ? String(llm.calls[0].messages && llm.calls[0].messages[0] && llm.calls[0].messages[0].content[0].text || '')
+      : ''
+    ok('★★ group24 A38: fork 继承前缀里的无 rpcId 消息**不**被当成父指令（isOwnSeq 生效）',
+      text.indexOf('INHERITED_FROM_PARENT_SESSION') === -1,
+      JSON.stringify({ leaked: text.indexOf('INHERITED_FROM_PARENT_SESSION') !== -1 }))
+    ok('★ group24 A38: 对照 —— 本会话自己的父指令仍被认出（否则上面那条是空转）',
+      text.indexOf('[direct-parent-instruction] OWN_PARENT_INITIAL_TASK') !== -1,
+      JSON.stringify({ dp: text.indexOf('[direct-parent-instruction] OWN_PARENT_INITIAL_TASK') !== -1 }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : [])) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    releaseTmp(ws, home)
   }
 }
 
