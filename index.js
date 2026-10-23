@@ -67,7 +67,7 @@ const ALL_MODES = ['ask', 'allow', 'deny', 'auto', 'inherit']
 // 只影响 `statusView` 下发的 `modes` / `allModes` 是否含 auto。
 //
 // **现已置真**：评审段（reviewWithModel）已实现并接线，smoke group24 的 20 条用例
-// 覆盖了「模型 allow/deny/escalate/矛盾/协议非法/无 llm/超时/熔断/缓存」全部路径。
+// 覆盖了「模型 allow/deny/escalate/矛盾/协议非法/无 llm/超时/熔断」全部路径。
 // 也就是说：现在面板上选 auto，真的会走模型判断，不再名不副实。
 //
 // 留这个开关而不是直接删掉过滤，是因为它把「面板暴露 auto」与「引擎认识 auto」
@@ -1487,7 +1487,6 @@ export default {
     // 值域：
     //   timeoutMs        ≥ 0 的有限数（0 = 不弹窗，直接按回落值执行）
     //   breakerThreshold ≥ 0 的有限数（0 = 永不启用）
-    //   cacheEnabled     布尔
     //   historyN         1..100 的整数
     //   historyBudget    200..100000 的整数
     //   provider / model 非空字符串（成对才有意义，但这里不强制成对 ——
@@ -1504,7 +1503,6 @@ export default {
       num('breakerThreshold', 0)
       num('historyN', 1, 100)
       num('historyBudget', 200, 100000)
-      if (typeof raw.cacheEnabled === 'boolean') out.cacheEnabled = raw.cacheEnabled
       if (typeof raw.provider === 'string' && raw.provider.trim()) out.provider = raw.provider.trim().slice(0, 100)
       if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim().slice(0, 200)
       return Object.keys(out).length ? out : null
@@ -6636,10 +6634,6 @@ export default {
       if (autoBreakerTripped(exec)) {
         return { verdict: 'escalate', code: 'breaker', detail: 'consecutive denies reached the configured threshold' }
       }
-      // ② 缓存：命中即放行（**只缓存 allow**，见 autoCacheSet 的注释）
-      if (autoCacheGet(exec)) {
-        return { verdict: 'allow', cached: true, risk: 'low', reason: '' }
-      }
       const llm = getLlmService(ctx)
       if (!llm) return { verdict: 'escalate', code: 'infra-error', detail: 'llm service unavailable' }
       // 模型覆盖：从设置页读（§4.2 第 ① 级）。**必须在这里读**，不能只把 null 传给
@@ -6668,7 +6662,7 @@ export default {
       } catch (e) {
         return { verdict: 'escalate', code: 'infra-error', detail: 'stream failed: ' + (e && e.message ? e.message : String(e)) }
       }
-      // ③ 熔断计数：**只有模型真·拒绝才 +1**；放行清零；失败/escalate 不变（怪线路不怪模型）
+      // ② 熔断计数：**只有模型真·拒绝才 +1**；放行清零；失败/escalate 不变（怪线路不怪模型）
       if (!r.ok) {
         noteAutoOutcome(exec, 'other')
         return { verdict: 'escalate', code: r.code, detail: r.detail, raw: r.raw }
@@ -6679,7 +6673,6 @@ export default {
       }
       if (r.decision === 'allow') {
         noteAutoOutcome(exec, 'allow')     // 清零
-        autoCacheSet(exec)                 // 只在这里写缓存（deny 不缓存）
         return { verdict: 'allow', risk: r.risk, reason: r.reason, raw: r.raw }
       }
       noteAutoOutcome(exec, 'deny')        // +1
@@ -6700,8 +6693,6 @@ export default {
       timeoutMs: 20000,
       // 熔断：真·连续拒绝达到此数触发。0 = 永不启用。默认 10（理由见 §3.5）。
       breakerThreshold: 10,
-      // 缓存：只对 allow 生效，会话级失效。
-      cacheEnabled: true,
       // 历史深度（§4.3A）
       historyN: 10,
       historyBudget: 4000,
@@ -6777,55 +6768,39 @@ export default {
       autoBreaker.delete(autoBreakerKey(exec))
     }
 
-    // ── 缓存（§4.7）：只对 allow 生效，会话级失效 ────────────────────────────────
-    // 目的：agent 反复读同一文件是常态，每次都问模型既贵又慢。
+    // ── 为什么**没有**结果缓存（曾经有，已删除）──────────────────────────────────
+    // 曾经有一层「同工具名 + 完整参数 → 记住 allow 结论」的会话级缓存，
+    // 命中的调用直接放行、不再问模型。已整体删除。
     //
-    // 键 = 工具名 + **完整参数**的哈希。必须用完整参数而不是截断后的：
-    // 若用截断参数做键，两个内容不同但前缀相同的 write 调用会**碰撞** ——
-    // 第一个被放行，第二个也会被错误放行（那是 fail-open）。
+    // ── 删除依据：实测 3222 个会话 / 387,373 次工具调用 ──────────────────────────
+    //   · 会话内「同工具名 + 完全相同参数」的重复率：全部工具 **3.35%**；
+    //     排除默认 `allow` 的只读工具后（= 真正会走 auto 的那部分）**1.51%**。
+    //   · 这 1.51% 仍是**上限** —— 真实命中率还要乘上「该工具确实配成了 auto」的比例。
+    //   · 调用数 ≥ 50 的 1533 个会话里，命中率中位数是 **0%**；1169 个（76%）一次都没命中。
     //
-    // deny **不缓存**：宁可重复问，不可错误地持续拒绝；且 deny 通常意味着
-    // 「这次调用有问题」，下次同样的调用仍应重新判断。
-    const autoCache = new Map()   // sessionKey → Map(hash → true)
-
-    function autoCacheKeyOf(exec) {
-      // 稳定序列化：对象键排序，避免 {a:1,b:2} 与 {b:2,a:1} 算出不同哈希。
-      // 只用于缓存命中判断，不用于安全判定，故不必抗碰撞攻击（参数来自同一次调用）。
-      const stable = (v) => {
-        if (v === null || typeof v !== 'object') return JSON.stringify(v)
-        if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']'
-        const ks = Object.keys(v).sort()
-        return '{' + ks.map((k) => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}'
-      }
-      let args = ''
-      try { args = stable(exec.arguments) } catch (e) { args = String(exec.arguments) }
-      return String(exec.name) + '\u0000' + args
-    }
-
-    function autoCacheGet(exec) {
-      if (!autoReviewSetting('cacheEnabled')) return false
-      const m = autoCache.get(autoBreakerKey(exec))
-      return !!(m && m.has(autoCacheKeyOf(exec)))
-    }
-
-    function autoCacheSet(exec) {
-      if (!autoReviewSetting('cacheEnabled')) return
-      const k = autoBreakerKey(exec)
-      let m = autoCache.get(k)
-      if (!m) { m = new Map(); autoCache.set(k, m) }
-      // 上限：缓存无界会随长任务无限增长（每个不同参数一条）。超了就从最早的丢。
-      if (m.size >= 500) {
-        const first = m.keys().next()
-        if (!first.done) m.delete(first.value)
-      }
-      m.set(autoCacheKeyOf(exec), true)
-    }
+    // ── 三个让它不值得的理由 ───────────────────────────────────────────────────
+    //   ① **重复集中在不需要评审的工具上**：`list_agents` 4512 次重复（96% 是空参数
+    //      `{}`）、`perm_status` 379 次（100% 空参数）。它们在默认分类里是 `allow`，
+    //      本来就不经评审 —— 缓存为它们做的是「记录一个永远不会被查的 key」。
+    //   ② **重复的形态不是「连续重试」**：间隔 1（紧邻）的只有 153 次，占重复总数的
+    //      3.6%；其余是「隔了一段又回来调同一个东西」（重读同一文件、重新列一次代理）。
+    //      这类调用参数相同但**上下文已经变了**（期间写过文件、改过配置），
+    //      「上次判过就放行」未必仍然成立。
+    //   ③ **它换来一个真实的 fail-open 面**：模型第一次判错（放行了不该放行的），
+    //      之后参数完全相同的调用会一直沿用那个错误结论，直到会话结束。
+    //      而缓存键**不含上下文** —— 同一个 `write` 同一份内容到同一路径，
+    //      第一次是新建、第二次可能覆盖了别人刚写的东西，风险不同却命中同一项。
+    //
+    // ── 还有一条与设计原则的直接冲突 ───────────────────────────────────────────
+    // 本计划要求「同一调用判两次应得同一结论」（§4.5B 的 `temperature: 0`）。
+    // 缓存让**第二次根本不再判**，于是「模型这次为什么改判了」这个问题连问都问不出来。
+    //
+    // 「模型持续出问题」这个场景由熔断器覆盖（§3.5），那是另一个问题。
 
     // 会话销毁时清理（§3.5 的「计数器按会话隔离，session/disposed 时清理」）
     function clearAutoState(sessionKey) {
       if (!sessionKey) return
       autoBreaker.delete(sessionKey)
-      autoCache.delete(sessionKey)
     }
 
     // 审批弹窗。opts（可选）：
@@ -7703,7 +7678,6 @@ export default {
           effective: {
             timeoutMs: autoReviewSetting('timeoutMs'),
             breakerThreshold: autoReviewSetting('breakerThreshold'),
-            cacheEnabled: autoReviewSetting('cacheEnabled'),
             historyN: autoReviewSetting('historyN'),
             historyBudget: autoReviewSetting('historyBudget'),
             provider: autoReviewSetting('provider'),
@@ -8486,7 +8460,7 @@ export default {
           return json(res, statusView(exec))
         }
         // ── /permgate/set-auto-review：自动审批的工程参数（§2.4）────────────────────
-        // **只有全局层**：这些都是「评审机制怎么跑」的工程参数（超时、熔断、缓存、模型覆盖），
+        // **只有全局层**：这些都是「评审机制怎么跑」的工程参数（超时、熔断、模型覆盖），
         // 不是「某个项目的权限怎么定」。按项目配超时会带来一个荒唐的场景：同一份模型调用
         // 在不同项目里超时不同，而评审结论本身是全局一致的 —— 参数跟着项目变只会让排查变难。
         // 故这里**不接受 target**（也不落 ensureProject），与 set-sandbox 等项目级设置不同。
@@ -8797,9 +8771,9 @@ export default {
     ctx.on('session/event', async (session, event) => {
       try {
         if (!event) return
-        // 会话销毁 → 清理该会话的 auto 状态（熔断计数 + 缓存）。
-        // 不做会在长跑进程里累积：每个会话一份 Map，且缓存条目无上界。
-        // 与 streakBySession 的清理同源（那里走 resetStreak），但这里要清的是两个表。
+        // 会话销毁 → 清理该会话的 auto 状态（熔断计数）。
+        // 不做会在长跑进程里累积：每个会话一份 Map。
+        // 与 streakBySession 的清理同源（那里走 resetStreak）。
         if (event.type === 'session/disposed' && session && session.id) {
           clearAutoState(session.id)
         }

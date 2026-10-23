@@ -4762,30 +4762,36 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     releaseTmp(ws, home)
   }
 
-  // ── A8：缓存 —— 同样的调用第二次不再问模型 ────────────────────────────────────
+  // ── A8：**没有**结果缓存 —— 同样的调用第二次仍然要问模型 ───────────────────────
+  //
+  // 这里曾经有两条断言，测的是「缓存命中，第二次不再调用模型」。缓存已整体删除
+  // （理由见 index.js 里「为什么没有结果缓存」那段：实测会话内完全重复率
+  // 全部工具 3.35%、排除默认 allow 的只读工具后 1.51%，且命中率中位数是 0%）。
+  //
+  // 现在断言方向**反过来**：同一个调用调两次，模型必须被问两次。
+  // 若哪天有人「为了省 token」把缓存加回来，这条会变红 —— 那正是我们要的。
+  //
+  // 为什么这不只是「测一个不存在的功能」：缓存的核心风险是 fail-open ——
+  // 模型第一次判错，后续同参数调用会一直沿用那个错误结论。这条断言钉的正是
+  // 「每次调用都重新判断」这个安全性质，而不是某个实现细节。
   {
     const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
     const { ws, home, h } = mkHostAuto({}, llm)
     const r1 = await probeAuto(h, ws, 'a8', T, A)
     const r2 = await probeAuto(h, ws, 'a8', T, A)
-    ok('★★ group24 A8: 缓存命中（allow 缓存，第二次不再调用模型）',
-      r1 === 'allow' && r2 === 'allow' && llm.calls.length === 1,
+    ok('★★ group24 A8: 没有结果缓存（同一调用两次 → 模型被问两次，不复用上次结论）',
+      r1 === 'allow' && r2 === 'allow' && llm.calls.length === 2,
       JSON.stringify({ r1, r2, calls: llm.calls.length }))
-    // 不同参数**不得**命中同一缓存（否则不同内容的调用会互相授权）
-    const r3 = await probeAuto(h, ws, 'a8', T, { a: 2 })
-    ok('★★ group24 A8: 不同参数不共享缓存（否则内容不同却互相授权）',
-      r3 === 'allow' && llm.calls.length === 2,
-      JSON.stringify({ r3, calls: llm.calls.length }))
     releaseTmp(ws, home)
   }
 
-  // ── A9：deny 不缓存 —— 同样的调用第二次仍要重新问模型 ─────────────────────────
+  // ── A9：deny 之后同样重新判断（不能被上一次的拒绝结论粘住）──────────────────────
   {
     const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
     const { ws, home, h } = mkHostAuto({}, llm)
     await probeAuto(h, ws, 'a9', T, A)
     await probeAuto(h, ws, 'a9', T, A)
-    ok('★★ group24 A9: deny 不缓存（第二次仍调用模型，避免错误地持续拒绝）',
+    ok('★★ group24 A9: deny 不留下任何可复用结论（第二次仍调用模型）',
       llm.calls.length === 2, JSON.stringify({ calls: llm.calls.length }))
     releaseTmp(ws, home)
   }

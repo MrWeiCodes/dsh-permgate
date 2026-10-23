@@ -1631,16 +1631,12 @@ window.__ModuleLoader__.load({
 				'panel.autoTimeoutHint': '模型判断失败时，弹窗等你多久。仅当「失败后」是允许/拒绝时有效：超时就按它执行；填 0 则不弹窗、直接执行。「失败后」是询问时本项不生效，弹窗照常弹，一直等你决定',
 				'panel.autoBreaker': '连续拒绝上限',
 				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
-				'panel.autoCache': '记住放行过的调用',
-				'panel.autoCacheHint': '同一个调用第二次直接放行，不再问模型。只记放行过的，拒绝过的照常问',
 				'panel.autoHistory': '工具调用历史',
 				'panel.autoHistoryHint': '左边是带几条最近的工具调用，右边是这些文字的总长上限（超了从最早的开始丢）。你本人说过的话不受这里限制，总是发给模型',
 				'panel.autoModel': '用哪个模型',
 				'panel.autoProviderPh': '服务商，留空用当前会话的',
 				'panel.autoModelPh': '模型名，留空用当前会话的',
 				'panel.autoModelHint': '两个都填才生效',
-				'panel.autoOn': '开',
-				'panel.autoOff': '关',
 				'panel.autoSaved': '已保存',
 				'panel.autoBadNumber': '请输入 0 或正整数',
 				'panel.autoMsUnit': '毫秒',
@@ -2059,16 +2055,12 @@ window.__ModuleLoader__.load({
 				'panel.autoTimeoutHint': 'when the model fails, how long the dialog waits. Only used when "if it fails" is allow/deny: on timeout that action runs; 0 means no dialog, run it right away. When "if it fails" is ask this setting does nothing — the dialog still appears and waits for you',
 				'panel.autoBreaker': 'Consecutive denials',
 				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
-				'panel.autoCache': 'Remember allowed calls',
-				'panel.autoCacheHint': 'a repeat of the same call is allowed straight away without asking the model. Only allowed calls are remembered; denied ones are asked again',
 				'panel.autoHistory': 'Tool call history',
 				'panel.autoHistoryHint': 'how many recent tool calls to include on the left, and the total length cap for that text on the right (oldest dropped first). What you typed yourself is not limited here and is always sent',
 				'panel.autoModel': 'Which model',
 				'panel.autoProviderPh': 'provider, empty = this session',
 				'panel.autoModelPh': 'model, empty = this session',
 				'panel.autoModelHint': 'both are required',
-				'panel.autoOn': 'on',
-				'panel.autoOff': 'off',
 				'panel.autoSaved': 'Saved',
 				'panel.autoBadNumber': 'enter 0 or a positive integer',
 				'panel.autoMsUnit': 'ms',
@@ -5058,19 +5050,6 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, unit),
 					);
 				};
-				const boolSel = (key, labelOn, labelOff) => {
-					const cur = eff[key] !== false;
-					return React.createElement('select', {
-						className: 'pg-field',
-						style: { padding: '2px 6px' },
-						value: cur ? 'on' : 'off',
-						onChange: (e) => setField(key, e.target.value === 'on'),
-						disabled: busy,
-					},
-						React.createElement('option', { value: 'on' }, labelOn),
-						React.createElement('option', { value: 'off' }, labelOff),
-					);
-				};
 				const row = (labelKey, ...children) => React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' } },
 					React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T(labelKey)),
 					...children,
@@ -5087,8 +5066,6 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoTimeoutHint'))),
 					row('panel.autoBreaker', numInput('breakerThreshold', 90, T('panel.autoTimesUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoBreakerHint'))),
-					row('panel.autoCache', boolSel('cacheEnabled', T('panel.autoOn'), T('panel.autoOff')),
-						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoCacheHint'))),
 					row('panel.autoHistory', numInput('historyN', 70, T('panel.autoTimesUnit')), numInput('historyBudget', 90, T('panel.autoCharsUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoHistoryHint'))),
 					// 模型覆盖：留空 = 跟随会话当前模型（三级回落的第 ② 级）。

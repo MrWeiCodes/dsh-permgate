@@ -1668,16 +1668,22 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
-    // 宿主 AUTO_REVIEW_DEFAULTS 的 7 个键，每个都要有控件
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 6 个键，每个都要有控件
     //
     // 曾经有第 8 个 `redactContentKeys`（「隐藏参数内容」），已删除：它**从未接线**
     // （`reviewUserText` 一次都没读过它），而它的设计前提也是错的 ——
     // 截断参数只会让模型看不清要写什么、判断变差，不是该提供给用户的选项。
     // 密钥脱敏（`sk-`/AKIA/PEM/敏感键名）是**始终开启**的另一层，与它无关。
-    const keys = ['timeoutMs', 'breakerThreshold', 'cacheEnabled', 'historyN', 'historyBudget', 'provider', 'model']
+    //
+    // 还有第 7 个 `cacheEnabled`（「记住放行过的调用」），也已删除 —— 见下一条断言。
+    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model']
     for (const k of keys) {
       if (body.indexOf("'" + k + "'") === -1) return false
     }
+    // 缓存开关**必须不存在**：它对应的功能已整体删除（实测命中率上限 1.51%，
+    // 中位数 0%，且引入 fail-open 面）。留一个改了没效果的开关就是面板说谎 ——
+    // 这正是本文件反复记录的那类缺陷。
+    if (body.indexOf("'cacheEnabled'") !== -1) return false
     // 提交走单一端点（不得各写一个路由）
     if (!/invoke\('permgate:set-auto-review'/.test(body)) return false
     // 卡片内**不再**判 tab（判据在调用点，见下一条断言）
