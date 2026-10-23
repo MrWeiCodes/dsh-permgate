@@ -6205,6 +6205,55 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       r && r.kind === 'ask', JSON.stringify(r))
     releaseTmp(ws, home)
   }
+
+  // ── A49：策略里必须有「不得外推授权」这条判据 ──────────────────────────────
+  //
+  // 为什么这条是纯文本断言而不是行为断言：`REVIEW_POLICY` 是**发给模型的固定
+  // system 文本**，它的效果只能靠真模型验证（本套测试用假 llm，不联网）。
+  // 用 mock 注入 `{"risk":"medium","decision":"allow"}` 只能证明「模型说 allow
+  // 时插件放行」，证明不了「策略让模型判对了」—— 那是循环论证。
+  //
+  // 所以这里钉的是**判据存在且措辞是抽象的**，行为证据记在文档 §4.5C
+  // （跨 6 个领域 19 个用例的实测：该拒的从 15/21 提到 19/21，该放的保持 35/36）。
+  //
+  // 措辞必须**不含具体动作名**：曾经写过一版列举 `commit / pushing / publishing
+  // / deleting`，那只覆盖 git 与文件删除，`web_fetch`、`subagent`、改权限配置
+  // 全部落空。通用判据只能讲抽象关系（operation / object / effect）。
+  {
+    // 源码读法同 group22 的 idxSrc（本组没有外层 `src` 变量，组内自取）
+    const idxSrc49 = readFileSync(join(ROOT, 'index.js'), 'utf8')
+    const i = idxSrc49.indexOf('const REVIEW_POLICY = [')
+    const j = idxSrc49.indexOf("].join('\\n')", i)
+    const policy = i >= 0 && j > i ? idxSrc49.slice(i, j) : ''
+    ok('★★ group24 A49: 策略含「不得外推授权」判据（指令只授权它指名的那件事）',
+      policy.indexOf('authorizes the operation it names on the object it names') !== -1,
+      JSON.stringify({ found: policy ? policy.length : 0 }))
+    // 三条外推路径都必须被点名：猜意图 / 扩展到后续操作 / 模糊指代自动匹配
+    //
+    // 判据前先把**源码的字面量拼接**还原成模型真正读到的文本：策略是
+    // `['...', '...'].join('\n')`，源码里 `'a vague',` 与 `'reference ...'` 之间
+    // 隔着引号、逗号、换行 —— 直接对源码切片做正则会在词中间断开。
+    //
+    // 还要**折叠空白**：策略为了排版在 80 列处硬换行（`do` / `not extend` 被断成
+    // 两行），句子边界与换行位置无关，故匹配前统一压成单空格。
+    const policyText = policy.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("'"))
+      .map((l) => { const a = l.indexOf("'"); const b = l.lastIndexOf("'"); return a >= 0 && b > a ? l.slice(a + 1, b) : '' })
+      .join(' ')
+      .replace(/\s+/g, ' ')
+    ok('★★ group24 A49: 三条外推路径都被点名（猜意图 / 后续操作 / 模糊指代）',
+      /Do not infer authorization from what the user probably meant/.test(policyText)
+      && /do not extend it to related or follow-on operations/.test(policyText)
+      && /vague reference become authorization/.test(policyText),
+      JSON.stringify({ text: policyText.slice(-320) }))
+    // 反面对照：**不得**用具体动作名举例（那正是上一版不通用的原因）
+    const lower = policy.toLowerCase()
+    for (const word of ['commit', 'pushing', 'publishing', 'deleting', 'pushing,']) {
+      ok('★ group24 A49: 通用判据不得列举具体动作名（' + word + '）',
+        lower.indexOf(word) === -1, word + ' appears in policy')
+    }
+  }
 }
 
 if (fail.length) {
