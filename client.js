@@ -4071,7 +4071,21 @@ window.__ModuleLoader__.load({
 			// 于是判据拿旧值比较 —— 实测（cat=ask）子设置由 deny 改 allow（该提示的放松方向）
 			// 反而不提示，由 allow 改 deny（不该提示）反而误报且文案与实际动作矛盾。
 			// changeSubDestructive 一侧传的就是新值（action），两侧口径现在一致。
-			const MODE_RANK = { allow: 0, ask: 1, deny: 2 };
+			//
+			// ── `auto` 必须在这张表里（曾经缺，导致提示静默失效）─────────────────────
+			// 缺 `auto` 时 `MODE_RANK['auto']` 是 `undefined`，而 warnSubMismatch 开头就是
+			// `if (rank === undefined || MODE_RANK[sub] === undefined) return` ——
+			// 于是**只要大分类或该档子设置任一侧是 auto，整条提示直接静默跳过**：
+			//   · 大分类 deny + 子设置 auto → 不提示，而 auto 明显比 deny 松（该提示的正是它）
+			//   · 大分类 auto + 子设置 allow → 不提示，同上
+			// 这与「面板说谎」同族：不协调真实存在，面板一声不吭。
+			//
+			// 取 1 与 `ask` 同档，理由与 index.js 的 `MODE_STRICTNESS` 同源：auto 与 ask
+			// 一样是「要过一道关」的档位（ask 过关的是人，auto 过关的是模型）。
+			// 并列时两边都不提示 —— 方向安全（auto 与 ask 谁更松本就没有客观答案，
+			// 编一个顺序去提示只会造成噪音）。
+			const MODE_RANK = { allow: 0, ask: 1, deny: 2, auto: 1 };
+
 			// `tierLabel` 是**已本地化**的档位名（由调用方给出）：文案必须点名是哪一档 ——
 			// 八档之后「子设置是「允许」」会被读成整个子设置都放行，而实际可能只有 `wide` 一档。
 			// 点名之后文案与判据同粒度（判的是哪一档，说的就是哪一档）。

@@ -3569,8 +3569,16 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 判据：子设置比大分类更松（MODE_RANK 越大越严，故更松 = 子设置排名更小）才提示；
   // 更紧是子设置的正常用途（D-6），提示它只会造成噪音。
   // 反例：把比较写成 `<=`（方向反了，会在子设置更严时提示、更松时不提示），本条即失败。
-  ok('★ 大分类与子设置不一致时提示（严格度比较，allow < ask < deny）',
-    cli.includes('const MODE_RANK = { allow: 0, ask: 1, deny: 2 };')
+  //
+  // ⚠️ 这里**不再锁字面量**（原断言是 `cli.includes('const MODE_RANK = { allow: 0, ask: 1,
+  // deny: 2 };')`）。锁字面量把「补 auto」这个**正确改动**判成了失败，而 auto 缺失正是
+  // 一个真 bug：`MODE_RANK['auto']` 为 undefined 时 `warnSubMismatch` 开头的
+  // `if (rank === undefined || MODE_RANK[sub] === undefined) return` 会**静默跳过整条提示**
+  // —— 大分类 deny + 子设置 auto 这种明确的不协调，面板一声不吭。
+  // 改为断言「表里覆盖了全部可配置动作」+「比较式仍在」，值由下面第 3726 行的真值表复算。
+  ok('★ 大分类与子设置不一致时提示（严格度比较，覆盖全部可配置动作）',
+    /const MODE_RANK = \{[^}]*\};/.test(cli)
+    && ['allow', 'ask', 'deny', 'auto'].every((a) => new RegExp("MODE_RANK = \\{[^}]*\\b" + a + ':').test(cli))
     && /const warnSubMismatch = \(catMode, sub, tierLabel\) => \{[\s\S]{0,700}?if \(MODE_RANK\[sub\] >= rank\) return;/.test(cli))
   // ★ 八档之后「改大分类」这一侧必须**逐档**判（§7.4），不能只判 inside。
   // 反例：改回只判 inside（`warnSubMismatch(mode, explicitSubOf(tab))`）时，
@@ -3722,10 +3730,20 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
   // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次
   // （写成 `<=` 时，大分类 deny + 子设置 ask 不提示，反而在子设置更严时提示）。
+  //
+  // ⚠️ 这张表**从源码求值**，不写死 `{ allow: 0, ask: 1, deny: 2 }`：写死的话，
+  // 表里补了 auto 这条断言仍会拿旧的 3 键表去算，于是「auto 的提示是否正常」永远测不到
+  // —— 而 auto 缺失恰恰是这条断言原本该抓的 bug。
   ok('★ 提示判据真值表复算：仅当子设置比大分类更松时提示', (function () {
-    const m = /const MODE_RANK = \{ allow: 0, ask: 1, deny: 2 \};/.exec(cli)
+    const m = /const MODE_RANK = (\{[^}]*\});/.exec(cli)
     if (!m) return false
-    const RANK = { allow: 0, ask: 1, deny: 2 }
+    let RANK = null
+    try { RANK = new Function('return (' + m[1] + ')')() } catch (e) { return false }
+    if (!RANK || typeof RANK !== 'object') return false
+    // ① 表必须覆盖全部可配置动作（缺 auto 会让提示静默失效，见上一条断言的说明）
+    for (const a of ['allow', 'ask', 'deny', 'auto']) if (typeof RANK[a] !== 'number') return false
+    // ② 序必须单调：allow < ask < deny（既有契约，不因加 auto 被打乱）
+    if (!(RANK.allow < RANK.ask && RANK.ask < RANK.deny)) return false
     // 复算函数：与 warnSubMismatch 的判据同构（inherit / 未知值不提示）
     const warns = (catMode, sub) => {
       if (!sub || sub === 'inherit') return false
@@ -3737,6 +3755,17 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
       ['deny', 'ask', true], ['deny', 'allow', true], ['deny', 'deny', false], ['deny', 'inherit', false],
       ['ask', 'allow', true], ['ask', 'ask', false], ['ask', 'deny', false], ['ask', 'inherit', false],
       ['allow', 'ask', false], ['allow', 'allow', false], ['allow', 'deny', false], ['allow', 'inherit', false],
+      // ── auto 的组合：缺键时下面四条会**全部**变成 false（静默不提示）──
+      // 大分类 deny + 子设置 auto：auto 比 deny 松 → 必须提示
+      ['deny', 'auto', true],
+      // 大分类 ask + 子设置 auto：同档（都取 1）→ 不提示（并列没有客观松紧）
+      ['ask', 'auto', false],
+      // 大分类 auto + 子设置 allow：allow 比 auto 松 → 必须提示
+      ['auto', 'allow', true],
+      // 大分类 auto + 子设置 deny：deny 更紧 → 不提示（子设置的正常用途）
+      ['auto', 'deny', false],
+      // 大分类 auto + 子设置 auto：相同 → 不提示
+      ['auto', 'auto', false],
     ]
     return expected.every(([cat, sub, want]) => warns(cat, sub) === want)
   })())
