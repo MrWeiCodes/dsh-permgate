@@ -3789,10 +3789,18 @@ window.__ModuleLoader__.load({
 				});
 				setSubReasons((prev) => {
 					// 聚焦中的那一格保留本地草稿（见 reasonFocus 注释），但仅限「该档此刻仍渲染出输入框」
-					// （即新数据里**该档**仍为 deny）。八档各自独立 —— 用整层的值判会让
+					// （即新数据里**该档**最终仍会拒绝）。八档各自独立 —— 用整层的值判会让
 					// 「wide 是 deny、inside 是 ask」时 inside 的框也进入编辑态。
+					//
+					// 判据必须是 finalActionOf（与 subTierRow 的 showReason 逐字同源）：
+					// 写 `=== 'deny'` 时 `auto + 回落 deny` 那一档的草稿会被这次回填**丢掉**，
+					// 而它的框明明还渲染着（用户正在打字，字却消失了）。
+					const keepOk = (tb, tier) => {
+						const a = (subNext[tb] || {})[tier]
+						return finalActionOf(a, subAutoFallbackOf(tier)) === 'deny'
+					}
 					if (focusNow && focusNow.kind === 'sub' && prev && prev[focusNow.tab]
-						&& subNext[focusNow.tab] && subNext[focusNow.tab][focusNow.key] === 'deny') {
+						&& subNext[focusNow.tab] && keepOk(focusNow.tab, focusNow.key)) {
 						return Object.assign({}, subReasonNext, {
 							[focusNow.tab]: Object.assign({}, subReasonNext[focusNow.tab], { [focusNow.key]: prev[focusNow.tab][focusNow.key] }),
 						});
@@ -4048,9 +4056,10 @@ window.__ModuleLoader__.load({
 			const changeCat = (c) => (e) => {
 				const mode = e.target.value;
 				setCats(Object.assign({}, cats, { [tab]: Object.assign({}, cats[tab], { [c]: mode }) }));
-				// 切离 deny 时作废该格的编辑态：控件会被卸载，若留着，切回 deny 时同一格会
+				// 切离「最终会拒绝」时作废该格的编辑态：控件会被卸载，若留着，切回时同一格会
 				// 莫名其妙又处于可输入状态（用户并没有点「编辑」）。
-				if (mode !== 'deny') exitEditOf('cat', c);
+				// 判据用 finalActionOf：`auto + 回落 deny` 时理由框仍在，不该被这里关掉。
+				if (finalActionOf(mode, catAutoFallbackOf(c)) !== 'deny') exitEditOf('cat', c);
 				// 切**进** auto 时必须同时把回落值写下去：宿主侧 `normalizeAutoFallback` 对
 				// 「action=auto 但没写回落」会补 'ask'（安全方向），但那是一次**静默补值** ——
 				// 用户看不到自己"选了 auto 但回落是 ask"。这里显式带上当前显示值，
@@ -4107,6 +4116,25 @@ window.__ModuleLoader__.load({
 			// 并列时两边都不提示 —— 方向安全（auto 与 ask 谁更松本就没有客观答案，
 			// 编一个顺序去提示只会造成噪音）。
 			const MODE_RANK = { allow: 0, ask: 1, deny: 2, auto: 1 };
+
+			// 「这一格最终会执行哪个动作」的判据 —— 宿主 index.js 的 `finalActionOf` 的
+			// 客户端副本（分处宿主闭包与浏览器 bundle，无法共用函数；改一处必须同步改另一处）。
+			//
+			// 四档里 `auto` 是**两层**的：第一层 `action: 'auto'`（交给模型），第二层
+			// `autoFallback`（模型失败时执行什么）。于是「这一格最终会不会拒绝」不能只看
+			// 第一层 —— `auto + 回落 deny` 在执行侧与裸 `deny` 完全同形（同一条 kind:'deny'
+			// 通道回给 AI），它的理由框当然该出现。
+			//
+			// 面板的**显示判据**必须与宿主的**存留判据**同源：宿主只在
+			// `finalActionOf(...) === 'deny'` 时存 reason，面板若仍按 `action === 'deny'`
+			// 决定要不要渲染理由框，就会出现两个方向的谎：
+			//   · `auto + 回落 deny` → 宿主能存，面板却不给框（用户写不了）；
+			//   · `auto + 回落 ask/allow` → 宿主不存，面板却给了框（用户写了不生效）。
+			// 回落值缺省 ask（与宿主 normalizeAutoFallback 同源）。
+			const finalActionOf = (action, autoFallback) => {
+				if (action !== 'auto') return action;
+				return autoFallback === 'allow' || autoFallback === 'deny' ? autoFallback : 'ask';
+			};
 
 			// `tierLabel` 是**已本地化**的档位名（由调用方给出）：文案必须点名是哪一档 ——
 			// 八档之后「子设置是「允许」」会被读成整个子设置都放行，而实际可能只有 `wide` 一档。
@@ -4198,12 +4226,22 @@ window.__ModuleLoader__.load({
 				invoke('permgate:set-category', { target: tab, category: c, mode: 'deny', reason: v }, () => markReasonSaved(focus));
 			};
 
+			// 某行快捷工具的**当前**回落值（只有 auto 时可能非空）。与 quickRow 里那段
+			// 内联取法同源 —— 抽成函数是因为 changeQuick 也要用它判编辑态，
+			// 而 qAf 是 quickRow 的局部变量，在 changeQuick 的作用域里拿不到。
+			const quickAutoFallbackOf = (tool) => {
+				const key = tab === 'global' ? 'g' : 'p';
+				const m = status && status.quickTools ? (key === 'g' ? status.quickTools.global : status.quickTools.project) : null;
+				const e = m && m[tool];
+				return e && typeof e === 'object' ? e.autoFallback : null;
+			};
 			const changeQuick = (tool) => (e) => {
 				const mode = e.target.value;
 				const key = tab === 'global' ? 'g' : 'p';
 				setQuickSel(Object.assign({}, quickSel, { [tool]: Object.assign({}, quickSel[tool], { [key]: mode }) }));
-				// 同 changeCat：切离 deny 时作废该格的编辑态（只作废这一格，不动别的行）
-				if (mode !== 'deny') exitEditOf('quick', tool);
+				// 同 changeCat：切离「最终会拒绝」时作废该格的编辑态（只作废这一格，不动别的行）。
+				// 判据用 finalActionOf：`auto + 回落 deny` 时理由框仍在，不该被这里关掉。
+				if (finalActionOf(mode, quickAutoFallbackOf(tool)) !== 'deny') exitEditOf('quick', tool);
 				invoke('permgate:set-quick', { target: tab, tool, action: mode });
 			};
 
@@ -4231,7 +4269,7 @@ window.__ModuleLoader__.load({
 					target: tab,
 					tool: String(newTool).trim(),
 					action: newToolAction,
-					reason: newToolAction === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
+					reason: finalActionOf(newToolAction, null) === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
 				}, () => {
 					setNewTool(''); setNewToolReason('');
 					// 清过滤器 + 滚到底部（用户定）：新加的条目排在最末，而过滤器可能正遮着它
@@ -4261,9 +4299,11 @@ window.__ModuleLoader__.load({
 					category: c,
 					match: v,
 					action: f.action,
-					// 只有 deny 会带拒绝原因（回给 AI），只有 ask 会带备注（显示在弹窗上供日后回看）
-					reason: f.action === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined,
-					note: f.action === 'ask' ? (String(f.note || '').trim() || undefined) : undefined,
+					// 只有**最终会拒绝**才带拒绝原因（回给 AI），只有**最终会询问**才带备注
+					// （显示在弹窗上供日后回看）。判据是 finalActionOf，与宿主的存留判据同源。
+					// 新增行没有回落值输入框，故 auto 的回落值按缺省 ask 参与判断。
+					reason: finalActionOf(f.action, f.autoFallback) === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined,
+					note: finalActionOf(f.action, f.autoFallback) === 'ask' ? (String(f.note || '').trim() || undefined) : undefined,
 				}, () => {
 					// 清过滤器 + 滚到底部（同 addQuick 的理由）。都**只作用于本分类**：
 					// 清全部会把用户在别的分类输的过滤词一并抹掉（他可能正靠着那个词找东西）；
@@ -4700,6 +4740,20 @@ window.__ModuleLoader__.load({
 			// 该层某档当前的**动作**（含未配置时的推导默认值）。状态点与下拉框共用，
 			// 两处取值必须同源 —— 各算一次的话，点的颜色可能与下拉框里的字不一致。
 			const subActionOf = (tier) => (subDestructive[tab] || {})[tier] || (tab === 'project' ? 'inherit' : 'ask');
+			// 该档的**生效回落值**（宿主下发，只有该档是 auto 时才可能非空）。
+			// 项目 tab 取 `effective.autoFallbacks`（按当前项目算，含穿透全局的结果），
+			// 全局 tab 取 `globalAutoFallbacks`（全局层单独解析）—— 与 `effOf` 的分派
+			// 完全同源，理由同 globalEffectiveProbe：全局 tab 不能用按当前项目算的值。
+			//
+			// 项目 tab 显示的是 `inherit` 时（本层未表态），回落值必须取**穿透后**的生效值
+			// —— 因为裁决确实会用全局那一档的回落值，面板的判据也得跟着走。
+			const subAutoFallbackOf = (tier) => {
+				const cs = status && status.commandSub;
+				if (!cs) return null;
+				const m = tab === 'global' ? cs.globalAutoFallbacks : cs.autoFallbacks;
+				const v = m ? m[tier] : null;
+				return v === 'allow' || v === 'deny' ? v : 'ask';
+			};
 			// 折叠摘要**由实际生效值生成**，不能写死「均为询问」（§7.4）。
 			//
 			// | 情形 | 摘要 |
@@ -4753,9 +4807,11 @@ window.__ModuleLoader__.load({
 			const subTierRow = (m, dim) => {
 				const tier = m.t
 				const action = subActionOf(tier)
-				// 理由框的显示条件是**该档**为 deny（不是整层为 deny）。
-				// 实际不会同时出现 8 个框（只有 deny 的档才有），通常 1~3 个。
-				const showReason = action === 'deny'
+				// 理由框的显示条件是**该档最终会拒绝**（不是 `action === 'deny'`）——
+				// `auto + 回落 deny` 在执行侧就是一次拒绝，宿主也会存它的理由，
+				// 面板必须给框（否则用户根本写不了）。判据见 finalActionOf 的注释。
+				// 实际不会同时出现 8 个框（只有会拒绝的档才有），通常 1~3 个。
+				const showReason = finalActionOf(action, subAutoFallbackOf(tier)) === 'deny'
 				const label = m.label ? T(m.label) : tier
 				// 悬浮给**完整判据**（行内标签是短的，判据是长的 —— 见 i18n 处的说明）。
 				const hint = m.hint ? T(m.hint) : label
@@ -4892,7 +4948,9 @@ window.__ModuleLoader__.load({
 								catReasons[tab] ? catReasons[tab].command : '',
 								(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { command: e.target.value }) })),
 								commitCatReason('command'),
-								mode === 'deny',
+								// 分类默认值最终会拒绝时才有拒绝原因（`auto + 回落 deny` 也算，
+								// 判据见 finalActionOf 的注释）。
+								finalActionOf(mode, catAutoFallbackOf('command')) === 'deny',
 								{ kind: 'cat', tab: tab, key: 'command' },
 								// 取消：把草稿还原成服务端当前值（不是清空 —— 用户可能只是改错了想放弃）
 								() => revertReason('cat', 'command'),
@@ -5237,12 +5295,13 @@ window.__ModuleLoader__.load({
 						: React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 							React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, catLabel(c)),
 							React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-								// 分类默认值为「拒绝」时才有拒绝原因：该分类被拒时它会回给 AI
+								// 分类默认值**最终会拒绝**时才有拒绝原因：该分类被拒时它会回给 AI。
+								// 判据是 finalActionOf（`auto + 回落 deny` 同样会拒绝），见其注释。
 								reasonInput(
 									catReasons[tab] ? catReasons[tab][c] : '',
 									(e) => setCatReasons(Object.assign({}, catReasons, { [tab]: Object.assign({}, catReasons[tab], { [c]: e.target.value }) })),
 									commitCatReason(c),
-									mode === 'deny',
+									finalActionOf(mode, catAutoFallbackOf(c)) === 'deny',
 									{ kind: 'cat', tab: tab, key: c },
 									// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
 									() => revertReason('cat', c),
@@ -5313,8 +5372,9 @@ window.__ModuleLoader__.load({
 										// 实测反馈「风格不统一，且如果例外过长就看不到了」。
 										// 换成同一个组件后，样式由构造保证一致，宽度也回到文字量级。
 										//
-										// 按动作二选一：deny 显示「拒绝原因」、ask 显示「备注」、
-										// allow 都不显示（放行的调用不再弹窗，写了也读不到，宿主会丢弃）。
+										// 按**最终动作**二选一：会拒绝的显示「拒绝原因」、会询问的显示「备注」、
+										// 其余都不显示（放行的调用不再弹窗，写了也读不到，宿主会丢弃）。
+										// 判据是 finalActionOf（`auto + 回落 deny` 在执行侧就是拒绝）。
 										// 与下方「添加例外」那排输入框同规则。
 										//
 										// focus 里带 category / field / cur：
@@ -5481,8 +5541,11 @@ window.__ModuleLoader__.load({
 												// 的观感完全不同（实测反馈「？」）。
 												// quickRow 里那条注释讲的是同一件事的反面：原因插在下拉前面会把
 												// 下拉整体右推，只有选「拒绝」的行会漂，看起来就是位置漂移。
-												act === 'deny' ? reasonSlot('reason') : null,
-												act === 'ask' ? reasonSlot('note') : null,
+												//
+												// 判据是**最终动作**（finalActionOf）：`auto + 回落 deny` 在执行侧
+												// 就是拒绝，宿主会存它的 reason，面板必须给框；`auto + 回落 ask` 反之。
+												finalActionOf(act, r.autoFallback) === 'deny' ? reasonSlot('reason') : null,
+												finalActionOf(act, r.autoFallback) === 'ask' ? reasonSlot('note') : null,
 												moveButtons(ui),
 												// 编辑：进入整行编辑态（模式 / 原因 / 备注）
 												// 按钮文案**必须与原因格的「编辑」区分开**：同一行里现在有两个可编辑的
@@ -5554,6 +5617,9 @@ window.__ModuleLoader__.load({
 				const isPreset = QUICK_PRESET.indexOf(t) !== -1;
 				const hasKey = key === 'g' ? hasOwnKey(gqMap, t) : hasOwnKey(pqMap, t);
 				const desc = quickDesc(t);
+				// 该行的回落值（快捷工具面板**没有**回落值选择器，故它只可能来自手改配置）。
+				// 取法收敛在 quickAutoFallbackOf（changeQuick 判编辑态时也要用同一份）。
+				const qAf = quickAutoFallbackOf(t);
 				return React.createElement('div', { key: t, style: rowStyle },
 					React.createElement('span', { style: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 260 } },
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13 } }, t),
@@ -5567,7 +5633,9 @@ window.__ModuleLoader__.load({
 						quickReason[t] ? quickReason[t][key] : '',
 						(e) => setQuickReason(Object.assign({}, quickReason, { [t]: Object.assign({}, quickReason[t], { [key]: e.target.value }) })),
 						commitQuickReason(t),
-						mode === 'deny',
+						// 判据是**最终动作**（finalActionOf）：`auto + 回落 deny` 在执行侧就是拒绝，
+						// 宿主会存它的 reason，面板必须给框；`auto + 回落 ask/allow` 反之。
+						finalActionOf(mode, qAf) === 'deny',
 						{ kind: 'quick', tab: tab, key: t },
 						// 取消：还原成服务端当前值
 						() => revertReason('quick', t),
@@ -5626,21 +5694,35 @@ window.__ModuleLoader__.load({
 			const sandboxLabel = (m) => (m === 'workspace-write' ? T('sandbox.ww') : m === 'danger-full-access' ? T('sandbox.fa') : T('sandbox.inherit'));
 			const sandboxVal = tab === 'global' ? sandbox.global : sandbox.project;
 			const fbVal = status && status.fallback ? (tab === 'global' ? status.fallback.global : status.fallback.project) : (tab === 'global' ? 'ask' : 'inherit');
+			// 兜底的回落值（兜底面板**没有**回落值选择器，故它只可能来自手改配置）。
+			// 项目层 `inherit` 时取全局值（裁决确实会穿透），与 fallbackSetting 同源。
+			const fbAutoFallbackOf = () => {
+				const fb = status && status.fallback;
+				if (!fb) return null;
+				const v = tab === 'global' ? fb.globalAutoFallback : (fb.projectAutoFallback || fb.globalAutoFallback);
+				return v === 'allow' || v === 'deny' ? v : 'ask';
+			};
+			// 兜底最终会拒绝 → 才显示拒绝原因框（`auto + 回落 deny` 也算，判据见 finalActionOf）
+			const fbShowReason = finalActionOf(fbVal, fbAutoFallbackOf()) === 'deny';
 			const changeFallback = (e) => {
 				const mode = e.target.value;
-				// 同 changeCat：切离 deny 时作废该格的编辑态（兜底每层只有一个键，按格等价于按 tab）
-				if (mode !== 'deny') exitEditOf('fb', null);
+				// 同 changeCat：切离「最终会拒绝」时作废该格的编辑态（兜底每层只有一个键，按格等价于按 tab）
+				if (finalActionOf(mode, fbAutoFallbackOf()) !== 'deny') exitEditOf('fb', null);
 				invoke('permgate:set-fallback', { target: tab, mode }, () => setMsg(T('panel.fallbackSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{v}', modeLabel(mode))));
 			};
-			// 兜底拒绝原因保存（仅兜底为 deny 时该控件可见）
+			// 兜底拒绝原因保存（仅兜底最终会拒绝时该控件可见）
 			// 同 commitCatReason：空串是「显式清除」，不可折叠成 undefined（那会变成「保留原值」）
 			const commitFbReason = (focus) => {
-				if (fbVal !== 'deny') return;
+				if (!fbShowReason) return;
 				const v = fbReason[tab];
 				const prev = tab === 'global' ? (status && status.fallback && status.fallback.globalReason) : (status && status.fallback && status.fallback.projectReason);
 				if ((v || '') === (prev || '')) return;
-				// 同 commitCatReason：对勾只在写盘成功后亮
-				invoke('permgate:set-fallback', { target: tab, mode: 'deny', reason: v }, () => markReasonSaved(focus));
+				// 同 commitCatReason：对勾只在写盘成功后亮。
+				//
+				// ⚠️ mode 必须传**当前兜底动作**而不是硬编码 'deny'：兜底是 `auto + 回落 deny`
+				// 时该框同样可见，若这里写 'deny' 就会把用户的 auto 设置**静默改成 deny**
+				// —— 模型判断那一步被一次「改原因」抹掉。
+				invoke('permgate:set-fallback', { target: tab, mode: fbVal, reason: v }, () => markReasonSaved(focus));
 			};
 			const sandboxOptions = tab === 'global' ? ['workspace-write', 'danger-full-access'] : ['workspace-write', 'danger-full-access', 'inherit'];
 			const changeSandbox = (e) => {
@@ -5749,11 +5831,13 @@ window.__ModuleLoader__.load({
 						sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy),
 						// 新增行选「拒绝」时同样给原因输入框，与已存在的行保持一致。
 						// 提交回调传 null：新增行没有独立的保存动作，原因随「添加」按钮一并下发。
+						// 判据用 finalActionOf 而非 `=== 'deny'`：新增行没有回落值输入框，
+						// 若选了 auto，按缺省 ask 参与判断（与宿主的缺省同源）。
 						reasonInput(
 							newToolReason,
 							(e) => setNewToolReason(e.target.value),
 							null,
-							newToolAction === 'deny',
+							finalActionOf(newToolAction, null) === 'deny',
 							null,
 						),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: addQuick }, T('panel.quickAddBtn')),
@@ -5793,12 +5877,13 @@ window.__ModuleLoader__.load({
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 } },
 						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.fallback')),
 						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-							// 兜底为「拒绝」时才有拒绝原因：未匹配任何规则的调用被拒时回给 AI
+							// 兜底**最终会拒绝**时才有拒绝原因：未匹配任何规则的调用被拒时回给 AI。
+							// 判据是 finalActionOf（`auto + 回落 deny` 同样会拒绝），见其注释。
 							reasonInput(
 								fbReason[tab],
 								(e) => setFbReason(Object.assign({}, fbReason, { [tab]: e.target.value })),
 								commitFbReason,
-								fbVal === 'deny',
+								fbShowReason,
 								{ kind: 'fb', tab: tab, key: null },
 								// 取消：还原成服务端当前值
 								() => revertReason('fb', null),

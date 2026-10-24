@@ -9274,47 +9274,62 @@ export function assessCommand(source, shell, hooks) {
    */
   const tierVerdict = (ds, tiers) => {
     const action = strictestTierAction(ds, tiers)
+    // 决定动作的那一档（动作就是它定的，回落值与理由都**先取它**）
+    const t = ds ? decisiveTierOf(ds, tiers) : null
     // ── auto：回落值与动作**同源**取用 ──────────────────────────────────────────
-    // 与下面 deny 取理由的顺位完全同构：先取**决定动作的那一档**（动作就是它定的），
-    // 取不到再按 `TIER_RANK` 试并列档。不跨严格度取 —— 更松的档本来就不是 auto，
-    // 它的回落值不属于这次裁决（否则 wide 是 auto、inside 是 ask 时，会把 wide 的
-    // 回落值安到一次由 inside 决定的裁决上）。
+    // 与下面取理由的顺位完全同构：先取决定动作的那一档，取不到再按 `TIER_RANK` 试并列档。
+    // 不跨严格度取 —— 更松的档本来就不是 auto，它的回落值不属于这次裁决（否则 wide 是
+    // auto、inside 是 ask 时，会把 wide 的回落值安到一次由 inside 决定的裁决上）。
     // 缺省 ask：与 index.js 的 normalizeAutoFallback 同源（模型失败后问人，方向安全）。
+    let autoFallback = null
     if (action === 'auto' && ds) {
       const afs = (ds.autoFallbacks && typeof ds.autoFallbacks === 'object') ? ds.autoFallbacks : null
-      const afOfTier = (t) => {
-        const v = (t && afs) ? afs[t] : null
+      const afOfTier = (u) => {
+        const v = (u && afs) ? afs[u] : null
         return (v === 'ask' || v === 'allow' || v === 'deny') ? v : null
       }
-      const t = decisiveTierOf(ds, tiers)
       const v = t ? afOfTier(t) : null
-      if (v) return { action, reason: null, autoFallback: v }
-      const rank = TIER_STRICTNESS[action]
-      const same = []
-      for (const u of (Array.isArray(tiers) ? tiers : [])) {
-        if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
+      if (v) autoFallback = v
+      else {
+        const rank = TIER_STRICTNESS[action]
+        const same = []
+        for (const u of (Array.isArray(tiers) ? tiers : [])) {
+          if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
+        }
+        sortTiersByRank(same)
+        for (const u of same) {
+          const vu = afOfTier(u)
+          if (vu) { autoFallback = vu; break }
+        }
+        if (!autoFallback) autoFallback = 'ask'
       }
-      sortTiersByRank(same)
-      for (const u of same) {
-        const vu = afOfTier(u)
-        if (vu) return { action, reason: null, autoFallback: vu }
-      }
-      return { action, reason: null, autoFallback: 'ask' }
     }
-    if (action === 'deny' && ds) {
+    // ── 拒绝理由：判据是「**最终**会执行哪个动作」，不是「第一层动作是什么」──────────
+    // `auto` 是两层的（action + autoFallback），而 `auto + 回落 deny` 在执行侧就是一次
+    // 拒绝 —— 与裸 `deny` 走同一条 kind:'deny' 通道回给 AI。此前这里只判
+    // `action === 'deny'`，于是那一支的 `reasons[tier]` **永远取不到**：用户给某一档配了
+    // 「自动审批、失败后拒绝」并写了理由，AI 收到的却是空的。
+    //
+    // 这与 index.js 的 finalActionOf 是同一条判据的两个实现（宿主与解析器分处两个模块、
+    // 无法共用函数），改一处必须同步改另一处。
+    const finalAction = action === 'auto' ? (autoFallback || 'ask') : action
+    if (finalAction === 'deny' && ds) {
       const reasons = ds.reasons
-      const reasonOfTier = (t) => {
-        const r = (t && reasons && typeof reasons === 'object') ? reasons[t] : null
+      const reasonOfTier = (u) => {
+        const r = (u && reasons && typeof reasons === 'object') ? reasons[u] : null
         if (r) return r
         // 旧契约的裸 `reason` 字符串 → `inside` 档的兜底（见 tierTableOf 与宿主的读取侧）
-        return t === 'inside' ? (ds.reason || null) : null
+        return u === 'inside' ? (ds.reason || null) : null
       }
       // 第一顺位：决定动作的那一档（动作就是它定的，理由理应先取它）
-      const t = decisiveTierOf(ds, tiers)
       const r = t ? reasonOfTier(t) : null
-      if (r) return { action, reason: r }
-      // 第二顺位：与它**并列在最严档**上的其余命中档，按 `TIER_RANK` 的次序逐个试
-      const rank = TIER_STRICTNESS[action]
+      if (r) return { action, reason: r, autoFallback }
+      // 第二顺位：与它**并列在最严档**上的其余命中档，按 `TIER_RANK` 的次序逐个试。
+      //
+      // 并列的判据用「决定动作那一档的动作严格度」而不是 `TIER_STRICTNESS[action]`：
+      // action 可能是 auto（严格度 1），而最终动作是 deny —— 用 action 的严格度去比，
+      // 会把 ask 档也当成并列（ask 与 auto 同为 1），把**没在拒绝的档**的理由取出来。
+      const rank = t ? TIER_STRICTNESS[ds[t]] : TIER_STRICTNESS[finalAction]
       const same = []
       for (const u of (Array.isArray(tiers) ? tiers : [])) {
         if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
@@ -9327,10 +9342,10 @@ export function assessCommand(source, shell, hooks) {
       sortTiersByRank(same)
       for (const u of same) {
         const ru = reasonOfTier(u)
-        if (ru) return { action, reason: ru }
+        if (ru) return { action, reason: ru, autoFallback }
       }
     }
-    return { action, reason: null }
+    return { action, reason: null, autoFallback }
   }
   const base = (action, code, reason, ruleId) => ({
     action,
@@ -9761,10 +9776,16 @@ export function assessCommand(source, shell, hooks) {
         reason = c.reason
       }
     }
-    // 拒绝理由只在 deny 时下发：allow 不弹窗用不上，ask 有自己的备注。
-    // 这与 normalizeCategory / normalizeException 的存储侧口径一致（那边只在 deny 时存 reason），
-    // 这里是第二道闸 —— 存储侧的口径不该是唯一的保证。
-    if (action !== 'deny') reason = null
+    // 拒绝理由只在**最终会拒绝**时下发：allow 不弹窗用不上，ask 有自己的备注。
+    // 这与 normalizeCategory / normalizeException 的存储侧口径一致（那边只在
+    // `finalActionOf(...) === 'deny'` 时存 reason），这里是第二道闸 —— 存储侧的口径
+    // 不该是唯一的保证。
+    //
+    // 判据是**最终动作**而不是第一层动作：`auto + 回落 deny` 在执行侧就是一次拒绝
+    // （同一条 kind:'deny' 通道回给 AI），它的 reasons[tier] 必须留下。
+    // 此前这里写 `action !== 'deny'`，那一支的理由被这一行**当场清空**。
+    const finalAction = action === 'auto' ? (autoFallback || 'ask') : action
+    if (finalAction !== 'deny') reason = null
 
     // 段级 code 仅供弹窗展示与决策日志（不参与动作选择）。
     // 优先级：确定的危险（label 精确命中名单）> 读不懂 > 写向工作区外。

@@ -10124,6 +10124,35 @@ group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 
     if (allAllow.action !== 'allow') bad.push(['无 auto 段的普通命令被误判为 auto', allAllow.action])
     ok('★★ AG auto 的严格度表 + 段间合并 + 回落值带出（4 条 fail-open 路径）',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+    // ⑧ `auto + 回落 deny` 的 reasons[tier] 必须能读出来（拒绝理由要回给 AI）
+    //
+    // 判据是**最终动作**而不是第一层动作：`auto + 回落 deny` 在执行侧与裸 `deny` 完全同形
+    // （同一条 kind:'deny' 通道回给 AI）。此前这里只判 `action === 'deny'`，那一支的
+    // reasons[tier] 被 `if (action !== 'deny') reason = null` 当场清空 ——
+    // 用户给某一档配了「自动审批、失败后拒绝」并写了理由，AI 收到的却是空的。
+    //
+    // 与 index.js 的 finalActionOf 是同一条判据的两个实现（宿主与解析器分处两个模块），
+    // 改一处必须同步改另一处 —— 这条断言就是那条纪律的守卫。
+    const bad2 = []
+    // 钩子契约：**不带 `action` 的档位表**直接原样使用（见 tierTableOf）；
+    // 带 `action` 的会被当成旧契约展开成八档同值，逐档 reasons 会被丢弃。
+    // 档位：`rm -rf /data` 只命中 `inside` 档（实测 tiers === ['inside']），故用 inside 键。
+    const denyAfHook = () => ({ inside: 'auto', autoFallbacks: { inside: 'deny' }, reasons: { inside: '删数据目录' } })
+    const r8 = assessCommand('rm -rf /data', 'bash', { destructive: denyAfHook, category: () => ({ action: 'allow' }) })
+    if (r8.action !== 'auto') bad2.push(['子设置给 auto 时整条命令不是 auto', r8.action])
+    if (r8.autoFallback !== 'deny') bad2.push(['回落值没带出', String(r8.autoFallback)])
+    if (r8.reason !== '删数据目录') bad2.push(['auto+回落 deny 的 reasons[tier] 被清空了（理由丢给 AI）', String(r8.reason)])
+    // 反例：回落 ask 时理由**不该**留下（该档不会拒绝，理由读不到）
+    const askAfHook = () => ({ inside: 'auto', autoFallbacks: { inside: 'ask' }, reasons: { inside: '不该留' } })
+    const r9 = assessCommand('rm -rf /data', 'bash', { destructive: askAfHook, category: () => ({ action: 'allow' }) })
+    if (r9.action !== 'auto') bad2.push(['反例场景动作不是 auto', r9.action])
+    if (r9.reason) bad2.push(['auto+回落 ask 时理由不该留下', String(r9.reason)])
+    // 反例对照（防空转）：裸 deny + 理由仍必须读得出
+    const denyHook = () => ({ inside: 'deny', reasons: { inside: '删数据目录' } })
+    const r10 = assessCommand('rm -rf /data', 'bash', { destructive: denyHook, category: () => ({ action: 'allow' }) })
+    if (r10.reason !== '删数据目录') bad2.push(['裸 deny 的 reasons[tier] 读不出（既有行为回归）', String(r10.reason)])
+    ok('★★ AH auto+回落 deny 的 reasons[tier] 读得出（判据看最终动作，不看第一层）',
+      bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
   }
 }
 
