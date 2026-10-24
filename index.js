@@ -2254,7 +2254,7 @@ export default {
     // 快捷工具写入单点（设置页面板路由与弹窗「记住此决定」共用）。
     // action=inherit 表示删除该键（回落到下一级：全局键 → 预设默认 → 兜底）。
     // reason 语义与 setCategoryMode 一致：未提供（undefined）保留该键原有原因、空串显式清除、有内容覆盖。
-    function setQuickAction(root, targetKey, tool, action, reason) {
+    function setQuickAction(root, targetKey, tool, action, reason, autoFallback) {
       if (ALL_MODES.indexOf(action) === -1) return false
       const block = targetKey === 'project' ? ensureProject(root) : config.global
       if (!block.quickTools) block.quickTools = {}
@@ -2267,7 +2267,10 @@ export default {
       // 「只动这一档」同一条纪律。动作切离 auto 时按 normalizeAutoFallback 的口径不保留。
       const prev = block.quickTools[tool]
       const prevObj = prev && typeof prev === 'object' ? prev : null
-      const af = normalizeAutoFallback(prevObj ? prevObj.autoFallback : undefined, action)
+      // 回落值：显式传入优先（面板改回落值时走这里），否则保留已有值。
+      // 只在动作是 auto 时才落键（normalizeAutoFallback 对非 auto 返回 undefined）。
+      const req = autoFallback === 'ask' || autoFallback === 'allow' || autoFallback === 'deny' ? autoFallback : undefined
+      const af = normalizeAutoFallback(req !== undefined ? req : (prevObj ? prevObj.autoFallback : undefined), action)
       const next = { action }
       if (af !== undefined) next.autoFallback = af
       // 判据是 finalActionOf（`auto + 回落 deny` 在执行侧就是拒绝，理由必须能存）
@@ -2385,7 +2388,7 @@ export default {
       return fallbackSetting(root).mode
     }
 
-    function setFallbackMode(root, targetKey, mode, reason) {
+    function setFallbackMode(root, targetKey, mode, reason, autoFallback) {
       const allowed = targetKey === 'global' ? MODES : ALL_MODES
       if (allowed.indexOf(mode) === -1) return false
       const block = targetKey === 'global' ? config.global : ensureProject(root)
@@ -2395,8 +2398,10 @@ export default {
       //
       // 兜底的回落值同样要跟着动作走：切进 auto 时若还没有值就补 'ask'（与
       // setCategoryMode 同一条理由 —— 面板下发的值必须与磁盘一致），切离 auto 时删掉。
+      // 显式传入的 autoFallback 优先（面板改回落值时走这里），否则保留已有值。
       if (mode === 'auto') {
-        if (block.fallbackAutoFallback !== 'allow' && block.fallbackAutoFallback !== 'deny') block.fallbackAutoFallback = 'ask'
+        const req = autoFallback === 'ask' || autoFallback === 'allow' || autoFallback === 'deny' ? autoFallback : null
+        block.fallbackAutoFallback = req || (block.fallbackAutoFallback === 'allow' || block.fallbackAutoFallback === 'deny' ? block.fallbackAutoFallback : 'ask')
       } else {
         delete block.fallbackAutoFallback
       }
@@ -7224,13 +7229,21 @@ export default {
       // reason / note 直接复用 normalizeText（trim + 截断 200 + 非字符串丢弃），与 normalizeException
       // 同一份实现：否则同一请求会先经 normalizeException 校验、再经这里落盘，两份口径一旦分叉，
       // 就会出现「校验认为没有 reason、落盘却写了 reason」的不一致。
-      // 两者按动作各归其位：reason 只随 deny、note 只随 ask（allow 放行后不再弹窗，都存不下）。
-      const reason = decision === 'deny' ? normalizeText(o.reason) : undefined
-      const note = decision === 'ask' ? normalizeText(o.note) : undefined
+      //
+      // 判据是 **finalActionOf**（不是 `decision === 'deny'`）：`auto + 回落 deny` 在执行侧
+      // 就是一次拒绝，它的 reason 必须能存；`auto + 回落 ask` 会弹窗，note 必须能存。
+      // 这里是 `addProjectException` 这一条写入路径 —— 与 normalizeException / setExceptionEntry
+      // 等处**同一条判据**，此前只有这里漏改（它是唯一不经 normalizeException 的例外写入）。
+      const fin = finalActionOf(decision, o.autoFallback)
+      const reason = fin === 'deny' ? normalizeText(o.reason) : undefined
+      const note = fin === 'ask' ? normalizeText(o.note) : undefined
+      // 回落值：只在动作是 auto 时保留（与 normalizeAutoFallback 同口径）
+      const af = normalizeAutoFallback(o.autoFallback, decision)
       // 回写既有条目时用的字段补丁（同向去重命中后要把新文字写回去）
       const textPatch = (hit) => {
         if (reason) hit.reason = reason
         if (note) hit.note = note
+        if (af !== undefined) hit.autoFallback = af
         return hit
       }
       // 新条目**追加到数组末尾**（用户定）：顺序即优先级，新加的排最后，
@@ -7253,7 +7266,7 @@ export default {
       //
       // 同方向重复写入仍然跳过并返回既有条目（去重逻辑不变，只是不再提到头部）：
       // 否则同一决定会在列表里堆积成一串。
-      const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {}, note ? { note } : {})
+      const build = (extra) => Object.assign({ id: 'e' + Math.random().toString(36).slice(2, 8), action: decision }, extra, reason ? { reason } : {}, note ? { note } : {}, af !== undefined ? { autoFallback: af } : {})
       try {
         const block = target === 'global' ? config.global : ensureProject(rootKey)
         if (kind === 'path' && cat && cat !== 'command' && EXC_CATS.indexOf(cat) !== -1) {
@@ -7387,6 +7400,9 @@ export default {
       // 这里不自己写一遍 —— 两处各写一遍必然漂移。
       if (patch.reason !== undefined) next.reason = patch.reason
       if (patch.note !== undefined) next.note = patch.note
+      // auto 的回落值：同上（undefined = 保留原值）。值域校验交给 normalizeAutoFallback，
+      // 它对该条不是 auto 时返回 undefined → 键被丢弃，这正是想要的（存了也读不到）。
+      if (patch.autoFallback !== undefined) next.autoFallback = patch.autoFallback
       const normalized = normalizeException(next, catKey)
       if (!normalized) return { ok: false, reason: '非法的例外参数' }
       // **就地替换**（保 id、保下标）：splice 而不是 push，顺序即优先级。
@@ -8657,7 +8673,7 @@ export default {
         if (pathname === '/permgate/set-fallback' && method === 'POST') {
           await init(exec)
           const target = normTarget(a)
-          if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
+          if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason, a.autoFallback)) return json(res, { error: '非法兜底参数: target=' + target + ' mode=' + a.mode })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -8750,7 +8766,7 @@ export default {
           await init(exec)
           const target = normTarget(a)
           if (!a.tool || !String(a.tool)) return json(res, { error: 'tool 不能为空' })
-          if (!setQuickAction(rootOf(exec), target, a.tool, a.action, a.reason)) return json(res, { error: '非法动作' })
+          if (!setQuickAction(rootOf(exec), target, a.tool, a.action, a.reason, a.autoFallback)) return json(res, { error: '非法动作' })
           await persist(exec)
           return json(res, statusView(exec))
         }
@@ -8763,7 +8779,7 @@ export default {
           // 例外写入统一走 addProjectException：与候选写入共用「同方向不重复、新条目追加到末尾」的语义。
           // 顺序即优先级（resolveCategory 首条命中即生效），而面板可拖动/上下移调整 ——
           // 新加的排最后，用户自己把它调到想要的优先级（与规则列表同一套语义）。
-          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, rootOf(exec), { target: a.target, reason: a.reason, note: a.note })
+          const written = addProjectException(a.category, a.category === 'command' ? 'command' : 'path', a.match, a.action, rootOf(exec), { target: a.target, reason: a.reason, note: a.note, autoFallback: a.autoFallback })
           if (!written) return json(res, { error: '例外未写入：分类/参数不支持' })
           await persist(exec)
           return json(res, { added: written, status: statusView(exec) })
@@ -8778,6 +8794,7 @@ export default {
           if (a.value !== undefined) patch.value = a.value
           if (a.reason !== undefined) patch.reason = a.reason
           if (a.note !== undefined) patch.note = a.note
+          if (a.autoFallback !== undefined) patch.autoFallback = a.autoFallback
           const r = setExceptionEntry(block, a.category, a.id, patch)
           // 失败一律回 `{ error }`（与其它写盘路由同形），**不用** `{ ok:false, reason }`：
           // 客户端对写盘端点已有一条统一的错误链（error → saveError → applyStatus），

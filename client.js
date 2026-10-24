@@ -1633,6 +1633,10 @@ window.__ModuleLoader__.load({
 				'mode.auto': '自动审批',
 				// 「模型失败后执行什么」的标签（仅在动作是 auto 时出现在下拉框左侧）
 				'panel.autoFallbackLabel': '失败后：',
+				// 新增行（「添加例外」「添加快捷工具」那两排）的回落值只读提示：
+				// 那里还没有已存在的条目可写，故不给下拉，但必须显示「失败后会怎样」——
+				// 否则用户选了自动审批却看不到落点，而提交时用的正是那个隐含值。
+				'panel.autoFallbackReadonlyHint': '新增条目暂不可设回落值，将按缺省「询问」处理；添加后可在列表中修改',
 				// ── 自动审批的工程参数卡片 ──────────────────────────────────────
 				'panel.autoReview': '自动审批',
 				'panel.autoReviewHint': '把某个分类设成「自动审批」后，每次调用先问模型，模型说行就直接过。下面这些是它的运行参数，全局生效。',
@@ -2059,6 +2063,7 @@ window.__ModuleLoader__.load({
 				'mode.inherit': 'Inherit global',
 				'mode.auto': 'Auto review',
 				'panel.autoFallbackLabel': 'if it fails:',
+				'panel.autoFallbackReadonlyHint': 'Fallback cannot be set for a new entry yet; it defaults to Ask. You can change it in the list after adding.',
 				'panel.autoReview': 'Auto review',
 				'panel.autoReviewHint': 'When a category is set to Auto review, each call is checked by a model first. These are its runtime settings, global to all projects.',
 				'panel.autoNoLlm': 'No model service is available. Every Auto review call will fall back to the action you chose.',
@@ -3483,7 +3488,7 @@ window.__ModuleLoader__.load({
 			// #region ex-form-state —— 例外添加行的取值/写入单点。test/regressions.mjs 按这对标记
 			// 抠出下面三行做行为复算（按分类改一处、别处不得被连带改写；两处默认值必须同源）。
 			// 改动请保持在区块内：标记被删或代码移出区块，该测试会直接报出可读的失败。
-			const exDefault = () => ({ action: 'allow', reason: '', note: '' });
+			const exDefault = () => ({ action: 'allow', reason: '', note: '', autoFallback: 'ask' });
 			const exOf = (c) => exForm[c] || exDefault();
 			const setExField = (c, patch) => setExForm((prev) => Object.assign({}, prev, { [c]: Object.assign({}, prev[c] || exDefault(), patch) }));
 			// #endregion ex-form-state
@@ -3513,6 +3518,8 @@ window.__ModuleLoader__.load({
 			// 新增快捷工具行的拒绝原因：与例外的新增行同构（选「拒绝」才出现输入框），
 			// 否则用户为新增行选了拒绝却无处填写原因，只能先添加、再到该行上补填。
 			const [newToolReason, setNewToolReason] = React.useState('');
+			// 新增快捷工具行的回落值：与已存在行同构（仅动作是 auto 时出现）。
+			const [newToolAutoFallback, setNewToolAutoFallback] = React.useState('ask');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
 			const [confirm, setConfirm] = React.useState(null);
 			// 一次性提示（非阻塞）：目前用于「大分类与破坏性子设置的严格度不一致」。
@@ -4181,14 +4188,18 @@ window.__ModuleLoader__.load({
 				setSubDestructive(Object.assign({}, subDestructive, {
 					[tab]: Object.assign({}, subDestructive[tab], { [tier]: action }),
 				}));
-				// 与 changeCat 同：切离 deny 时作废**该档**的编辑态（控件会被卸载）
-				if (action !== 'deny') exitEditOf('sub', tier);
+				// 与 changeCat 同：切离「最终会拒绝」时作废**该档**的编辑态（控件会被卸载）。
+				// 判据用 finalActionOf：`auto + 回落 deny` 时理由框仍在，不该被这里关掉。
+				if (finalActionOf(action, subAutoFallbackOf(tier)) !== 'deny') exitEditOf('sub', tier);
 				invoke('permgate:set-command-sub', { target: tab, tier: tier, action }, () => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 				// 反向也要提示：用户刚把子设置放松到大分类之下（同一个不协调，两个方向都会出现）。
 				// 传 action（本次新值），不读 state —— 见 warnSubMismatch 的说明。
 				// 档位名一并传：文案要点名是哪一档（八档之后「子设置是「允许」」会被误读成整层）。
 				warnSubMismatch(cats[tab] ? cats[tab].command : undefined, action, subTierLabelOf(tier));
 			};
+
+			// 子设置的**回落值**写入单点见下方 changeSubAutoFallback（紧邻 subActionOf /
+			// subAutoFallbackOf —— 它要用这两个取值函数，放在一起才能一眼看出同源）。
 
 			// 子设置拒绝原因的保存单点。空串必须原样下发（宿主把空串定义为显式清除、
 			// undefined 定义为保留原值），与 commitCatReason 完全同口径。
@@ -4200,30 +4211,37 @@ window.__ModuleLoader__.load({
 			// 八档之后这个请求必须带 `tier`，否则它会写到**缺省档**（`inside`）——
 			// 即「用户改 `wide` 的理由，把 `inside` 的动作改成了 deny」。
 			//
-			// `action: 'deny'` **保留**：reason 只在 deny 的档上存在（存储侧口径），
-			// 所以提交 reason 时该档必然是 deny，带上它不会改错动作。
+			// ── `action` 必须取该档**当前**动作，不能硬编码 'deny' ─────────────────────
+			// 理由框现在在 `auto + 回落 deny` 时也会渲染（判据 finalActionOf）。若这里仍写
+			// `action: 'deny'`，用户「在自动审批档上补一句拒绝理由」就会把该档的动作从 auto
+			// **静默改成 deny** —— 模型判断那一步被一次改理由抹掉。取当前动作则是一次纯
+			// 无副作用的理由写入（宿主的 setCommandSub 会按 action 走对应分支）。
 			const commitSubReason = (focus) => {
 				const tier = (focus && focus.key) || 'inside';
 				const v = (subReasons[tab] || {})[tier];
 				const cr = (status && status.commandSub && status.commandSub[tab === 'global' ? 'globalReasons' : 'projectReasons']) || null;
 				const cur = (cr && cr[tier]) || '';
 				if ((v || '') === cur) return;
-				invoke('permgate:set-command-sub', { target: tab, tier: tier, action: 'deny', reason: v }, () => markReasonSaved(focus));
+				invoke('permgate:set-command-sub', { target: tab, tier: tier, action: subActionOf(tier), reason: v }, () => markReasonSaved(focus));
 			};
 
-			// 拒绝原因保存单点：只在当前动作是 deny 时才写（其它动作下控件根本不显示）。
+			// 拒绝原因保存单点：只在**最终会拒绝**时才写（其它动作下控件根本不显示）。
 			// 空串必须原样下发：宿主把「空串」定义为显式清除、「undefined」定义为保留原值，
 			// 若这里用 `|| undefined` 把清空折叠成 undefined，用户就再也删不掉写错的原因
 			// （旧文字会被 applyStatus 回填）。仅当该键确实缺失时才传 undefined。
+			//
+			// ⚠️ `mode` 必须取该分类**当前**动作（不是硬编码 'deny'）：理由框在
+			// `auto + 回落 deny` 时也会渲染，硬编码会把用户的 auto 静默改成 deny。
 			const commitCatReason = (c) => (focus) => {
-				if ((cats[tab] ? cats[tab][c] : null) !== 'deny') return;
+				const curMode = cats[tab] ? cats[tab][c] : null;
+				if (finalActionOf(curMode, catAutoFallbackOf(c)) !== 'deny') return;
 				const v = catReasons[tab] ? catReasons[tab][c] : undefined;
 				const cur = (status && status.categories && status.categories[tab] && status.categories[tab][c] && status.categories[tab][c].reason) || '';
 				// 与已落盘值相同就不写盘：回车与按钮可能各触发一次，避免无谓的重复请求
 				if ((v || '') === cur) return;
 				// 对勾只在**写盘成功**后才亮：invoke 在 r.error / catch 分支只 setMsg 报错、
 				// 不回滚标记，若在这里先亮，失败时界面会同时显示「✓ 已保存」和错误信息。
-				invoke('permgate:set-category', { target: tab, category: c, mode: 'deny', reason: v }, () => markReasonSaved(focus));
+				invoke('permgate:set-category', { target: tab, category: c, mode: curMode, reason: v }, () => markReasonSaved(focus));
 			};
 
 			// 某行快捷工具的**当前**回落值（只有 auto 时可能非空）。与 quickRow 里那段
@@ -4245,18 +4263,32 @@ window.__ModuleLoader__.load({
 				invoke('permgate:set-quick', { target: tab, tool, action: mode });
 			};
 
-			// 快捷工具拒绝原因保存（同上：仅 deny 行可见）
+			// 快捷工具的**回落值**写入（/permgate/set-quick 的 autoFallback 参数）。
+			// 必须带上 action（取该行当前动作）：宿主的 setQuickAction 用它决定该行是不是
+			// auto，非 auto 时回落值会被丢弃 —— 只传回落值会静默失效。
+			const changeQuickAutoFallback = (tool) => (e) => {
+				const v = e.target.value;
+				const key = tab === 'global' ? 'g' : 'p';
+				const mode = quickSel[tool] && quickSel[tool][key] ? quickSel[tool][key] : (tab === 'project' ? 'inherit' : quickGlobalValue(tool, status && status.quickTools ? status.quickTools.global : null));
+				invoke('permgate:set-quick', { target: tab, tool, action: mode, autoFallback: v },
+					() => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+			};
+
+			// 快捷工具拒绝原因保存（同上：仅在**最终会拒绝**的行可见）
+			//
+			// ⚠️ `action` 必须取该行**当前**动作（不是硬编码 'deny'）：理由框在
+			// `auto + 回落 deny` 时也会渲染，硬编码会把用户的 auto 静默改成 deny。
 			const commitQuickReason = (tool) => (focus) => {
 				const key = tab === 'global' ? 'g' : 'p';
 				const cur = quickSel[tool] ? quickSel[tool][key] : null;
-				if (cur !== 'deny') return;
+				if (finalActionOf(cur, quickAutoFallbackOf(tool)) !== 'deny') return;
 				const v = quickReason[tool] ? quickReason[tool][key] : undefined;
 				// 同 commitCatReason：与已落盘值相同就不写盘
 				const map = tab === 'global' ? (status && status.quickTools && status.quickTools.global) : (status && status.quickTools && status.quickTools.project);
 				const prev = map && map[tool] && typeof map[tool] === 'object' ? map[tool].reason : undefined;
 				if ((v || '') === (prev || '')) return;
 				// 同 commitCatReason：对勾只在写盘成功后亮
-				invoke('permgate:set-quick', { target: tab, tool, action: 'deny', reason: v }, () => markReasonSaved(focus));
+				invoke('permgate:set-quick', { target: tab, tool, action: cur, reason: v }, () => markReasonSaved(focus));
 			};
 
 			const addQuick = () => {
@@ -4269,9 +4301,11 @@ window.__ModuleLoader__.load({
 					target: tab,
 					tool: String(newTool).trim(),
 					action: newToolAction,
-					reason: finalActionOf(newToolAction, null) === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
+					// 回落值：只在动作是 auto 时下发（与新增例外行同口径）
+					autoFallback: newToolAction === 'auto' ? newToolAutoFallback : undefined,
+					reason: finalActionOf(newToolAction, newToolAutoFallback) === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined,
 				}, () => {
-					setNewTool(''); setNewToolReason('');
+					setNewTool(''); setNewToolReason(''); setNewToolAutoFallback('ask');
 					// 清过滤器 + 滚到底部（用户定）：新加的条目排在最末，而过滤器可能正遮着它
 					// —— 不清掉用户就看不到自己刚加的那条，会以为没加上而重复添加。
 					// 两者必须同时做：只滚不清 = 新条目被过滤掉、列表看起来没变；只清不滚 = 它在最底下看不见。
@@ -4293,15 +4327,17 @@ window.__ModuleLoader__.load({
 				const f = exOf(c);
 				// 只清本分类那一行：清全部会把用户在别的分类填了一半的内容一并抹掉
 				setExVals(Object.assign({}, exVals, { [c]: '' }));
-				setExField(c, { reason: '', note: '' });
+				setExField(c, { reason: '', note: '', autoFallback: 'ask' });
 				invoke('permgate:add-exception', {
 					target: tab,
 					category: c,
 					match: v,
 					action: f.action,
+					// 回落值：只在动作是 auto 时下发（宿主 normalizeAutoFallback 对非 auto 返回
+					// undefined，多传也无害，但少传会让「新增时选的回落值」被静默丢弃）。
+					autoFallback: f.action === 'auto' ? (f.autoFallback || 'ask') : undefined,
 					// 只有**最终会拒绝**才带拒绝原因（回给 AI），只有**最终会询问**才带备注
 					// （显示在弹窗上供日后回看）。判据是 finalActionOf，与宿主的存留判据同源。
-					// 新增行没有回落值输入框，故 auto 的回落值按缺省 ask 参与判断。
 					reason: finalActionOf(f.action, f.autoFallback) === 'deny' ? (String(f.reason || '').trim() || undefined) : undefined,
 					note: finalActionOf(f.action, f.autoFallback) === 'ask' ? (String(f.note || '').trim() || undefined) : undefined,
 				}, () => {
@@ -4437,6 +4473,34 @@ window.__ModuleLoader__.load({
 			};
 
 
+			// 某条例外的**当前**回落值（只有该条动作是 auto 时才可能非空）。
+			// 直接读宿主下发的原始例外对象 —— 它是 config 的投影，字段名与存储同形
+			// （`autoFallback`），不需要在客户端再做一次映射。
+			// 缺省返回 null 而不是 'ask'：由 actionFallbackCtl 统一按 ask 渲染，
+			// 免得「这里补 ask、那里补 ask」两处各写一份缺省。
+			const exAutoFallbackOf = (row) => (row && typeof row === 'object' ? row.autoFallback : null) || null;
+
+			// 例外的**回落值**写入（/permgate/set-exception 的 autoFallback 字段）。
+			// 与 setExAction 完全同一条错误链（error → saveError → applyStatus），
+			// 不新造一种失败形状：多一条分支就多一处会绕过「写盘失败要回填」的纪律。
+			//
+			// 不传 action：宿主的 setExceptionEntry 里 action 缺席 = 保留原值，
+			// 故这次写入不会碰动作（与 commitSubReason 必须传 action 的情形不同 ——
+			// 那里宿主用 action 决定「该不该存回落值」，这里没有那个判断）。
+			const setExAutoFallback = (c, row) => (e) => {
+				const v = e.target.value;
+				setBusy(true);
+				setMsg('');
+				call('permgate:set-exception', { target: tab, category: c, id: row.id, autoFallback: v }).then((r) => {
+					if (r && r.error) { setMsg(String(r.error)); return; }
+					const st = r && r.status ? r.status : r;
+					const saveErr = (r && r.saveError) || (st && st.saveError);
+					if (saveErr) { setMsg(String(saveErr)); applyStatus(st); return; }
+					applyStatus(r && r.status ? r.status : r);
+					setMsg(T('panel.saved'));
+				}).catch((err) => setMsg(String((err && err.message) || err))).then(() => setBusy(false));
+			};
+
 			const setFormKey = (key) => (e) => setForm(Object.assign({}, form, { [key]: e.target.value }));
 			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });
 			const removeRule = (id) => invoke('permgate:remove-rule', { target: tab, id });
@@ -4475,6 +4539,56 @@ window.__ModuleLoader__.load({
 			const sel = (v, onChange, options, disabled) => React.createElement('select', { value: v, onChange, className: 'pg-field', style: { padding: '2px 6px' }, disabled: !!disabled },
 				options.map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
 			);
+
+			// ── 「动作 + 失败后」控件组：**六处共用**的唯一实现 ─────────────────────────
+			//
+			// 六处：分类标题行 / command 的「其余情况」/ 八档子设置 / 例外行 / 快捷工具行 / 兜底。
+			// 每一处都是「选一个动作；若选了自动审批，紧跟着选它失败后怎么办」这两件**同一组**控件。
+			//
+			// ── 为什么必须收敛成一个组件（这不是「少写几行」的问题）────────────────────
+			// 收敛前这组控件是**手抄**的：分类块两处各写一遍 `sel(...)` + 一个三元 span +
+			// 一个三元 sel(...)，逐字相同。后果是加 `auto` 那一档时**必须记住改六处**，
+			// 而实测漏过两次：
+			//   · command 的「其余情况」漏掉（那一处把动作下拉放在块底部，与标题行是两套渲染）
+			//     → 「执行命令」设为自动审批后回落值无处可设，面板上根本看不到那个下拉框；
+			//   · 例外行 / 快捷工具行 / 兜底 / 八档子设置**从来没有**回落值选择器
+			//     → 那四处能选 auto，但回落值只能用隐含默认 ask，用户在面板上改不了，
+			//       而面板却要按 `finalActionOf(action, autoFallback)` 决定理由框显不显示
+			//       —— 显示判据依赖一个用户看不见也改不了的值，是典型的「面板说谎」。
+			//
+			// 收敛后**漏改不再可能**：新增一档、改回落值语义、改标签位置，都只改这里一处。
+			//
+			// ── 参数 ──────────────────────────────────────────────────────────────────
+			//   action     当前动作（'inherit' 等非 auto 值时回落值不渲染）
+			//   onAction   动作变更回调（收到 event）
+			//   options    动作下拉的值域（全局层 MODES / 项目层 ALL_MODES）
+			//   fallback   当前回落值（'ask' | 'allow' | 'deny'）
+			//   onFallback 回落值变更回调（收到 event）；**传 null = 该处不支持改回落值**
+			//   disabled   busy
+			//
+			// `onFallback === null` 这条分支不是给未来的：新增行（「添加例外」「添加快捷工具」
+			// 那两排输入框）确实**没有**可编辑的回落值 —— 它们还没有对应的已存在条目。
+			// 那两处仍要显示一个**只读**的回落值提示，否则用户选了 auto 却看不到
+			// 「失败后会怎样」，而提交时用的正是那个隐含值。只读比不给更能说明事实。
+			const actionFallbackCtl = (action, onAction, options, fallback, onFallback, disabled) => {
+				const isAuto = action === 'auto';
+				// 回落值缺省 ask：与宿主 normalizeAutoFallback 的缺省**同源**（不是各写一份）
+				const fbVal = fallback === 'allow' || fallback === 'deny' ? fallback : 'ask';
+				return React.createElement(React.Fragment, null,
+					sel(action, onAction, options, disabled),
+					isAuto ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
+					isAuto
+						? (onFallback
+							? sel(fbVal, onFallback, AUTO_FALLBACK_MODES, disabled)
+							// 只读态：文案与下拉一致（同一个 modeLabel），不给交互。
+							// title 说明为什么不能改 —— 否则用户会去点它、以为界面坏了。
+							: React.createElement('span', {
+								style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' },
+								title: T('panel.autoFallbackReadonlyHint'),
+							}, modeLabel(fbVal)))
+						: null,
+				);
+			};
 
 			// ── 长列表容器：过滤器 + 定高滚动区（快捷工具 / 例外 / 规则三处共用）──────────
 			//
@@ -4754,6 +4868,17 @@ window.__ModuleLoader__.load({
 				const v = m ? m[tier] : null;
 				return v === 'allow' || v === 'deny' ? v : 'ask';
 			};
+			// 子设置的**回落值**写入单点（/permgate/set-command-sub 的 autoFallback 参数）。
+			// 只改这一个字段、不动动作：与分类的 changeCatAutoFallback 同构。
+			//
+			// 必须把 action 一起带上（值取该档**当前**动作）：宿主的 setCommandSub 用
+			// `action` 决定该档是不是 auto，非 auto 时回落值会被直接丢掉 —— 只传
+			// autoFallback 而不传 action 会让这次写入**静默失效**（面板显示改了、磁盘没变）。
+			const changeSubAutoFallback = (tier) => (e) => {
+				const v = e.target.value;
+				invoke('permgate:set-command-sub', { target: tab, tier: tier, action: subActionOf(tier), autoFallback: v },
+					() => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
+			};
 			// 折叠摘要**由实际生效值生成**，不能写死「均为询问」（§7.4）。
 			//
 			// | 情形 | 摘要 |
@@ -4843,7 +4968,11 @@ window.__ModuleLoader__.load({
 							{ kind: 'sub', tab: tab, key: tier },
 							() => revertReason('sub', tier),
 						),
-						sel(action, changeSubDestructive(tier), tab === 'project' ? ALL_MODES : MODES, busy),
+						// 动作 + 失败后：走共用组件。这一处**此前没有**回落值选择器 ——
+						// 八档能选 auto，回落值却只能用隐含默认 ask，用户在面板上改不了；
+						// 而 showReason 又按 finalActionOf 依赖那个值（看不见也改不了）。
+						actionFallbackCtl(action, changeSubDestructive(tier), tab === 'project' ? ALL_MODES : MODES,
+							subAutoFallbackOf(tier), changeSubAutoFallback(tier), busy),
 					),
 				)
 			};
@@ -4955,20 +5084,12 @@ window.__ModuleLoader__.load({
 								// 取消：把草稿还原成服务端当前值（不是清空 —— 用户可能只是改错了想放弃）
 								() => revertReason('cat', 'command'),
 							),
-							// auto 的回落值选择器：与标题行那套**同一判据、同一组件、同一顺序**
-							// （动作在前、回落在后；仅 mode === 'auto' 时出现）。
-							//
-							// ⚠️ 这一处曾经漏掉：command 是唯一把动作下拉放在**块底部**的分类
-							// （它有三层：例外 → 破坏性子设置 → 其余情况），而回落选择器最初只加在了
-							// 标题行那套渲染里。后果是「执行命令」设为自动审批后**回落值无处可设** ——
-							// 面板上根本看不到那个下拉框，只能用隐含默认 ask，而用户以为自己配好了。
-							//
-							// 判据与顺序都与标题行逐字一致，不是抄一份新的：
-							// 两处若分叉，就会出现「标题行分类能配回落、command 不能」，
-							// 或「一处动作在左、一处回落在前」这种按分类而异的怪状态。
-							sel(mode, changeCat('command'), tab === 'project' ? ALL_MODES : MODES, busy),
-							mode === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
-							mode === 'auto' ? sel(catAutoFallbackOf('command'), changeCatAutoFallback('command'), AUTO_FALLBACK_MODES, busy) : null,
+							// 动作 + 失败后：走**共用组件** actionFallbackCtl（六处同一实现）。
+							// 这一处曾经因为 command 把动作下拉放在块底部而**漏掉回落值选择器**
+							// ——「执行命令」设为自动审批后回落值无处可设，面板上看不到那个下拉框。
+							// 收敛成组件后这种「某处漏掉」在结构上不再可能。
+							actionFallbackCtl(mode, changeCat('command'), tab === 'project' ? ALL_MODES : MODES,
+								catAutoFallbackOf('command'), changeCatAutoFallback('command'), busy),
 						),
 					),
 				);
@@ -5306,18 +5427,18 @@ window.__ModuleLoader__.load({
 									// 取消：把草稿还原成服务端当前值（不是清空——用户可能只是改错了想放弃）
 									() => revertReason('cat', c),
 								),
-								// ── 动作下拉在前，回落值在后 ────────────────────────────────────
+								// ── 动作在前，回落值在后（由共用组件保证）──────────────────────
 								// 读序必须是「**先选动作，再看它失败后怎么办**」：
 								//   读取文件   [自动审批 ▾]  失败后：[询问 ▾]
 								//
-								// 之前这里写反了（回落值排在动作左边），而同一处的注释却写着
-								// 「读序：动作 → 失败后怎么办」—— 注释与实现直接矛盾。
-								// 排反的后果不只是不好看：用户从左往右读时，先看到「失败后：询问」
-								// 会以为这是一个**独立的设置项**，而不知道它在修饰右边那个下拉。
 								// 「失败后」这三个字本身是**从句**，它必须跟在它所修饰的主句之后。
-								sel(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES, busy),
-								mode === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel')) : null,
-								mode === 'auto' ? sel(catAutoFallbackOf(c), changeCatAutoFallback(c), AUTO_FALLBACK_MODES, busy) : null,
+								// 曾经这里写反了（回落值排在动作左边），而同一处的注释却写着
+								// 「读序：动作 → 失败后怎么办」—— 注释与实现直接矛盾。排反后用户
+								// 从左往右读会先看到「失败后：询问」，误以为它是独立设置项。
+								//
+								// 现在读序由 actionFallbackCtl 的构造保证，不再靠每处手写顺序。
+								actionFallbackCtl(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES,
+									catAutoFallbackOf(c), changeCatAutoFallback(c), busy),
 							),
 						),
 					// 循环检测（doomloop）的阈值与状态提示。该分类**不挂例外**（EXC_CATS 不含它），
@@ -5419,7 +5540,8 @@ window.__ModuleLoader__.load({
 													}),
 												),
 												React.createElement('div', { className: 'pg-exc-ctl' },
-													sel(act, setExAction(c, r), MODES, busy),
+													actionFallbackCtl(act, setExAction(c, r), MODES,
+														exAutoFallbackOf(r), setExAutoFallback(c, r), busy),
 													React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: () => saveExEdit(c, r) }, T('panel.reasonSave')),
 													React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: cancelExEdit }, T('panel.cancel')),
 												),
@@ -5528,10 +5650,10 @@ window.__ModuleLoader__.load({
 											})(),
 											),
 											React.createElement('div', { className: 'pg-exc-ctl' },
-												// 动作下拉框：**即时生效**（与档位行的动作下拉框同构）。
-												// 这是「例外可以修改」最常用的一半 —— 多数时候用户只是想
-												// 把某条从「允许」改成「询问」，不该逼他走完整的编辑态。
-												sel(act, setExAction(c, r), MODES, busy),
+												// 动作 + 失败后：走共用组件（这一处**此前没有**回落值选择器）。
+												// 「即时生效」的性质不变 —— 两个下拉都是 onchange 即写盘。
+												actionFallbackCtl(act, setExAction(c, r), MODES,
+													exAutoFallbackOf(r), setExAutoFallback(c, r), busy),
 												// 原因 / 备注排在**下拉之后**，与快捷工具行（quickRow）同序：
 												// 那里是 `[工具名+说明] [动作▾] [原因] [删除]`，这里就是
 												// `[模式] [动作▾] [原因] [↑↓] [改匹配] [删除]`。
@@ -5562,11 +5684,14 @@ window.__ModuleLoader__.load({
 							) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.7)' } }, T('panel.excNone'))),
 						React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 							React.createElement('input', { className: 'pg-field', placeholder: c === 'command' ? T('panel.excPh') : T('panel.excPathPh'), value: exVals[c] || '', onChange: (e) => setExVals(Object.assign({}, exVals, { [c]: e.target.value })), disabled: busy }),
-							// 动作与文字都按本分类（c）取值：共用一份状态会让所有分类的添加行联动
-							sel(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES, busy),
-							// 两个输入框按动作二选一：拒绝时填「拒绝原因」（回给 AI），询问时填「备注」（方便日后回看）
-							exOf(c).action === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exOf(c).reason || '', onChange: (e) => setExField(c, { reason: e.target.value }), disabled: busy }) : null,
-							exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exOf(c).note || '', onChange: (e) => setExField(c, { note: e.target.value }), disabled: busy }) : null,
+							// 动作 + 失败后：走共用组件（新增行现在也能设回落值了 ——
+							// 之前那两排只有动作下拉，选了 auto 却看不到也改不了落点）。
+							actionFallbackCtl(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES,
+								exOf(c).autoFallback, (e) => setExField(c, { autoFallback: e.target.value }), busy),
+							// 两个输入框按**最终动作**二选一：会拒绝时填「拒绝原因」（回给 AI），
+							// 会询问时填「备注」（方便日后回看）。判据与宿主的存留判据同源。
+							finalActionOf(exOf(c).action, exOf(c).autoFallback) === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh'), title: T('panel.excReason'), value: exOf(c).reason || '', onChange: (e) => setExField(c, { reason: e.target.value }), disabled: busy }) : null,
+							finalActionOf(exOf(c).action, exOf(c).autoFallback) === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh'), title: T('panel.excNote'), value: exOf(c).note || '', onChange: (e) => setExField(c, { note: e.target.value }), disabled: busy }) : null,
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => addException(c) }, T('panel.addExc')),
 						),
 						// command 分类的子设置「破坏性命令」排在**例外之后**，与判定链的
@@ -5625,7 +5750,9 @@ window.__ModuleLoader__.load({
 						React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 13 } }, t),
 						desc ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, desc) : null,
 					),
-					sel(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES, busy),
+					// 动作 + 失败后：走共用组件（这一处**此前没有**回落值选择器）。
+					actionFallbackCtl(mode, changeQuick(t), tab === 'project' ? ALL_MODES : MODES,
+						qAf, changeQuickAutoFallback(t), busy),
 					// 拒绝原因排在动作下拉**之后**：工具名 span 的 minWidth 撑出了固定的下拉列宽，
 					// 输入框插在它前面会把该行的下拉整体右推（窄面板下直接换行到下一行），
 					// 看起来就是「位置漂移」——只有选「拒绝」的行会漂，其它行不动。
@@ -5702,8 +5829,17 @@ window.__ModuleLoader__.load({
 				const v = tab === 'global' ? fb.globalAutoFallback : (fb.projectAutoFallback || fb.globalAutoFallback);
 				return v === 'allow' || v === 'deny' ? v : 'ask';
 			};
-			// 兜底最终会拒绝 → 才显示拒绝原因框（`auto + 回落 deny` 也算，判据见 finalActionOf）
+			// 兜底**最终会拒绝** → 才显示拒绝原因框（`auto + 回落 deny` 也算，判据见 finalActionOf）
 			const fbShowReason = finalActionOf(fbVal, fbAutoFallbackOf()) === 'deny';
+			// 兜底**回落值**写入（/permgate/set-fallback 的 autoFallback 参数）。
+			// 必须带 mode（取当前兜底动作）：宿主的 setFallbackMode 用它决定要不要存回落值。
+			// ⚠️ 传的 mode 是**当前**值而不是 'auto' —— 用户改回落值时动作没变，
+			// 传 'auto' 会在当前不是 auto 时凭空把动作改成 auto。
+			const changeFallbackAutoFallback = (e) => {
+				const v = e.target.value;
+				invoke('permgate:set-fallback', { target: tab, mode: fbVal, autoFallback: v },
+					() => setMsg(T('panel.fallbackSaved').replace('{t}', T(tab === 'global' ? 'panel.tabGlobal' : 'panel.tabProject')).replace('{v}', modeLabel(fbVal))));
+			};
 			const changeFallback = (e) => {
 				const mode = e.target.value;
 				// 同 changeCat：切离「最终会拒绝」时作废该格的编辑态（兜底每层只有一个键，按格等价于按 tab）
@@ -5828,16 +5964,16 @@ window.__ModuleLoader__.load({
 					}),
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
 						React.createElement('input', { className: 'pg-field', placeholder: T('panel.quickAdd'), value: newTool, onChange: (e) => setNewTool(e.target.value), disabled: busy }),
-						sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy),
-						// 新增行选「拒绝」时同样给原因输入框，与已存在的行保持一致。
+						// 动作 + 失败后：走共用组件（新增行现在也能设回落值了）。
+						actionFallbackCtl(newToolAction, (e) => setNewToolAction(e.target.value), MODES,
+							newToolAutoFallback, (e) => setNewToolAutoFallback(e.target.value), busy),
+						// 新增行**最终会拒绝**时同样给原因输入框，与已存在的行保持一致。
 						// 提交回调传 null：新增行没有独立的保存动作，原因随「添加」按钮一并下发。
-						// 判据用 finalActionOf 而非 `=== 'deny'`：新增行没有回落值输入框，
-						// 若选了 auto，按缺省 ask 参与判断（与宿主的缺省同源）。
 						reasonInput(
 							newToolReason,
 							(e) => setNewToolReason(e.target.value),
 							null,
-							finalActionOf(newToolAction, null) === 'deny',
+							finalActionOf(newToolAction, newToolAutoFallback) === 'deny',
 							null,
 						),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: addQuick }, T('panel.quickAddBtn')),
@@ -5888,7 +6024,9 @@ window.__ModuleLoader__.load({
 								// 取消：还原成服务端当前值
 								() => revertReason('fb', null),
 							),
-							sel(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES, busy),
+							// 动作 + 失败后：走共用组件（这一处**此前没有**回落值选择器）。
+							actionFallbackCtl(fbVal, changeFallback, tab === 'global' ? MODES : ALL_MODES,
+								fbAutoFallbackOf(), changeFallbackAutoFallback, busy),
 						),
 					),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)' } }, T('panel.fallbackHint')),

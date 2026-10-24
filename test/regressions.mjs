@@ -265,7 +265,7 @@ ok('设置页路由对兜底动作做白名单校验', (function () {
     if (src[k] === '{') d++
     else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
   }
-  return src.includes("if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason)) return json(res, { error: '非法兜底参数")
+  return src.includes("if (!setFallbackMode(rootOf(exec), target, a.mode, a.reason, a.autoFallback)) return json(res, { error: '非法兜底参数")
     && body.includes("const allowed = targetKey === 'global' ? MODES : ALL_MODES")
     && body.includes('if (allowed.indexOf(mode) === -1) return false')
 })())
@@ -464,7 +464,7 @@ group('8. 快捷工具面板口径（修好的写法不得回潮）')
 ok('client 快捷清单与默认值初始为空、等宿主下发', cli.includes('let QUICK_PRESET = [];') && cli.includes('let QUICK_DEFAULTS = {};'))
 ok('client 主动读 status 的 quickPreset/quickDefaults', cli.includes('s.quickPreset') && cli.includes('s.quickDefaults'))
 ok('client 不再硬编码任何预设工具名', !cli.includes("'web_search', 'skill'") && !cli.includes("job_kill: 'allow'") && !cli.includes("todo_write: 'allow'"))
-ok('快捷工具新增行带动作下拉（与例外行一致）', cli.includes('sel(newToolAction, (e) => setNewToolAction(e.target.value), MODES, busy)') && !cli.includes("action: 'allow' }, () => setNewTool('')"))
+ok('快捷工具新增行带动作下拉（与例外行一致）', cli.includes('actionFallbackCtl(newToolAction, (e) => setNewToolAction(e.target.value), MODES,') && !cli.includes("action: 'allow' }, () => setNewTool('')"))
 ok('存在自有键判定 hasOwnKey', cli.includes('function hasOwnKey(o, k)'))
 ok('quick 存在性判断不用原型链写法', !cli.includes("pq[t] && pq[t] !== 'inherit'") && !cli.includes('gq[t] !== undefined'))
 ok('删除按钮只给「自加且本层有键」的行', cli.includes('(!isPreset && hasKey)'))
@@ -1238,7 +1238,10 @@ ok('例外写入统一走 addProjectException（不再尾部 push）', (src.matc
 ok('含通配符/.. 的原文不生成目录 glob 候选（守卫作用于原始值）', src.includes('const hasParentSeg =') && src.includes('const globSafe = !hasGlobMeta(entry.value) && !hasParentSeg(entry.value)'))
 ok('预算内图片只读一次盘（嗅探与内联共用缓冲）', src.includes('whole = await fsService.readBytes(target, undefined, IMAGE_MAX_BYTES)') && src.includes('const bytes = whole || await fsService.readBytes'))
 ok('写入缺省作用域与删除侧一致（缺省全局，候选显式项目块）', src.includes("const target = o.target === 'project' ? 'project' : 'global'") && src.includes("addProjectException(cat, kind, value, decision, entryRoot, { target: 'project' })") && !src.includes('function addProjectRule'))
-ok('reason 与 normalizeException 同口径（仅 deny、共用 normalizeText）', src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
+// 判据是 finalActionOf（不是 `decision === 'deny'`）：`auto + 回落 deny` 在执行侧就是
+// 一次拒绝，它的 reason 必须能存。这是 addProjectException 这条**唯一不经
+// normalizeException 的例外写入路径**，此前只有这里漏改。
+ok('reason 与 normalizeException 同口径（按最终动作、共用 normalizeText）', src.includes("const fin = finalActionOf(decision, o.autoFallback)") && src.includes("const reason = fin === 'deny' ? normalizeText(o.reason) : undefined"))
 ok('整读后直接用整份缓冲嗅探', src.includes('sniffImage(whole || head)'))
 ok('不可达的 directory else-if 候选分支已删除', !src.includes("else if (entry.cat === 'directory')"))
 ok('范围说明下移到候选小字（hint），标题下只留一句话', !src.includes('允许时同时写入') && src.includes("t('工作区外访问目录 + '") && src.includes("t('工作区外访问文件 + '") && cli.includes("'app.cand.hint': '点亮条目后点「允许 / 拒绝」即写入当前项目例外。'") && cli.includes('c.hint ? React.createElement'))
@@ -1316,6 +1319,10 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
       "function normAbsPath(p, root) { const s = norm(p); return /^([a-zA-Z]:|\\/)/.test(s) ? s : norm(root) + '/' + s }",
       "function pathKey(p, root) { return normPathKey(normAbsPath(p, root)) }",
       "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
+      // finalActionOf / normalizeAutoFallback：addProjectException 现在按**最终动作**决定
+      // reason/note 存不存（`auto + 回落 deny` 在执行侧就是拒绝）。两者都从源码抽真身。
+      (src.match(/function finalActionOf\(action, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0],
+      (src.match(/function normalizeAutoFallback\(v, action\) \{[\s\S]*?\n    \}/) || [''])[0],
       // 判重键与 addProjectException 同源：从源码抽真身，不在这里手抄一份
       // （手抄会让「实现改了、测试还按旧口径跑」这种情况静默通过）。
       sliceFn3('cmdExcKey'),
@@ -1362,6 +1369,28 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
     const afterCI = (A.cfg().global.command.exceptions || []).length
     ok('★★ addProjectException：命令例外判重大小写不敏感（不再写入语义重复的第二条）',
       afterCI === beforeCI, 'before=' + beforeCI + ' after=' + afterCI + ' ' + JSON.stringify((A.cfg().global.command.exceptions || []).map((e) => e.match)))
+    // ⑤ ★★ auto + 回落 deny 的 reason/回落值都要落盘（addProjectException 是唯一
+    // 不经 normalizeException 的例外写入路径 —— 它此前漏改了 finalActionOf 判据）
+    //
+    // 判据是**最终动作**：`auto + 回落 deny` 在执行侧与裸 deny 同形，理由必须能存；
+    // 而 `auto + 回落 ask` 会弹窗，note 必须能存、reason 不该存。
+    A.add('image', 'path', 'X:/ws/d.png', 'auto', R, { target: 'global', autoFallback: 'deny', reason: '这条不许删' })
+    const afDeny = (A.cfg().global.image.exceptions || []).filter((e) => e.path === 'X:/ws/d.png')[0]
+    ok('★★ addProjectException：auto+回落 deny 的 reason 与 autoFallback 都落盘',
+      !!afDeny && afDeny.action === 'auto' && afDeny.autoFallback === 'deny' && afDeny.reason === '这条不许删',
+      JSON.stringify(afDeny))
+    A.add('image', 'path', 'X:/ws/e.png', 'auto', R, { target: 'global', autoFallback: 'ask', reason: '不该留', note: '该留' })
+    const afAsk = (A.cfg().global.image.exceptions || []).filter((e) => e.path === 'X:/ws/e.png')[0]
+    ok('★★ addProjectException：auto+回落 ask 时 note 落盘、reason 不落盘',
+      !!afAsk && afAsk.action === 'auto' && afAsk.autoFallback === 'ask'
+      && afAsk.reason === undefined && afAsk.note === '该留',
+      JSON.stringify(afAsk))
+    // 反例对照（防空转）：裸 deny + 理由仍必须落盘（既有行为不得回归）
+    A.add('image', 'path', 'X:/ws/f.png', 'deny', R, { target: 'global', reason: '裸 deny 的理由' })
+    const bare = (A.cfg().global.image.exceptions || []).filter((e) => e.path === 'X:/ws/f.png')[0]
+    ok('★★ addProjectException：裸 deny 的 reason 仍落盘（既有行为不回归）',
+      !!bare && bare.action === 'deny' && bare.reason === '裸 deny 的理由', JSON.stringify(bare))
+
   }
 }
 // ★★ 遮蔽标注（exceptionShadow）：面板要能告诉用户「你刚加的这条没生效」。
@@ -1558,17 +1587,26 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // ③ 回落值选择器：选了 auto 就必须**看得见**「失败后怎么办」。
   //    没有它，用户以为自己在配 auto，实际连「模型挂了会怎样」都不知道 ——
   //    而那是 auto 语义的核心（§2.1：选 auto 必须同时指定 autoFallback）。
-  ok('★★ 选了 auto 时面板出现回落值选择器（否则用户看不见「失败后怎么办」）', (function () {
-    // ⚠️ 判据是「**每一处**渲染分类动作下拉的地方都配了回落选择器」，不是「某处有」。
-    //    command 是唯一把动作下拉放在**块底部**的分类（三层布局），它的渲染走
-    //    commandRestRow 而不是标题行那套 —— 最初漏了这一处，后果是「执行命令」设为
-    //    auto 后回落值**无处可设**（面板上看不到那个下拉框，只能用隐含默认 ask）。
-    //    故这里按 `sel(mode, changeCat(...))` 的调用点逐个数：有几个动作下拉，
-    //    就必须有几个 `mode === 'auto'` 的回落选择器。
-    const catSels = (cli.match(/sel\(mode, changeCat\('?[a-z]*'?\)/g) || []).length
-    const fallbackSels = (cli.match(/mode === 'auto' \? sel\(catAutoFallbackOf\(/g) || []).length
-    if (catSels !== 2) return false          // 标题行（其余分类）+ commandRestRow
-    if (fallbackSels !== 2) return false     // 两处都要有
+  //
+  // ── 判据从「数调用点」改为「只有一份实现」────────────────────────────────────
+  // 旧断言数的是 `sel(mode, changeCat(...))` 与 `mode === 'auto' ? sel(catAutoFallbackOf(`
+  // 的**字面出现次数**（各 2）。那锁的是「手抄两份」这个实现形态：加 auto 时**必须记住
+  // 改每一处**，而实测漏过两次（command 的「其余情况」、以及例外/快捷/兜底/八档四处的
+  // 回落值**从来没有**）。
+  //
+  // 现在这组控件收敛成唯一实现 `actionFallbackCtl`（动作 + 「失败后」+ 回落值），
+  // 六处全部调用它。故断言改为：① 组件存在；② 六处**都**走它；③ 不再有任何手抄副本。
+  // 「某处漏掉」在结构上不再可能 —— 这才是原意（用户在任何一处选 auto 都能设回落值）。
+  ok('★★ 选了 auto 时面板出现回落值选择器（六处共用唯一实现，不再手抄）', (function () {
+    // ① 组件存在，且它内部按 isAuto 渲染回落值
+    if (!/const actionFallbackCtl = \(action, onAction, options, fallback, onFallback, disabled\) => \{/.test(cli)) return false
+    if (!/const isAuto = action === 'auto'/.test(cli)) return false
+    // ② 六处调用点：分类标题行 / command 其余情况 / 八档子设置 / 例外行 ×2 / 快捷工具 / 兜底
+    //    （例外有编辑态与只读态两处，共 7 个调用点 —— 数它**至少**覆盖这 6 个场景）
+    const calls = (cli.match(/actionFallbackCtl\(/g) || []).length
+    if (calls < 7) return false
+    // ③ 反例：不得再出现手抄副本（`mode === 'auto' ? sel(...)` 那种三元拼装）
+    if (/mode === 'auto' \? sel\(/.test(cli)) return false
     if (!cli.includes("'panel.autoFallbackLabel'")) return false
     // 回落值域必须是 ask/allow/deny（不含 inherit —— 回落必须是能直接执行的动作）
     const m = cli.match(/const AUTO_FALLBACK_MODES = (\[[^\]]*\])/)
@@ -1579,30 +1617,29 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   })())
   // ★★ 顺序：**动作下拉在前，回落选择器在后**。
   //
-  // 「失败后」是从句，它修饰的是左边（原先）/右边（现在）那个动作下拉。写反了不只是
-  // 不好看 —— 用户从左往右读时先看到「失败后：询问」，会以为那是一个**独立设置项**，
-  // 不知道它在修饰哪个控件。曾经就这样排反了，而同一处的注释却写着「读序：动作 →
-  // 失败后怎么办」，注释与实现直接矛盾（用户一眼看出来的正是这个）。
+  // 「失败后」是从句，它修饰的是那个动作下拉。写反了不只是不好看 —— 用户从左往右读时
+  // 先看到「失败后：询问」，会以为那是一个**独立设置项**。曾经就这样排反了，而同一处的
+  // 注释却写着「读序：动作 → 失败后怎么办」，注释与实现直接矛盾。
   //
-  // 判据：每个回落选择器之前，必须**先**出现 `sel(mode, changeCat(...))`。
-  // 两处渲染（标题行 + commandRestRow）都要满足。
+  // 收敛后顺序由 actionFallbackCtl 的**构造**保证（它先渲染 sel(action, ...)，再渲染标签
+  // 与回落值），不再靠每处手写顺序。故断言改为检查组件体内的渲染次序。
   ok('★★ 回落选择器排在动作下拉之后（「失败后」是从句，必须跟在被修饰项后面）', (function () {
-    const iBar = cli.indexOf("tabBtn('auto'")
-    let n = 0
-    // 逐处检查：找到每个 `sel(catAutoFallbackOf(`，看它前面最近的 `sel(mode, changeCat(` 是否更近
-    const re = /mode === 'auto' \? sel\(catAutoFallbackOf\(/g
-    let m
-    while ((m = re.exec(cli))) {
-      n++
-      const before = cli.slice(Math.max(0, m.index - 2000), m.index)
-      const iAction = before.lastIndexOf('sel(mode, changeCat(')
-      // 动作下拉必须出现在这段窗口里（否则说明它排到了回落之后）
-      if (iAction < 0) return false
-      // 且两者之间不得再出现另一个回落选择器（那意味着顺序乱了）
-      const between = before.slice(iAction)
-      if (between.indexOf('sel(catAutoFallbackOf(') !== -1) return false
+    const i = cli.indexOf('const actionFallbackCtl = (action, onAction, options, fallback, onFallback, disabled) => {')
+    if (i < 0) return false
+    // 切出组件体（到下一个同级 `const ` 或 `// ──` 注释块为止，用花括号配平更稳）
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
-    return n === 2
+    if (!body) return false
+    const iAct = body.indexOf('sel(action, onAction, options, disabled)')
+    const iLabel = body.indexOf("T('panel.autoFallbackLabel')")
+    const iFb = body.indexOf('sel(fbVal, onFallback, AUTO_FALLBACK_MODES, disabled)')
+    if (iAct < 0 || iLabel < 0 || iFb < 0) return false
+    // 次序必须是 动作 → 标签 → 回落值
+    return iAct < iLabel && iLabel < iFb
   })())
   // ⑤ 超时文案必须说清「询问时到底弹不弹窗」。
   //
@@ -1904,16 +1941,19 @@ ok('★ 弹窗 note 由 d.note 优先、opts.note 回退，字符串过 normaliz
     const codeOnly = seg.split('\n').map((l) => (/^\s*(\/\/|\*|\/\*)/.test(l) ? '' : l)).join('\n')
     return !/L\([^)]*\blang\b/.test(codeOnly)
   })())
-ok('落盘时 reason 只随 deny、note 只随 ask（allow 两者都不存）', src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined") && src.includes("const note = decision === 'ask' ? normalizeText(o.note) : undefined") && src.includes('reason ? { reason } : {}, note ? { note } : {}'))
+// 判据是 finalActionOf：`auto + 回落 deny` 会拒绝（reason 要存）、`auto + 回落 ask`
+// 会弹窗（note 要存）、allow 两者都不存。
+ok('落盘时 reason 只随**最终拒绝**、note 只随**最终询问**（allow 两者都不存）', src.includes("const reason = fin === 'deny' ? normalizeText(o.reason) : undefined") && src.includes("const note = fin === 'ask' ? normalizeText(o.note) : undefined") && src.includes('reason ? { reason } : {}, note ? { note } : {}'))
 // 防回退：addProjectException 曾自建一份 trim200（会对非字符串 String() 强转），与 normalizeText 分叉
-ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有第二份 trim200）', !src.includes('const trim200 =') && src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
+ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有第二份 trim200）', !src.includes('const trim200 =') && src.includes("const reason = fin === 'deny' ? normalizeText(o.reason) : undefined"))
 ok('同向去重命中后用 textPatch 回写（reason/note 各写各的）', src.includes('const textPatch = (hit) => {') && (src.match(/textPatch\(hit\)/g) || []).length === 2 && (src.match(/if \(reason\) hit\.reason = reason/g) || []).length === 1 && (src.match(/if \(note\) hit\.note = note/g) || []).length === 1)
 // `m.src ? m.src.ruleId : null` 从 8 处增到 12 处：四个区外分类各多一条 auto 出口
 // （auto 出口与 deny/ask/allow 同口径地回传例外来源 —— 正是本断言要守的东西）。
 ok('工作区外 ask 分支回传例外来源（cat/ruleId 与文案同源）', src.includes("const src = (d.action === 'ask' && d.ruleId) ? d : ((e.action === 'ask' && e.ruleId) ? e : null)") && (src.match(/m\.src \? m\.src\.ruleId : null/g) || []).length === 12)
 ok('工作区外 ask 的文案在有例外时用例外备注、无例外时回落「需确认」', (src.match(/m\.src \? exReason\(m\.src\) : '（需确认）'/g) || []).length === 3 && src.includes("m.src ? exReason(m.src) : '（写入需确认）'"))
-ok('面板例外动作下拉复用宿主下发的 MODES（三态，不再硬编码两项）', cli.includes('sel(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES, busy)') && !cli.includes("React.createElement('option', { value: 'allow' }, T('panel.allow'))"))
-ok('面板两个输入框按动作二选一（deny→拒绝原因，ask→备注）', cli.includes("exOf(c).action === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh')") && cli.includes("exOf(c).action === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh')"))
+ok('面板例外动作下拉复用宿主下发的 MODES（三态，不再硬编码两项）', cli.includes('actionFallbackCtl(exOf(c).action, (e) => setExField(c, { action: e.target.value }), MODES,') && !cli.includes("React.createElement('option', { value: 'allow' }, T('panel.allow'))"))
+// 新增行的两个输入框也按**最终动作**二选一（`auto + 回落 deny` 时要能填拒绝原因）
+ok('面板两个输入框按**最终动作**二选一（会拒绝→拒绝原因，会询问→备注）', cli.includes("finalActionOf(exOf(c).action, exOf(c).autoFallback) === 'deny' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excReasonPh')") && cli.includes("finalActionOf(exOf(c).action, exOf(c).autoFallback) === 'ask' ? React.createElement('input', { className: 'pg-field', style: { maxWidth: 220 }, placeholder: T('panel.excNotePh')"))
 ok('面板按**最终动作**分派 reason / note 两个字段', (function () {
   // 判据是 finalActionOf（`auto + 回落 deny` 在执行侧就是拒绝，reason 要能提交；
   // `auto + 回落 ask` 反之）。旧断言钉的是 `f.action === 'deny'`，那会让 auto 两种回落都丢字段。
@@ -2001,7 +2041,7 @@ ok('例外添加行不再用全局单值状态（exAction / exReasonVal / exNote
   ok('行为复算：改一个分类的例外添加行不联动其它分类', behavOk, detail)
 }
 // 防回退：添加成功后只清本分类那一行——清全部会把别的分类填了一半的内容一并抹掉
-ok('添加例外后只清本分类的添加行', cli.includes('setExVals(Object.assign({}, exVals, { [c]: \'\' }));') && cli.includes('setExField(c, { reason: \'\', note: \'\' });'))
+ok('添加例外后只清本分类的添加行（含回落值复位）', cli.includes('setExVals(Object.assign({}, exVals, { [c]: \'\' }));') && cli.includes("setExField(c, { reason: '', note: '', autoFallback: 'ask' });"))
 // reason 与 note 是**两种不同的东西**，必须分开、且各归其动作：
 //   reason —— deny 专属，拒绝时随 kind:'deny' 回给 AI（「为什么被拒、该怎么改」）；
 //   note   —— ask 专属，命中时显示在审批弹窗上（「当初为什么特意拦它」）。
@@ -2266,7 +2306,7 @@ ok('兜底 mode 与 reason 同源（fallbackSetting 单点）', (function () {
 // 判据走 finalActionOf（`auto + 回落 deny` 在执行侧就是拒绝，理由必须能存/读），
 // 故 setFallbackMode 的删除条件与 normalize 侧的两个保留条件都不再是裸 `=== 'deny'`。
 ok('兜底拒绝原因落盘并在**最终不再拒绝**时清除', (function () {
-  const setM = src.match(/function setFallbackMode\(root, targetKey, mode, reason\) \{[\s\S]*?\n    \}/)
+  const setM = src.match(/function setFallbackMode\(root, targetKey, mode, reason, autoFallback\) \{[\s\S]*?\n    \}/)
   if (!setM) return false
   if (!/if \(finalActionOf\(mode, block\.fallbackAutoFallback\) !== 'deny'\) \{ delete block\.fallbackReason; return true \}/.test(setM[0])) return false
   if (!src.includes('if (t) block.fallbackReason = t')) return false
@@ -2289,7 +2329,7 @@ ok('快捷工具改为 { action, reason? } 对象形态，老字符串由单一�
   return true
 })())
 // 原本计数为 4（定义 + 弹窗候选 + 面板路由 + perm_set_quick 工具）；工具移除后为 3
-ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason) {') && (src.match(/setQuickAction\(/g) || []).length === 3 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
+ok('快捷工具读写各自单一入口（不再各处直接赋值）', src.includes('function setQuickAction(root, targetKey, tool, action, reason, autoFallback) {') && (src.match(/setQuickAction\(/g) || []).length === 3 && !src.includes('block.quickTools[a.tool] = a.action') && !src.includes('block.quickTools[args.tool] = args.action') && !src.includes('block.quickTools[entry.tool] = action'))
 // 断言升级：原版要求两个 return 的**字面形态**（`return { action: modeOf(...), reason: reasonOf(...) }`），
 // 加 autoFallback 后必然要改它。它守的是「取值走函数、保留防御性字符串回退」这件事，故改为：
 // ① 两个取值函数存在（modeOf 有字符串回退，reasonOf/afOf 同口径）；② 两个 return 都经它们取值；
@@ -2349,11 +2389,13 @@ ok('面板各处共用同一个 reasonInput 渲染函数（分类/快捷工具/�
 })())
 // 防回退：快捷工具行的原因输入框必须在动作下拉**之后**——该行工具名 span 有 minWidth 撑出固定
 // 列宽，输入框插在它前面会把下拉右推（窄面板下换行），只有选「拒绝」的行会漂移。
-ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('sel(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
+// 收敛后动作下拉与回落值都在 actionFallbackCtl 里，故这里判「该组件出现在 reasonInput 之前」——
+// 等价于原来那句「动作▾ 在原因之前」，且不再依赖 `sel(mode, changeQuick(t))` 这个字面形态。
+ok('快捷工具行的原因输入框排在动作下拉之后（否则下拉位置漂移）', (function () { const i = cli.indexOf('const quickRow = (t) =>'); const j = cli.indexOf('const ruleRow = (r'); const body = i >= 0 && j > i ? cli.slice(i, j) : ''; const a = body.indexOf('actionFallbackCtl(mode, changeQuick(t)'); const b = body.indexOf('reasonInput('); return a !== -1 && b !== -1 && a < b })())
 // 防回退：新增行选了拒绝却无处填原因，只能先添加再补填。
 // 注意空值必须折叠成 undefined：新增行可以输入本层已存在的工具名，而宿主把「空串」定义为
 // 显式清除——用户没填原因就点「添加」，会静默删掉该键已保存的拒绝原因（改动前不传 reason 则保留）。
-ok('快捷工具新增行也带拒绝原因输入框并下发 reason（空值折叠为未提供）', cli.includes('const [newToolReason, setNewToolReason] = React.useState') && cli.includes("reason: finalActionOf(newToolAction, null) === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined") && cli.includes("finalActionOf(newToolAction, null) === 'deny',") && cli.includes("setNewTool(''); setNewToolReason('');") && cli.includes('setQuickScrollEnd((n) => n + 1)'))
+ok('快捷工具新增行也带拒绝原因输入框并下发 reason（空值折叠为未提供，回落值可设）', cli.includes('const [newToolReason, setNewToolReason] = React.useState') && cli.includes("reason: finalActionOf(newToolAction, newToolAutoFallback) === 'deny' ? (String(newToolReason || '').trim() || undefined) : undefined") && cli.includes("finalActionOf(newToolAction, newToolAutoFallback) === 'deny',") && cli.includes('const [newToolAutoFallback, setNewToolAutoFallback] = React.useState') && cli.includes("setNewTool(''); setNewToolReason(''); setNewToolAutoFallback('ask');") && cli.includes('setQuickScrollEnd((n) => n + 1)'))
 // 防回退：输入框曾「永远可编辑 + 只在失焦时保存」，界面没有任何状态提示，用户填完不知道算不算数。
 // 现在改为只读展示 + 编辑/保存两态按钮：当前值可见、「改了有没有生效」有确定答案。
 ok('拒绝原因默认只读，点「编辑」才可输入（按钮变保存/取消）', cli.includes('const [reasonEditing, setReasonEditing] = React.useState(null)') && cli.includes("btn(T('panel.reasonEdit'), beginEdit)") && cli.includes("btn(T('panel.reasonSave'), () => { onCommit(focus); endEdit(); })") && cli.includes("btn(T('panel.cancel'), () => { onCancel(); endEdit(); })"))
@@ -2383,7 +2425,11 @@ ok('面板全局列与服务端同径跳过 inherit', cli.includes("hasOwnKey(gq
 // 防回退：面板曾用 `|| undefined` 把清空产生的空串折叠成 undefined，而宿主把 undefined 解释为
 // 「保留原值」——用户于是永远删不掉写错的拒绝原因（旧文字还会被 applyStatus 回填）。
 // 空串必须原样下发才能命中宿主的「显式清除」分支。
-ok('面板清空拒绝原因时透传空串（不折叠成 undefined）', cli.includes('const v = catReasons[tab] ? catReasons[tab][c] : undefined') && cli.includes('const v = fbReason[tab]') && cli.includes('const v = quickReason[tool] ? quickReason[tool][key] : undefined') && cli.includes("mode: 'deny', reason: v }") && cli.includes("action: 'deny', reason: v }") && !cli.includes('catReasons[tab][c] || undefined') && !cli.includes('fbReason[tab] || undefined') && !cli.includes('quickReason[tool][key] || undefined'))
+//
+// `mode` / `action` 两处不再硬编码 'deny'：理由框在 `auto + 回落 deny` 时也渲染，
+// 硬编码会把用户的 auto **静默改成 deny**（模型判断那一步被一次改理由抹掉）。
+// 故下发的动作取**当前**值（commitCatReason → curMode / commitSubReason → subActionOf）。
+ok('面板清空拒绝原因时透传空串（不折叠成 undefined）', cli.includes('const v = catReasons[tab] ? catReasons[tab][c] : undefined') && cli.includes('const v = fbReason[tab]') && cli.includes('const v = quickReason[tool] ? quickReason[tool][key] : undefined') && cli.includes('mode: fbVal, reason: v }') && cli.includes('action: subActionOf(tier), reason: v }') && !cli.includes('catReasons[tab][c] || undefined') && !cli.includes('fbReason[tab] || undefined') && !cli.includes('quickReason[tool][key] || undefined'))
 // 防回退：只固定中间变量声明是不够的——把下发字段改成 `reason: v || undefined` 时，
 // 上面的 `const v = ...` 仍在，断言会空转。故必须同时校验真正下发的三个字段。
 // 四处：分类默认值 / 快捷工具 / 兜底 / 命令子设置
@@ -2393,10 +2439,13 @@ ok('四处下发字段确实原样透传 v（不是只声明了 v）', (function
   // —— 而那条路径根本不存在（它是被修掉的那个缺陷本身）。实测：不剥注释时计数为 5。
   const code = cli.replace(/\/\/[^\n]*/g, '')
   // 4 条路径：分类默认值 / 快捷工具 / 兜底 / 命令子设置。
-  // 子设置那一路（per-tier reason，§7.2d）多带一个 `tier` 字段，故单独计数它 ——
-  // 而它**也**匹配 `reason: v }`（是后缀），故总数是 3 + 1 = 4，不是 4 + 1。
+  // 子设置那一路（per-tier reason，§7.2d）多带一个 `tier` 字段，故单独计数它。
+  // 动作字段取当前值（不再硬编码 deny）：见上一条注释的理由。
   return (code.match(/reason: v \}/g) || []).length === 4
-    && (code.match(/tier: tier, action: 'deny', reason: v \}/g) || []).length === 1
+    && (code.match(/tier: tier, action: subActionOf\(tier\), reason: v \}/g) || []).length === 1
+    // 反例：任何一处退回硬编码 'deny' 都会把 auto 静默改成 deny
+    && !/action: 'deny', reason: v \}/.test(code)
+    && !/mode: 'deny', reason: v \}/.test(code)
 })())
 // 防回退：对勾曾在 invoke 之前无条件点亮，写盘失败（r.error / catch 只 setMsg）时界面
 // 仍显示「✓ 已保存」，与错误信息并存。必须由成功回调点亮。
@@ -3397,7 +3446,8 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     // ③ 它渲染出小节名，且**复用**分类默认动作那一整套状态与提交路径
     //    （不是新开一份状态 —— 那会让同一个值出现两个来源、两处显示不一致）
     if (!row.includes("T('panel.subRest')")) return false
-    if (!row.includes("sel(mode, changeCat('command')")) return false
+    // 动作下拉 + 回落值走共用组件（原先这里是手抄的 sel + 两个三元，且曾漏掉回落值）
+    if (!row.includes("actionFallbackCtl(mode, changeCat('command')")) return false
     if (!row.includes("commitCatReason('command')")) return false
     if (!row.includes("revertReason('cat', 'command')")) return false
     // focus key 必须与标题行那套**逐字相同**（`{ kind: 'cat', tab, key: 'command' }`）：
@@ -4857,6 +4907,9 @@ group('21. 工作区根按会话派生（不再有跨会话共享的可变单例
     "function freshCategory(key, inh) { const c = { mode: inh ? 'inherit' : 'allow' }; if (EXC_CATS.indexOf(key) !== -1) c.exceptions = []; return c }",
     "function freshProject() { const pb = { quickTools: {}, custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit' }; for (const c of CATS) pb[c] = freshCategory(c, true); return pb }",
     "function normalizeText(v) { return typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined }",
+    // addProjectException 现在按**最终动作**决定 reason/note 存不存，故这两个函数必须注入。
+    (src.match(/function finalActionOf\(action, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0],
+    (src.match(/function normalizeAutoFallback\(v, action\) \{[\s\S]*?\n    \}/) || [''])[0],
     sliceFn('rootOf'), sliceFn('normAbsPath'), sliceFn('pathKey'),
     sliceFn('projectBlock'), sliceFn('ensureProject'), sliceFn('addProjectException'),
     sliceFn('effectiveSandboxConfig'),
@@ -7967,7 +8020,8 @@ ok('★★ 例外行字段顺序与快捷工具一致（动作▾ 在原因之�
   // 用「再往后 8000 字符」足够覆盖这一行（该分支约 5.6k），且不会越到别的分支：
   // 编辑态在**前面**，所以往后取不会误入它。
   const seg = cli.slice(roStart, roStart + 8000)
-  const iSel = seg.indexOf('sel(act, setExAction')
+  // 动作下拉现在由共用组件渲染（actionFallbackCtl 内部才调 sel），故这里找它的调用点
+  const iSel = seg.indexOf('actionFallbackCtl(act, setExAction')
   const iRsn = seg.indexOf("reasonSlot('reason')")
   const iNote = seg.indexOf("reasonSlot('note')")
   if (iSel < 0 || iRsn < 0 || iNote < 0) return false
@@ -7993,7 +8047,7 @@ ok('★★ 例外行字段顺序与快捷工具一致（动作▾ 在原因之�
     else if (cli[k] === '}') { d--; if (d === 0) { qb = cli.slice(qi, k + 1); break } }
   }
   if (!qb) return false
-  const qSel = qb.indexOf('sel(mode, changeQuick(t)')
+  const qSel = qb.indexOf('actionFallbackCtl(mode, changeQuick(t)')
   const qRsn = qb.indexOf('reasonInput(')
   return qSel > 0 && qRsn > qSel
 })())
@@ -8791,6 +8845,40 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     } catch (e) { return false }
   })())
 
+  // ★ 59g 四处写入单点都能改回落值（真实求值，不是匹配字面量）
+  //
+  // 起因：面板新增了四处回落值选择器（例外 / 快捷工具 / 兜底 / 八档子设置），
+  // 它们各自要走一个宿主的写入单点。若单点不接收 autoFallback 参数，面板会「显示改了、
+  // 磁盘没变」—— 那正是本仓库反复警告的「面板说谎」，且只在 auto 档上暴露。
+  //
+  // 四个单点分处不同函数、签名各异，故逐个真实求值：喂「动作 auto + 指定回落值」，
+  // 断言落盘结果里的回落值确实是它（而不是被静默丢弃、或退回缺省 ask）。
+  ok('★★ 59g 四处写入单点都接收 autoFallback（例外 / 快捷 / 兜底 / 子设置，真实求值）', (function () {
+    // ① 例外：setExceptionEntry 走 normalizeException，patch.autoFallback 必须被带上
+    if (!/if \(patch\.autoFallback !== undefined\) next\.autoFallback = patch\.autoFallback/.test(src)) return false
+    // ② 路由层必须把请求里的 autoFallback 透传进 patch（漏了它上一条永远收不到值）
+    if (!/if \(a\.autoFallback !== undefined\) patch\.autoFallback = a\.autoFallback/.test(src)) return false
+    // ③ 快捷工具：setQuickAction 的第六个参数，显式传入优先于已有值
+    const qm = src.match(/function setQuickAction\(root, targetKey, tool, action, reason, autoFallback\) \{[\s\S]*?\n    \}/)
+    if (!qm) return false
+    if (!/const req = autoFallback === 'ask' \|\| autoFallback === 'allow' \|\| autoFallback === 'deny' \? autoFallback : undefined/.test(qm[0])) return false
+    if (!/normalizeAutoFallback\(req !== undefined \? req : \(prevObj \? prevObj\.autoFallback : undefined\), action\)/.test(qm[0])) return false
+    // ④ 兜底：setFallbackMode 的第五个参数，显式传入优先
+    const fm = src.match(/function setFallbackMode\(root, targetKey, mode, reason, autoFallback\) \{[\s\S]*?\n    \}/)
+    if (!fm) return false
+    if (!/block\.fallbackAutoFallback = req \|\|/.test(fm[0])) return false
+    // ⑤ 子设置：setCommandSub 的第六个参数，显式传入优先
+    const sm = src.match(/function setCommandSub\(root, targetKey, action, reason, tier, autoFallback\) \{[\s\S]*?\n    \}/)
+    if (!sm) return false
+    if (!/sub\.autoFallbacks\[t\] = req \|\| afOfTier\(\) \|\| 'ask'/.test(sm[0])) return false
+    // ⑥ 四条路由都必须把请求参数透传到单点（否则面板发了、宿主收不到）
+    if (!src.includes("setQuickAction(rootOf(exec), target, a.tool, a.action, a.reason, a.autoFallback)")) return false
+    if (!src.includes("setFallbackMode(rootOf(exec), target, a.mode, a.reason, a.autoFallback)")) return false
+    if (!src.includes("setCommandSub(rootOf(exec), target, a.action, a.reason, a.tier, a.autoFallback)")) return false
+    return true
+  })())
+
+
 
   // ★ 47：import 名单（新增导出符号）
   ok('★ 47 index.js 从 shell-parse 导入新增符号（tierLabel / TIERS / GROUP_MEMBERS）',
@@ -9008,23 +9096,28 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     !/kind: 'sub', tab: tab, key: 'command'/.test(cli)
     && /kind: 'sub', tab: tab, key: tier/.test(cli))
   // ★ 59c `commitSubReason` 必带 tier（§7.2d 的既有缺陷：硬编码 action:'deny' 且无档位）
-  ok('★★ 59c commitSubReason 带 tier（否则会写到缺省档 inside —— 改 wide 的理由却改 inside 的动作）',
+  //
+  // 且 `action` 必须取该档**当前**动作（不再是硬编码 'deny'）：理由框在
+  // `auto + 回落 deny` 时也渲染，硬编码会把用户的 auto **静默改成 deny**。
+  ok('★★ 59c commitSubReason 带 tier，且 action 取当前值（不硬编码 deny）',
     (function () {
       const i = cli.indexOf('const commitSubReason = (focus) => {')
       if (i < 0) return false
-      const body = cli.slice(i, i + 900)
+      const body = cli.slice(i, i + 1200)
       return body.includes("const tier = (focus && focus.key) || 'inside'")
-        && /invoke\('permgate:set-command-sub', \{ target: tab, tier: tier, action: 'deny', reason: v \}/.test(body)
+        && /invoke\('permgate:set-command-sub', \{ target: tab, tier: tier, action: subActionOf\(tier\), reason: v \}/.test(body)
+        // 反例：退回硬编码 'deny' 会把 auto 静默改成 deny
+        && !/action: 'deny', reason: v \}/.test(body)
     })())
   // ★ 30 changeSubDestructive 带 tier（只改该档，不连带改其余档）
   ok('★ 30 changeSubDestructive 带 tier（只改该档）', (function () {
     const i = cli.indexOf('const changeSubDestructive = (tier) => (e) => {')
     if (i < 0) return false
-    const body = cli.slice(i, i + 1200)
+    const body = cli.slice(i, i + 1400)
     return body.includes('[tab]: Object.assign({}, subDestructive[tab], { [tier]: action })')
       && /invoke\('permgate:set-command-sub', \{ target: tab, tier: tier, action \}/.test(body)
-      // exitEditOf 也按档（切离 deny 时只作废该档的编辑态）
-      && body.includes("if (action !== 'deny') exitEditOf('sub', tier)")
+      // exitEditOf 也按档；判据是「最终会不会拒绝」（auto + 回落 deny 时理由框仍在）
+      && body.includes("if (finalActionOf(action, subAutoFallbackOf(tier)) !== 'deny') exitEditOf('sub', tier)")
   })())
   // ★ 31 warnSubMismatch 按档判（八档各判一次 —— 判据不变：子设置比大分类更松才提示）
   // 这里断言的是「调用点传的是该档的**新值**」，与 §7.2d 那条「必须显式传入」的既有纪律同源。
