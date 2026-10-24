@@ -6698,7 +6698,13 @@ export default {
       }
       if (r.decision === 'escalate') {
         noteAutoOutcome(exec, 'other')
-        return { verdict: 'escalate', code: 'escalate', detail: r.reason || 'model escalated', raw: r.raw }
+        // `reason` 必须**单独带出**（除了拼进 detail）：
+        //   · `detail` 是给 `fallbackReason` 用的机械串（`escalate: <reason>`），
+        //     会进决策记录、随 perm_status 下发；
+        //   · 弹窗要显示的是模型**原话本身**（见 pre-execute 里 modelReason 的说明），
+        //     不能从 detail 里再切一刀 —— 那等于把「格式化过的串」当原文用，
+        //     一旦 detail 的格式变了（加前缀/换分隔符）弹窗就跟着错。
+        return { verdict: 'escalate', code: 'escalate', detail: r.reason || 'model escalated', reason: r.reason || '', raw: r.raw }
       }
       if (r.decision === 'allow') {
         noteAutoOutcome(exec, 'allow')     // 清零
@@ -6944,11 +6950,45 @@ export default {
           // （d.note，最具体：就是当初特意拦它的那句话），无则回退 opts.note（auto 异常回落预留）。
           // 二者都不拼进 reason —— reason 会被 recordDecision 写入决策记录并随 perm_status 下发给
           // AI，而备注只该在弹窗上给人看（详见 decide() 中 exNote 的说明）。
-          // 统一走 normalizeText（trim + 截断 200 + 非字符串丢弃），与 reason/例外 note 同口径。
-          // 早先这里是裸 String(o.note)，是全文件唯一无上界的弹窗文本通道：该字段会经
-          // /permgate/pending 原样下发并渲染进卡片（卡片只有 max-height:82vh），
-          // 超长文本会把「允许/拒绝」按钮挤出可视区。
-          note: normalizeText(d.note) || normalizeText(o.note) || null,
+          //
+          // ── 存**原始值**，按语言投影交给路由层（与 reason / intent 同一套）──────────
+          // `d.note` 有两种形状：例外备注是**裸字符串**（normalizeText 存下来的），
+          // auto 异常路径写的是 `bi(zh, en)` 对象（三处，见 pre-execute）。
+          //
+          // 这里曾经是 `normalizeText(d.note) || normalizeText(o.note) || null`，而
+          // `normalizeText` 只接受 `typeof v === 'string'` —— 于是 bi 对象**恒被丢弃**：
+          // 实测 auto 异常回落时 entry.note 一直是 null，弹窗上「原因：escalate: …」
+          // 从来没显示过。这不是本次改动引入的，是 bi 与 normalizeText 口径不一致的既有洞。
+          //
+          // 修法不能是「在这里调 L(v, lang)」—— askUser 里**没有 lang**（它在路由层才有），
+          // 在 Promise executor 里引用未定义变量会抛错，整个 entry 构造失败、弹窗根本不出现
+          // （实测：改成 L(v, lang) 后 group24 十五条断言同时变红，全部退化成 deny）。
+          //
+          // 正确做法与 reason / intent 完全一致：**存原值**，路由层 `/permgate/pending`
+          // 用 `L(e.note, lang)` 投影。`L` 对字符串会原样返回（`if (typeof o === 'string')
+          // return o`），故两种形状都能正确投影，且截断仍在写入侧做（normalizeText）。
+          note: normalizeText(d.note) || normalizeText(o.note) || (d.note && typeof d.note === 'object' ? d.note : (o.note && typeof o.note === 'object' ? o.note : null)),
+          // ── 模型原话（auto 专有）──────────────────────────────────────────────
+          // 为什么它必须在弹窗上：`escalate` 与各类失败是**弹窗的主要来源**，而模型在那条
+          // 路径上恰恰说了一句「我拿不准，因为 X」—— X 是用户判断的关键输入，却被
+          // `fallbackReason`（只有 `escalate` / `infra-error` 这类机械码）挡在外面。
+          // 实测用户看到的全部信息是「自动审批未能给出结论，请人工判断 / 原因：escalate:
+          // model escalated」，模型原本那句话没了。
+          //
+          // 数据其实早就在手边：`d2.modelReason` 由 pre-execute 写入、`recordDecision`
+          // 也把它落进决策记录 —— 只是 `askUser` 构造 entry 时没读它，`/permgate/pending`
+          // 的白名单里也没有。数据在、接口没接，属本文件反复记录的「静默退化」同族。
+          //
+          // 与 note 分开两个字段（而不是拼进 note）：
+          //   · note 是 permgate 自己写的说明（命中哪条例外 / 哪条机械原因），
+          //     模型原话是**第三方文本**，客户端要能给它不同的视觉标记
+          //     （否则用户会把「用户已授权删除」这种模型臆断读成系统结论）；
+          //   · 两者的截断口径与来源都不同，拼在一起日后无法分辨哪句是谁说的。
+          //
+          // 走 normalizeText（trim + 截断 200）与 note 同口径：这个字段会经
+          // /permgate/pending 原样下发并渲染进卡片，而卡片只有 max-height:82vh ——
+          // 无上界的文本会把「允许/拒绝」按钮挤出可视区（note 的注释记着这个教训）。
+          modelReason: normalizeText(d.modelReason) || null,
           // 审批发起时的项目根：审批可能挂起很久、期间用户会切会话，故必须把发起时的
           // 根快照下来 —— 打相对路径/对比/打开侧栏/落盘例外都用它，不能用「当前会话」的根。
           projRoot: rootOf(exec),
@@ -8296,9 +8336,10 @@ export default {
             //
             // cat/deadline/onTimeout/note 也必须在白名单里：客户端缩小方块要按 cat 选图标与
             // 标签（缺失则永远回落通用扳手图标 + 裸工具名），倒计时条要按 deadline 倒数、
-            // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位。
+            // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位，
+            // modelReason 是模型原话（escalate 时那句「拿不准，因为 X」的唯一来源）。
             // 白名单式投影漏字段不会报错，只会让客户端静默退化，故新增 entry 字段时必须同步此处。
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, intentLabel: e.intentLabel ? L(e.intentLabel, lang) : null, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note || null, blast: e.blast || null })
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, intentLabel: e.intentLabel ? L(e.intentLabel, lang) : null, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note ? L(e.note, lang) : null, modelReason: e.modelReason || null, blast: e.blast || null })
           }
           return json(res, out)
         }
@@ -8906,16 +8947,27 @@ export default {
             // 异常原因写进 note（弹窗上给人看「为什么模型没用上」），**不进 reason** ——
             // reason 会经 recordDecision 落进决策记录并随 perm_status 下发给 AI。
             const why = (rv.code || 'infra-error') + (rv.detail ? ': ' + rv.detail : '')
+            // ── `modelReason` 在异常路径上同样必须带上 ─────────────────────────────
+            // 这是**弹窗的主要来源**（escalate / 超时 / 协议非法 / 熔断都落这里），而模型
+            // 恰恰在这条路径上说了一句「我拿不准，因为 X」。此前只带 `why`（机械码），
+            // 用户看到的是「原因：escalate: model escalated」—— 模型原本那句话被丢掉，
+            // 而那正是他判断的依据。
+            //
+            // `rv.reason` 在 `verdict === 'escalate'` 时是模型自述的理由（reviewWithModel
+            // 里 `detail: r.reason || 'model escalated'`）；在失败路径上它可能是空串
+            // （协议非法时没有可信的理由），`normalizeText` 会把空串折成 undefined，
+            // 于是 entry.modelReason 为 null、弹窗不显示空行 —— 不需要额外判空。
+            const mr = rv.reason || ''
             // 超时时长只在这条异常路径上有意义，故在此算一次（下面两个分支共用）。
             const tmo = autoReviewTimeoutMs()
             if (fb === 'ask') {
               // 用户选了 ask 回落 = 就是要被问。此时**永不超时**，与 timeoutMs 的取值无关：
               // 「异常」与「正常失败」本来就都会弹窗，不需要靠超时结案，也不该被超时打断。
-              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断', 'Auto review could not decide; human decision required'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why })
+              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断', 'Auto review could not decide; human decision required'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why, modelReason: mr })
             } else if (tmo > 0) {
               // allow / deny 回落：弹窗等你这么久（默认 20 秒），超时就按回落值执行。
               // 语义不是「自动结案」，而是「异常时先问你，你不理才按预设走」。
-              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断（' + (fb === 'allow' ? '超时后放行' : '超时后拒绝') + '）', 'Auto review could not decide; human decision required (timeout will ' + fb + ')'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why, timeoutFallback: fb })
+              d2 = Object.assign({}, carry, { action: 'ask', reason: bi('自动审批未能给出结论，请人工判断（' + (fb === 'allow' ? '超时后放行' : '超时后拒绝') + '）', 'Auto review could not decide; human decision required (timeout will ' + fb + ')'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback', fallbackReason: why, timeoutFallback: fb, modelReason: mr })
             } else {
               // tmo === 0 = **不弹窗，直接按回落值执行**（用户显式表示「这种异常别问我」）。
               //

@@ -4900,7 +4900,59 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     releaseTmp(ws, home)
   }
 
-  // ── A14b：超时 0 直接执行是**无人在环**的放行/拒绝，必须留痕 ────────────────────
+  // ── A16b：模型原话必须出现在弹窗数据里 ────────────────────────────────────────
+  //
+  // 回归背景：`escalate` 与各类失败是**弹窗的主要来源**，模型在那条路径上恰恰说了
+  // 「我拿不准，因为 X」—— 而 X 是用户判断的关键输入。此前 `entry` 只带
+  // `note`（机械码，如 `escalate: model escalated`），模型原话被丢掉：
+  //   · `d2.modelReason` 由 pre-execute 写入、`recordDecision` 也落了决策记录，
+  //     数据在，但 `askUser` 构造 entry 时没读它、`/permgate/pending` 白名单也没有。
+  // 这条断言钉的正是「数据在、接口没接」这个静默退化。
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"escalate","reason":"无法确认这个目录是不是用户说的那个"}'))
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, llm)
+    const r = await probeAuto(h, ws, 'a16b', T, A)
+    ok('★★ group24 A16b: escalate 时模型原话进弹窗（不再只剩机械码）',
+      r && r.kind === 'ask' && r.entry.modelReason === '无法确认这个目录是不是用户说的那个',
+      JSON.stringify(r && r.entry ? { note: r.entry.note, modelReason: r.entry.modelReason } : r))
+    // 对照：机械码仍在 note 里，两者**分属不同字段**（不能合并 —— 一个是系统说明、
+    // 一个是第三方文本，客户端要能给不同视觉标记）
+    ok('★ group24 A16b: 机械码仍在 note，与模型原话分属两个字段',
+      r && r.kind === 'ask' && String(r.entry.note || '').indexOf('escalate') !== -1
+      && r.entry.modelReason !== r.entry.note,
+      JSON.stringify(r && r.entry ? { note: r.entry.note, modelReason: r.entry.modelReason } : r))
+    releaseTmp(ws, home)
+  }
+  // ── A16c：失败路径没有可信理由时，弹窗不显示空的原话行 ────────────────────────
+  //
+  // 协议非法时 `rv.reason` 是空串（模型输出被拒，没有可信理由可引用）。
+  // `normalizeText` 把空串折成 undefined → entry.modelReason 为 null，
+  // 客户端 `p.modelReason ? … : null` 因此不渲染 —— 不会出现「模型判断：」后面跟空白的空行。
+  {
+    const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, llm)
+    const r = await probeAuto(h, ws, 'a16c', T, A)
+    ok('★★ group24 A16c: 失败路径无理由时 modelReason 为 null（不渲染空行）',
+      r && r.kind === 'ask' && r.entry.modelReason === null,
+      JSON.stringify(r && r.entry ? { note: r.entry.note, modelReason: r.entry.modelReason } : r))
+    releaseTmp(ws, home)
+  }
+  // ── A16d：模型原话有长度上界（否则超长文本会把按钮挤出可视区）────────────────
+  //
+  // 这个字段会经 /permgate/pending 原样下发并渲染进卡片，而卡片只有 max-height:82vh。
+  // 走 normalizeText（trim + 截断 200）与 note 同口径 —— note 的注释里记着这个教训。
+  {
+    const long = '很长的理由'.repeat(200)   // 1000 字符
+    const llm = mkLlm(verdict(JSON.stringify({ risk: 'medium', decision: 'escalate', reason: long })))
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, llm)
+    const r = await probeAuto(h, ws, 'a16d', T, A)
+    ok('★★ group24 A16d: 模型原话被截断到 200 字符（与 note 同口径）',
+      r && r.kind === 'ask' && typeof r.entry.modelReason === 'string'
+      && r.entry.modelReason.length === 200,
+      JSON.stringify({ len: r && r.entry ? String(r.entry.modelReason || '').length : null }))
+    releaseTmp(ws, home)
+  }
+
   //
   // 若不补记，事后无法区分「用户设了 0、系统按预设直接放行」与「模型判断放行」——
   // 前者用户可能完全不知情，后者是他授权模型判断的，责任归属不同。

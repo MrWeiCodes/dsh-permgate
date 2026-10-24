@@ -1849,9 +1849,28 @@ ok('★ ask 例外的 note 经独立字段 exNote 下发（弹窗用，不混入
     nonAsk.every((b) => !/[,{]\s*note:/.test(b)))
 }
 // 弹窗的 note 来源：优先本次判定命中的 ask 例外备注，无则回退 opts.note（auto 异常回落预留）。
-// 两者都必须过 normalizeText（与 reason 同口径），否则又是无上界的弹窗文本通道。
-ok('★ 弹窗 note 由 d.note 优先、opts.note 回退，且两者都过 normalizeText',
-  /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| null/.test(src))
+//
+// 形状有两种：例外备注是**裸字符串**（normalizeText 存下来的），auto 异常路径写的是
+// `bi(zh, en)` 对象。`normalizeText` 只接受 `typeof v === 'string'`，故这里必须
+// **字符串走 normalizeText、对象原样保留**，由路由层 `/permgate/pending` 用 `L(e.note, lang)`
+// 投影 —— 与 reason / intent 完全同一套。
+//
+// 反例（修复前的真实 bug）：写成 `normalizeText(d.note) || normalizeText(o.note) || null`，
+// bi 对象**恒被丢弃**，auto 异常回落的「原因：escalate: …」从来没显示过。
+// 另一种错法是在 askUser 里调 `L(v, lang)` —— 那里**没有 lang**（路由层才有），
+// 引用未定义变量会抛错、整个 entry 构造失败、弹窗根本不出现（实测 group24 十五条同时变红）。
+ok('★ 弹窗 note 由 d.note 优先、opts.note 回退，字符串过 normalizeText、bi 对象留原值',
+  /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| \(d\.note && typeof d\.note === 'object'/.test(src)
+  // 反向：askUser 内**代码**不得引用 lang（那个作用域里没有它）。
+  // ⚠️ 必须先剥注释：本函数的注释里成段引用了 `L(e.intent, lang)` 来说明投影层，
+  // 不剥的话这条反向断言会被自己的说明文字命中（本文件反复记录过这个坑）。
+  && (function () {
+    const i = src.indexOf('function askUser(exec, d, opts) {')
+    if (i < 0) return false
+    const seg = src.slice(i, i + 6000)
+    const codeOnly = seg.split('\n').map((l) => (/^\s*(\/\/|\*|\/\*)/.test(l) ? '' : l)).join('\n')
+    return !/L\([^)]*\blang\b/.test(codeOnly)
+  })())
 ok('落盘时 reason 只随 deny、note 只随 ask（allow 两者都不存）', src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined") && src.includes("const note = decision === 'ask' ? normalizeText(o.note) : undefined") && src.includes('reason ? { reason } : {}, note ? { note } : {}'))
 // 防回退：addProjectException 曾自建一份 trim200（会对非字符串 String() 强转），与 normalizeText 分叉
 ok('例外落盘与 normalizeException 共用 normalizeText 单点（不再有第二份 trim200）', !src.includes('const trim200 =') && src.includes("const reason = decision === 'deny' ? normalizeText(o.reason) : undefined"))
@@ -6519,14 +6538,19 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // note 必须与同文件的 reason/例外 note 同口径（normalizeText：trim + 截断 200）。
   // 裸 String(o.note) 是全文件唯一无上界的弹窗文本通道，会经 pending 原样下发并渲染进
   // 卡片（卡片只有 max-height:82vh），超长文本会把允许/拒绝按钮挤出可视区。
-  ok('★ note 走 normalizeText（与 reason/例外 note 同口径，不会无界下发）',
-    /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| null/.test(ask)
+  //
+  // 但**只有字符串**能走 normalizeText：auto 异常路径写的是 `bi(zh, en)` 对象，
+  // 它必须原样保留、由路由层 `L(e.note, lang)` 投影（见第 1853 行那条断言的说明）。
+  ok('★ note 走 normalizeText（字符串）/ 留原值（bi），不会无界下发也不会被丢弃',
+    /note: normalizeText\(d\.note\) \|\| normalizeText\(o\.note\) \|\| \(d\.note && typeof d\.note === 'object'/.test(ask)
     && !/note: o\.note \? String\(o\.note\) : null/.test(ask))
   // timeoutMs 只写不读会被误当成「还有人依赖」：客户端只认绝对 deadline。
   ok('★ 不存只写不读的 entry.timeoutMs（有无超时由 deadline 表达）',
     !/timeoutMs: timeoutMs \|\| null/.test(ask) && !/entry\.timeoutMs = null/.test(ask))
-  ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note/blast（白名单漏字段即静默退化）',
-    /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \|\| null, blast: e\.blast \|\| null \}\)/.test(src))
+  // 白名单投影：note 走 L() 投影（bi 对象才能按语言取值），modelReason 原样下发
+  // （它是 normalizeText 存下的**字符串**，不需要投影）。
+  ok('★ /permgate/pending 投影带上 cat/deadline/onTimeout/note/modelReason/blast（白名单漏字段即静默退化）',
+    /out\.push\(\{ id: e\.id[\s\S]{0,900}?cat: e\.cat \|\| null, deadline: e\.deadline \|\| null, onTimeout: e\.onTimeout \|\| null, note: e\.note \? L\(e\.note, lang\) : null, modelReason: e\.modelReason \|\| null, blast: e\.blast \|\| null \}\)/.test(src))
 
   // ── 27d. pre-execute 的异常兜底必须是 fail-safe（★72）────────────
   //

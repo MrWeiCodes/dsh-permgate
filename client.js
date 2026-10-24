@@ -40,6 +40,12 @@ window.__ModuleLoader__.load({
 			'.pg-count-err { flex: none; font-size: 11px; }',
 			// 异常原因（auto 专用）：灰色小字，只作说明不抢视线
 			'.pg-note { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; line-height: 1.5; word-break: break-word; }',
+			// 模型原话（auto 专用）：与 .pg-note 同为灰色小字，但加左侧竖线 + 斜体，
+			// 让用户一眼看出「这是模型说的」而不是「系统判定的」。
+			// 为什么必须区分：模型在 reason 里可能写「用户已授权删除」这类**臆断**，
+			// 若与 permgate 自己的说明同形渲染，用户会把它读成系统的结论。
+			// 竖线用 border-left 而不是 ::before 伪元素：这里只拼字符串，没有额外的节点。
+			'.pg-model-reason { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; padding-left: 8px; border-left: 2px solid var(--dsw-alias-border-secondary, #30363d); font-style: italic; line-height: 1.5; word-break: break-word; }',
 			// 无障碍：系统偏好「减少动态效果」时关掉脉动，改用静态强调色边框 ——
 			// 该偏好针对的是「动态」，不是「不要提示」，故仍保留可见的存在感。
 			'@media (prefers-reduced-motion: reduce) { .pg-min { animation: none; border-color: var(--dsw-alias-state-warning-primary, #e65100); box-shadow: 0 0 0 1px var(--dsw-alias-state-warning-primary, #e65100), 0 6px 20px rgba(0,0,0,0.28); } }',
@@ -1526,6 +1532,10 @@ window.__ModuleLoader__.load({
 				'app.resetPos': '复位到默认位置（右上角）',
 				'app.timeoutIn': '⏳ {n} 秒后自动{act}',
 				'app.timeoutStop': '停止倒计时',
+				// 模型原话的前缀。为什么需要前缀而不是只靠样式：灰色斜体在缩小方块与深色
+				// 主题下区分度不足，而模型可能在 reason 里写「用户已授权删除」这类臆断 ——
+				// 必须让用户一眼看出这是模型说的，不是系统判定的。
+				'app.modelReasonPrefix': '模型判断：',
 				'app.timeoutStopHint': '停止后本审批不再自动结案，一直等你决定',
 				'app.timeoutStopFailed': '取消失败：倒计时仍在运行',
 				'app.fromSession': '来自对话：',
@@ -1967,6 +1977,7 @@ window.__ModuleLoader__.load({
 				'app.resetPos': 'Reset to default position (top right)',
 				'app.timeoutIn': '⏳ auto-{act} in {n}s',
 				'app.timeoutStop': 'Stop countdown',
+				'app.modelReasonPrefix': 'Model says: ',
 				'app.timeoutStopHint': 'After stopping, this request waits for you indefinitely',
 				'app.timeoutStopFailed': 'Could not stop: the countdown is still running',
 				'app.fromSession': 'From conversation: ',
@@ -2612,6 +2623,17 @@ window.__ModuleLoader__.load({
 				// ② auto 异常回落的附加说明。二者都经 entry.note 独立下发，**不拼进 reason** ——
 				// reason 会被记入决策记录并随 perm_status 回给 AI，备注只该在这里给人看。
 				p.note ? React.createElement('div', { className: 'pg-note' }, p.note) : null,
+				// 模型原话（auto 专有）：escalate 与各类失败是弹窗的主要来源，模型在那条路径上
+				// 说的「拿不准，因为 X」正是用户判断的依据，此前只有机械码（escalate:
+				// model escalated），那句话被丢掉了。
+				//
+				// 单独一个块而不是拼进 note：这是**第三方文本**，必须与 permgate 自己的说明
+				// 视觉可区分（.pg-model-reason 有左侧竖线 + 斜体）。模型可能在 reason 里写
+				// 「用户已授权删除」这类臆断，同形渲染会让用户把它读成系统结论。
+				//
+				// 前缀「模型判断：」是必要的：单靠样式（灰色斜体）在缩小方块/深色主题下
+				// 区分度不够，文字前缀是唯一在任何配色下都成立的标识。
+				p.modelReason ? React.createElement('div', { className: 'pg-model-reason' }, T('app.modelReasonPrefix') + p.modelReason) : null,
 				props.children,
 			);
 		}
