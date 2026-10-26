@@ -5045,12 +5045,25 @@ function splitQuotedTokens(text) {
  * ⚠️ 必须丢掉 heredoc 正文（`stripHeredocBody`）：正文是**数据**，不是命令，
  * 拿它判档会让 `cat > doc.txt <<EOF\nrm -rf /etc\nEOF` 凭空多出一个 `outside` 档。
  *
+ * ── 反引号按**段分隔符**处置（不是逐词元剥掉）────────────────────────────────────
+ * 词法器**不吞**反引号：`` `rm -rf /data` `` 是带引号的**字面词元**，
+ * `blastRadiusOfSegment(['echo', '`rm', '-rf', '/data`'])` 的命令头是 `echo`、`/data`
+ * 只是它的实参 ⇒ `blast=null` ⇒ `outside` 档失明（方向 fail-open）。
+ * 而**剥掉**反引号（`replace(/`/g, '')`）只堵住「构造独立成段」那一半：整段变成
+ * `echo rm -rf /data`，段首仍是 `echo`，同样判不出 —— 实测 `` echo `rm -rf /data` `` 的
+ * 四种读不懂形态里**两种仍 allow**。故这里把反引号当**分隔符**（与 `$()` 的 `(` `)`
+ * 同待遇）：`` echo `rm -rf /data` `` 切成 `echo` 与 `rm -rf /data` 两段，后一段的段首
+ * 就是 `rm`，判档与裸命令同源。方向仍是收紧（多认目标只会让更多档参与取最严）。
+ *
  * @param {string} source 整行原文
  * @param {object} [opts] 判档选项（`home` / `userHome` / `platform` / `isOutsideWorkspace`）
  * @returns {boolean} 原文里读得出工作区外的目标时为真
  */
 function outsideTargetInUnparsable(source, opts) {
-  const body = stripHeredocBody(String(source == null ? '' : source))
+  // ⚠️ 顺序不可交换：必须**先**剥 heredoc 正文，**再**把反引号换成换行。
+  // 反过来（先换反引号）会把 opener 与终止符拆到不同行 ⇒ `stripHeredocBody` 找不到终止符
+  // ⇒ 走 `!end` 分支截断 ⇒ 反引号之后的真命令整段被丢弃（`outside=deny` 下 fail-open）。
+  const body = stripHeredocBody(String(source == null ? '' : source)).replace(/`/g, '\n')
   // 切分与 `rawCommandNames` **同一份判据**（空白与操作符），不另写一套 ——
   // 两条路径对「哪一段是命令」的认识必须一致，否则同一个 heredoc 在
   // 「查 deny 例外」与「判 outside 档」两处看到不同的命令集合。
@@ -7721,6 +7734,30 @@ export function tierSetOf(seg, labels, opts) {
       for (const t of RADIUS_TIERS_WHEN_UNREADABLE) add(t)
       // 诱饵目标已判出的半径档（`outside` / `home` 那一族）**显式保留**，见本支开头。
       add(radiusTierOf(seg && seg.blast))
+      // ── 构造里**读得出的区外目标** → 并入 `outside` 档（本发现的修法）────────────────────
+      // 上面那三档（`wide ∪ unknown ∪ inside`）是「半径侧读不出」的**通用**口径，**不含
+      // `outside`**（该常量也不能加 `outside`：整行分支同样消费它，加了会把
+      // `rm -rf ./build <<EOF` 那一族从 allow 变 deny —— 过度收紧）。于是用户显式配的
+      // `outside=deny`（「工作区外的破坏性操作一律拒绝」）在这条路径上整个失明：
+      //     rm -rf /data     → deny（段级 `outside` 档）
+      //     (rm -rf /data)   → allow ← 同一命令，只因整个包进了 opaque 构造
+      // 判据与整行读不懂分支（`:9763`）**同一个函数**：只有构造原文里真的读得出区外目标时
+      // 才并入，不是「凡 opaque 就并 `outside`」—— 后者会给八档全 allow 的用户凭空多一档。
+      //
+      // ⚠️ 取 `seg.opaqueTexts` 而**不是** `seg.text`：`tierSetOf` 的入参只有
+      // `{words, blast, opaque, opaqueTexts}`（见 `assessCommand` 的调用点），**没有 `text`**
+      // —— 用 `seg.text` 会恒 `undefined`、本行改动 0 格。
+      // ⚠️ 反引号由 `outsideTargetInUnparsable` **内部**统一处置（当段分隔符，与 `$( )` 的
+      // `(` `)` 同待遇，见该函数的说明）—— 调用处**不再**自己剥一遍。
+      // 这里曾写着 `String(t).replace(/`/g, '')`，那是上一轮只修段级分支时留下的**第二份判据**：
+      // 逐词元剥掉反引号会把 `echo `rm -rf /data`` 变成 `echo rm -rf /data`，段首仍是
+      // `echo` ⇒ `/data` 只是它的实参 ⇒ 判不出目标（实测保留剥离时，那一族的整行形态
+      // 仍 allow）。单点化之后两种形态走同一条判据，实测段级 6 种构造 × 2 方言、
+      // 以及「反引号 × 7 构造 × 7 目标 × 4 包装 × 3 配置」共 1176 格，**保留 vs 删除剥离
+      // 零差异**；四套测试亦全绿。
+      for (const t of (seg && Array.isArray(seg.opaqueTexts) ? seg.opaqueTexts : [])) {
+        if (outsideTargetInUnparsable(String(t), opts)) { add('outside'); break }
+      }
     } else {
       add((opaqueUnjudgeable || isUnknownTierSegment(list, seg && seg.words, opts))
         ? 'unknown'
@@ -7819,9 +7856,28 @@ export function tierSetOf(seg, labels, opts) {
  *     → 落**大分类 mode**。大分类若是 allow，用户写的「这一档交给模型判」就变成了
  *     **直接放行**（fail-open，且没有任何提示）。
  * 取值 1 的理由与 MODE_STRICTNESS 处同源：auto 与 ask 一样是「要过一道关」的档位
- * （ask 过关的是人，auto 过关的是模型），并列时由 `tiers` 的排列决定，不影响方向安全。
+ * （ask 过关的是人，auto 过关的是模型）。并列时**不能**一律由 `tiers` 的排列决定 ——
+ * 那会让「提权要问人」被降级成「问模型」（`wide` 恒排在 `priv` 之前），故
+ * `decisiveTierOf` 对 `ask` 与 `auto` 的并列另有 tie-break：显式 ask 压过 auto、
+ * 缺省 ask 让位给 auto（同为 ask 的并列另见该函数第三支；详见该函数的注释）。
  */
 export const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
+/**
+ * **回落值**（`autoFallback`）的严格度序：allow < ask < deny（越大越严）。
+ *
+ * 回落值与动作是**两个域**，不能共用上面那张表：动作域含 `auto`（与 `ask` 同为 1，
+ * 表示「还要再过一道关」），而回落值的值域被 `normalizeAutoFallback` / `autoFallbackOf`
+ * 锁死在**三值** —— 它就是「模型失败后最终执行什么」，`auto` 在这里没有意义
+ * （回落值不可能再回落一次，见计划 §2.2.1）。拿含 `auto: 1` 的动作表去比回落值，
+ * 正确性依赖「值域已被上游锁死」这条**隐式**契约；一旦某处漏了归一化，`auto` 会
+ * 以 1 的身份参与比较、与 `ask` 并列 —— 那时取谁取决于实现细节。
+ *
+ * 故回落值有自己的一张表，且**全仓只有这一张**：本模块的 `strictestFallbackOf`
+ * （段内多档 / 段与段合并）与宿主的 `out()`（doom 合并）、`outsideMatrix`（两道区外闸）
+ * 共用它。三处原先各写一份三键表 / 借动作表，其中两处的注释对同一原则给出**相反**指令，
+ * 那种「表述冲突 + 值域隐式契约」正是漂移的温床。
+ */
+export const AF_STRICTNESS = { allow: 0, ask: 1, deny: 2 }
 /**
  * 命中档位 → 动作：取**最严**（deny > ask > allow）。
  *
@@ -7842,20 +7898,94 @@ export const TIER_STRICTNESS = { allow: 0, ask: 1, deny: 2, auto: 1 }
  *
  * @param {object|null} ds 宿主的档位表（`{inside, outside, wide, …, reasons?}`）
  * @param {string[]} tiers 命中的档位
+ * @param {boolean} [noDefaultYield] 见 `decisiveTierOf` 的同名参数；本函数只负责转发，
+ *   保证「选档」与「翻译动作」用的是**同一个**判据（否则动作与 decisive 档分叉）
  * @returns {'allow'|'ask'|'deny'|'inherit'}
  */
-export function strictestTierAction(ds, tiers) {
-  const t = decisiveTierOf(ds, tiers)
-  // 没有任何档给出具体动作（全部未表态 / 表里没有这些键）→ inherit，
-  // 由调用方按既有语义落大分类默认值。
-  return t === null ? 'inherit' : ds[t]
+export function strictestTierAction(ds, tiers, noDefaultYield) {
+  const t = decisiveTierOf(ds, tiers, noDefaultYield)
+  // ── 全部命中档都「选不出动作」时，**不能**一律返回 inherit ─────────────────────────
+  // `decisiveTierOf` 跳过两种档：`inherit` / `undefined`（该档未表态，**应当**落大分类）
+  // 与本版**不认识的值**（手改配置的尾空格、大小写、更高版本写入的动作）。
+  // 前者落大分类是对的；后者落大分类是 **fail-open** —— 大分类常态 allow
+  // （read / undo / subagent / outsideRead 四类的默认值就是 allow），于是
+  // 「用户写了条拒绝规则」变成**静默放行**。
+  //
+  // 判据：命中档里**是否有任何一个**带了本版不认识的值。有 → 折 ask。
+  // 语义：有人要求表态，只是本版读不懂它要什么 —— 退化成「问人」最接近原意，
+  // 且方向安全（弹窗拦一次）。折 deny 会让降级期间所有此类规则变成硬拒绝。
+  // 全部档都是 inherit / undefined → 仍是 inherit（既有语义**不变**）。
+  //
+  // 「认识与否」用 `TIER_STRICTNESS` 判：它是动作域的**唯一一份表**，`decisiveTierOf`
+  // 选档时用的也是它，两处同源 —— 不会出现「选档时认、返回时不认」的分叉，
+  // 也不新增第二份合法动作清单。
+  // ⚠️ 必须用 `hasOwnProperty`：那张表是对象字面量，`TIER_STRICTNESS['toString']` /
+  // `['constructor']` / `['valueOf']` 会命中原型链返回**函数**而不是 undefined，
+  // 于是把动作写成 `toString` 就能绕过本闸（实测确认这三个键都返回 function）。
+  const known = (v) => Object.prototype.hasOwnProperty.call(TIER_STRICTNESS, v)
+  const list = Array.isArray(tiers) ? tiers : []
+  // 命中档里是否有**本版读不懂**的值。注意不能只在 `t === null` 时判：
+  // 未知档会被 `decisiveTierOf` 跳过，于是「wide=未知 + priv=allow」里
+  // priv 的 allow 会成为 decisive → 整条命令**静默放行**，未知那一档的
+  // 表态（可能是用户写的 deny 笔误）被完全吃掉。实测该形态在只补 `t === null`
+  // 的版本下仍是 `allow`（fail-open）。
+  const hasUnknown = list.some((u) => {
+    const v = ds ? ds[u] : undefined
+    return typeof v === 'string' && !known(v) && v !== 'inherit'
+  })
+  if (t === null) return hasUnknown ? 'ask' : 'inherit'
+  const a = ds[t]
+  // 未知档在场时折 ask，但**不越过更严的落点**：把 deny 降成 ask 是放宽。
+  // 「更严」按**最终动作**判，与 `finalActionOf` / B 项 `noDefaultYield` 是同一条判据：
+  // `auto` 是**两层**的（第一层交给模型，第二层 `autoFallbacks[档]` 才是模型失败后
+  // 真正执行的动作），`auto/deny` 的最终动作就是 deny —— 与裸 deny 在执行侧同形
+  // （同一条 kind:'deny' 通道）。折 ask 等于把用户显式配的「失败后拒绝」降级成
+  // 「问人」，那是反向放宽。
+  // ⚠️ 判据必须看**全部命中的 auto 档**，不能只看 decisive 档 `t`：`tierVerdict` 给出的
+  // `autoFallback` 本来就是全部 auto 档取最严（见 `assessCommand` 里 `strictestFallbackOf`
+  // 的说明）。只看 `t` 时，deny 落在**非 decisive** 的 auto 档上就被折成 ask：
+  //     sudo rm -rf /etc $TARGET   tiers=['wide','unknown','priv']
+  //     wide=auto/ask + priv=auto/deny + unknown 档是本版读不懂的值
+  //   → 只看 `t`（`wide`）得 ask，取全部 auto 档最严得 auto/deny（正确）。
+  // 其余（allow / 全部 auto 档的回落最严值不严于 ask）一律折 ask：这些形态的最终落点
+  // 不严于 ask，而未知档可能是用户写的 deny 笔误 —— 折 ask 才是收紧。
+  if (hasUnknown) {
+    if (a === 'deny') return a
+    // `autoFallbacks` 可能是 undefined / null / 非对象（调用方允许），归一成 null。
+    const afs = (ds && ds.autoFallbacks && typeof ds.autoFallbacks === 'object') ? ds.autoFallbacks : null
+    if (a === 'auto') {
+      // 全部**命中的 auto 档**取最严回落值（缺省 / 非法值按 `ask` 参与，与
+      // `strictestFallbackOf` 同一条判据 —— 那个是 `assessCommand` 内的局部 const，
+      // 本函数调不到，故内联；两处判据必须同步改）。
+      let worst = 'ask'
+      for (const u of list) {
+        if (ds[u] !== 'auto') continue
+        const raw = afs === null ? undefined : afs[u]
+        // 回落值域只有三个键；`AF_STRICTNESS` 是对象字面量，直接索引会命中原型链
+        // （`'constructor'` 等返回函数），故先限定字符串再用 hasOwnProperty 判。
+        const f = (typeof raw === 'string' && Object.prototype.hasOwnProperty.call(AF_STRICTNESS, raw)) ? raw : 'ask'
+        if (AF_STRICTNESS[f] > AF_STRICTNESS[worst]) worst = f
+      }
+      if (worst === 'deny') return a
+    }
+    return 'ask'
+  }
+  return a
 }
 
 /**
  * 命中档位里**决定动作**的那一个（用于取该档的拒绝理由）。
  *
- * 判据与 `strictestTierAction` 同源（同一个严格度序 + 同一个「取最严」），
- * 且并列时取 `tiers` 里**靠前**的那个。
+ * 判据与 `strictestTierAction` 同源（同一个严格度序 + 同一个「取最严」）；
+ * 同严格度并列时按「**显式**表态压过缺省值」定（`source[tier] === 'default'` 才算缺省，
+ * 没有 `source` 表时一律按非缺省处理）：
+ *   · 显式 `ask` 压过 `auto` —— 故 `ask` 与 `auto` 双方都**显式**时取 `ask`
+ *     （安全方向：人比模型更该被问）；
+ *   · **缺省** `ask` 让位给 `auto` —— 用户显式配置的 `auto` 不得被宿主的缺省值吃掉；
+ *     但在**读不懂**的路径上（`noDefaultYield`），只让位给**最终不会放行**的 `auto`（见下）。
+ * `deny` / `allow` 与同动作 `auto` 的并列取 `tiers` 里**靠前**的那个 —— 先到先得；
+ * 同动作 `ask` 不适用「先到先得」，按「显式压缺省」定（见下面第三支）。
+ * 见下面循环里的 tie-break。
  *
  * ⚠️ 「靠前」的稳定性**由调用方保证**：本函数不看 `TIER_ORDER`，只认 `tiers` 的**排列**，
  * 故稳定性对**已排序**的 `tiers` 成立 ——
@@ -7864,15 +7994,122 @@ export function strictestTierAction(ds, tiers) {
  *     见那里的说明：不排的话动作不变、理由会随书写形态漂移）。
  * 传进未排序的 `tiers` 时本函数仍然正确选出**最严档**，只是并列时取哪个由传入顺序决定。
  * 没有任何档给出具体动作时返回 `null`。
+ *
+ * ── `noDefaultYield`：读不懂路径上不许「缺省让位」把授权带进来（D-4）────────────────
+ * 由 `assessCommand` 的**两个读不懂调用点**传 `true`（整行读不懂 / 段级 opaque），可读段不传。
+ * 理由：读不懂的段/整行的 `tiers` 恒含 `RADIUS_TIERS_WHEN_UNREADABLE`（`wide ∪ unknown ∪ inside`，
+ * 见该常量），而 `inside` 在 `TIER_ORDER` 里排**最后**。于是「`inside=auto` 显式 + 其余缺省 ask」时，
+ * 缺省的 `wide`（ask）先占住 `best`、第二支再让位给 `inside` 的 auto —— 裁决从 ask 变 auto。
+ * 若那一档的回落值是 `allow`，模型失败后就是**无人在环放行**（`timeoutMs=0` 连弹窗都没有）：
+ * 一条 `rm -rf C:/Windows` 只要包一层 `( )` / `$()` 就能拿到它。实测（工作区，其余七档全缺省 ask）：
+ *     rm -rf C:/Windows           → ask
+ *     (rm -rf C:/Windows)         → auto/allow ❌（HEAD 是 ask）
+ *     echo $(rm -rf C:/Windows)   → auto/allow ❌
+ * 故读不懂路径上**只阻止让位给「最终会放行」的 auto**（即 `autoFallbacks[t] === 'allow'`）：
+ *   · `auto/deny`、`auto/ask` 的最终动作不松于 ask，让位它们不产生放宽；
+ *     `auto/deny` 还比 ask 更严 —— 一并堵掉等于把用户显式配的「失败后拒绝」降级成「问人」；
+ *   · 判据是「让位目标的**最终落点**」而不是「它是不是因读不懂才并入的档」：`priv` 这类
+ *     **读得出**的组档同样会走到第二支（`sudo rm -rf /etc "unclosed` 的 tiers 含 `priv`），
+ *     只堵并入档的修法对它无效（实测仍放宽）；
+ *   · 可读路径**不受影响**（不传该参数）：那里 `inside` / `priv` 是**真的**命中，
+ *     用户显式配置的 auto 应当生效。
  */
-export function decisiveTierOf(ds, tiers) {
+export function decisiveTierOf(ds, tiers, noDefaultYield) {
+  // ── 来源表 / 回落值表 / 「是否缺省」判据**全部建在循环外**（性能）──────────────────
+  // 同一次调用里 `ds` 不变，而原先「来源表」与「是否缺省」的判据建在 for 体内 —— 每次同档比较都重建
+  // 一个闭包；而闭包**调用**本身也是逐档开销，故判据直接内联、不写成小函数。
+  // `ds[t]` 同理：原先每档至少读一次（算严格度）、同档比较时再读一次，现在只读一次。
+  // 实测（min-of-15、200k iter、四档全 ask，ns/次）：
+  //     工作区 178~186（闭包在循环内 + `ds[t]` 重复读）
+  //   → 只把两行提出循环外 105~111
+  //   → 提出 + 内联判据 + `ds[t]` 只读一次 72~77
+  // 三件事都要做：提出、内联、缓存。
+  //
+  // `ds` 可能为 null / 非对象（调用方允许），故先归一成「没有来源表」的 null —— 语义与
+  // 原先的 `src && typeof src === 'object'` 逐字相同：没有来源表时一律按**非缺省**处理。
+  const src = (ds && ds.source && typeof ds.source === 'object') ? ds.source : null
+  // 回落值表同样取一次：读不懂路径上的让位判据要看「这一档 auto 的**最终落点**」。
+  // 只有 `allow` 才阻止让位（理由见下面第二支），其余（ask / deny / 没配 / 垃圾值）都放行。
+  const afs = (ds && ds.autoFallbacks && typeof ds.autoFallbacks === 'object') ? ds.autoFallbacks : null
   const list = Array.isArray(tiers) ? tiers : []
   let best = null
   let bestRank = -1
   for (const t of list) {
-    const r = TIER_STRICTNESS[ds ? ds[t] : null]
+    // `ds[t]` 每档只读一次：它既用来算严格度、又要进 tie-break 的三支
+    const at = ds ? ds[t] : null
+    const r = TIER_STRICTNESS[at]
     if (r === undefined) continue
-    if (r > bestRank) { bestRank = r; best = t }
+    if (r > bestRank) { bestRank = r; best = t; continue }
+    // ── 同档 tie-break：`ask` 压过 `auto`（§13）──────────────────────────────────
+    // `ask` 与 `auto` 同为 1，而 `TIER_ORDER` 里 `wide` 恒在 `priv` 之前 —— 严格大于
+    // 的比较就成了「先到先得」，于是同一组 `tiers` 的结论取决于哪一档被设成 auto：
+    //     `sudo rm -rf /etc`（tiers = ['wide','priv']）
+    //       wide=auto + priv=ask → auto   ← 用户显式要求的「提权要问人」被降级成「问模型」
+    //       wide=ask  + priv=auto → ask
+    // 那是**放宽**（模型可能直接放行）。故并列时的判据是「**显式**表态压过缺省值」，
+    // 且**两个方向都必须堵** —— 只堵一个方向会留下镜像缺陷（`TIER_ORDER` 把
+    // `proc/power/priv/reg` 全排在 `wide/unknown/outside/inside` 之后，于是「后置档单独
+    // 设成 auto」这一整族配置会被缺省 ask 吃掉，面板显示 priv=auto 而裁决是 ask）：
+    //     wide=auto 显式 + priv=ask 缺省 → auto（缺省 ask 不得压过显式 auto）
+    //     wide=ask 缺省 + priv=auto 显式 → auto（同上，镜像方向）
+    // 双方都**显式**时仍取 `ask`：安全方向不得被上面两条翻转（人比模型更该被问）。
+    // `deny`（2）与 `allow`（0）不同档，不受影响；同动作的并列仍先到先得（`ask` 除外，见第三支）。
+    //
+    // ⚠️ **不要**为此改 `TIER_STRICTNESS` 的值（把 auto 改成 2）：`doom` 合并、段间
+    // 合并、`warnSubMismatch` 三处共同消费那张表，改成 2 会让 doom 的 ask 盖不过 auto
+    // —— 正是 §9B 记的那个 bug。
+    //
+    // ── 「ask」必须是**用户显式**的表态，缺省值不算 ───────────────────────────────
+    // 宿主的 `destructiveTiers` 对**未配置**的档下发 `'ask'` + `source[t] = 'default'`
+    // （见 index.js：「八档同一套规则：项目显式 → 全局显式 → ask」），而这张表原样流到这里。
+    // 于是「wide=auto 显式 + priv 未配置」被 tie-break 当成「用户要求提权问人」，
+    // 把用户显式配置的 auto 降级成 ask —— 用户的意图被**缺省值**压掉（实测 wide=auto
+    // 单档配置下，`tiers = ['wide','priv']` 的语料整族从 auto 变 ask：`sudo rm -rf /`、
+    // `sudo chmod 777 …`、`su -c "rm -rf /"` …）。
+    // 故 tie-break 只在 ask 那一档**有显式来源**时生效。
+    //
+    // ⚠️ 反方向同样成立：`tiers` 里 `ask` 在前、`auto` 在后时（`TIER_ORDER` 把
+    // `proc/power/priv/reg` 全排在 `wide/unknown/outside/inside` 之后，这种排列是常态），
+    // 循环因 `r > bestRank` 严格大于而什么都不做、`best` 停在前面的 ask 上 —— 于是
+    // 「`priv=auto` 显式 + 其余缺省 ask」下 `sudo rm -rf /etc`（['wide','priv']）得 ask，
+    // 而「`wide=auto` 显式」同形态得 auto：同一个判据在两个方向给出相反结论，
+    // 与本段标题自相矛盾（面板显示 priv=auto、实际裁决 ask）。
+    // 故第二支的判据是「**best** 是缺省值」—— 只有缺省 ask 才让位给显式 auto。
+    // 写成 `if (!(src && src[t] === 'default')) best = t` 是**错的**：那会让双方都显式时 auto 压 ask，
+    // 把安全方向（显式 ask 仍压显式 auto）翻转，正是本条要守的东西。
+    // ── 第三支：`best` 与 `t` **都是 ask** 时，显式 ask 仍须压过缺省 ask ─────────────
+    // 前两支互为镜像、只覆盖「一边 ask 一边 auto」，故两者都是 ask 时**都不匹配**、
+    // `best` 原地不动 —— 「已见过显式 ask」这个事实没被记下。随后再来一个显式 auto，
+    // 第二支只看 `src[best] === 'default'`，而 `best` 恰是排最前的**缺省 ask** → auto 接管，
+    // 中间那个显式 ask 被跳过（方向放宽）：
+    //     {proc: 显式 ask, priv: 显式 auto}，其余缺省 ask
+    //       `sudo kill 1234`（['proc','priv']）           → ask ✅
+    //       `sudo kill -9 /etc/passwd`（['wide','proc','priv']） → 修复前 auto ❌
+    // `TIER_ORDER` 把 `wide/unknown/outside/inside` 排在 `proc/power/priv/reg` 之前，
+    // 故「缺省 ask 在前、显式 ask 居中、显式 auto 在后」正是生产常态。
+    //
+    // 两个守卫**缺一不可**：
+    //   · 缺 `src[best] === 'default'` → 后面的显式 ask 会覆盖前面的显式 ask，decisive 档漂移
+    //     （动作不变、理由换人，弹窗解释与实际裁决不一致）；
+    //   · 缺 `!(src[t] === 'default')` → 缺省 ask 会顶掉前面的显式 ask，理由归因同样劣化。
+    // 于是缺省+显式 → 取显式；显式+缺省、显式+显式 → 不动（先到先得）。
+    if (r === bestRank && best && ds) {
+      // `at` 已在循环头取过；`ds[best]` 每轮至多读一次（三支都要用）
+      const ab = ds[best]
+      if (at === 'ask' && ab === 'auto') { if (!(src && src[t] === 'default')) best = t }
+      else if (ab === 'ask' && at === 'auto') {
+        // ── 读不懂路径（`noDefaultYield`）上，缺省 ask 只让位给「最终不会放行」的 auto ──
+        // `auto` 是**两层**的：第一层「交给模型」，第二层 `autoFallbacks[t]` 才是模型失败后
+        // 真正执行的动作。让位给 `auto/allow` 等于让「模型失败后无人在环放行」拿走裁决 ——
+        // 正是 D-4「读不懂的内容不可被授权」要堵的（`timeoutMs=0` 时连弹窗都没有）。
+        // 而 `auto/ask`、`auto/deny` 的最终动作不松于 ask，让位它们不产生放宽；`auto/deny`
+        // 甚至比 ask 更严 —— 一并堵掉会把用户显式配的「失败后拒绝」降级成「问人」，那是反向放宽。
+        // 缺省 / 非法值按 ask 处理（与 `assessCommand` 的 `autoFallbackOf`、index.js 的
+        // `normalizeAutoFallback` 同源）：没配回落值的 auto 档，最终落点就是 ask。
+        if (src && src[best] === 'default' && !(noDefaultYield && afs !== null && afs[t] === 'allow')) best = t
+      }
+      else if (at === 'ask' && ab === 'ask') { if (src && src[best] === 'default' && !(src && src[t] === 'default')) best = t }
+    }
   }
   return best
 }
@@ -9171,11 +9408,11 @@ export function nestedInlineProgram(label, words) {
  *   home?: string,
  *   userHome?: string,
  *   platform?: 'win32'|'posix',
- *   matchException?: (segmentText: string, label: string) => ({action:string, ruleId?:string, reason?:string, note?:string}|null),
+ *   matchException?: (segmentText: string, label: string) => ({action:string, autoFallback?:'ask'|'allow'|'deny', ruleId?:string, reason?:string, note?:string}|null),
  *   destructive?: () => ({inside:string, outside:string, wide:string, unknown:string,
  *                         proc:string, power:string, priv:string, reg:string,
  *                         reasons?: {[tier:string]: string}}|null),
- *   category?: () => ({action:string, reason?:string}|null),
+ *   category?: () => ({action:string, autoFallback?:'ask'|'allow'|'deny', reason?:string}|null),
  *   isOutsideWorkspace?: (path: string) => boolean,
  *   isWorkspaceRoot?: (path: string) => boolean,
  * }} hooks 注入判定回调，使本模块保持纯函数、可独立测试
@@ -9201,9 +9438,50 @@ export function nestedInlineProgram(label, words) {
 export function assessCommand(source, shell, hooks) {
   const h = hooks || {}
   const sh = shell === 'pwsh' ? 'pwsh' : 'bash'
+  // 分类默认值钩子的返回**原样转发 `autoFallback`**：宿主 `resolveCategory` 经 `pick()`
+  // 返回的对象本来就带着它（见 index.js 的 pick），丢掉它等于让「执行命令分类设为
+  // 自动审批 + 失败后拒绝」在裁决侧退化成缺省 ask —— 面板显示与实际裁决分叉。
+  // 只认三个合法值，其余（含 undefined / 手改配置塞进来的垃圾）一律当「没给」，
+  // 由 commandDecision 的 `|| 'ask'` 兜底（缺省仍是 ask，方向保守）。
+  const autoFallbackOf = (v) => ((v === 'ask' || v === 'allow' || v === 'deny') ? v : null)
+  // 「这一格**最终**会执行哪个动作」——`auto` 是两层的，回落值缺失/非法时按缺省 ask。
+  // 与 index.js 的 finalActionOf 是同一条判据的两个实现（宿主与解析器分处两个模块），
+  // 改一处必须同步改另一处。本模块内只用这一份，不再各处分写三元式。
+  const finalActionOf = (action, af) => (action === 'auto' ? (autoFallbackOf(af) || 'ask') : action)
+  /**
+   * 一组回落值 → **最严**的那个（deny > ask > allow）。
+   *
+   * 回落值**是**权限判据 —— 它就是「模型超时 / 熔断 / 协议错时最终执行什么」。
+   * 两个地方必须用它，且判据只能是这一份（段内多档、段与段）：
+   *   · `tierVerdict`：同一段内**多个档**都是 auto 时（`sudo rm -rf /etc` 命中
+   *     `tiers = ['wide','priv']`），各档可以各配一个回落值；
+   *   · `assessCommand` 末尾的段间合并：多段命令的每个 auto 段各带一个回落值。
+   * 任一处按「档位/书写顺序取第一个有值的」，用户为**更严的那一档**显式配的
+   * 「失败后拒绝」就会被另一档的 allow 吞掉（fail-open）：
+   *     wide=auto/回落 allow + priv=auto/回落 deny → 旧实现得 **allow**
+   * 缺省值按 `ask` 参与合并（与 index.js 的 normalizeAutoFallback 缺省同源）：某个 auto 档
+   * 没配回落值时，它自己的最终落点就是 ask，跳过它会让另一档的 allow 独占结果 —— 那是放宽。
+   *
+   * 空数组返回 `null`（没有 auto 档），由调用方决定兜底值。
+   *
+   * 比较用 `AF_STRICTNESS`（**回落值专用**的三值表），不借 `TIER_STRICTNESS` ——
+   * 后者含 `auto: 1`，是**动作**域的序；拿它比回落值等于依赖「值域已被上游锁死」。
+   */
+  const strictestFallbackOf = (values) => {
+    let best = null
+    for (const v of (Array.isArray(values) ? values : [])) {
+      const f = autoFallbackOf(v) || 'ask'
+      if (best === null || AF_STRICTNESS[f] > AF_STRICTNESS[best]) best = f
+    }
+    return best
+  }
   const catOf = () => {
     const c = h.category ? h.category() : null
-    return { action: (c && c.action) || 'inherit', reason: (c && c.reason) || null }
+    return {
+      action: (c && c.action) || 'inherit',
+      reason: (c && c.reason) || null,
+      autoFallback: c ? autoFallbackOf(c.autoFallback) : null,
+    }
   }
   /**
    * 把钩子返回值归一成**档位表**（§7.2 的契约）。
@@ -9268,41 +9546,32 @@ export function assessCommand(source, shell, hooks) {
    *   · 理由一定来自一个**用户确实为它写过拒绝理由**的档，不会凭空造出理由
    *     （没有任何命中档写过理由时仍然是 `null`）。
    * 次序与 `decisiveTierOf` 同源（同严格度时按 `TIER_ORDER` 靠前者优先）：`tiers` 已按
-   * `TIER_RANK` 排过（`decisiveTierOf` 的注释声明该顺序由调用方保证），故 `decisiveTierOf`
-   * 选出的那一档正是并列组里 `TIER_RANK` 最小的那个 —— 本回落是它的**严格续延**
-   * （先试它、再按同一 `TIER_RANK` 试其余并列档），不是另一套选档规则。
+   * `TIER_RANK` 排过（`decisiveTierOf` 的注释声明该顺序由调用方保证）。`auto` 与 `ask`
+   * 同为严格度 1，但 tie-break 保证「命中档含 `ask` 时 decisive 必为 `ask`」——此时
+   * `action` 是 `ask`、下面整个 auto 分支不执行；故 `same` 里只可能是同为 `auto` 的其余档，
+   * 本回落是在多个 auto 档之间选回落值（见下面的 `strictestFallbackOf`）。
    */
-  const tierVerdict = (ds, tiers) => {
-    const action = strictestTierAction(ds, tiers)
+  const tierVerdict = (ds, tiers, noDefaultYield) => {
+    const action = strictestTierAction(ds, tiers, noDefaultYield)
     // 决定动作的那一档（动作就是它定的，回落值与理由都**先取它**）
-    const t = ds ? decisiveTierOf(ds, tiers) : null
-    // ── auto：回落值与动作**同源**取用 ──────────────────────────────────────────
-    // 与下面取理由的顺位完全同构：先取决定动作的那一档，取不到再按 `TIER_RANK` 试并列档。
-    // 不跨严格度取 —— 更松的档本来就不是 auto，它的回落值不属于这次裁决（否则 wide 是
-    // auto、inside 是 ask 时，会把 wide 的回落值安到一次由 inside 决定的裁决上）。
-    // 缺省 ask：与 index.js 的 normalizeAutoFallback 同源（模型失败后问人，方向安全）。
+    const t = ds ? decisiveTierOf(ds, tiers, noDefaultYield) : null
+    // ── auto：回落值在**全部 auto 档**之间取最严（deny > ask > allow）──────────────
+    // 判据是 `ds[u] === 'auto'`（**不是** decisive 档）：同一段里可以有多个 auto 档
+    // （`sudo rm -rf /etc` 命中 `tiers = ['wide','priv']`），而回落值**是**权限判据 ——
+    // 用户为 priv 档显式配的「模型失败后拒绝」不能被 wide 档的 allow 吞掉：
+    //     wide=auto/回落 allow + priv=auto/回落 deny → 旧实现得 **allow**（fail-open）
+    // 旧实现有两条路径，**都不是从严合并**：①decisive 档有值就直接返回、并列档根本不看；
+    // ②只有 decisive 档没值时才扫并列档，且按 `TIER_RANK` 取**第一个**有值的。
+    // 第二条路径同样独立 fail-open：`sudo rm -rf /data $Y`（tiers 含 unknown/outside/priv）
+    // 在 priv=auto/回落 deny、其余无值时也得 allow。
+    // 缺省 ask：与 index.js 的 normalizeAutoFallback 同源（模型失败后问人，方向安全）；
+    // 没配回落值的 auto 档按 ask 参与合并（跳过它会让另一档的 allow 独占结果 —— 放宽）。
     let autoFallback = null
     if (action === 'auto' && ds) {
       const afs = (ds.autoFallbacks && typeof ds.autoFallbacks === 'object') ? ds.autoFallbacks : null
-      const afOfTier = (u) => {
-        const v = (u && afs) ? afs[u] : null
-        return (v === 'ask' || v === 'allow' || v === 'deny') ? v : null
-      }
-      const v = t ? afOfTier(t) : null
-      if (v) autoFallback = v
-      else {
-        const rank = TIER_STRICTNESS[action]
-        const same = []
-        for (const u of (Array.isArray(tiers) ? tiers : [])) {
-          if (u !== t && TIER_STRICTNESS[ds[u]] === rank) same.push(u)
-        }
-        sortTiersByRank(same)
-        for (const u of same) {
-          const vu = afOfTier(u)
-          if (vu) { autoFallback = vu; break }
-        }
-        if (!autoFallback) autoFallback = 'ask'
-      }
+      autoFallback = strictestFallbackOf((Array.isArray(tiers) ? tiers : [])
+        .filter((u) => ds[u] === 'auto')
+        .map((u) => (afs ? afs[u] : null))) || 'ask'
     }
     // ── 拒绝理由：判据是「**最终**会执行哪个动作」，不是「第一层动作是什么」──────────
     // `auto` 是两层的（action + autoFallback），而 `auto + 回落 deny` 在执行侧就是一次
@@ -9312,7 +9581,7 @@ export function assessCommand(source, shell, hooks) {
     //
     // 这与 index.js 的 finalActionOf 是同一条判据的两个实现（宿主与解析器分处两个模块、
     // 无法共用函数），改一处必须同步改另一处。
-    const finalAction = action === 'auto' ? (autoFallback || 'ask') : action
+    const finalAction = finalActionOf(action, autoFallback)
     if (finalAction === 'deny' && ds) {
       const reasons = ds.reasons
       const reasonOfTier = (u) => {
@@ -9347,17 +9616,17 @@ export function assessCommand(source, shell, hooks) {
     }
     return { action, reason: null, autoFallback }
   }
-  const base = (action, code, reason, ruleId) => ({
+  const base = (action, code, reason, ruleId, note) => ({
     action,
     code,
     segments: [],
     matched: ruleId || null,
     reason: reason || null,
-    note: null,
-    // 这条 base 用于「整行读不懂 / 空命令」等**没有段**的路径，动作来自大分类（catOf），
-    // 而 catOf 的 `{action, reason}` 契约里不含回落值（它是旧契约的兼容形态）。
-    // 故这里不给 autoFallback —— 动作若是 auto，由 commandDecision 回落缺省 ask，
-    // 与 normalizeAutoFallback 的缺省一致（方向安全：问人）。
+    note: note || null,
+    // 这条 base 用于「整行读不懂 / 空命令」等**没有段**的路径，动作来自大分类（catOf）。
+    // catOf 的契约**含 `autoFallback`**（见那里的注释），整行分支在下面按判定链补上；
+    // 这里仍不给 —— 走到 base 时尚未判定，动作若是 auto 由 commandDecision 回落缺省 ask
+    // （与 normalizeAutoFallback 的缺省一致，方向安全：问人）。
     autoFallback: undefined,
   })
 
@@ -9381,15 +9650,32 @@ export function assessCommand(source, shell, hooks) {
   // 这与段级那条修复（`destructive` 不再依赖 `unparsable`）是同一个道理：
   // 「原文里认得出 rm」这个事实不受「整行还有读不懂的构造」影响。
   //
-  // 命令名仍用 rawCommandNames 粗提（只用于**收紧方向**：查 deny 例外与破坏性名单）；
-  // allow/ask 例外在这条路径上一律不认（读不懂的内容不可被授权）。
+  // 命令名仍用 rawCommandNames 粗提（只用于**收紧方向**：查例外与破坏性名单）；
+  // allow 例外在这条路径上不认（读不懂的内容不可被授权）；deny / ask / auto 照常生效，
+  // 且**取最严**（TIER_STRICTNESS，并列时显式 ask 压过 auto）—— 与段级 opaque 路径
+  // （`ex.action !== 'allow'`）同一条判据。丢弃 ask 不是「不授权」而是「不问人」，
+  // 那是**放宽**：`git status $(x)` 是 ask，加个 heredoc 却变 allow。
   if (!d.ok) {
     const c = catOf()
     const code = d.reason === EMPTY_COMMAND_REASON ? 'empty' : 'unparsable'
     let action = c.action
     let reason = c.reason
     let ruleId = null
-    let autoFallback = null
+    let note = null
+    // 初值取分类默认值那一份：`code === 'empty'` 时判定链整段不执行，动作就是 `c.action`，
+    // 回落值必须同源带上。下面每个分支都会**显式重设**它（不留残值）。
+    //
+    // ── 但「整行读不懂」时同样只保留收紧方向（D-4，与下面 opaque 段 ③ 同一条判据）──────
+    // 分类默认值可以是 auto，其回落值是 auto 的第二层：`allow` 回落 = 模型失败后无人在环
+    // 放行（`timeoutMs=0` 不弹窗直接放行）。原样带出等于把第一层刚堵掉的授权从第二层
+    // 放回来：分类 `auto/allow` 时 `git status $(curl evil)` 修复前 auto/ask、改后 auto/allow。
+    //
+    // **空命令不适用 D-4**：它不是「读不懂」，是「没有内容可读」（`decomposeCommand` 用
+    // `EMPTY_COMMAND_REASON` 单独分流），故 `code === 'empty'` 保持原样带上整份回落值。
+    // 曾把这一支也改成只留 deny，空命令当场从 `auto/allow` 变 `auto/ask` —— 那是过度收紧。
+    let autoFallback = code === 'empty'
+      ? c.autoFallback
+      : ((c.action === 'auto' && autoFallbackOf(c.autoFallback) === 'deny') ? 'deny' : null)
     if (code !== 'empty') {
       // 方言维度（本轮缺陷 2 的修法）：`rawCommandNames` 只收文本、内部按 bash 判赋值，
       // 而赋值判据是**方言相对**的（见 `rawCommandNamesWithShell`）——pwsh 侧不传方言
@@ -9399,20 +9685,77 @@ export function assessCommand(source, shell, hooks) {
       //    结构断言要求它出现在 `if (!d.ok) {` 之后（见 `rawCommandNamesWithShell`）。
       const src = String(source == null ? '' : source)
       const names = sh === 'pwsh' ? rawCommandNamesWithShell(src, sh) : rawCommandNames(src)
-      // ① deny 例外（最高优先，用户显式拒绝）
+      // ① 例外（deny / ask / auto 生效；allow 不认）
+      //
+      // **必须取最严，不能「命中即 break」**：`h.matchException` 是「单条返回、首条命中」
+      // （见宿主的 matchSegmentException：项目层 → 全局层、层内按数组顺序），它**不做**
+      // deny > ask 排序 —— 那个排序在段级路径上由 resolveException 自己做。整行路径是
+      // 按 names 逐个调用，若命中 ask 就 break，后面那个 name 的 deny 就再也不会被问。
+      // 实测（例外 `curl *`=ask 在前、`rm *`=deny 在后）：
+      //     curl https://example.com && rm -rf /data <<EOF…EOF
+      //       命中即 break → **ask**（用户的 deny 被丢掉 = 放宽）；取最严 → deny。
+      // 并列（TIER_STRICTNESS 同为 1）时显式 ask 压过 auto，与 decisiveTierOf 的 tie-break 同源。
       let denied = false
+      let bestEx = null
+      // 未知动作的例外（手改配置的笔误 / 更高版本写入的动作）：**不短路判定链**，
+      // 只在最后给一个 `ask` 的**下界**。见下面 `unknownEx` 的用法。
+      let unknownEx = null
+      // ── 未知动作：按 ask **参与排序**，并列时**不得顶掉**本版认识的动作 ────────────
+      // 上一轮只给段级 `resolveException` 加了 unknown 槽（`ask || unknown || auto || allow`），
+      // 本分支却用 `TIER_STRICTNESS[ex.action]` 查不到就 `continue` —— 未知动作的例外
+      // 在整行读不懂时**整个消失**，于是「未知动作折 ask」这条闸被绕过（fail-open）：
+      //     例外 `git *`=atuo（手改配置的笔误）、子设置八档 ask、分类 allow
+      //     git status -s   → ask（段级 segment-unknown-action）
+      //     git status <<EOF→ **allow**（整行分支：例外被丢 → 破坏性子设置未命中 → 分类）
+      // 故未知动作按 `ask` 的严格度（1）参与比较，最后再折成 `ask` 输出（与段级
+      // `anyUnknown → 'ask'` 同形）。**不是** `?? 1` 那种只改第一处查表的写法：
+      // 那样 tie-break 里的 `TIER_STRICTNESS[bestEx.action]` 仍是 `undefined`，
+      // `s > undefined` 恒假 ⇒ 已选中的未知动作**永远顶不掉**，实测
+      // 「未知 `git status*` 在前 + deny `rm*` 在后」的 `git status && rm -rf /data <<EOF`
+      // 由 deny 变 **atuo**（放宽）。
+      //
+      // ⚠️ 并列时**认识的动作优先**：未知动作折 ask 的语义是「没人表态，问人」，
+      // 而一个已知的 `auto/deny` 例外（最终动作 deny）是**更强**的表态 —— 让未知动作
+      // 在并列时胜出会把它顶成 ask，那是 deny→ask 的放宽（实测：例外 `rm *`=atuo 在前、
+      // `git status *`=auto/回落 deny 在后，`rm -rf /data && git status <<EOF` 由
+      // auto/deny 变 ask，而段级合并给的是 auto/deny）。方向与段级
+      // `ask || unknown || auto || allow` 一致：未知动作只在没有更强表态时才折 ask。
+      const knownAction = (v) => Object.prototype.hasOwnProperty.call(TIER_STRICTNESS, v)
+      const rankOfEx = (v) => (knownAction(v) ? TIER_STRICTNESS[v] : 1)
       if (h.matchException) {
         for (const name of names) {
           let ex = null
           try { ex = h.matchException(name, name) } catch (e) { ex = null }
-          if (ex && ex.action === 'deny') {
-            action = 'deny'
-            reason = ex.reason || null
-            ruleId = ex.ruleId || null
-            denied = true
-            break
-          }
+          if (!ex || ex.action === 'allow') continue
+          const s = rankOfEx(ex.action)
+          const sb = bestEx === null ? -1 : rankOfEx(bestEx.action)
+          if (bestEx === null || s > sb
+            || (s === sb && ex.action === 'ask' && bestEx.action === 'auto')
+            || (s === sb && knownAction(ex.action) && !knownAction(bestEx.action))) bestEx = ex
         }
+      }
+      if (bestEx && knownAction(bestEx.action)) {
+        action = bestEx.action
+        reason = bestEx.reason || null
+        note = bestEx.note || null
+        ruleId = bestEx.ruleId || null
+        // auto 的第二层：读不懂时**只保留收紧方向**（D-4，与段级 opaque 的 9868 同形）。
+        // 其余回落值（allow / ask / 缺省）一律不建键，由 commandDecision 末尾的 `|| 'ask'` 补。
+        autoFallback = (bestEx.action === 'auto' && autoFallbackOf(bestEx.autoFallback) === 'deny') ? 'deny' : null
+        denied = true
+      } else if (bestEx) {
+        // ── 未知动作：`ask` 是**下界**，不是「命中即定案」（与上面 known 支分开）──────────
+        // 不能像 known 支那样 `denied = true` 直接短路破坏性子设置 —— 那会让一条
+        // **笔误的例外**顶掉用户为这一档显式配的 `deny`。实测（`outside=deny`、
+        // 例外 `git *`=atuo）：
+        //     git status && rm -rf /data <<EOF
+        //       base（例外被丢）      → **deny**（子设置命中 rm 的 outside 档）
+        //       短路子设置            → **ask** ← deny 被一条读不懂的例外顶掉（放宽）
+        //       取下界（本实现）       → **deny** ✅
+        // 而下界仍堵住本项要修的那个洞：判定链给出 allow 时一律抬到 ask。
+        // 与段级 `resolveException` 的 `ask || unknown || auto || allow` 同向 ——
+        // 那里 unknown 也只是「排在 allow 之前」，不越过 deny / ask。
+        unknownEx = bestEx
       }
       // ② 破坏性子设置（更细的判定，优先于分类默认值）
       if (!denied && names.some((n) => isDestructiveLabel(n))) {
@@ -9497,18 +9840,42 @@ export function assessCommand(source, shell, hooks) {
         // 排序键与段级路径**同一个**函数（`sortTiersByRank` 复用 `TIER_RANK`）——
         // 这里曾经手抄一份逐字相同的比较函数，而「抄漏一处」正是发现 3 的成因。
         sortTiersByRank(tiers)
-        const v = tierVerdict(ds, tiers)
+        const v = tierVerdict(ds, tiers, true)
         if (v.action !== 'inherit') {
           action = v.action
           reason = v.reason
-          if (v.autoFallback) autoFallback = v.autoFallback
+          // 显式重设（不是「有值才覆盖」）：inherit 时保留分类默认值那一份，
+          // 有具体动作时回落值必须与动作**同源**，不得残留上一步的值。
+          // ② 的回落值同样**不适用 D-4**（allow 来自用户为这一档显式配置的表，理由见段级 opaque 分支 ②）
+          autoFallback = v.autoFallback
         }
       }
+      // ── 未知动作例外的 `ask` 下界（本项修法的落点）───────────────────────────────
+      // 放在整条判定链**之后**：子设置可能给出更严的 `deny`（或 `auto` + 回落 `deny`，
+      // 后者最终动作也是 deny），那些表态比一条本版读不懂的例外更具体，不得被顶掉。
+      // 只在最终落点**比 ask 松**时抬到 ask。
+      //
+      // 判据必须问**最终动作**（`finalActionOf`）而不是第一层动作：`auto` 是两层的，
+      // `auto/allow` 的最终动作是 **allow** —— 模型失败后无人在环放行，比 ask 松。
+      // 只看 `action === 'auto'` 会把它漏掉（实测：例外 `rm *`=atuo + 子设置八档
+      // `auto/回落 allow`，`rm -rf /data <<EOF` 给 **auto/allow**，而同一命令的段级
+      // 结论是 **ask**（`resolveException` 的 unknown 槽折 ask）—— 同一语义两个结论，
+      // 且松的那一侧正是本项要修的方向）。
+      // 抬升时把归因指向那条例外（`ruleId` / `note` 一起搬）—— 弹窗上要能看出
+      // 「这次弹窗是因为一条读不懂的例外」，而不是一条无主的 ask。
+      if (unknownEx && TIER_STRICTNESS[finalActionOf(action, autoFallback)] < TIER_STRICTNESS.ask) {
+        action = 'ask'
+        reason = null
+        note = unknownEx.note || null
+        ruleId = unknownEx.ruleId || null
+        autoFallback = null
+      }
     }
-    const r = base(action, code, reason, ruleId)
+    const r = base(action, code, reason, ruleId, note)
     // auto 的回落值：base() 恒返回 undefined（它服务的是无段的路径），故在这里补 ——
-    // 整行读不懂但子设置给出了 auto 时，仍要有回落值。
-    if (autoFallback) r.autoFallback = autoFallback
+    // 整行读不懂但子设置 / 分类默认值给出了 auto 时，仍要有回落值。
+    // 只有 auto 才建这个字段（与 reason 仅 deny / note 仅 ask 同一条纪律）；缺省 ask。
+    if (action === 'auto') r.autoFallback = autoFallback || 'ask'
     return r
   }
 
@@ -9517,6 +9884,7 @@ export function assessCommand(source, shell, hooks) {
   let anyAsk = false
   let anyAuto = false
   let anyInherit = false
+  let anyUnknown = false
 
   // 例外匹配单点（opaque 段与可读段共用，避免两份实现漂移）。
   //
@@ -9559,10 +9927,28 @@ export function assessCommand(source, shell, hooks) {
     }
     let allow = null
     let ask = null
+    let auto = null
+    // 未知动作（手改配置 / 未来版本的动作）在 `first` 那一支原先靠 `else` 落进 allow 槽。
+    // 加了 auto 槽之后，auto 排在 allow 之前，于是「段原文命中未知动作 + label 命中 auto」
+    // 会从折 ask（anyUnknown）变成 auto/allow —— 那是**放宽**。
+    // 故未知动作必须有**自己的**槽，并保持它原有的位置（在 auto 之前、仍折 ask）。
+    let unknown = null
+    // 多个 auto 候选之间回落值**取严**（deny > ask > allow，缺省按 ask 参与）——
+    // 与 tierVerdict / 段间合并同一条纪律。只取第一个会让回落值取决于 label 顺序：
+    // 实测（例外 `find *`=auto/allow + `rm *`=auto/deny 同段命中）第一个是 find → allow。
+    const takeAuto = (r) => {
+      if (!auto) { auto = r; return }
+      const a = autoFallbackOf(auto.autoFallback) || 'ask'
+      const b = autoFallbackOf(r.autoFallback) || 'ask'
+      if (AF_STRICTNESS[b] > AF_STRICTNESS[a]) auto = r
+    }
+    const KNOWN_ACTION = { allow: 1, ask: 1, deny: 1, auto: 1 }
     const first = tryOne(segText)
     if (first && first.action === 'deny') return first
     if (first && first.action === 'ask') ask = first
-    else if (first) allow = first
+    else if (first && first.action === 'auto') takeAuto(first)
+    else if (first && KNOWN_ACTION[first.action]) allow = first
+    else if (first) unknown = first
     // 收紧方向：`ask` 不是授权、`deny` 只会收紧，两者用扩展出的 label 都安全 ——
     // 这正是「用户写的 `kill *`=deny 拦不住 `sudo kill 1234`」那条既有漏洞的修法。
     //
@@ -9589,12 +9975,21 @@ export function assessCommand(source, shell, hooks) {
       if (!r) continue
       if (r.action === 'deny') return r
       if (r.action === 'ask' && !ask) ask = r
+      // auto 与 allow 一样是**授权方向**（auto 只是把判断交给模型，不是收紧），
+      // 故用同一个 `allowSet` 判据；前缀扩展出的名字在这一轮同样不可见。
+      // ⚠️ **不要**为了「让 `sudo rm` 也命中」改成 allLabels：实测那会让
+      // `rm *`=auto/allow 命中 `sudo rm -rf /` / `doas` / `pkexec` / `sudo -u root`，
+      // 而 `rm *`=allow 对同样形态是 ask —— 把上一轮「授权不得穿过提权前缀」的修复回退掉。
+      if (r.action === 'auto' && allowSet.has(allLabels[i])) takeAuto(r)
       // 授权方向：前缀扩展出的名字（`sudo kill 1234` → `kill`）在这一轮不可见。
       // 判据按**值**查 `allowed`（= `allowLabels`，即并集滤掉扩展名）：labels 已去重，
       // 故与原先「遍历 allowed 数组」逐项等价，且顺序也一致（filter 保序）。
       if (r.action === 'allow' && !allow && allowSet.has(allLabels[i])) allow = r
     }
-    return ask || allow
+    // 顺序 = 「deny > ask > auto > allow」：deny 已在上面的循环里立即返回；
+    // ask 代表「问人」、auto 代表「问模型」，人优先于模型，故 ask 在 auto 前。
+    // unknown（未知动作）与 ask 同列：它只会让人多确认一次，方向 fail-closed。
+    return ask || unknown || auto || allow
   }
 
   for (const seg of d.segments) {
@@ -9695,7 +10090,7 @@ export function assessCommand(source, shell, hooks) {
       // 读不懂的段：只跳过**授权方向**的例外（allow），其余照常生效。
       //
       // 三条规则，按「会不会放宽」划界：
-      //   · **allow 例外跳过** —— 读不懂的内容不可被授权（D-4 / §3.6.1）。
+      //   · **allow 例外跳过** —— 读不懂的内容不可被授权。
       //     否则 `git status $(任意代码)` 会因为一条 `git status *` 例外被静默放行。
       //   · **deny 例外保留** —— 它只会收紧。跳过它等于让 opaque 构造成为
       //     「绕开用户显式拒绝」的手段（实测：例外 `rm *`=deny 时 `rm -rf /data` 是 deny，
@@ -9715,19 +10110,43 @@ export function assessCommand(source, shell, hooks) {
         // note 是 ask 例外的备注（弹窗上给人看「当初为什么特意拦它」），opaque 段同样要带上
         note = ex.note || null
         ruleId = ex.ruleId || null
+        // 例外也可以是 auto（「这类命令交给模型判」），它的回落值是用户配置的一部分，
+        // 必须随动作一起带出 —— 否则模型失败后按缺省 ask 处理，与配置不符。
+        //
+        // ── 但读不懂的段上**只保留收紧方向**（D-4「读不懂的内容不可被授权」）──────────
+        // 上面的 `ex.action !== 'allow'` 只把 allow 排除在**第一层**（动作）之外，理由是
+        // 「auto 只是委托模型、不是授权」。回落值是 auto 的**第二层**：模型超时 / 协议错 /
+        // 熔断时按它执行，`allow` 回落 = 无人在环的放行（`timeoutMs=0` 不弹窗直接放行；
+        // 默认 20 秒无人应答即放行）。原样带出等于把第一层刚堵掉的授权从第二层放回来：
+        //     例外 `git status *`=auto/allow → `git status $(curl evil)` 修复前 auto/allow
+        // 故这里只让 `deny` 通过，其余（allow / ask / 缺省）一律由 `commandDecision`
+        // 末尾的 `|| 'ask'` 补成 ask。**不能删整行、也不能无条件 'ask'**：前者丢掉用户
+        // 显式配的 deny 回落、后者同样把 deny 变成 ask，两者都是放宽。
+        // 可读段分支（下面 ①）**不动** —— 用户要 allow 回落只能用在可读段上。
+        if (ex.action === 'auto' && autoFallbackOf(ex.autoFallback) === 'deny') autoFallback = 'deny'
       } else if (destructive) {
         // ② destructive 子设置 —— 与可读段**同一份**档位判定（见下面那段注释）
-        const v = tierVerdict(tierTableOf(), tiers)
+        const v = tierVerdict(tierTableOf(), tiers, true)
         action = v.action
         source = 'destructive'
         reason = v.reason
-        // auto 的回落值：与动作同源（v 已按 decisive 档取过，见 tierVerdict）
+        // auto 的回落值：与动作同源（v 已在全部 auto 档之间按 deny > ask > allow 从严合并，见 tierVerdict）
+        // ② **不适用 D-4**：这里的 allow 来自用户**为这一档显式配置**的表，
+        // 且已由 tierVerdict 在全部命中的 auto 档间从严合并；D-4 要堵的是 ①③ 那种从**不相干的授权源继承**来的 allow。
+        // 可读的 `rm -rf /`（真 wide 目标）同得 auto/allow，不是新洞；收紧前先对齐整行读不懂分支的档位
+        // 集合说明（`RADIUS_TIERS_WHEN_UNREADABLE`，见该常量的注释；本分支的 tiers 来自上面的 `tierSetOf`）。
         if (v.autoFallback) autoFallback = v.autoFallback
       } else {
+        // ③ command 分类默认值 —— **读不懂的段上只保留收紧方向**（D-4，与 ① 的例外守卫同一条）。
+        // 分类 `auto/allow` 的 `allow` 是 auto 的第二层：模型失败后无人在环放行。原样带出
+        // 等于把 ① 刚堵掉的授权从第二层放回来（`git status $(curl evil)` → auto/allow）。
+        // 可读段分支的 ③（下面 `} else {` 之后那一支）**不动** —— 用户要 allow 回落
+        // 只能用在可读段上（与 ① 的例外守卫同一条边界）。
         const c = catOf()
         action = c.action
         source = 'category'
         reason = c.reason
+        autoFallback = (c.action === 'auto' && autoFallbackOf(c.autoFallback) === 'deny') ? 'deny' : null
       }
     } else {
       // ① 用户例外（段级匹配）—— 显式表态，优先于子设置（D-5）。
@@ -9740,6 +10159,8 @@ export function assessCommand(source, shell, hooks) {
         reason = ex.reason || null
         note = ex.note || null
         ruleId = ex.ruleId || null
+        // 同 opaque 分支：例外上的回落值必须随动作带出（缺省仍由 commandDecision 补 ask）
+        autoFallback = autoFallbackOf(ex.autoFallback)
       } else if (destructive) {
         // ② destructive 子设置 —— 更细的判定，优先于分类默认值（D-6）。
         //
@@ -9766,7 +10187,7 @@ export function assessCommand(source, shell, hooks) {
         action = v.action
         source = 'destructive'
         reason = v.reason
-        // auto 的回落值：与动作同源（v 已按 decisive 档取过，见 tierVerdict）
+        // auto 的回落值：与动作同源（v 已在全部 auto 档之间按 deny > ask > allow 从严合并，见 tierVerdict）
         if (v.autoFallback) autoFallback = v.autoFallback
       } else {
         // ③ command 分类默认值
@@ -9774,6 +10195,9 @@ export function assessCommand(source, shell, hooks) {
         action = c.action
         source = 'category'
         reason = c.reason
+        // 分类默认值也可以是 auto（面板上「执行命令」整类设为自动审批），
+        // 它的回落值同样要随动作带出（catOf 已按合法值域归一）。
+        autoFallback = c.autoFallback
       }
     }
     // 拒绝理由只在**最终会拒绝**时下发：allow 不弹窗用不上，ask 有自己的备注。
@@ -9784,7 +10208,7 @@ export function assessCommand(source, shell, hooks) {
     // 判据是**最终动作**而不是第一层动作：`auto + 回落 deny` 在执行侧就是一次拒绝
     // （同一条 kind:'deny' 通道回给 AI），它的 reasons[tier] 必须留下。
     // 此前这里写 `action !== 'deny'`，那一支的理由被这一行**当场清空**。
-    const finalAction = action === 'auto' ? (autoFallback || 'ask') : action
+    const finalAction = finalActionOf(action, autoFallback)
     if (finalAction !== 'deny') reason = null
 
     // 段级 code 仅供弹窗展示与决策日志（不参与动作选择）。
@@ -9801,6 +10225,7 @@ export function assessCommand(source, shell, hooks) {
     else if (action === 'ask') anyAsk = true
     else if (action === 'auto') anyAuto = true
     else if (action === 'inherit') anyInherit = true
+    else if (action !== 'allow') anyUnknown = true
 
     // `words` / `opaque` 随段一起交回：判定内部已经算出了它们（`segmentLabelsCore(seg.words)`
     // 就在上面几行），而**消费侧此前拿不到** —— 宿主生成弹窗候选时只能把同一条命令
@@ -9809,7 +10234,11 @@ export function assessCommand(source, shell, hooks) {
     // 后果是候选侧**无法知道某一段已经被放行**：`Get-ChildItem *` 已配成 allow 时，
     // 弹窗仍然给出 `get-childitem *` 候选，点一次就往配置里再写一条语义重复的例外。
     // 交回 words 后消费侧不必再解析，判定与候选看到的是**同一批段对象**。
-    out.push({ op: seg.op, text: seg.text, words: seg.words, opaque: seg.opaque, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers, autoFallback })
+    out.push({ op: seg.op, text: seg.text, words: seg.words, opaque: seg.opaque, label, action, source, code, ruleId, reason, note, dynamic: seg.dynamic, blast, tiers,
+      // 只有 auto 段才有回落值：与 reason（仅 deny）/ note（仅 ask）同一条纪律。
+      // 别的动作上带一个回落值既无意义，又会让「段间从严合并」误读一个不属于它的值。
+      // 非 auto 时保持改前的 `null`（字段形状不变），auto 且钩子没给值时按缺省 ask 补齐。
+      autoFallback: action === 'auto' ? (autoFallback || 'ask') : null })
   }
 
   // fail-closed 合并：拒绝面取并集、放行面取交集。
@@ -9831,26 +10260,75 @@ export function assessCommand(source, shell, hooks) {
   // 若把 auto 放到 inherit 之后（或漏掉），auto 段会被当成「无表态」→ 落到
   // `all-allow` 分支**静默放行**（fail-open，正是 §9A.4 警告的那一类）。
   else if (anyAuto) { action = 'auto'; code = 'segment-auto' }
+  // ── 未知动作**必须排在 inherit 之前**（fail-open 修复）────────────────────────────
+  // 顺序反了（`anyInherit` 在前）时，一条命令里只要有一段落 `inherit`，其余段的
+  // 「本版读不懂的动作」就被整体吞掉，整条回 `inherit` —— 而宿主把 inherit 折算成
+  // 大分类默认值（command 分类常态是 allow）。实测：
+  //     git status; echo hi   （例外 `git status`=未知动作，分类 inherit）
+  //       → inherit → 宿主折算 allow   ❌
+  //     单段 `git status` 同配置 → ask ✅（顺序只影响多段，正是本条要堵的）
+  // 语义依据与上面 auto 那一条同源：`inherit` 表示「**该段**没有表态」，而未知动作
+  // 是「有表态、只是本版读不懂」—— 有表态必须压过无表态，否则「把危险段包进多段
+  // 命令」就成了绕过未知动作闸门的手段。折 ask 是「问人」，方向安全。
+  // 注意不能简单把 unknown 并进 anyAsk：那样 `code` 会变成 `segment-ask`，
+  // 而弹窗/日志要靠 `segment-unknown-action` 区分「有人要求确认」与「配置读不懂」。
+  else if (anyUnknown) { action = 'ask'; code = 'segment-unknown-action' }
   else if (anyInherit) { action = 'inherit'; code = 'all-inherit' }
   else { action = 'allow'; code = 'all-allow' }
 
-  // 决定最终动作的那一段：它的 reason/ruleId/note 随判定一起下发
-  const decisive = out.find((s) => s.action === action) || out[0]
+  // 决定最终动作的那一段：它的 reason/ruleId/note 随判定一起下发。
+  //
+  // ⚠️ 未知动作折 ask 时，**没有任何段的 `action` 等于 `'ask'`**（那一段的 `action`
+  // 是那个读不懂的原值）—— 于是 `find` 落空、归因退化成 `out[0]`（第一段，可能是
+  // 毫不相关的 `echo`）。故这一支要单独找「动作既不在四档值域、也不是 inherit」的那一段。
+  // ⚠️ 必须排除 `inherit`：它同样不在 `TIER_STRICTNESS` 里，但它表示「该段没表态」，
+  // 不是「读不懂的动作」。不排除时 `echo hi; git status` 会选中 `echo hi` 那一段
+  // （实测 matched=null），归因仍然错位。
+  const decisive = (action === 'ask' && code === 'segment-unknown-action')
+    ? (out.find((s) => s.action !== 'inherit' && !Object.prototype.hasOwnProperty.call(TIER_STRICTNESS, s.action)) || out[0])
+    : (out.find((s) => s.action === action) || out[0])
+  // ── 段间 autoFallback 从严合并（deny > ask > allow）──────────────────────────────
+  // 回落值**是**权限判据 —— 它就是「模型超时 / 熔断 / 协议错时最终执行什么」。
+  // 此前直接取 `decisive` 那一段的值，而 `decisive` 是 `out.find(...)` 的**第一个**匹配段，
+  // 于是多段命令的回落值由**书写顺序**决定，把危险段写在后面即可绕过：
+  //     `kill 1234; rm -rf /`（proc=auto/回落 allow、wide=auto/回落 deny）
+  //     → 整条 auto，回落值取第一段的 allow ⇒ `rm -rf /` 在模型失败后被放行。
+  // 段之间是**并列**关系（与上面 fail-closed 合并同一条原则），故回落值也只能整体从严；
+  // 这与 index.js 的 outsideMatrix 在两道闸的回落值冲突时取更严是同构的。
+  //
+  // 严格度表用 **`AF_STRICTNESS`**（回落值专用域：allow < ask < deny 三键）——
+  // 回落值不可能再是 `auto`（见该表的注释），故**不**复用含 `auto: 1` 的
+  // `TIER_STRICTNESS`（那是动作域的序）。合并实现复用 `strictestFallbackOf`
+  // （段内多档用的是同一个），缺省 ask 的规则也在那里。
+  const mergedAutoFallback = strictestFallbackOf(out.filter((s) => s.action === 'auto').map((s) => s.autoFallback))
+  // ── 归因段：`matched` / `reason` / `note` 必须指向**真正产生最终动作**的那一段 ──────────
+  // 非 auto 动作：产生该动作的段就是 `decisive`（`out.find` 的第一个同动作段），本来正确。
+  // auto 不同 —— 整条的动作由**回落值**落地（模型失败时执行 `autoFallback`），而回落值已按
+  // 上面的从严合并取了全段最严，真正决定结局的是**回落值等于合并结果的那一段**，不一定是
+  // 第一个 auto 段。仍取 `decisive` 的后果（实测：`git push` 命中 auto 例外，`wide` 档
+  // auto/回落 deny 的 `rm -rf /` 在后）：
+  //     action=auto + autoFallback=deny ⇒ 整条被拒绝，
+  //     但 matched/reason 指向**回落 ask、已被放行**的 `git push` 段（reason=null），
+  //     真正拒绝的那一段的理由（`rm -rf /` 是删根）一个字都没传达。
+  // 宿主拿 `matched` 生成「（例外 e-git）」文案（index.js 的 exReason / ruleId），于是 AI
+  // 收到「被 e-git 拒绝」，会去改一条与该次拒绝无关的例外。段里的 `autoFallback` 在 push 时
+  // 已归一（`action === 'auto' ? (autoFallback || 'ask') : null`），故这里直接比字符串。
+  // 找不到匹配段时退回 `decisive`（不让归因变成 null、理由凭空丢失）。
+  const attributed = action === 'auto'
+    ? (out.find((s) => s.action === 'auto' && s.autoFallback === (mergedAutoFallback || 'ask')) || decisive)
+    : decisive
   return {
     action,
     code,
     segments: out,
-    matched: decisive ? decisive.ruleId : null,
-    reason: decisive ? decisive.reason : null,
-    note: decisive ? decisive.note : null,
+    matched: attributed ? attributed.ruleId : null,
+    reason: attributed ? attributed.reason : null,
+    note: attributed ? attributed.note : null,
     // auto 的回落值：只有动作是 auto 时才有意义（宿主的 commandDecision 据此下发，
-    // 其它动作时恒为 undefined，不建键 —— 与 reason（仅 deny）/ note（仅 ask）同一条纪律）。
-    //
-    // 从 `decisive` 段带出，而 decisive 段的值来自宿主 `destructive` 钩子下发的
-    // `autoFallbacks[t]`（见 index.js 的 destructiveTiers）：即「决定最终动作的那一档」
-    // 的回落值，与动作**同源**。段与段之间不做从严合并 —— 回落值是「模型失败后干什么」，
-    // 不是权限判据，且它只在**整条命令最终是 auto** 时才被消费，那时决定权已归模型。
-    autoFallback: decisive ? decisive.autoFallback : undefined,
+    // 其它动作时宿主的 `a.action === 'auto' ? … : undefined` 一律不建键）。
+    // 值来自**全部 auto 段**的从严合并（见上），不是某一段的值；整条是 auto 却一个 auto 段
+    // 都没有时（理论上不可达：`anyAuto` 由段置位）按缺省 ask —— 方向安全，不留 null。
+    autoFallback: action === 'auto' ? (mergedAutoFallback || 'ask') : null,
   }
 }
 

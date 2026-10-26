@@ -29,6 +29,11 @@ export default [
         URLSearchParams: 'readonly',
         TextDecoder: 'readonly',
         TextEncoder: 'readonly',
+        // AbortController/AbortSignal 是标准 Web API（Chrome 66+/FF 57+/Safari 12.1+）也是
+        // Node 15+ 全局，两边都在，故可进这份同时覆盖 Node 侧与 client.js 的 globals。
+        // 当前仅 index.js（Node 侧）用；声明的是构造器本身，不构成 .any/.timeout 的兼容背书。
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
         setInterval: 'readonly',

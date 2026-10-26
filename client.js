@@ -3652,8 +3652,10 @@ window.__ModuleLoader__.load({
 				// 每层**全部**例外 id → 动作 的映射（跨分类）：只用于收敛例外行的编辑态
 				// （见下面 setExEdit 处的说明）。取全集而不是当前分类的，
 				// 是因为编辑态不知道自己属于哪个分类 —— 它只记一个 id。
-				// 存**动作**而不只是「存在」：stillEditable 要判的是「该格此刻是否仍渲染出
-				// 输入框」，而原因/备注格只在 deny/ask 时才渲染（allow 两格都没有）。
+				// 存**最终动作**而不只是「存在」：stillEditable 要判的是「该格此刻是否仍渲染出
+				// 输入框」，而原因/备注格只在最终动作是 deny/ask 时才渲染（allow 两格都没有）。
+				// 必须走 finalActionOf 而不是 raw `action`：`auto + 回落 deny` 的原因格同样在渲染，
+				// 只存 raw 动作时 auto 一律判 false，编辑态会被一次 status 推送清掉。
 				const excActs = { global: {}, project: {} };
 				for (const t of ['global', 'project']) {
 					const block = s.categories && s.categories[t] ? s.categories[t] : null;
@@ -3664,7 +3666,7 @@ window.__ModuleLoader__.load({
 					if (block) {
 						for (const c of EXC_CATS) {
 							const list = block[c] && Array.isArray(block[c].exceptions) ? block[c].exceptions : [];
-							for (const r of list) if (r && r.id) excActs[t][r.id] = r.action;
+							for (const r of list) if (r && r.id) excActs[t][r.id] = finalActionOf(r.action, r.autoFallback);
 						}
 					}
 				}
@@ -3815,8 +3817,11 @@ window.__ModuleLoader__.load({
 					return subReasonNext;
 				});
 				setCatReasons((prev) => {
+					// 判据同 keepOk：必须按**最终动作**（与 catBlock 的 showReason 同源）——
+					// `auto + 回落 deny` 那一格的理由框仍在渲染，按 raw `=== 'deny'` 判会把它
+					// 正在打的草稿丢掉。
 					if (focusNow && focusNow.kind === 'cat' && prev && prev[focusNow.tab]
-						&& cs[focusNow.tab] && cs[focusNow.tab][focusNow.key] === 'deny') {
+						&& cs[focusNow.tab] && finalActionOf(cs[focusNow.tab][focusNow.key], catAutoFallbackOf(focusNow.key)) === 'deny') {
 						return Object.assign({}, crs, { [focusNow.tab]: Object.assign({}, crs[focusNow.tab], { [focusNow.key]: prev[focusNow.tab][focusNow.key] }) });
 					}
 					return crs;
@@ -3832,7 +3837,9 @@ window.__ModuleLoader__.load({
 					project: (s.fallback && s.fallback.project) || 'inherit',
 				};
 				setFbReason((prev) => {
-					if (focusNow && focusNow.kind === 'fb' && prev && fbShow[focusNow.tab] === 'deny') {
+					// 同 keepOk：按**最终动作**判（与 fbShowReason 同源），`auto + 回落 deny`
+					// 那一格的草稿同样要保住。
+					if (focusNow && focusNow.kind === 'fb' && prev && finalActionOf(fbShow[focusNow.tab], fbAutoFallbackOf()) === 'deny') {
 						return Object.assign({}, fbNext, { [focusNow.tab]: prev[focusNow.tab] });
 					}
 					return fbNext;
@@ -3861,7 +3868,7 @@ window.__ModuleLoader__.load({
 				setQuickReason((prev) => {
 					if (focusNow && focusNow.kind === 'quick' && prev && prev[focusNow.key]) {
 						const sub = focusNow.tab === 'global' ? 'g' : 'p';
-						if (qs[focusNow.key] && qs[focusNow.key][sub] === 'deny') {
+						if (qs[focusNow.key] && finalActionOf(qs[focusNow.key][sub], quickAutoFallbackOf(focusNow.key)) === 'deny') {
 							return Object.assign({}, qr, { [focusNow.key]: Object.assign({}, qr[focusNow.key], { [sub]: prev[focusNow.key][sub] }) });
 						}
 					}
@@ -3883,8 +3890,11 @@ window.__ModuleLoader__.load({
 					const kind = fk.slice(0, i);
 					const t = fk.slice(i + 1, j);
 					const key = fk.slice(j + 1);
-					if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');
-					if (kind === 'sub') return !!(subNext[t] && subNext[t][key] === 'deny');
+					// 四支判据都走 finalActionOf（与各自渲染处的 showReason 同源）：
+					// `auto + 回落 deny` 那一格的理由框仍在渲染，按 raw `=== 'deny'` 判会把
+					// 编辑态清掉，而草稿保护也依赖同一判据 —— 两处一起改才保得住。
+					if (kind === 'cat') return !!(cs[t] && finalActionOf(cs[t][key], catAutoFallbackOf(key)) === 'deny');
+					if (kind === 'sub') return !!(subNext[t] && finalActionOf(subNext[t][key], subAutoFallbackOf(key)) === 'deny');
 					// 例外行：该条仍在（未被别处删掉）**且动作仍是 deny/ask** 时，原因/备注格
 					// 才继续可编辑。用 excActs 同时回答两件事：该条在不在、它的动作是什么。
 					//
@@ -3895,9 +3905,9 @@ window.__ModuleLoader__.load({
 					if (kind === 'exc') return !!(excActs[t] && (excActs[t][key] === 'deny' || excActs[t][key] === 'ask'));
 					if (kind === 'quick') {
 						const sub = t === 'global' ? 'g' : 'p';
-						return !!(qs[key] && qs[key][sub] === 'deny');
+						return !!(qs[key] && finalActionOf(qs[key][sub], quickAutoFallbackOf(key)) === 'deny');
 					}
-					return fbShow[t] === 'deny';
+					return finalActionOf(fbShow[t], fbAutoFallbackOf()) === 'deny';
 				};
 				setReasonEditing((cur) => (stillEditable(cur) ? cur : null));
 				if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;
@@ -3987,9 +3997,12 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				if (kind === 'exc') {
-					// 例外行的原因/备注。key 是例外 id；**取哪个字段由该条的动作决定**
-					// （deny → reason、ask → note）—— 与渲染处同规则，故不需要额外的字段参数：
-					// 同一时刻只有一个是可见的，那个就是正在编辑的那个。
+					// 例外行的原因/备注。key 是例外 id；**取哪个字段由该条的最终动作决定**
+					// （deny → reason、ask → note，判据 finalActionOf）—— 与渲染处逐字同源，
+					// 故不需要额外的字段参数：同一时刻只有一个是可见的，那个就是正在编辑的那个。
+					// 不能用原始 `row.action`：`auto + 回落 ask` 在渲染侧走的是 note 槽位，
+					// 而该形状下 normalizeException 不存 reason —— 按 action 取会恒取到空串，
+					// 点「取消」就把用户写的备注清掉（面板显示与磁盘分叉）。
 					//
 					// 按 id 在**本层全部分类**里找（例外 id 在一层内唯一，但不带分类信息）：
 					// 遍历分类比让调用方多传一个 category 更省事，也不会因为漏传而静默取空。
@@ -4003,7 +4016,7 @@ window.__ModuleLoader__.load({
 							if (hit) { row = hit; break; }
 						}
 					}
-					const field = row && row.action === 'ask' ? 'note' : 'reason';
+					const field = row && finalActionOf(row.action, row.autoFallback) === 'ask' ? 'note' : 'reason';
 					setExReason((prev) => Object.assign({}, prev, { [key]: (row && row[field]) || '' }));
 					return;
 				}
@@ -6063,6 +6076,15 @@ window.__ModuleLoader__.load({
 						// reason 可能很长（段摘要上限 300 字符）且不换行会把行撑出面板，
 						// 故给这一格 minWidth:0 + 允许换行，让它在剩余宽度内折行。
 						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', minWidth: 0, flex: '1 1 100%', wordBreak: 'break-word', whiteSpace: 'pre-wrap' } }, d.reason || ''),
+						// 模型原话（auto 专有）：auto-deny 是**不弹窗**的路径，reason 只剩
+						// 「自动审批：模型拒绝」+ 段摘要，工具侧又已把 modelReason 剥掉（§4.5A），
+						// 于是这里是它唯一的展示位 —— 不画就等于模型原话三处出口全断。
+						// 与弹窗同款样式类 + 前缀「模型判断：」：第三方文本必须与 permgate
+						// 自己的结论视觉可区分（单靠灰色斜体在深色主题下区分度不够）。
+						// 行内覆盖 marginBottom（决策行高紧凑）、flex 独占一行与 reason 同格折行。
+						// rawOutput（2000 字符原始 JSON）会撑爆面板、fallbackReason 已由 note 承载，
+						// 两者都不在这里画。
+						d.modelReason ? React.createElement('div', { className: 'pg-model-reason', style: { marginBottom: 0, flex: '1 1 100%' } }, T('app.modelReasonPrefix') + d.modelReason) : null,
 					))) : React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.8)' } }, T('panel.noDecisions')),
 					// 失败提示：只在 { error } 态出现（'loading' 是字符串、没有 .error，天然不命中）。
 					// 与 expandedList 的判据一致 —— 该态**不算展开**，故按钮仍是可重试的「展开」。

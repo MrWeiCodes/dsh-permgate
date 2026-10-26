@@ -73,6 +73,50 @@ function tierChainOf(source) {
   return evaluate
 }
 
+/**
+ * 把 index.js 的**子设置写入单点** `setCommandSub` 抽出来并**实际求值**。
+ *
+ * 为什么走求值而不是匹配源码：59g 的 ⑤ 原先匹配字面量
+ * `sub.autoFallbacks[t] = req || afOfTier() || 'ask'`。那句实现已改成「本层无值就不写键」
+ * （把补 `ask` 的职责留给读取侧的跨层回落），字面量随之消失，而新注释里为说明历史
+ * **引用了旧代码原文** —— 正则于是改为命中注释：把实现那一行整个删掉，断言照样绿（实测）。
+ * 行为断言不吃这个亏：它不关心代码长什么样，只问「传了回落值，磁盘上是不是它」。
+ *
+ * 依赖注入：函数体用到 `MODES` / `ALL_MODES` / `TIERS` / `keyOfTier` / `finalActionOf` /
+ * `normalizeText` / `config` / `ensureProject` / `freshCategory`。
+ *   · `MODES` / `ALL_MODES` / `keyOfTier` / `finalActionOf` **按源码原样抠出**（与 tierChainOf 同源）：
+ *     手抄一份就是给这些口径再造一个副本，而「漂移即 fail-open」正是本仓库反复踩的坑。
+ *   · `normalizeText` 注入（纯文本归一，抽取窗口里没有它的定义）。
+ *   · `config` / `ensureProject` / `freshCategory` 注入：写入单点只碰 `config` 里的块，
+ *     用最小的假块即可，不必拉起真实配置加载链。
+ *
+ * 返回 `(project, targetKey, action, reason, tier, autoFallback) => boolean`，直接改
+ * **调用方给的** project 块（就地观察落盘结果）。取不到函数（被改名 / 删掉 / 依赖变了）
+ * 时返回 null，调用方的断言随即失败 —— 不会静默跳过。
+ */
+function setCommandSubOf(source) {
+  const body = (source.match(/function setCommandSub\(root, targetKey, action, reason, tier, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0]
+  const modStmt = (source.match(/const MODES = \[[^\n]*/) || [''])[0]
+  const allStmt = (source.match(/const ALL_MODES = \[[^\n]*/) || [''])[0]
+  // keyOfTier 是**单行**箭头函数（无花括号），按行取（与 tierChainOf 同一手法）。
+  const keyStmt = (source.match(/const keyOfTier = [^\n]*/) || [''])[0]
+  const faStmt = (source.match(/function finalActionOf\(action, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0]
+  if (!body || !modStmt || !allStmt || !keyStmt || !faStmt) return null
+  return (project, targetKey, action, reason, tier, autoFallback) => {
+    const fn = new Function('TIERS', 'normalizeText', 'config', 'ensureProject', 'freshCategory',
+      [modStmt, allStmt, keyStmt, faStmt, body, 'return setCommandSub;'].join('\n'))(
+      sp.TIERS,
+      (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined),
+      { global: { command: {} } },
+      () => project,
+      // 建块用不到：用例给的 project 都自带 command 块。留着是为了函数体真的需要时不炸。
+      () => ({ command: {} })
+    )
+    return fn('X:/ws', targetKey, action, reason, tier, autoFallback)
+  }
+}
+
+
 // ─────────────────────────────────────────────────────────────
 group('1. 模块级冒烟：头部（export default 之前的全部定义）在无 DSH 环境下可求值')
 // 目的：捕获「模块级函数引用闭包内常量/未定义标识符」这类只在运行时才炸的错误
@@ -1164,9 +1208,10 @@ ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outs
 //
 // 判据取四件事：
 //   ① auto 分支存在；
-//   ② 顺序必须是 deny → **auto** → ask → allow。auto 排在 ask **之前**：ask 是「要问人」、
-//      auto 是「问模型」，人比模型更该被问 —— 若 auto 抢先，用户设的 ask 例外会被降级成
-//      「问模型」，那是**放宽**（模型可能直接放行）。同理 auto 必须在 allow 之前，
+//   ② 顺序必须是 deny → **ask** → auto → allow。ask 排在 auto **之前**：ask 是「要问人」、
+//      auto 是「问模型」，人比模型更该被问 —— 若 auto 抢先，用户显式配的 ask 例外会被降级成
+//      「问模型」，那是**放宽**（模型可能直接放行）。这与 shell-parse.js 段间合并的
+//      anyDeny → anyAsk → anyAuto 同一方向（§13）。auto 仍必须在 allow 之前，
 //      否则掉进最后的 allow 分支就是静默放行。
 //   ③ auto 分支返回 `action: 'auto'` 并带从严合并后的回落值；
 //   ④ 四个调用点各有一条 auto 出口（漏一个 = 那一类区外操作仍会静默放行）。
@@ -1184,10 +1229,10 @@ ok('★★ 区外合并矩阵认识 auto 且排在 allow 之前（漏改即 fail
   const iAuto = body.indexOf("if (d.action === 'auto' || e.action === 'auto')")
   const iAsk = body.indexOf("if (d.action === 'ask' || e.action === 'ask')")
   if (iDeny < 0 || iAsk < 0 || iAuto < 0) return false
-  // ② deny → auto → ask（更严在前；auto 抢在 ask 前就是放宽）
-  if (!(iDeny < iAuto && iAuto < iAsk)) return false
+  // ② deny → ask → auto（更严在前；auto 抢在 ask 前就是放宽）
+  if (!(iDeny < iAsk && iAsk < iAuto)) return false
   // ③ auto 分支必须返回 action: 'auto'（不是别的），并带上从严合并后的回落值
-  const seg = body.slice(iAuto, iAsk)
+  const seg = body.slice(iAuto)
   if (!/return \{ action: 'auto', autoFallback: af,/.test(seg)) return false
   // ④ 四个调用点各一条 auto 出口
   return (src.match(/if \(m\.action === 'auto'\) return out\(\{ action: 'auto', autoFallback: m\.autoFallback,/g) || []).length === 4
@@ -2417,7 +2462,61 @@ ok('取消编辑还原服务端当前值（不是清空）——三处取值口�
 })())
 // 防回退：后台 status 推送（AI 改权限 / 配置重载 / 会话事件）会用服务端值整表重建三份 reason state，
 // 若不保留聚焦中的草稿，用户「已输入未失焦」的文字会被静默清空（注释曾宣称不会，实际会）。
-ok('聚焦中的拒绝原因草稿不被 status 回填覆盖（且仅在输入框仍可见时兜住）', cli.includes('const reasonFocus = React.useRef(null)') && cli.includes('const focusNow = reasonFocus.current') && cli.includes("focusNow.kind === 'cat'") && cli.includes("focusNow.kind === 'quick'") && cli.includes("focusNow.kind === 'fb'") && cli.includes("cs[focusNow.tab][focusNow.key] === 'deny'") && cli.includes("qs[focusNow.key][sub] === 'deny'") && cli.includes("fbShow[focusNow.tab] === 'deny'") && cli.includes('reasonFocus.current = focus'))
+//
+// 判据从「三处字面量恰好是 `=== 'deny'`」改为**行为**：从源码抠出 applyStatus 里那三处草稿保留
+// 分支真跑，喂 status 夹具看草稿是否被保住。理由是这三处判据此后必须走 `finalActionOf`
+// （`auto + 回落 deny` 的框同样在渲染，按 raw `action` 判会把正在打的字丢掉）——
+// 继续钉 `=== 'deny'` 等于把缺陷本身写成期望，而换成新的字面量又只是把同一把锁换个钥匙。
+ok('聚焦中的拒绝原因草稿不被 status 回填覆盖（且仅在输入框仍可见时兜住）', (function () {
+  if (!cli.includes('const reasonFocus = React.useRef(null)')) return false
+  if (!cli.includes('const focusNow = reasonFocus.current')) return false
+  if (!cli.includes('reasonFocus.current = focus')) return false
+  // 三处草稿保留分支必须都还在（用 kind 分派判，不钉内部表达式）
+  for (const kind of ['cat', 'quick', 'fb']) {
+    if (!cli.includes("focusNow.kind === '" + kind + "'")) return false
+  }
+  // 行为：cat / quick / fb 三处各自「最终会拒绝」时必须保住草稿、否则回填服务端值。
+  // 直接从 applyStatus 里截出三段 setState updater，注入生产源码里的 `finalActionOf`（真实现）；
+  // 三个 `*AutoFallbackOf` 是桩 —— 它们读闭包里的 `status`/`tab`，本断言只测判据是否按最终动作，
+  // 回落值由夹具给出。
+  const faSrc = (cli.match(/const finalActionOf = \(action, autoFallback\) => \{[\s\S]*?\n\t\t\t\};/) || [''])[0]
+  if (!faSrc) return false
+  // 三处 updater 的判据（updater 本体依赖大量闭包状态，故只取判据表达式真跑）
+  const catCond = (cli.match(/focusNow\.kind === 'cat' && prev && prev\[focusNow\.tab\]\s*\n\s*&& cs\[focusNow\.tab\] && (finalActionOf\([^\n]*?\) === 'deny')/) || [])[1]
+  const quickCond = (cli.match(/if \(qs\[focusNow\.key\] && (finalActionOf\([^\n]*?\) === 'deny')\)/) || [])[1]
+  const fbCond = (cli.match(/focusNow\.kind === 'fb' && prev && (finalActionOf\([^\n]*?\) === 'deny')\)/) || [])[1]
+  if (!catCond || !quickCond || !fbCond) return false
+  let evalCond = null
+  try {
+    evalCond = new Function('finalActionOf', 'catAutoFallbackOf', 'quickAutoFallbackOf', 'fbAutoFallbackOf',
+      'cs', 'qs', 'fbShow', 'prev', 'focusNow', 'sub',
+      // 三处判据各包一层函数：一次只求值被调用的那一路（另两路依赖的夹具形状不同）
+      'return [ function () { return (' + catCond + '); },'
+      + ' function () { return (' + quickCond + '); },'
+      + ' function () { return (' + fbCond + '); } ];')
+  } catch (e) { return false }
+  const fa = new Function(faSrc + '; return finalActionOf;')()
+  // 四种动作 × 四种回落值：只有「最终会拒绝」的形态保住草稿。
+  const cases = [
+    ['deny', null, true], ['allow', null, false], ['ask', null, false],
+    ['auto', 'deny', true], ['auto', 'ask', false], ['auto', 'allow', false], ['auto', null, false],
+  ]
+  for (const [action, af, want] of cases) {
+    const afOf = () => (action === 'auto' ? af : null)
+    const pick = (i, focusNow, cs, qs, fbShow, prev) => evalCond(
+      fa, afOf, afOf, afOf, cs, qs, fbShow, prev, focusNow, 'g')[i]()
+    // cat：本层该分类的最终动作
+    if (pick(0, { kind: 'cat', tab: 'global', key: 'command' },
+      { global: { command: action } }, {}, { global: 'ask' }, { global: {} }) !== want) return false
+    // quick：本行该层工具的最终动作
+    if (pick(1, { kind: 'quick', tab: 'global', key: 't' },
+      {}, { t: { g: action } }, { global: 'ask' }, { t: {} }) !== want) return false
+    // fb：该层兜底的最终动作
+    if (pick(2, { kind: 'fb', tab: 'global', key: null },
+      {}, {}, { global: action }, { global: '草稿' }) !== want) return false
+  }
+  return true
+})())
 // 防回退：兜底可见性判据必须取 fallbackMode，不能误用存原因文本的 fbNext（那会让兜底草稿保护形同虚设）
 ok('兜底草稿判据取 fallbackMode 而非原因文本', cli.includes("const fbShow = {") && !cli.includes("fbNext[focusNow.tab] === 'deny'"))
 // 防回退：面板全局列若不跳过 inherit，select 会拿到不在选项内的值（显示空白），与实际裁决分叉
@@ -2594,56 +2693,82 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
 })())
 // 防回退：编辑态只在「用户主动操作」时清理是不够的——AI 侧 perm_* 写入、配置重载、删行、换会话
 // 都是服务端驱动的，编辑态会残留成「没点编辑却可输入」。applyStatus 必须按新的 mode 收敛一次。
-// 注意必须断言**函数体内部判据**：只固定函数名与两处调用时，把判据 `=== 'deny'` 改成 `=== 'ask'`、
-// 或在函数体开头加 `return true/false`、或让冒号切分退化，都能绕过（实测 5/8 变异漏网）。
+//
+// 判据从「逐字比对函数体文本」改为**行为**：把 stillEditable 从源码抠出来真跑，喂夹具看它返回什么。
+// 文本比对挡得住插入式变异，却会把等价改写、以及本次这类**必须做的判据迁移**一并判红
+// （raw `action === 'deny'` → `finalActionOf(action, autoFallback) === 'deny'`，理由见渲染处：
+// `auto + 回落 deny` 的框仍在渲染）。它守的其实是「这几行恰好长这样」，而不是
+// 「该格此刻是否仍渲染出输入框」—— 后者正是这条断言真正要守的性质。
+// 行为断言两者都守得住：判据写反 / 恒真 / 恒假 / 冒号切分退化都会在这里返回错值。
 // 行首的 `;` 是**必需的**，不是笔误：上一条语句以 `})())` 结尾，若去掉它，ASI 会把两者连成
 // `ok(...)(function(){...})`，运行时报 `TypeError: ok(...) is not a function`（已实测）。
 ;(function () {
-  const body = cli.slice(cli.indexOf('const stillEditable = (fk) =>'), cli.indexOf('setReasonEditing((cur) => (stillEditable(cur)'));
-  // 去注释、折叠空白后与**期望实现逐字比对**。
-  // 之所以不用逐条 includes：插入式变异（在函数体开头加一句 `return false;`）不会破坏任何
-  // 既有子串，却能改变行为（误清正在编辑的格）——逐条 includes 对它完全无感（实测漏网）。
-  const norm = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim();
-  const expected = [
-    'const stillEditable = (fk) => {',
-    'if (!fk) return false;',
-    // 键解析：按**前两个**冒号切分（key 本身可能含冒号，工具名允许）
-    "const i = fk.indexOf(':');",
-    "const j = fk.indexOf(':', i + 1);",
-    'if (i < 0 || j < 0) return false;',
-    'const kind = fk.slice(0, i);',
-    'const t = fk.slice(i + 1, j);',
-    'const key = fk.slice(j + 1);',
-    // 四处判据都必须以 deny 为准（写反成 ask / 恒真 / 恒假都会失败）；
-    // exc 一处例外：原因格（deny）与备注格（ask）都渲染，故那一支认 deny 或 ask。
-    "if (kind === 'cat') return !!(cs[t] && cs[t][key] === 'deny');",
-    // sub 一处（八档之后）：判据从「整层 === 'deny'」改为「**该档** === 'deny'」。
-    // 原意不变（本格是否仍渲染出输入框），只是「本格」的粒度从「命令子设置」细化到「某一档」——
-    // 八档共用一层判据时，「wide 是 deny、inside 是 ask」会让 inside 的框也进入编辑态。
-    // 反例：写回 `subNext[t] === 'deny'`（整层）或 `=== 'ask'`，本条即失败。
-    "if (kind === 'sub') return !!(subNext[t] && subNext[t][key] === 'deny');",
-    // exc 一处：例外行的原因/备注格。判据是「该条仍在本层**且动作仍是 deny/ask**」——
-    // 两件事都由 excActs（id → 动作）回答。
-    //
-    // 为什么必须连动作一起判：原因格只在 deny 时渲染、备注格只在 ask 时渲染，而动作
-    // 下拉框是**即时生效**的（setExAction），其调用点不在 exitEditOf 的覆盖范围内。
-    // 曾经只判「该条还在不在」，理由是「动作改了整格消失、编辑态自然作废」——**那个理由
-    // 有漏洞**：输入框确实被卸载，但 state 不会被清，格子回来（改回 deny/ask）即复活，
-    // 于是用户没点「编辑」就已处于输入态（输入框 autoFocus 抢焦点）。
-    // 反例：写回 `excActs[t] && excActs[t][key]`（只判存在性）或 `=== 'deny'`（漏掉 ask 备注格），
-    // 本条即失败。
-    "if (kind === 'exc') return !!(excActs[t] && (excActs[t][key] === 'deny' || excActs[t][key] === 'ask'));",
-    "if (kind === 'quick') { const sub = t === 'global' ? 'g' : 'p';",
-    "return !!(qs[key] && qs[key][sub] === 'deny'); }",
-    "return fbShow[t] === 'deny'; };",
-  ].join(' ');
-  // 两处收敛调用必须在
-  const callOk = cli.includes('setReasonEditing((cur) => (stillEditable(cur) ? cur : null));')
-    && cli.includes('if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;');
-  const bodyOk = norm(body) === expected;
-  // 逐字比对失败时给出期望/实际：等价改写也会走到这里（该断言刻意偏严格，宁可误报不可漏报）
-  ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', bodyOk && callOk,
-    bodyOk ? '收敛调用缺失' : ('stillEditable 函数体与期望不符\n      期望: ' + expected + '\n      实际: ' + norm(body)));
+  const i = cli.indexOf('const stillEditable = (fk) =>')
+  if (i < 0) return ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', false,
+    'stillEditable 已改名/删除，断言无法求值')
+  const j = cli.indexOf('setReasonEditing((cur) => (stillEditable(cur)', i)
+  if (j < 0) return ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', false,
+    'stillEditable 的收敛调用点已改名/删除，断言无法求值')
+  // 去注释：函数体里既有注释也有代码，注释里的 'deny' 不该被当成判据（反之亦然）
+  const body = cli.slice(i, j).replace(/\/\/[^\n]*/g, '')
+  // finalActionOf 取**生产实现**：判据必须与渲染同源，注入复刻件等于测了个假的。
+  const faSrc = (cli.match(/const finalActionOf = \(action, autoFallback\) => \{[\s\S]*?\n\t\t\t\};/) || [''])[0]
+  if (!faSrc) return ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', false,
+    'finalActionOf 的形状变了（缩进/签名），正则取不到函数体，断言无法求值')
+  // 四个 *AutoFallbackOf 注入桩：它们读宿主下发的 status（闭包），而这里要测的是
+  // 「stillEditable 是否按**最终动作**判」，故回落值直接由夹具给出。
+  const run = (fk, action, af) => {
+    const fa = new Function(faSrc + '\n; return finalActionOf;')()
+    const afOf = () => af
+    const fn = new Function('cs', 'subNext', 'excActs', 'qs', 'fbShow',
+      'finalActionOf', 'catAutoFallbackOf', 'subAutoFallbackOf', 'quickAutoFallbackOf', 'fbAutoFallbackOf',
+      body + '\n; return stillEditable;')
+    return fn(
+      { global: { command: action }, project: {} },
+      { global: { wide: action }, project: {} },
+      { global: { e1: action }, project: {} },
+      { tool: { g: action, p: action }, 'a:b': { g: action, p: action } },
+      { global: action, project: action },
+      fa, afOf, afOf, afOf, afOf)(fk)
+  }
+  // 四格 × 四动作 × 四回落值：**只有「最终会拒绝」的形态可编辑**。
+  // 缺省回落值（null）与显式 ask 同义 —— 与宿主 normalizeAutoFallback 的缺省同源。
+  const cases = [
+    ['deny', null, true], ['allow', null, false], ['ask', null, false],
+    ['auto', 'deny', true], ['auto', 'ask', false], ['auto', 'allow', false], ['auto', null, false],
+  ]
+  const cells = [
+    ['cat', (a) => 'cat:global:command'],
+    ['sub', (a) => 'sub:global:wide'],
+    ['quick', (a) => 'quick:global:tool'],
+    ['fb', (a) => 'fb:global:'],
+  ]
+  for (const [name, fkOf] of cells) {
+    for (const [action, af, want] of cases) {
+      if (run(fkOf(action), action, af) !== want) {
+        throw new Error(name + ' / action=' + action + ' / af=' + af + ' 期望 ' + want)
+      }
+    }
+  }
+  // 键解析：空键、缺冒号、只有一段冒号都必须返回 false（不能因为解析退化而恒真）
+  // ⚠️ 这几格**不能**写成 `if (...) return false`：IIFE 的返回值无人消费，早退会让末尾的
+  // ok() 静默不执行（实测：把 client.js 的 `if (i < 0 || j < 0) return false` 改成 return true，
+  // 套件仍全绿）。故一律折进 keyOk，由末尾那一次 ok() 统一报告。
+  const keyOk = run('', 'deny', null) === false
+    && run('cat', 'deny', null) === false
+    && run('cat:global', 'deny', null) === false
+    // 键里含冒号（工具名允许）：仍按**前两个**冒号切分，剩余整体作为 key
+    && run('quick:global:a:b', 'deny', null) === true
+    && run('quick:global:a:b', 'allow', null) === false
+  // 两处收敛调用必须在。判之前先去掉行注释：`cli.includes` 是**子串**匹配，把调用
+  // 注释掉之后原文仍在源码里，照样命中（实测：注释掉 client.js 的焦点收敛那行，套件仍全绿）。
+  // 去注释后「还在」才等于「真的会被执行」。
+  const live = cli.replace(/\/\/[^\n]*/g, '')
+  const callOk = live.includes('setReasonEditing((cur) => (stillEditable(cur) ? cur : null));')
+    && live.includes('if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;');
+  // 必须走 ok()：这个 IIFE 的返回值无人消费，`return callOk` 会让这条断言静默失效。
+  ok('applyStatus 按新 mode 收敛残留的编辑态与焦点', callOk && keyOk,
+    keyOk ? undefined : '键解析判据不符（空键 / 缺冒号 / 工具名含冒号）')
 })()
 // 防回退：exc 那一支**必须连动作一起判**（不能只判「该条还在不在」）。
 //
@@ -2947,7 +3072,7 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && (sp.match(/resolveException\(seg\.text, labels\)/g) || []).length === 2
     && /if \(r\.action === 'deny'\) return r/.test(sp)
     && /if \(r\.action === 'ask' && !ask\) ask = r/.test(sp)
-    && /return ask \|\| allow/.test(sp))
+    && /return ask \|\| unknown \|\| auto \|\| allow/.test(sp))
   // ★ 命令替换必须**摘出内容**（而非只换定界符）：双引号内的命令替换会被双引号剥离吃掉。
   // 实测 `echo "$(rm -rf /x)"` 与 `echo "\`rm -rf /x\`"` 曾提取不到 rm。
   // 且必须**递归**展开：嵌套的命令替换（`$(echo \`rm -rf /x\`)`）内层也要可见。
@@ -2958,9 +3083,9 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     && sp.includes('function replaceCommandSubstitution(text, extracted) {')
     && sp.includes('function expandSubstitution(text, depth) {'))
   // ★ 整行 ok:false 时 deny 例外仍要生效（合法 heredoc 曾绕过显式拒绝）
-  ok('★ 整行读不懂时仍查 deny 例外（不绕过用户显式拒绝）',
+  ok('★ 整行读不懂时仍查例外（deny/ask/auto 取最严，不绕过用户显式表态）',
     /if \(!d\.ok\) \{[\s\S]{0,1200}?rawCommandNames\(/.test(sp)
-    && /ex && ex\.action === 'deny'/.test(sp)
+    && /if \(!ex \|\| ex\.action === 'allow'\) continue/.test(sp)
     && sp.includes('export function rawCommandNames(text) {'))
   // ★ 破坏性名单含 POSIX 侧（修好 D4 的主要漏报），且不列入高频日常命令
   ok('★ 破坏性名单含 POSIX 侧（rm/dd/chmod/chown/kill）',
@@ -3205,11 +3330,16 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     // ② 序必须单调：allow < ask < deny（既有契约，不能因加 auto 被打乱）
     if (!(T.allow < T.ask && T.ask < T.deny)) return false
     // ③ 复算 out() 的合并（`if (b === undefined || d === undefined || d < b) return base`），
-    //    对每个 base 检查「doom 更严或相等时 doom 接管」。
+    //    对每个 base 检查「doom 更严或相等时 doom 接管」，**外加那个唯一的同档例外**。
+    //
+    //    本复算只覆盖**动作层**（含同档例外）；回落值层由下面 `withDoom` 直接跑 `out()` 覆盖 ——
+    //    `merge` 返回动作字符串，结构上无法表达 `autoFallback`，不要在此处补算。
     const merge = (base, doom) => {
       const b = T[base]
       const d = T[doom]
       if (b === undefined || d === undefined || d < b) return base
+      // `ask` 与 `auto` 同为 1：同档时不得让 doom=auto 把 base=ask 降级成「问模型」
+      if (d === b && doom === 'auto' && base === 'ask') return base
       return doom
     }
     // `doom` 永不为 allow（它在 `d.action !== 'allow'` 时才构造 = 用户知情关闭检测），
@@ -3227,6 +3357,70 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     //    不能被 `d === undefined` 挡掉。取 1 与 ask 同档 → 对 deny 不接管、对 allow 接管。
     if (merge('allow', 'auto') !== 'auto') return false
     if (merge('deny', 'auto') !== 'deny') return false
+    // ★ 新规则的必要覆盖：同档（1 对 1）时 `doom=auto` **不得**接管 `base=ask`。
+    //   没有这一条，把 out() 里那行同档例外删掉，上面所有断言仍然全绿 ——
+    //   而用户显式要求的「问人」就被静默降级成「问模型」（方向放宽）。
+    if (merge('ask', 'auto') !== 'ask') return false
+    return true
+  })())
+  // ★★ 生产侧 `out()` 的同档例外必须**真的存在并生效**。
+  //
+  // 上面那条断言守的是 `merge` 这份**复算**，不是 `out()` 本身 —— 实测把
+  // `out()` 里那行 `if (d === b && doom.action === 'auto' && base.action === 'ask') return base`
+  // 整行删掉，regressions 与 smoke **两套全绿**（复算自带例外、谁也不去看生产代码）。
+  // 这正是 §9B.1 记的教训：两份实现只同步其中一份，等于新规则没有测试。
+  // 故这里把 `out()` 的函数体从源码里抠出来真跑（与 withEncMeta 同一套做法），
+  // 喂它一个「base=ask + doom=auto」的输入，断言返回的是 base 而不是 doom。
+  ok('★★ out() 的同档例外真实生效：base=ask 不被 doom=auto 接管（§9B）', (function () {
+    const iOut = src.indexOf('const out = (base) => {')
+    if (iOut < 0) return false
+    let i = src.indexOf('{', iOut), depth = 0
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') { depth--; if (depth === 0) break }
+    }
+    const m = src.match(/const MODE_STRICTNESS = (\{[^}]*\})/)
+    if (!m) return false
+    let T = null
+    try { T = new Function('return (' + m[1] + ')')() } catch (e) { return false }
+    const mAf = sp.match(/export const AF_STRICTNESS = (\{[^}]*\})/)
+    if (!mAf) return false
+    let AF = null
+    try { AF = new Function('return (' + mAf[1] + ')')() } catch (e) { return false }
+    // doom 是 out() 的闭包变量：注入它，返回可调用的 out。
+    // 下面每个场景各造一个实例（doom 在闭包里，同一个实例只能测一种 doom）。
+    const withDoom = (doom) => new Function('MODE_STRICTNESS', 'AF_STRICTNESS', 'doom',
+      'const out = (base) => ' + src.slice(iOut, i + 1).replace(/^const out = \(base\) => /, '') + '; return out')(T, AF, doom)
+    const base = { action: 'ask', reason: 'base' }
+    const doomAsk = { action: 'ask', reason: 'doom' }
+    const doomAuto = { action: 'auto', autoFallback: 'ask', reason: 'doom' }
+    // 无 doom → 原样返回 base（这一句顺带证明注入的是 doom=null，不是别的东西）
+    const r0 = withDoom(null)(base)
+    if (r0 !== base) return false
+    // base=ask + doom=auto（同档 1 对 1）→ 必须仍是 base，**不得**被 auto 接管
+    const r1 = withDoom(doomAuto)(base)
+    if (!(r1 && r1.action === 'ask' && r1.reason === 'base')) return false
+    // 既有方向不得被这条规则误伤：base=auto + doom=ask 仍要由 doom 接管（提醒盖过 auto）
+    const r2 = withDoom(doomAsk)({ action: 'auto', autoFallback: 'ask', reason: 'base' })
+    if (!(r2 && r2.action === 'ask' && r2.reason === 'doom')) return false
+    // base=ask + doom=ask 仍由 doom 接管（理由换成循环提醒，L-10）
+    const r3 = withDoom(doomAsk)(base)
+    if (!(r3 && r3.reason === 'doom')) return false
+    // ★ 两支都是 auto 时回落值必须**取严**：`autoFallback` 是 auto 的第二层判据，
+    //   同档接管会把 base 的 deny 换成 doom 的 allow（deny → allow，fail-open）。
+    //   没有这三格，把 out() 里那段取严整段删掉，四套测试仍全绿（已实测）。
+    //   ⚠️ 回落值排序是 allow < ask < deny，**不是** MODE_STRICTNESS（auto 与 ask 同档）。
+    const r4 = withDoom({ action: 'auto', autoFallback: 'allow', reason: 'doom' })(
+      { action: 'auto', autoFallback: 'deny', reason: 'base' })
+    if (!(r4 && r4.action === 'auto' && r4.autoFallback === 'deny')) return false
+    // base 无回落值 → 缺省按 ask 参与比较，doom 的 allow 更宽 → 取 base 的 ask
+    const r5 = withDoom({ action: 'auto', autoFallback: 'allow', reason: 'doom' })(
+      { action: 'auto', reason: 'base' })
+    if (!(r5 && r5.action === 'auto' && r5.autoFallback === 'ask')) return false
+    // 反方向：doom 更严（deny 对 allow）→ 取 doom 的 deny（不是恒取 base）
+    const r6 = withDoom({ action: 'auto', autoFallback: 'deny', reason: 'doom' })(
+      { action: 'auto', autoFallback: 'allow', reason: 'base' })
+    if (!(r6 && r6.action === 'auto' && r6.autoFallback === 'deny')) return false
     return true
   })())
   // ★ 阈值：默认 6、下限 1、**无上限**（无 MAX 常量）。上限唯一的用途是「不许超过窗口」，
@@ -8867,10 +9061,25 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     const fm = src.match(/function setFallbackMode\(root, targetKey, mode, reason, autoFallback\) \{[\s\S]*?\n    \}/)
     if (!fm) return false
     if (!/block\.fallbackAutoFallback = req \|\|/.test(fm[0])) return false
-    // ⑤ 子设置：setCommandSub 的第六个参数，显式传入优先
-    const sm = src.match(/function setCommandSub\(root, targetKey, action, reason, tier, autoFallback\) \{[\s\S]*?\n    \}/)
-    if (!sm) return false
-    if (!/sub\.autoFallbacks\[t\] = req \|\| afOfTier\(\) \|\| 'ask'/.test(sm[0])) return false
+    // ⑤ 子设置：setCommandSub 的第六个参数 —— 真实求值（抽函数体执行，看落盘结果）
+    //
+    // 这里原先匹配源码字面量 `sub.autoFallbacks[t] = req || afOfTier() || 'ask'`。那句实现
+    // 改成「本层无值就不写键」后字面量消失，而注释里为说明历史引用了旧代码原文 ——
+    // 正则于是改为命中注释，把实现删掉也照样绿（实测）。行为断言不关心实现长什么样。
+    const S = setCommandSubOf(src)
+    if (!S) return false
+    try {
+      // 显式传入的回落值必须落盘，且只落在**该档**（不碰兄弟档的已有值）
+      const p1 = { command: { destructive: { wide: 'auto', autoFallbacks: { priv: 'deny' } } } }
+      if (S(p1, 'project', 'auto', undefined, 'wide', 'deny') !== true) return false
+      if (!p1.command.destructive.autoFallbacks || p1.command.destructive.autoFallbacks.wide !== 'deny') return false
+      if (p1.command.destructive.autoFallbacks.priv !== 'deny') return false
+      // 反例：调用方没传、本层也没有值 → **不写这个键**（写死 ask 会盖掉全局层的显式回落值：
+      // 读取侧正是靠「本层没有这个键」才穿透到全局）
+      const p2 = { command: { destructive: {} } }
+      if (S(p2, 'project', 'auto', undefined, 'wide', undefined) !== true) return false
+      if (p2.command.destructive.autoFallbacks && p2.command.destructive.autoFallbacks.wide !== undefined) return false
+    } catch (e) { return false }
     // ⑥ 四条路由都必须把请求参数透传到单点（否则面板发了、宿主收不到）
     if (!src.includes("setQuickAction(rootOf(exec), target, a.tool, a.action, a.reason, a.autoFallback)")) return false
     if (!src.includes("setFallbackMode(rootOf(exec), target, a.mode, a.reason, a.autoFallback)")) return false

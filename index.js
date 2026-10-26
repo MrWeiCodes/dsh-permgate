@@ -3,7 +3,7 @@
 // 配置持久化于 $DSH_HOME/dsh-permgate/config.json（用户级、不进任何 git 仓库）。
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, segmentLabel, nestedInlineProgram, isDestructiveSegment, canCarryDestructivePayload, isPayloadCarrierLabel, blastRadiusOf, blastRadiusOfCommandPattern, BLAST_ORDER, SHELL_OF_TOOL, DESTRUCTIVE_LABELS, TIERS, GROUP_MEMBERS } from './shell-parse.js'
+import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, segmentLabel, nestedInlineProgram, isDestructiveSegment, canCarryDestructivePayload, isPayloadCarrierLabel, blastRadiusOf, blastRadiusOfCommandPattern, BLAST_ORDER, SHELL_OF_TOOL, DESTRUCTIVE_LABELS, TIERS, GROUP_MEMBERS, AF_STRICTNESS } from './shell-parse.js'
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
@@ -90,6 +90,15 @@ const AUTO_REVIEW_READY = true
 // 取 `1` 而非 `0` 的理由不是「更严」（本函数里两者等价），而是**语义可读**：auto 与 ask
 // 一样是「要过一道关」的档位（ask 过关的是人，auto 过关的是模型），写成 0 会让人误读成
 // 「和 allow 同义」。取 2 则是错的，理由见上。
+//
+// ── 另一侧：`doom = auto`、`base = ask`（同档 1 对 1，必须单独推演）───────────────
+// 上面只算了「doom 为 ask/deny、base 为 auto」。反过来 doom 也可以是 auto（用户把
+// **doomloop 分类本身**设成 auto），此时同档相等会让 doom 接管 —— 而接管就是把
+// 用户显式要求的 `ask`（问人）换成 `auto`（问模型），**方向是放宽**（模型可能直接放行）。
+// 故 `out()` 里对这一个组合有专门的例外：`base=ask` 不被 `doom=auto` 接管。
+// 注意不能把规则改成「相等且动作相同才接管」：那会让 `auto + doom=ask` 也不接管，
+// 而 doomloop 的提醒必须能盖过 auto（`auto` 与 `ask` 同为 1 正是为此）。
+// 四档 × 四档的完整对拍见 test/regressions.mjs 的 merge 复算。
 //
 // ⚠️ 本表加入 `auto` 时（2026-10 之前）`MODES` 还不含 `auto`，配置写不进这个动作，
 // 故当时 `decide()` 产不出 `auto`、合并里不可达 —— 那次是「档位表先固化设计决策，
@@ -2838,10 +2847,28 @@ export default {
         return v === 'ask' || v === 'allow' || v === 'deny' ? v : null
       }
       if (action === 'auto') {
-        if (!sub.autoFallbacks) sub.autoFallbacks = {}
-        // 显式传入的回落值优先（面板改回落值时走这里）；否则保留已有值、缺则 ask。
+        // ── 本层既没传、本层也没有值时**不写这个键**，把补默认值的职责留给读取侧 ──────────
+        // 曾经写成 `sub.autoFallbacks[t] = req || afOfTier() || 'ask'`：`afOfTier()` 只读**本层**
+        // （项目层此时是空的），于是 req 与它都空时就把 `'ask'` 硬写进项目层。而读取侧
+        // （`destructiveTiers`）本来是 `afOf(from) || afOf(pSub) || afOf(gSub)` 的**跨层回落** ——
+        // 项目层一旦有了具体的 `'ask'`，全局层用户显式配的 `'deny'` 就永远取不到了：
+        //     全局 wide=auto/回落 deny，项目 tab 把 wide 切成「自动审批」（面板不发回落值）
+        //       → 项目层落盘 `{wide:'auto', autoFallbacks:{wide:'ask'}}`，回落值 deny → ask
+        // 方向是**放宽**，且用户完全无感：面板上显示的就是 `ask`，看起来像「我没配过所以是默认值」。
+        //
+        // 不写键不会让面板显示缺值：`destructiveTiers` 读取侧恒会补 `ask`，
+        // 面板下发的 `effective.autoFallbacks` 仍有具体值。
         const req = autoFallback === 'allow' || autoFallback === 'deny' || autoFallback === 'ask' ? autoFallback : null
-        sub.autoFallbacks[t] = req || afOfTier() || 'ask'
+        const v = req || afOfTier()
+        if (v) {
+          // 容器可能还不存在（本层第一次写回落值）或不是对象（脏配置）——
+          // 与 afOfTier / 下面 else 分支同一条守卫，避免在非对象上赋值抛 TypeError。
+          if (!sub.autoFallbacks || typeof sub.autoFallbacks !== 'object') sub.autoFallbacks = {}
+          sub.autoFallbacks[t] = v
+        } else if (sub.autoFallbacks && typeof sub.autoFallbacks === 'object') {
+          delete sub.autoFallbacks[t]
+          if (!Object.keys(sub.autoFallbacks).length) delete sub.autoFallbacks
+        }
       } else if (sub.autoFallbacks && typeof sub.autoFallbacks === 'object') {
         delete sub.autoFallbacks[t]
         if (!Object.keys(sub.autoFallbacks).length) delete sub.autoFallbacks
@@ -4960,25 +4987,18 @@ export default {
         return { action: 'deny', src, cat, pz: p[0], pe: p[1] }
       }
       // ── auto：两道闸里任一道是 auto，就按 auto 处理 ─────────────────────────────
-      // 必须在 ask/allow 之前判，否则 auto 会**落到下面的 allow 分支被静默放行**。
+      // 必须排在 allow 之前，否则 auto 会**落到最后的 allow 分支被静默放行**。
       // 为什么取「任一道 auto 即 auto」而不是别的合并方式：两道闸是**并列**关系
       // （区外闸与分类闸都放行才算放行），与 deny/ask 的「任一道拦即拦」同构 ——
       // auto 的语义是「这一道交给模型判」，它既不是放行也不是拒绝，故它出现时
       // 必须让模型看过再决定，不能因为**另一道**是 allow 就把 auto 这一道抹掉。
       // 两道的 autoFallback 不同时取**更严**的那个（deny > ask > allow）：
       // 模型失败后两道闸各自要求的落点不同，此时按从严者执行，方向安全。
-      if (d.action === 'auto' || e.action === 'auto') {
-        const a = d.action === 'auto' ? d : null
-        const b = e.action === 'auto' ? e : null
-        const src = a || b
-        const cat = a ? gate : catKey
-        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
-        const afs = [a && a.autoFallback, b && b.autoFallback].filter((x) => x === 'ask' || x === 'allow' || x === 'deny')
-        // 从严：deny(2) > ask(1) > allow(0)；都缺时 ask（与 normalizeAutoFallback 的缺省同源）
-        const rank = { allow: 0, ask: 1, deny: 2 }
-        const af = afs.length ? afs.reduce((x, y) => (rank[y] > rank[x] ? y : x)) : 'ask'
-        return { action: 'auto', autoFallback: af, src, cat, pz: p[0], pe: p[1] }
-      }
+      //
+      // ⚠️ 顺序是 deny → **ask** → auto → allow，auto **必须排在 ask 之后**（§13）：
+      // ask 是「要问人」、auto 是「问模型」，人比模型更该被问 —— 若 auto 抢先，
+      // 用户显式配的 ask 例外会被降级成「问模型」，那是**放宽**（模型可能直接放行）。
+      // 与 shell-parse.js 的段间合并（anyDeny → anyAsk → anyAuto）方向一致。
       if (d.action === 'ask' || e.action === 'ask') {
         // 与 deny/allow 同口径：由**例外**触发的 ask 让 cat 跟随该例外所在闸，前缀与 ruleId 同源；
         // 纯模式默认值触发的 ask 沿用「区外闸优先」的既有取法（此时无 ruleId，文案回落「（需确认）」）。
@@ -4986,6 +5006,27 @@ export default {
         const cat = src ? (src === d ? gate : catKey) : (d.action === 'ask' ? gate : catKey)
         const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
         return { action: 'ask', src, cat, pz: p[0], pe: p[1] }
+      }
+      if (d.action === 'auto' || e.action === 'auto') {
+        const a = d.action === 'auto' ? d : null
+        const b = e.action === 'auto' ? e : null
+        const src = a || b
+        const cat = a ? gate : catKey
+        const p = OUTSIDE_PREFIX[cat] || OUTSIDE_PREFIX[OUTSIDE_WRITE_CAT]
+        // 从严：deny(2) > ask(1) > allow(0)，表取自 shell-parse.js 的 `AF_STRICTNESS`
+        // （回落值专用域，与 `out()` / `strictestFallbackOf` 共用同一份）。
+        //
+        // `afs` 分两步取，两个「没有值」的**原因不同、处置也不同**：
+        //   · `filter(Boolean)` —— 该闸**不是 auto**（另一道是，这一道没有回落值）。
+        //     它不参与比较，这是正确的；
+        //   · 是 auto 但回落值缺失/非法 → 归一成 `ask` **参与**比较（与 `out()` 的 afOf
+        //     同判据，也与 normalizeAutoFallback 的缺省同源：那个 auto 档失败后的落点就是 ask）。
+        // 曾经写成一句 `filter(x => x === 'ask' || …)`，把两种情形一起丢弃：当前不可达
+        // （`pick()` 恒下发三值），但它把「缺省 ask 参与」这条语义写成了「跳过」——
+        // 一旦上游归一化漏一处，缺失回落值的 auto 闸就会被另一道的 allow 独占结果（放宽）。
+        const afs = [a, b].filter(Boolean).map((x) => ((x.autoFallback === 'allow' || x.autoFallback === 'deny') ? x.autoFallback : 'ask'))
+        const af = afs.length ? afs.reduce((x, y) => (AF_STRICTNESS[y] > AF_STRICTNESS[x] ? y : x)) : 'ask'
+        return { action: 'auto', autoFallback: af, src, cat, pz: p[0], pe: p[1] }
       }
       // allow：与 deny/ask 同口径——由哪道闸的例外实际放行，cat 就跟随哪道闸，
       // 保证 reason 前缀、ruleId、cat 三者同源（否则文案写「读取图片权限：」
@@ -5077,6 +5118,11 @@ export default {
           if (d.action !== 'allow') {
             doom = {
               action: d.action,
+              // `autoFallback` 与其余七个出口同口径一并带出（`d` 来自 resolveCategory，
+              // 经 pick 在 `action === 'auto'` 时已给出回落值）。漏了它的后果：
+              // doomloop 分类设成 auto + 失败后拒绝时，pre-execute 读到的
+              // `d.autoFallback` 是 undefined → 回落缺省 ask → 用户配的 deny 静默失效。
+              autoFallback: d.autoFallback,
               // L-10：doomloop 触发时理由优先。N 取**实际连续次数**（正常等于阈值；
               // 若用户在计数途中调低了阈值，它可能已经更大 —— 报真实值比报配置值准确）。
               reason: bi('重复操作(Doom Loop)：' + name + ' 已连续放行 ' + streak + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' silently allowed ' + streak + ' identical calls in a row' + exReasonEn(d)),
@@ -5102,6 +5148,31 @@ export default {
         // 相等时让 doom 接管：动作相同、只是理由换成循环提醒 —— 与旧行为一致（L-10 理由优先），
         // 也是「提醒」这一语义该有的表现（用户需要知道为什么这次被拦）。
         if (b === undefined || d === undefined || d < b) return base
+        // ── 唯一的例外：`base=ask` 不被 `doom=auto` 接管（§9B）──────────────────────
+        // `ask` 与 `auto` 在 MODE_STRICTNESS 里同为 1，于是上面的「相等即接管」会把
+        // 用户显式要求的「问人」降级成「问模型」—— 那是**放宽**（模型可能直接放行）。
+        // 只堵这一个方向，其余相等组合（动作相同 / ask 被 ask 接管）行为不变。
+        //
+        // 不能把规则写成「相等且动作相同才接管」：那会让 `auto + doom=ask` 也不接管，
+        // 而「重复调用的提醒盖过 auto」是必须保留的（regressions 的 `merge('auto','ask')`）。
+        if (d === b && doom.action === 'auto' && base.action === 'ask') return base
+        // ── 两支都是 auto：回落值必须**取严**（§9B / §13）────────────────────────────
+        // 同档（1 对 1）时上面的「相等即接管」让 doom 整体接管 —— 动作相同、理由换成
+        // 循环提醒，那是对的；但 `autoFallback` 是 auto 的**第二层判据**：
+        // `auto/allow` 与 `auto/deny` 在执行侧分别是放行与拒绝。整体接管会把 base 的
+        // `deny` 换成 doom 的 `allow`（deny → allow，本轮新引入的 fail-open）。
+        // 回落值按 `allow < ask < deny` 单独比较，用 `AF_STRICTNESS`（回落值专用域）。
+        // **不能**复用 `MODE_STRICTNESS` —— 它含 `auto: 1` 与 `ask: 1` 同档，那是**动作**
+        // 域的序；拿它比回落值是错的。缺省 / 非法值按 `ask` 参与比较（与
+        // normalizeAutoFallback 的缺省同源）。这张表与 `strictestFallbackOf`、
+        // `outsideMatrix` 共用同一份（shell-parse.js 导出），不再各处手写。
+        // ⚠️ 必须返回**新对象**：`doom` 是闭包变量，原地改会污染后续出口。
+        if (doom.action === 'auto' && base.action === 'auto') {
+          const afOf = (v) => (v === 'allow' || v === 'deny' ? v : 'ask')
+          const bf = afOf(base.autoFallback)
+          const df = afOf(doom.autoFallback)
+          return Object.assign({}, doom, { autoFallback: AF_STRICTNESS[df] > AF_STRICTNESS[bf] ? df : bf })
+        }
         return doom
       }
       // 会话没选「自定义审查」→ 不归本插件管，放行且**不带理由**。
@@ -5463,12 +5534,28 @@ export default {
           for (const r of list) {
             for (const target of targets) {
               if (!matchCommand(r.match, target)) continue
-              return {
+              // ── 钩子契约：`autoFallback` 与 reason / note 一样是**动作的附带字段** ──────
+              // 例外可以设成 `auto`（「这类命令交给模型判」），它的回落值是用户配置的一部分；
+              // 不在这里带出去，解析器就只能拿到一个裸 auto —— 模型失败后按缺省 ask 弹窗，
+              // 与用户在面板上配的「失败后拒绝/放行」不符（面板说谎）。
+              // 只在动作是 auto 时带（其它动作的回落值在归一化阶段就已不存，见
+              // normalizeException 的 normalizeAutoFallback）；缺省 ask 由
+              // shell-parse 的 catOf/autoFallbackOf 与 commandDecision 的 `|| 'ask'` 兜。
+              //
+              // reason / note 的判据用 **finalActionOf**（= auto 时看它自己的回落值）：
+              // `auto + 回落 deny` 在执行侧就是一次拒绝（同一条 kind:'deny' 通道回给 AI），
+              // 它的 reason 必须带出；`auto + 回落 ask` 会弹窗，它的 note 必须带出。
+              // 此前这里写 `r.action === 'deny'` / `r.action === 'ask'`，那两种形状的
+              // reason / note 恒被丢掉 —— 与 normalizeException 的存储侧判据不同源。
+              const fin = finalActionOf(r.action, r.autoFallback)
+              const o = {
                 action: r.action,
                 ruleId: r.id,
-                reason: (r.action === 'deny' && r.reason) ? r.reason : undefined,
-                note: (r.action === 'ask' && r.note) ? r.note : undefined,
+                reason: (fin === 'deny' && r.reason) ? r.reason : undefined,
+                note: (fin === 'ask' && r.note) ? r.note : undefined,
               }
+              if (r.action === 'auto') o.autoFallback = normalizeAutoFallback(r.autoFallback, r.action)
+              return o
             }
           }
         }
@@ -5519,8 +5606,8 @@ export default {
       // 见 blastRadiusOf 的注释（`rmdir /s /q B:\` 与删一个普通目录在判定链上完全一样）。
       return {
         action: a.action,
-        // auto 的回落值：`a.autoFallback` 由 assessCommand 从决定动作的那一段/那一档带出
-        // （见 shell-parse.js 的 decisive 取值与 destructiveTiers 的 autoFallbacks）。
+        // auto 的回落值：值来自 assessCommand 对全部 auto 段的从严合并（deny > ask > allow，
+        // 缺省按 ask 参与合并）；见 shell-parse.js 的 mergedAutoFallback 段间合并。
         // 动作不是 auto 时它是 undefined —— 与其它出口同口径，调用方据此不建键。
         autoFallback: a.action === 'auto' ? (a.autoFallback || 'ask') : undefined,
         reason: bi('执行命令' + exZh, 'Run command' + exEn),
@@ -6612,6 +6699,14 @@ export default {
     function reviewSection(name, value) {
       let body
       try { body = JSON.stringify(value, null, 2) } catch (e) { body = JSON.stringify('(unserializable section)') }
+      // ── 行分隔符也必须转义（否则段边界可被伪造）────────────────────────────────
+      // `JSON.stringify` **不转义** U+2028 / U+2029（已实测原样保留），而这两个字符在多数
+      // LLM 分词/渲染里被当换行。于是被审内容（arguments / 文件内容 / 用户消息都可控）里的
+      // `\u2028PENDING_ACTION\u2028{…}` 仍会落在行首，成为一个假的段标题 —— 上面那段
+      // 「段名只可能是行首的裸名字」的保证就不成立了。U+0085（NEL）同理。
+      // 换成**转义序列文本**（反斜杠 + u2028 六个字符）：JSON 语义完全不变（解析后仍是
+      // 同一个字符），但材料里不再有真实的行分隔符。
+      body = body.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029').replace(/\u0085/g, '\\u0085')
       return name + '\n' + body
     }
 
@@ -6709,7 +6804,10 @@ export default {
         if (finished) { sawDataAfterFinish = true; continue }
         const t = chunk.type
         if (t === 'block-start') {
-          const bt = chunk.block && chunk.block.type ? chunk.block.type : chunk.type2
+          // 真实形状是 `{ type:'block-start', index, blockType }`（dsh-llm 的 StreamChunk）。
+          // 此前读的是 `chunk.block.type`（那个形状只有 mock 里存在），于是 bt 恒 undefined、
+          // blockTypes 恒空、下面的块结构校验**从未执行**过。保留 block.type 作为兼容回退。
+          const bt = chunk.blockType || (chunk.block && chunk.block.type) || null
           if (bt) blockTypes.push(bt)
           continue
         }
@@ -6801,6 +6899,34 @@ export default {
       const override = { provider: autoReviewSetting('provider'), model: autoReviewSetting('model') }
       const target = reviewTarget(agent, override)
       if (!target) return { verdict: 'escalate', code: 'infra-error', detail: 'no model available' }
+      // ── 模型等待超时：**这里必须自己兜，外层兜不住**────────────────────────────
+      // 本函数跑在 `tools/pre-execute` 里，而宿主 `dsh-tool-call-timeout-policy` 的超时
+      // 挂在 `tools/execute`（该包 lib/index.js:116），后者由 dsh-tools 的
+      // `dispatchScheduledExecution` 在 **pre-execute 之后**才进入
+      // （dsh-tools lib/index.js:3321 是 pre-execute，:3427 才是 tools/execute）。
+      // 也就是说：pre-execute 挂住时，外层的 deadline **从未被创建**，声明
+      // `defineTool({ timeoutMs })` 对本阶段完全无效（已实测：工具声明了 timeoutMs，
+      // 但 pre-execute 不返回时外层定时器根本没启动）。
+      //
+      // 故超时由本函数自己管：`AbortSignal.timeout` 只负责通知 provider 停，
+      // 真正让 `await` 返回的是下面那个 Promise 竞速。
+      //
+      // `AbortSignal.any` / `.timeout` 需要 Node ≥ 20.3 / 17.3；宿主 DSH 自身与
+      // dsh-timeout（lib/index.js:68）已在用 `AbortSignal.any`，故这里不引入新下限。
+      const modelAbort = new AbortController()
+      const modelSignal = signal
+        ? AbortSignal.any([signal, modelAbort.signal])
+        : modelAbort.signal
+      const MODEL_TIMEOUT = Symbol('auto-review-model-timeout')
+      let clearTimer = () => {}
+      const timeout = new Promise((resolve) => {
+        // 用 ctx.timer（不是裸 setTimeout）：插件卸载/上下文销毁时 cordis 会连带清掉
+        // 这个定时器，不留一个在已销毁的闭包里跑的回调。
+        clearTimer = ctx.timer.setTimeout(() => {
+          try { modelAbort.abort(new Error('auto review model timeout')) } catch (e) {}
+          resolve(MODEL_TIMEOUT)
+        }, AUTO_REVIEW_MODEL_TIMEOUT_MS)
+      })
       let stream
       try {
         stream = llm.stream({
@@ -6810,16 +6936,40 @@ export default {
           messages: [{ role: 'user', content: [{ type: 'text', text: reviewUserText(exec, d, agent) }] }],
           // temperature 0：判定要可复现，不要创造性
           temperature: 0,
-          signal,
+          // 宿主 signal 与本地超时并集：两者任一触发都要停。
+          signal: modelSignal,
         })
       } catch (e) {
+        // 定时器已经建好了（上面那个 Promise 的 executor 是同步跑的），这条早退路径
+        // 也必须清掉它 —— 否则每次 `llm.stream` 同步抛错都留一个 60 秒的空定时器。
+        clearTimer()
         return { verdict: 'escalate', code: 'infra-error', detail: 'llm.stream threw: ' + (e && e.message ? e.message : String(e)) }
       }
       let r
       try {
-        r = await readReviewStream(stream)
+        // ── 必须与定时器**竞速**，不能只把带超时的 signal 交给 llm.stream ──────────
+        // 实测（真插件 + 永不 yield 的 async generator）：只传 signal 时，provider 只要
+        // 不理会 signal（或根本没有 provider，直接返回一个自己写的 generator），
+        // `for await` 就会一直等下去 —— pre-execute 永不返回，该次工具调用永久卡住。
+        // 本插件此前正是如此：`signal` 一路传下去，但全仓没有任何地方给它挂定时器。
+        //
+        // 另实测确认：**`stream.return()` 也救不了** —— 若 generator 卡在 `await` 内部
+        // （而非暂停在 yield 处），return() 只是排进队列，消费侧的 `for await` 仍然不动。
+        // 故这里让**定时器赢得 Promise 竞速**，把「超时」变成一次确定的 escalate 返回值，
+        // 而不是指望对端配合。被丢下的那个 stream 会随 modelSignal 的 abort 自行结束
+        // （守规矩的 provider 会；不守的也只是泄漏一个不会再被读的生成器，
+        //  而它的结论本来就不能用）。
+        r = await Promise.race([readReviewStream(stream), timeout])
       } catch (e) {
         return { verdict: 'escalate', code: 'infra-error', detail: 'stream failed: ' + (e && e.message ? e.message : String(e)) }
+      } finally {
+        clearTimer()
+      }
+      if (r === MODEL_TIMEOUT) {
+        // 超时不是「模型拒绝」，故 noteAutoOutcome 记 other（熔断计数不变）——
+        // 与其它失败同口径（失败怪线路，不怪模型判断）。
+        noteAutoOutcome(exec, 'other')
+        return { verdict: 'escalate', code: 'infra-error', detail: 'review timed out after ' + AUTO_REVIEW_MODEL_TIMEOUT_MS + 'ms' }
       }
       // ② 熔断计数：**只有模型真·拒绝才 +1**；放行清零；失败/escalate 不变（怪线路不怪模型）
       if (!r.ok) {
@@ -6865,6 +7015,26 @@ export default {
       provider: '',
       model: '',
     }
+    // ── 评审调用的模型等待上限（毫秒）────────────────────────────────────────────
+    // **与 AUTO_REVIEW_DEFAULTS.timeoutMs 是两件事，不复用同一个键**：
+    //   · 那个问「弹窗已弹出，还等你多久」（异常路径上的人机等待，0 = 一直等）；
+    //   · 这个问「等模型多久」（评审段自己的一步，与弹窗无关）。
+    // 复用会让「把弹窗超时调大」顺带把模型超时也调大 —— 而后者是防挂起的安全阀，
+    // 调大等于把「pre-execute 永久挂起」这个故障重新放回来。
+    //
+    // 为什么不放进设置页：它不是策略参数，是兜底。用户能调大就是能把它调回 bug；
+    // 而暴露它要连带改 normalizeAutoReview / statusView / 设置页 / i18n 四处，
+    // 为一个「只在 provider 不守规矩时才触发」的值付这份 plumbing 不值得。
+    // 真要调时改这一行即可（与本文件其它阈值常量同一做法）。
+    //
+    // 取 60 秒的依据：
+    //   · 评审材料有预算上限（historyBudget 默认 4000 字符 + 参数），输出只有一行 JSON，
+    //     正常应在数秒内完成；60 秒是十倍以上余量，够 reasoning 模型吐完推理段。
+    //   · 必须显著大于弹窗超时默认值（20 秒）：两者是**串行**的两步（先等模型、超时才弹窗），
+    //     数字接近时用户无法从总等待时长判断卡在哪一步。
+    //   · 上游 provider 自己的 idle watchdog 默认 300 秒（dsh-llm-deepseek 的
+    //     streamIdleTimeoutMs = 3e5）。本值先于它触发：provider 真卡死时不必陪等 5 分钟。
+    const AUTO_REVIEW_MODEL_TIMEOUT_MS = 60000
     // 取某个设置项的生效值：用户显式配置优先，否则用默认值。
     // 非法值一律回落默认（不抛错）—— 这些是体验参数，不该让插件因配置写错而崩。
     function autoReviewSetting(key) {
@@ -7908,7 +8078,20 @@ export default {
           // 评审能力是否可用：面板据此提示「未装 llm 服务时 auto 会全部走回落」。
           // 这是**诊断信息**，不是开关 —— 用户看到它才知道为什么 auto 一直在弹窗。
           llmAvailable: !!getLlmService(ctx),
-          ready: AUTO_REVIEW_READY,
+          // ── `ready` 已删除（曾是 `ready: AUTO_REVIEW_READY`）───────────────────────
+          // 它恒为 `true`（常量硬编码），且全仓**零消费**：client.js 对 autoReview 的
+          // 读取穷举为 effective / defaults / explicit / llmAvailable（无 Object.keys、
+          // 无展开），test/smoke.mjs 只断言 llmAvailable。
+          //
+          // 删它的理由不是「死代码」这么简单，而是**它是本版新暴露的 HTTP 响应字段**：
+          // 发布之后它就成了对外的协议面，再删就是 breaking change；现在删零成本。
+          // 而「评审能力是否就绪」这个问题已经被 `llmAvailable` 回答了 ——
+          // 后者是真的运行时探测（`!!getLlmService(ctx)`），前者只是把一个编译期常量
+          // 抄进响应体。留着它反而给了外部一个「以后可能会变」的错误暗示。
+          //
+          // `AUTO_REVIEW_READY` 常量**本身保留**：它仍在 statusView 的 modes/allModes
+          // 处决定「面板上能不能选 auto」（见其定义处的注释），那是它真正的用途 ——
+          // 与「要不要把同一个布尔值再下发一遍」是两件事。
         },
         // 首屏只带 DECISIONS_PREVIEW 条（见其定义处）：本视图会被面板反复取（SSE 通知后重查、
         // 各写盘路由回带、perm_status 每次调用），全量下发会让每次下发都跟着内存窗口变重。
@@ -8706,8 +8889,25 @@ export default {
         //
         // 传 `clear` 数组 = 恢复默认（删掉这些键，回到推导默认值）。不传与传 null 必须分开 ——
         // 前者是「别动它」，后者是「我要它回默认」；否则用户清空输入框后那个值会永远粘在磁盘上。
+        //
+        // 但「不接受」必须由代码执行，不能只写在注释里：客户端若传
+        // `{ target: 'project', patch: {...} }`，不拦就会照常写 `config.global.autoReview`
+        // —— 「在项目 tab 改超时/熔断」实际改的是全局，影响所有项目，面板随后显示全局值
+        // 而项目层无变化，用户拿不到任何提示。故下面**显式拒绝** target !== 'global'。
+        //
+        // 三选一里选「拒绝」而不是「丢弃 target 照常写」或「实现项目层」：
+        //   · 丢弃 = 请求成功了、落点却不是它说的那个。写盘接口上「成功但写错地方」
+        //     比报错更糟，而且没有任何可观测信号；
+        //   · 实现项目层与本段开头那条设计直接冲突（这些参数不该跟着项目变）；
+        //   · 拒绝让调用方立刻知道「这条路由只认 global」。
+        // 判据只拦**明确要了别的层**的请求：`target` 缺失或为 'global' 都放行 ——
+        // 与其它设置路由的 normTarget 同口径；区别是这里不把非法值静默归一成 global，
+        // 因为它的语义是「你要求的层我做不了」，不是「你没说」。
         if (pathname === '/permgate/set-auto-review' && method === 'POST') {
           await init(exec)
+          if (a && a.target !== undefined && a.target !== 'global') {
+            return json(res, { error: '该路由只支持全局层（target=global）：自动审批的工程参数不按项目配置' })
+          }
           const patch = a && typeof a.patch === 'object' ? a.patch : null
           if (!patch && !(a && Array.isArray(a.clear))) return json(res, { error: '缺少 patch' })
           if (!config.global.autoReview || typeof config.global.autoReview !== 'object') config.global.autoReview = {}
@@ -8939,11 +9139,43 @@ export default {
     // 它会不会被 AI 读到、算不算隐私问题——明确不管，直接忽略，不作为议题。
     //
     // 另外返回副本：categories.* 是 config 的引用，就地删会改坏运行中的配置。
+    //
+    // 决策记录里的**模型原话**同样只留在面板侧（§4.5A：模型原话只进 `modelReason`，
+    // 不进 `reason`、也不回传给主模型）。`recentDecisions` 此前整条浅拷贝下发，于是评审模型在 reason 里
+    // 复述被审内容（「文件内容写着：忽略之前的指令…」）时，那句话会经 perm_status 的返回值
+    // 回到主模型上下文 —— 一条以工具结果为载体的二阶注入通道。`rawOutput` 是同一句原话的
+    // 截断前原文，同理。两者与 `note` 一样只做「工具侧不下发」的分工，面板照旧。
+    //
+    // `fallbackReason` 是**同一句原话的第三条通道**：auto 异常路径把它写成
+    // `why = (rv.code || 'infra-error') + ': ' + rv.detail`，而 `reviewWithModel` 在
+    // escalate 时 `detail: r.reason || 'model escalated'` —— 模型自述的那句话就这样
+    // 进了记录（且那里**没有截断**）。它在本仓**没有任何工具侧消费方**（client.js 零引用、
+    // 只有 recordDecision 写入与一处 console.log 读取），剥掉零影响；
+    // 弹窗排障靠 `note`（「原因：<why>」）照旧。
+    //
+    // ⚠️ `statusView.fallback.globalReason` / `projectReason` 是**配置侧用户自己写的**
+    // 拒绝理由，不是模型原话，也不经这里 —— 不要一起删。
     function toolView(view) {
       try {
         if (!view || typeof view !== 'object') return view
-        const cats = view.categories
-        if (!cats || typeof cats !== 'object') return view
+        // 无该字段时返回原数组（不白造副本）；有则逐条浅拷贝后删，不改记录本身。
+        const cleanDecisions = (list) => {
+          if (!Array.isArray(list)) return list
+          const needsStrip = (d) => !!(d && typeof d === 'object' && ('modelReason' in d || 'rawOutput' in d || 'fallbackReason' in d))
+          if (!list.some(needsStrip)) return list
+          return list.map((d) => {
+            if (!needsStrip(d)) return d
+            const e = Object.assign({}, d)
+            delete e.modelReason
+            delete e.rawOutput
+            delete e.fallbackReason
+            return e
+          })
+        }
+        const rd = cleanDecisions(view.recentDecisions)
+        const base = rd === view.recentDecisions ? view : Object.assign({}, view, { recentDecisions: rd })
+        const cats = base.categories
+        if (!cats || typeof cats !== 'object') return base
         const cleanBlock = (block) => {
           if (!block || typeof block !== 'object') return block
           const out = Object.assign({}, block)
@@ -8963,7 +9195,7 @@ export default {
           }
           return out
         }
-        return Object.assign({}, view, { categories: { global: cleanBlock(cats.global), project: cleanBlock(cats.project) } })
+        return Object.assign({}, base, { categories: { global: cleanBlock(cats.global), project: cleanBlock(cats.project) } })
       } catch (e) {
         // 清洗失败不能让 perm_status 整个报错：退回原视图保证工具仍可用。
         // 但必须留痕 —— 静默退回会让「工具侧不显示备注」这条分工在无感知的情况下失效，
@@ -9004,15 +9236,21 @@ export default {
 
     // 会话权限/沙箱/审批变化（DSH 侧写入，不经 permgate）→ 推送浏览器刷新，
     // 让设置页/权限选择器在选择器切换权限后立即联动。
+    // 会话销毁 → 清理该会话的 auto 状态（熔断计数）。
+    // 不做会在长跑进程里累积：每个会话一份 Map。
+    // 与 streakBySession 的清理同源（那里走 resetStreak）。
+    //
+    // ⚠️ `session/disposed` 是 **cordis ctx 事件**（与上面 `session/created` 同族），
+    // 不在 `SessionEventMap` 里，**永远不会**作为 `session/event` 的 `event.type` 出现。
+    // 此前这段判断挂在 `session/event` 处理器里，条件恒假 → clearAutoState 从未被调用过，
+    // 长跑进程里 autoBreaker 只增不减。故单独注册一个 ctx 监听。
+    ctx.on('session/disposed', (session) => {
+      try { clearAutoState(session && session.id) } catch (e) {}
+    })
+
     ctx.on('session/event', async (session, event) => {
       try {
         if (!event) return
-        // 会话销毁 → 清理该会话的 auto 状态（熔断计数）。
-        // 不做会在长跑进程里累积：每个会话一份 Map。
-        // 与 streakBySession 的清理同源（那里走 resetStreak）。
-        if (event.type === 'session/disposed' && session && session.id) {
-          clearAutoState(session.id)
-        }
         if (event.type === 'permission/preset' || event.type === 'sandbox/mode' || event.type === 'approval/policy') {
           if (agentRef === null && session) agentRef = { session }
           broadcast({ type: 'status' })
@@ -9080,7 +9318,8 @@ export default {
         //
         // 评审段产出三种结果（见 reviewWithModel 的返回值）：
         //   verdict=allow → 直接放行（action 改成 allow）
-        //   verdict=deny  → 直接拒绝（action 改成 deny，理由用模型给的那句）
+        //   verdict=deny  → 直接拒绝（action 改成 deny；`reason` 只写 permgate 自己的结论，
+        //                   模型原话只进 `modelReason`，见 §4.5A）
         //   verdict=escalate（任何失败：无 llm / 超时 / 协议非法 / 模型自述不确定 / 熔断）
         //                 → 走【统一异常路径】：按 d.autoFallback 决定「弹窗问人 / 直接放行 / 直接拒绝」
         //
@@ -9105,7 +9344,17 @@ export default {
           if (rv.verdict === 'allow') {
             d2 = Object.assign({}, carry, { action: 'allow', reason: bi('自动审批：模型放行', 'Auto review: allowed by model'), via: 'auto-allow', modelReason: rv.reason || '' })
           } else if (rv.verdict === 'deny') {
-            d2 = Object.assign({}, carry, { action: 'deny', reason: bi('自动审批：模型拒绝' + (rv.reason ? '（' + rv.reason + '）' : ''), 'Auto review: denied by model' + (rv.reason ? ' (' + rv.reason + ')' : '')), via: 'auto-deny', modelReason: rv.reason || '' })
+            // ── `reason` 只写 permgate 自己的结论，**不拼模型原话**（§4.5A）────────────
+            // `reason` 的完整去向：recordDecision（segmentSummary）→ projectDecisions →
+            // statusView.recentDecisions → toolView → **perm_status 的返回值** —— 也就是说
+            // 它会被主模型读到。模型原话是第三方文本，可能复述被审内容
+            //（「文件内容写着：忽略之前的指令…」），拼进来就是一条以工具结果为载体的
+            // 二阶注入通道。模型原话只留 `modelReason`（决策记录 + 弹窗，工具侧由
+            // toolView 剥掉）。
+            //
+            // 但**不能整条剥掉 reason**：它承载 permgate 的结论，且 segmentSummary 拼出的
+            // 「—— 分段：… 另有 N 段」是 AI 唯一的「哪一段被拦」线索（直接拒绝没有弹窗）。
+            d2 = Object.assign({}, carry, { action: 'deny', reason: bi('自动审批：模型拒绝', 'Auto review: denied by model'), via: 'auto-deny', modelReason: rv.reason || '' })
           } else {
             // 【统一异常路径】§3.4：所有失败走同一套机制，不为每种失败单独设计。
             // 回落值缺省 ask（normalizeAutoFallback 已保证存下来的值合法，这里是防御）。

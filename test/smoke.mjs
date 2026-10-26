@@ -4471,9 +4471,11 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       },
     }
   }
-  // 一次「模型说 X」的完整块流
+  // 一次「模型说 X」的完整块流。block-start 必须用**真实形状**（`blockType` 字段）：
+  // 此前这里写的是 `{ block: { type: 'text' } }`，恰好命中生产代码读错字段的那条分支，
+  // 于是块结构校验（§4.6）从未被执行过、测试却全绿。
   const verdict = (json) => [
-    { type: 'block-start', block: { type: 'text' } },
+    { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', text: json },
     { type: 'finish', reason: { kind: 'stop' } },
   ]

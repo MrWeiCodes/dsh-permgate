@@ -105,13 +105,13 @@ function hooks(opts) {
           // excActions：按模式指定动作（{ 'echo *': 'allow', 'rm *': 'deny' }），
           // 用于验证「不同例外不同动作」的优先级场景；未提供时统一走 excAction。
           const action = (o.excActions && o.excActions[pat]) || o.excAction || 'allow'
-          return { action, ruleId: 'e1', reason: o.excReason, note: o.excNote }
+          return { action, ruleId: 'e1', reason: o.excReason, note: o.excNote, autoFallback: o.excAutoFallback }
         }
       }
       return null
     },
     destructive: () => ({ action: o.destructive || 'ask', reason: o.destructiveReason || null }),
-    category: () => ({ action: o.category || 'ask', reason: o.categoryReason || null }),
+    category: () => ({ action: o.category || 'ask', reason: o.categoryReason || null, autoFallback: o.catAutoFallback }),
     isOutsideWorkspace: (p) => {
       // 钩子收到的是**可能相对的**目标（模块不做路径解析，那是宿主的 normAbsPath 的职责）。
       // 这里模拟宿主：相对路径按工作区根绝对化，再判内外。
@@ -479,6 +479,80 @@ group('F. 破坏性命令（落 destructive 子设置）')
   const f33b = run('git status $(date)', 'bash', { exceptions: ['git status *'], category: 'ask' })
   ok('★ F33b opaque 段（无破坏性命令）同样不被 allow 例外授权',
     f33b.action !== 'allow' && f33b.segments[0].source === 'category', 'action=' + f33b.action + ' src=' + f33b.segments[0].source)
+  // ★★ F33c/F33d：opaque 段命中 **auto 例外**时，回落值只保留**收紧方向**（D-4）
+  //
+  // F32/F33/F33b 全部只走 `excAction`，`matchException` 从不返回 `autoFallback` ——
+  // 「opaque + auto 例外」这条路径此前零覆盖。而回落值是 auto 的**第二层**：模型超时 /
+  // 协议错 / 熔断时按它执行。`ex.action !== 'allow'` 只把 allow 挡在第一层，原样带出
+  // `allow` 回落 = 把刚堵掉的授权从第二层放回来（`timeoutMs=0` 不弹窗直接放行）。
+  // 两格**必须一起**断言：
+  //   · 只测 allow 格 → 把整行删掉、或无条件钉成 'ask'，都仍然绿；
+  //   · 只测 deny 格 → 放行 allow 回落的原缺陷仍然绿。
+  const f33c = run('git status $(curl evil)', 'bash',
+    { exceptions: ['git status *'], excAction: 'auto', excAutoFallback: 'allow', category: 'ask' })
+  ok('★★ F33c opaque 段不得带出 allow 回落值（模型失败后无人在环放行）',
+    f33c.action === 'auto' && f33c.autoFallback === 'ask',
+    'action=' + f33c.action + ' af=' + f33c.autoFallback + ' src=' + f33c.segments[0].source)
+  // 对照（防过度收紧）：用户显式配的 **deny** 回落必须保住 —— 无条件钉 'ask' 会把
+  // 「失败后拒绝」降级成「失败后问人」，那也是放宽。
+  const f33d = run('git status $(curl evil)', 'bash',
+    { exceptions: ['git status *'], excAction: 'auto', excAutoFallback: 'deny', category: 'ask' })
+  ok('★★ F33d opaque 段的 deny 回落值不得被钉成 ask（过度收紧 = 放宽）',
+    f33d.action === 'auto' && f33d.autoFallback === 'deny',
+    'action=' + f33d.action + ' af=' + f33d.autoFallback)
+  // ★★ F33e/F33f：**分类默认值**路径上的同一道闸（F33c/F33d 只覆盖了例外路径）
+  //
+  // F33c/F33d 走 `excAutoFallback`，而分类默认值这条路径是**另一份**代码（opaque 段 ③ 与
+  // 整行读不懂分支的初值）。修了例外却漏了分类，正是这条缺陷的成因 —— 分类 `auto/allow` 时
+  // `git status $(curl evil)` 曾回到 auto/allow（模型失败后无人在环放行）。
+  // F33e/F33f 各钉一条路径，但**只**断言 allow 回落被挡回 ask。故它们只守一半：
+  //   · 删掉整行修复（回落值原样带出）→ 两格红；
+  //   · 把 `autoFallbackOf(...) === 'deny' ? 'deny' : null` 简化成无条件 `null`
+  //     （或无条件 `'ask'`）→ 两格**仍绿**，因为下游 `|| 'ask'` 正好把 null 补成 ask。
+  //     那是「用户显式配的 deny 回落被降级成 ask」，属**放宽**方向，必须另有断言。
+  // ⚠️ 这个 deny 方向**不能**指望 F33d：F33d 走的是例外路径（shell-parse.js:9867），
+  // 与这两处的分类默认值路径不是同一份代码，改分类那两行它一格都不会红。
+  // 故下面 F33g/F33h 与 F33e/F33f 成对存在（同 F33c/F33d 的纪律）：
+  //   只留 allow 格 → 无条件 null/ask 的放宽无人发现；
+  //   只留 deny 格 → 原样带出 allow 回落的原缺陷无人发现。
+  // 仍**不**为 allow/deny/缺省 × 可读/opaque/整行/空命令铺矩阵：可读段的回落方向由
+  // 可读段那组既有断言守住，这里只补分类默认值路径的 deny 格。
+  const f33e = run('git status $(curl evil)', 'bash', { category: 'auto', catAutoFallback: 'allow' })
+  ok('★★ F33e opaque 段的分类默认值不得带出 allow 回落值',
+    f33e.action === 'auto' && f33e.autoFallback === 'ask',
+    'action=' + f33e.action + ' af=' + f33e.autoFallback + ' src=' + (f33e.segments[0] && f33e.segments[0].source))
+  // 整行读不懂（未闭合引号）：没有段，走 `if (!d.ok)` 分支的初值。
+  // ⚠️ 空命令**不在**这条判据里 —— 它不是「读不懂」（见 shell-parse.js 的三行式），
+  // 故这里刻意不测空命令：那会诱导后来者把 empty 也收紧掉。
+  const f33f = run('git status "unclosed', 'bash', { category: 'auto', catAutoFallback: 'allow' })
+  ok('★★ F33f 整行读不懂的分类默认值不得带出 allow 回落值',
+    f33f.action === 'auto' && f33f.autoFallback === 'ask',
+    'action=' + f33f.action + ' af=' + f33f.autoFallback + ' code=' + f33f.code)
+  // ★★ F33g/F33h：同两条路径的 **deny** 格（收紧方向必须保住）
+  // 与 F33e/F33f 互补：把分类默认值那两行钉成无条件 `null`（或 `'ask'`）时，
+  // F33e/F33f 因下游 `|| 'ask'` 仍绿，只有这两格能发现「显式 deny 回落被降级成 ask」。
+  const f33g = run('git status $(curl evil)', 'bash', { category: 'auto', catAutoFallback: 'deny' })
+  ok('★★ F33g opaque 段的分类默认值不得把 deny 回落值钉成 ask（过度收紧 = 放宽）',
+    f33g.action === 'auto' && f33g.autoFallback === 'deny',
+    'action=' + f33g.action + ' af=' + f33g.autoFallback + ' src=' + (f33g.segments[0] && f33g.segments[0].source))
+  const f33h = run('git status "unclosed', 'bash', { category: 'auto', catAutoFallback: 'deny' })
+  ok('★★ F33h 整行读不懂的分类默认值不得把 deny 回落值钉成 ask（过度收紧 = 放宽）',
+    f33h.action === 'auto' && f33h.autoFallback === 'deny',
+    'action=' + f33h.action + ' af=' + f33h.autoFallback + ' code=' + f33h.code)
+  // ★★ F33i：**可读段**的分类默认值回落值必须随动作带出
+  //
+  // F33e–F33h 四格全在「读不懂」的两条路径上（opaque 段 ③ / 整行读不懂），而**可读段**走的是
+  // 另一份代码（shell-parse.js 可读段分支 ③）。那一行此前零直接断言：把它改成 `null`，
+  // 本文件与 regressions / meta / smoke **全绿** —— 用户显式配「分类 auto + 失败后放行」时
+  // 回落值恒为 null，宿主按缺省 ask 兜底，面板上写着 allow、实际却在问人（面板说谎）。
+  // ⚠️ 不能直接用默认配置跑 `git status`：默认例外表里有 `git status *`=allow，会走 ① 例外分支、
+  // 根本到不了 ③。故显式清空例外表，让这条命令落在「可读 + 无例外 + 非破坏性」的分类分支上。
+  // `source === 'category'` 是**前提格**：它保证本格测的确实是 ③，而不是别的分支恰好也给出 auto/allow。
+  const f33i = run('git status', 'bash', { exceptions: [], category: 'auto', catAutoFallback: 'allow' })
+  const seg33i = f33i.segments[0]
+  ok('★★ F33i 可读段的分类回落值必须随动作带出（否则用户显式配置失效 = 面板说谎）',
+    f33i.action === 'auto' && f33i.autoFallback === 'allow' && !!seg33i && seg33i.source === 'category',
+    'action=' + f33i.action + ' af=' + f33i.autoFallback + ' src=' + (seg33i && seg33i.source))
 
   // ★★ F34–F37：bash 控制关键字不得让后续真实命令逃过判定
   // `;` 是分段符，`if ...; then rm ...; fi` 会切成独立段；`then` 不在关键字表时被当成命令名，
@@ -1090,6 +1164,22 @@ group('F. 破坏性命令（落 destructive 子设置）')
   // 反向：allow 例外**不得**因并集名字而授权 opaque 段（底线不变）
   const f108 = run('echo $(git status)', 'bash', { category: 'ask', destructive: 'ask', exceptions: ['git status *'], excAction: 'allow' })
   ok('★★ F108 并集名字不得让 allow 例外授权 opaque 段（底线不变）', f108.action !== 'allow', 'action=' + f108.action)
+  // F-auto：例外动作的**四种值**在「非段首 label」位置上必须行为一致。
+  // 此前 auto 是唯一漏网的动作值（resolveException 的 label 循环只收 deny/ask/allow），
+  // 于是 `find . -exec rm` / `echo $(rm …)` 上配了 auto 例外等于没配（落 allow/ask）。
+  // 实测（八档 allow + 分类 allow + 例外 rm *）：
+  //     修前  find -exec → allow、$(rm) → allow
+  //     修后  find -exec → auto/deny、$(rm) → auto/deny
+  const fAutoA = run('find . -exec rm -rf /data {} +', 'bash',
+    { exceptions: ['rm *'], excAction: 'auto', excAutoFallback: 'deny', category: 'allow', destructive: 'allow' })
+  ok('★★ F-auto 例外=auto 在额外 label 上生效（find -exec）',
+    fAutoA.action === 'auto' && fAutoA.autoFallback === 'deny',
+    'action=' + fAutoA.action + ' af=' + fAutoA.autoFallback)
+  const fAutoB = run('echo $(rm -rf /data)', 'bash',
+    { exceptions: ['rm *'], excAction: 'auto', excAutoFallback: 'deny', category: 'allow', destructive: 'allow' })
+  ok('★★ F-auto 例外=auto 在 opaque 段上生效（$(rm …)）',
+    fAutoB.action === 'auto' && fAutoB.autoFallback === 'deny',
+    'action=' + fAutoB.action + ' af=' + fAutoB.autoFallback)
 
   // ★★ F109~F112：双引号内的命令替换必须被提取。
   // 命令替换（`$(...)` / 反引号）里的内容**会被执行**，而它经常出现在双引号内
@@ -10029,13 +10119,14 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
     if (consumers !== 2) bad.push(['`TIER_RANK[...]` 消费点不是恰好两处（应只在 sortTiersByRank 内）', 'count=' + consumers])
     if (!spSrc.includes('sortTiersByRank(same)')) bad.push(['tierVerdict 未复用 sortTiersByRank'])
     // `tierSetOf`、段级 `tierVerdict`、整行分支仍须共用同一个排序函数。
-    // 调用点从 3 处增到 5 处：`tierVerdict` 的 **auto 分支**（取并列档的回落值）与
-    // 整行读不懂分支的 auto 分支各多一处 —— 两处都复用同一个 `sortTiersByRank`，
-    // 正是本断言要守的「排序键只有一份实现」。计数只用于发现「新增调用点没走它」，
+    // 调用点从 4 处减回 3 处（定义 1 处，共 4）：`tierVerdict` 的 **auto 分支**原先也排了一次
+    // `same`，但该分支现在只按 `ds[u] === 'auto'` 收集 auto 档、回落值取最严
+    // （`strictestFallbackOf`），结果与排列顺序无关，那次排序随之删除；
+    // 理由分支（同一函数内）仍保留它。计数只用于发现「新增调用点没走它」，
     // 真正的判据是上面两条（`handCopy === 1` 且 `TIER_RANK[` 只在函数内出现）。
     const uses = (spSrc.match(/sortTiersByRank\(/g) || []).length
-    if (uses !== 5) bad.push(['sortTiersByRank 的调用点不是 4 处 + 定义 1 处', 'count=' + uses])
-    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、五处调用共用',
+    if (uses !== 4) bad.push(['sortTiersByRank 的调用点不是 3 处 + 定义 1 处', 'count=' + uses])
+    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、四处调用共用',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
   // ── 发现 6：整行分支的三档并入不得退化成「条件恒真」的死守卫 ─────────────────────
@@ -10085,7 +10176,9 @@ group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 
   {
     const bad = []
     // ① TIER_STRICTNESS 必须含 auto，且与 ask 同档（理由见 shell-parse.js 的注释：
-    //    auto 与 ask 一样是「要过一道关」，并列时由 tiers 排列决定，不影响方向安全）
+    //    auto 与 ask 一样是「要过一道关」；并列时由 `decisiveTierOf` 的 tie-break 定：
+    //    显式 ask 压过 auto、缺省 ask 让位给 auto（不是「一律取 ask」；「与 `tiers` 排列
+    //    无关」只在「双方都显式」那一格成立）（§13））
     if (TIER_STRICTNESS.auto !== TIER_STRICTNESS.ask) bad.push(['TIER_STRICTNESS.auto 不等于 ask 档', String(TIER_STRICTNESS.auto)])
     // 序不能被 auto 打乱
     if (!(TIER_STRICTNESS.allow < TIER_STRICTNESS.ask && TIER_STRICTNESS.ask < TIER_STRICTNESS.deny)) {
@@ -10122,8 +10215,240 @@ group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 
     // ⑦ 全 allow 时仍是 allow（auto 分支不得把无表态的命令也变成 auto）
     const allAllow = assessCommand('echo ok', 'bash', { category: () => ({ action: 'allow' }) })
     if (allAllow.action !== 'allow') bad.push(['无 auto 段的普通命令被误判为 auto', allAllow.action])
+    // ★ 档内并列：`ask` 必须压过 `auto`，**与 tiers 的排列无关**（§13）
+    //
+    // ⑥ 只覆盖「段与段」的合并，覆盖不到「同一段内两个档并列」—— 而 `ask` 与 `auto`
+    // 在 `TIER_STRICTNESS` 里同为 1，`decisiveTierOf` 的 `r > bestRank` 是严格大于，
+    // 同分时先到先得，`TIER_ORDER` 里 `wide` 又恒在 `priv` 之前。于是同一命令、同一组
+    // tiers，结论取决于哪一档被设成 auto（实测 `sudo rm -rf /etc` → tiers = ['wide','priv']）：
+    //     wide=auto + priv=ask → auto   ← 用户显式要求的「提权要问人」被降级成「问模型」
+    //     wide=ask  + priv=auto → ask
+    // 前者是**放宽**（模型可能直接放行）。这条断言是唯一能挡住它的判据：
+    // 把 `decisiveTierOf` 里的 tie-break 删掉，本文件其余断言与 regressions/smoke 全绿。
+    // 两种排列都必须得到 `ask`，故两格一起断言（单看一格时另一格恰好绿，测不出方向）。
+    {
+      const tierDs = (over) => {
+        const t = {}
+        for (const x of TIERS) t[x] = 'allow'
+        return Object.assign(t, over)
+      }
+      const atTier = (cmd, over) => assessCommand(cmd, 'bash', {
+        home: HOME, userHome: HOME, platform: 'posix',
+        matchException: () => null,
+        destructive: () => tierDs(over),
+        category: () => ({ action: 'allow' }),
+        isOutsideWorkspace: () => true,
+      })
+      // 两种 tiers 组合各测一遍：`['wide','priv']`（半径档在前）与 `['proc','priv']`
+      // （组档在前）—— 两种排列里 `priv` 都在后面，故都走「先到先得」的那一侧。
+      for (const [cmd, first] of [['sudo rm -rf /etc', 'wide'], ['sudo kill 1234', 'proc']]) {
+        const rFirstAuto = atTier(cmd, { [first]: 'auto', priv: 'ask' })
+        const rPrivAuto = atTier(cmd, { [first]: 'ask', priv: 'auto' })
+        if (rFirstAuto.action !== 'ask') bad.push([first + '=auto + priv=ask 未由 ask 压过 auto（方向放宽）', cmd, rFirstAuto.action])
+        if (rPrivAuto.action !== 'ask') bad.push([first + '=ask + priv=auto 未得到 ask', cmd, rPrivAuto.action])
+      }
+      // 对照（防空转）：同档并列的 tie-break 不得改变 deny / 同动作的既有取法
+      if (decisiveTierOf(tierDs({ wide: 'deny', priv: 'deny' }), ['wide', 'priv']) !== 'wide') {
+        bad.push(['同动作并列的「先到先得」被改掉了（deny 档）'])
+      }
+      if (decisiveTierOf(tierDs({ wide: 'allow', priv: 'allow' }), ['wide', 'priv']) !== 'wide') {
+        bad.push(['同动作并列的「先到先得」被改掉了（allow 档）'])
+      }
+      // ★ 并列时的 `ask` 必须是**用户显式**的表态，缺省值不算（§13）
+      //
+      // 宿主的 `destructiveTiers` 对**未配置**的档下发 `'ask'` + `source[t] = 'default'`，
+      // 这张表原样流进 `decisiveTierOf`。若 tie-break 不区分来源，「wide=auto 显式 +
+      // priv 未配置」就会被缺省 ask 压成 ask —— 用户显式配置的 auto 被缺省值吃掉
+      // （实测 wide=auto 单档配置下，`tiers = ['wide','priv']` 的语料整族从 auto 变 ask）。
+      //
+      // 三格**必须一起**断言（缺一不可）：
+      //   · 只测第一格 → 删掉整个 tie-break 也绿（没有 tie-break 时 wide 本来就赢）；
+      //   · 只测第二格 → 缺省/显式判断被删也绿（两边都是 ask，显式/缺省同值）；
+      //   · 只测前两格 → tie-break 只剩**单向**分支时全绿：镜像方向（缺省 ask 在前、
+      //     显式 auto 在后）没有断言覆盖。`TIER_ORDER` 把 `proc/power/priv/reg` 全排在
+      //     `wide/unknown/outside/inside` 之后，所以「后置档单独设成 auto」这一整族
+      //     配置走的正是镜像方向 —— 缺这一格，删掉第二支永远测不出来。
+      // 与上面本块的 `tierDs`（10161）不同，这里的表带 `source`；来源只需区分
+      // `default` / 非 `default`，故用 `'explicit'` 占位（生产是 `project` / `global`）。
+      {
+        const realDs = (over) => {
+          const t = {}
+          const src = {}
+          for (const x of TIERS) { t[x] = 'ask'; src[x] = 'default' }
+          for (const k of Object.keys(over)) { t[k] = over[k]; src[k] = 'explicit' }
+          t.source = src
+          return t
+        }
+        // 缺省 ask 不得压过显式 auto：用户意图恢复（放宽，但只放宽「ask 是缺省值」的格子）
+        if (decisiveTierOf(realDs({ wide: 'auto' }), ['wide', 'priv']) !== 'wide') {
+          bad.push(['缺省 ask 压过了显式 auto（用户显式配置被缺省值吃掉）'])
+        }
+        // 双方都显式时 ask 仍压 auto：安全方向不得被上一格的修法翻转
+        if (decisiveTierOf(realDs({ wide: 'auto', priv: 'ask' }), ['wide', 'priv']) !== 'priv') {
+          bad.push(['双方显式时 ask 未压过 auto（方向放宽）'])
+        }
+        // 镜像方向：**缺省 ask 在前**、显式 auto 在后时同样不得被缺省值压掉。
+        // `TIER_ORDER` 把 `priv` 排在 `wide` 之后，这是生产里最常见的排列
+        // （`sudo rm -rf /etc` → ['wide','priv']；`sudo kill 1234` → ['proc','priv']）。
+        if (decisiveTierOf(realDs({ priv: 'auto' }), ['wide', 'priv']) !== 'priv') {
+          bad.push(['后置档的显式 auto 被前置档的缺省 ask 吃掉（镜像方向未堵）'])
+        }
+        // 三档：wide 缺省 ask、unknown 显式 ask、priv 显式 auto —— 中间的显式 ask 不得被跳过。
+        // 前两支 tie-break 互为镜像、只覆盖「一边 ask 一边 auto」，故两者**都是 ask** 时
+        // 谁都不匹配、「已见过显式 ask」这个事实没被记下；随后 priv 的显式 auto 只看
+        // `isDefault(best)`，而 best 恰是排最前的**缺省 ask** → auto 接管（方向放宽）。
+        // 生产形态：`{proc: 显式 ask, priv: 显式 auto}`、其余缺省 ask 时
+        // `sudo kill -9 /etc/passwd`（['wide','proc','priv']）修复前得 auto（HEAD 是 ask）。
+        if (decisiveTierOf(realDs({ unknown: 'ask', priv: 'auto' }), ['wide', 'unknown', 'priv']) !== 'unknown') {
+          bad.push(['三档并列时中间的显式 ask 被跳过（方向放宽）'])
+        }
+      }
+    }
     ok('★★ AG auto 的严格度表 + 段间合并 + 回落值带出（4 条 fail-open 路径）',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+    // ⑨ 段间 `autoFallback` 必须**从严合并**（deny > ask > allow），不得按书写顺序取首段 ─────
+    // 回落值是**权限判据** —— 它就是「模型超时 / 熔断 / 协议错时最终执行什么」。
+    // 旧实现取 `out.find(...)` 的**第一个** auto 段，于是整条的回落值由书写顺序决定：
+    //     `kill 1234; rm -rf /`（前者回落 allow、后者回落 deny）→ 旧实现得 allow
+    //     ⇒ 模型失败时 `rm -rf /` 被放行（把危险段写在后面即可绕过）。
+    // 变异证据：把 shell-parse.js 的段间合并退回 `decisive ? decisive.autoFallback : null`，
+    // regressions / shell-parse / smoke 三套**全部仍然 ALL PASS** —— 本格是这条修复的唯一护栏。
+    //
+    // 钩子按**段文本**给值：`matchException` 的入参就是段原文，稳定；不用 `destructive`
+    // 的调用计数构造（那种写法随段顺序/调用次数错位，见上面 ⑤⑥ 的注释）。
+    {
+      const bad9 = []
+      // `rm …` → auto/回落 deny；其余段 → auto/回落 allow。两种书写顺序共用**同一份**配置，
+      // 故结果若随顺序变化，只能是合并逻辑在按顺序取值。
+      const afByText = (rmFallback) => (t) => {
+        if (!/^rm\b/.test(String(t))) return { action: 'auto', autoFallback: 'allow' }
+        // `undefined` = 该段**没配**回落值（不建键），走缺省 ask
+        return rmFallback === undefined ? { action: 'auto' } : { action: 'auto', autoFallback: rmFallback }
+      }
+      for (const c of ['kill 1234; rm -rf /', 'rm -rf /; kill 1234']) {
+        const r = assessCommand(c, 'bash', { matchException: afByText('deny'), category: () => ({ action: 'allow' }) })
+        // 前提格：整条确实是 auto（否则下面判的是别的分支，本格失去意义）
+        if (r.action !== 'auto') bad9.push(['混合命令整条不是 auto（前提失效）', c, r.action])
+        if (r.autoFallback !== 'deny') {
+          bad9.push(['段间回落值未从严合并（按书写顺序取首段 = fail-open）', c, String(r.autoFallback)])
+        }
+      }
+      // 缺省回落值按 `ask` 参与合并：`rm` 段没配值、另一段 allow ⇒ 整条 ask（allow 独占即放宽）
+      const rDefault = assessCommand('kill 1234; rm -rf /', 'bash',
+        { matchException: afByText(undefined), category: () => ({ action: 'allow' }) })
+      if (rDefault.autoFallback !== 'ask') {
+        bad9.push(['缺省回落值没有按 ask 参与合并（被另一段的 allow 独占）', String(rDefault.autoFallback)])
+      }
+      ok('★★ AG 段间 autoFallback 从严合并（deny > ask > allow）：书写顺序不得改变回落值',
+        bad9.length === 0, JSON.stringify(bad9.slice(0, 8)))
+      // ★ 段**内**多档 auto：回落值同样必须从严合并（deny > ask > allow）──────────────
+      //
+      // ⑨ 只覆盖「段与段」，覆盖不到「同一段内多个档都是 auto」—— 而
+      // `sudo rm -rf /etc` 实测命中 `tiers = ['wide','priv']`，两档可各配一个回落值。
+      // 旧实现取 decisive 档（`wide`）的值、并列档根本不看，于是
+      //     wide=auto/回落 allow + priv=auto/回落 deny → **allow**
+      // 用户为 priv 档显式配的「模型失败后拒绝」被 wide 的 allow 吞掉；
+      // 下游 `commandDecision` → pre-execute 的 `fb === 'allow'` + `timeoutMs === 0`
+      // 就是**直接放行**（无弹窗、无人工）。
+      // 变异证据：把 `tierVerdict` 的合并退回「取 decisive 档、并列档按 TIER_RANK 取第一个」，
+      // 本文件其余断言与 regressions / smoke 全绿 —— 本格是这条修复的唯一护栏。
+      // 两格**一起**断言：只测一格时删掉整个合并逻辑仍绿（另一格恰好落在 decisive 档上）。
+      {
+        const bad10 = []
+        const dsBothAuto = () => { const t = {}; for (const x of TIERS) t[x] = 'allow'; t.wide = 'auto'; t.priv = 'auto'; return t }
+        const atAf = (afs) => assessCommand('sudo rm -rf /etc', 'bash', {
+          home: HOME, userHome: HOME, platform: 'posix',
+          matchException: () => null,
+          destructive: () => Object.assign(dsBothAuto(), { autoFallbacks: afs }),
+          category: () => ({ action: 'allow' }),
+          isOutsideWorkspace: () => true,
+        })
+        for (const [afs, want] of [
+          [{ wide: 'allow', priv: 'deny' }, 'deny'],   // decisive 档（wide）是 allow，并列档的 deny 必须赢
+          [{ wide: 'deny', priv: 'allow' }, 'deny'],   // 反向排列：不得因哪一档 decisive 而改变
+        ]) {
+          const r = atAf(afs)
+          if (r.action !== 'auto') bad10.push(['前提失效：整条不是 auto', JSON.stringify(afs), r.action])
+          if (r.autoFallback !== want) {
+            bad10.push(['段内多档 auto 的回落值未从严合并（decisive 档的 allow 吞掉并列档的 deny）',
+              JSON.stringify(afs), String(r.autoFallback)])
+          }
+        }
+        ok('★★ AG 段内多档 auto 的 autoFallback 从严合并（decisive 档不得独占）',
+          bad10.length === 0, JSON.stringify(bad10.slice(0, 8)))
+      }
+      // ⑪ 归因段（`matched` / `reason` / `note`）必须指向**真正产生最终动作**的那一段 ────────
+      //
+      // 整条是 auto 时，最终动作由**回落值**落地（模型失败时执行 `autoFallback`），而回落值
+      // 已按 ⑨ 的从严合并取了全段最严 —— 真正决定结局的是**回落值等于合并结果的那一段**。
+      // 旧实现仍取 `decisive`（第一个 action 匹配的段），于是一条被自动**拒绝**的命令，
+      // 归因却指向一个回落 ask、**已被放行**的段：
+      //     `git push`（例外 e-git，auto/回落 ask）+ `rm -rf /`（wide，auto/回落 deny）
+      //     → action=auto + 回落 deny（整条被拒），
+      //       但 matched='e-git'、reason=null、note=该段的备注 ——
+      //       AI 收到的文案是「（例外 e-git）」，真正拒绝的那一段的理由一个字都没传达，
+      //       它会去改一条与这次拒绝无关的例外。
+      // 非 auto 动作不受影响（产生该动作的段就是 `decisive`），故本格只钉 auto 这一支。
+      //
+      // 变异证据：把 shell-parse.js 的归因退回 `const attributed = decisive`，
+      // 本文件其余断言与 regressions / meta / smoke 全绿 —— 本格是这条修复的唯一护栏。
+      // 三格**一起**断言，缺一即空转：
+      //   · 只断言 `reason`：B 段没有 matched 可换，测不出「指向另一个放行段」那一半；
+      //   · 只断言 `matched`：A 段的 matched 换成 null（拒绝段无例外），看不出方向对错；
+      //   · 不查 `note`：note 是「指向放行段」最直观的证据（拒绝段本来就没有备注）。
+      {
+        const bad11 = []
+        // A 段：`git push` 命中 auto 例外（回落 ask、带备注），`rm -rf /` 走 wide=auto/回落 deny。
+        const pushPat = 'git push *'
+        const hooks11 = {
+          home: HOME, userHome: HOME, platform: 'posix',
+          matchException: (segText) => (matchCommand(pushPat, segText)
+            ? { action: 'auto', ruleId: 'e-git', autoFallback: 'ask', note: '放行段的备注' }
+            : null),
+          destructive: () => {
+            const t = {}
+            for (const x of TIERS) t[x] = 'allow'
+            t.wide = 'auto'
+            t.autoFallbacks = { wide: 'deny' }
+            t.reasons = { wide: '删根，必须拒绝' }
+            return t
+          },
+          category: () => ({ action: 'allow' }),
+          isOutsideWorkspace: () => true,
+        }
+        const r11 = assessCommand('git push; rm -rf /', 'bash', hooks11)
+        // 前提格：整条确实是「auto + 回落 deny」（否则下面判的是别的分支）
+        if (r11.action !== 'auto') bad11.push(['前提失效：整条不是 auto', r11.action])
+        if (r11.autoFallback !== 'deny') bad11.push(['前提失效：回落值不是 deny', String(r11.autoFallback)])
+        // 真正的拒绝段 = 段数组里回落值为 deny 的那一段（用它当期望值，不写死字面量）
+        const denySeg = (r11.segments || []).find((s) => s.action === 'auto' && s.autoFallback === 'deny')
+        const allowSeg = (r11.segments || []).find((s) => s.action === 'auto' && s.autoFallback !== 'deny')
+        if (!denySeg || !allowSeg) bad11.push(['前提失效：语料未构造出「放行段 + 拒绝段」两段'])
+        // ① reason 必须是拒绝段的那句，而不是 null / 放行段的
+        if (denySeg && r11.reason !== denySeg.reason) {
+          bad11.push(['auto 的 reason 没取真正拒绝的那一段（理由丢失）', JSON.stringify(r11.reason)])
+        }
+        // ② matched 必须是拒绝段的 ruleId（此语料里是 null），不得指向放行段的例外
+        if (denySeg && r11.matched !== denySeg.ruleId) {
+          bad11.push(['auto 的 matched 指向了已放行的段', String(r11.matched)])
+        }
+        if (allowSeg && r11.matched === allowSeg.ruleId && allowSeg.ruleId) {
+          bad11.push(['auto 的 matched 命中放行段的例外 id（归因指向已放行段）', String(r11.matched)])
+        }
+        // ③ note 必须是拒绝段的（null），不得把放行段的备注顶上来
+        if (denySeg && r11.note !== denySeg.note) {
+          bad11.push(['auto 的 note 取到了放行段的备注', JSON.stringify(r11.note)])
+        }
+        // ④ 对照（防空转）：同一份配置、只有一个 auto 段时，归因仍指向它自己（修复不得改变这一格）
+        const r11b = assessCommand('rm -rf /', 'bash', hooks11)
+        if (r11b.reason !== '删根，必须拒绝') {
+          bad11.push(['单段场景的归因被改坏（既有行为回归）', JSON.stringify(r11b.reason)])
+        }
+        ok('★★ AG auto 的归因段（matched/reason/note）取回落值最严的那一段，不取已放行的段',
+          bad11.length === 0, JSON.stringify(bad11.slice(0, 8)))
+      }
+
+    }
     // ⑧ `auto + 回落 deny` 的 reasons[tier] 必须能读出来（拒绝理由要回给 AI）
     //
     // 判据是**最终动作**而不是第一层动作：`auto + 回落 deny` 在执行侧与裸 `deny` 完全同形
@@ -10153,6 +10478,161 @@ group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 
     if (r10.reason !== '删数据目录') bad2.push(['裸 deny 的 reasons[tier] 读不出（既有行为回归）', String(r10.reason)])
     ok('★★ AH auto+回落 deny 的 reasons[tier] 读得出（判据看最终动作，不看第一层）',
       bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+
+    // ★★ AG 读不懂路径的 tie-break 不得把「缺省让位」变成授权（D-4）─────────────────────
+    //
+    // 读不懂的段/整行的 `tiers` 恒含 `RADIUS_TIERS_WHEN_UNREADABLE`（`wide ∪ unknown ∪ inside`），
+    // 而 `inside` 在 `TIER_ORDER` 里排**最后** —— 于是「`inside=auto` 显式 + 其余缺省 ask」时，
+    // 缺省的 `wide`（ask）先占住 decisive 档、`decisiveTierOf` 的第二支再让位给 `inside` 的 auto：
+    //     rm -rf C:/Windows         → ask
+    //     (rm -rf C:/Windows)       → auto/allow ❌
+    // 后者是**无人在环放行**（`timeoutMs=0` 时连弹窗都没有）—— 读不懂的内容不可被授权。
+    //
+    // 四格**必须一起**断言（缺一即空转，均实测）：
+    //   · ①② 覆盖两个读不懂调用点（段级 opaque / 整行读不懂）。只测一格时另一格漏接线仍全绿。
+    //   · ③ 是**接线对照**：`noDefaultYield` 只能传给那两个调用点 —— 可读段传了会把用户
+    //     显式配的 `priv=auto/allow` 降级成 ask（实测：三个调用点全传 true 时，四套测试**全绿**）。
+    //   · ④ 堵「只堵并入档」那一族修法：`priv` 是**读得出**的组档，不是并入档。
+    //     ⚠️ **不要**拿 `proc=auto/allow`（`sudo kill 1234`）当对照：它在两种接线下都是
+    //     auto/allow，是**空转格**（实测）。
+    {
+      const badAf = []
+      const tierTable = (over, afs) => {
+        const t = {}
+        const src = {}
+        for (const x of TIERS) { t[x] = 'ask'; src[x] = 'default' }
+        for (const k of Object.keys(over)) { t[k] = over[k]; src[k] = 'global' }
+        t.source = src
+        t.autoFallbacks = afs
+        return t
+      }
+      const atTierAf = (cmd, sh, plat, over, afs) => assessCommand(cmd, sh, {
+        home: HOME, userHome: HOME, platform: plat,
+        matchException: () => null,
+        destructive: () => tierTable(over, afs),
+        category: () => ({ action: 'ask' }),
+        isOutsideWorkspace: () => true,
+      })
+      // ① 段级 opaque：真命令藏在 `( )` 里（tiers = ['wide','unknown','inside']）
+      const r1 = atTierAf('(rm -rf C:/Windows)', 'bash', 'win32', { inside: 'auto' }, { inside: 'allow' })
+      if (r1.action !== 'ask') badAf.push(['段级 opaque 的读不懂路径被缺省让位放宽', r1.action + '/' + r1.autoFallback])
+      // ② 整行读不懂（未闭合引号）：没有段，走 `if (!d.ok)` 分支
+      const r2 = atTierAf('rm -rf /etc "unclosed', 'bash', 'posix', { inside: 'auto' }, { inside: 'allow' })
+      if (r2.action !== 'ask') badAf.push(['整行读不懂的路径被缺省让位放宽', r2.action + '/' + r2.autoFallback])
+      // ③ 接线对照：可读段**不得**受这条收紧影响（用户显式配的 auto/allow 必须生效）
+      const r3 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { priv: 'auto' }, { priv: 'allow' })
+      if (r3.action !== 'auto' || r3.autoFallback !== 'allow') {
+        badAf.push(['可读段的显式 auto/allow 被读不懂路径的收紧误伤（接线错误）', r3.action + '/' + r3.autoFallback])
+      }
+      // ④ 读不懂 + **读得出**的组档（priv）：『因读不懂才并入的档』不是唯一入口
+      //     只堵并入档的修法对这一族无效（实测仍放宽）：
+      //       sudo rm -rf /etc            → auto/allow ✅（可读，应当）
+      //       sudo rm -rf /etc "unclosed  → auto/allow ❌（读不懂，HEAD 是 ask）
+      const r4 = atTierAf('sudo rm -rf /etc "unclosed', 'bash', 'posix', { priv: 'auto' }, { priv: 'allow' })
+      if (r4.action !== 'ask') badAf.push(['读不懂路径上读得出的组档同样不得被缺省让位放宽', r4.action + '/' + r4.autoFallback])
+      ok('★★ AG 读不懂路径的 tie-break 不得把「缺省让位」变成授权（两调用点 + 可读对照 + 读得出的组档）',
+        badAf.length === 0, JSON.stringify(badAf))
+
+      // ⑤ 未知动作折 ask 时**不得越过 auto 的第二层**：`auto/deny` 的最终动作是 deny
+      //    （模型失败后拒绝，与裸 deny 同一条 kind:'deny' 通道），折 ask 等于把用户显式配的
+      //    「失败后拒绝」降级成「问人」—— 那是**放宽**。与 B 项 `noDefaultYield` 同一条判据：
+      //    auto 是两层的，只有让位给 `auto/allow` 才是放宽。
+      //    ⚠️ 七格**必须一起**断言：只钉「不越过 deny」（r5）时，把 `hasUnknown` 整段删掉
+      //    仍全绿 —— 折 ask 的目标形态（r6）不可省。逐格变异实测见各格的说明。
+      //    实测（sudo rm -rf /etc，tiers=['wide','priv']，wide='always' 是本版不认识的值）：
+      //        r5  wide=always + priv=auto/deny  → auto/deny（不得折 ask）
+      //        r6  wide=always + priv=auto/allow → ask（折 ask 的目标形态，不得变成 auto/allow）
+      //        r7  wide=always + priv=deny       → deny（不得降级）
+      //        r8  wide=always + priv=auto/ask   → ask（⑥：`!== 'allow'` 的写法会放成 auto/ask，
+      //                                            而 auto/ask 比 ask 松 —— 模型放行就无人在环）
+      //        r9  wide=always + priv=auto（无 afs 键）→ ask（⑦：同上，缺省按 ask 参与比较，
+      //                                            不是「不是 allow 就放过」）
+      //        r10 wide=auto/ask + priv=auto/deny + unknown=always → auto/deny（⑧：回落值要看
+      //                                            **全部命中的 auto 档**，只看 decisive 档会得 ask）
+      //    ⑧ 命令是 `sudo rm -rf /etc $TARGET`：`$TARGET` 让 `unknown` 档命中，`unknown='always'`
+      //    是本版不认识的值 → tiers=['wide','unknown','priv']，decisive 档是 `wide`（auto/ask）——
+      //    deny 落在**非 decisive** 的 `priv` 上。取全部 auto 档最严得 deny，只看 decisive 档得 ask。
+      const badAf2 = []
+      const r5 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { wide: 'always', priv: 'auto' }, { priv: 'deny' })
+      if (r5.action !== 'auto' || r5.autoFallback !== 'deny') {
+        badAf2.push(['未知档在场时 auto/deny 被折成 ask（越过第二层，属放宽）', r5.action + '/' + r5.autoFallback])
+      }
+      const r6 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { wide: 'always', priv: 'auto' }, { priv: 'allow' })
+      if (r6.action !== 'ask') badAf2.push(['未知档在场时 auto/allow 未被折 ask（fail-open）', r6.action + '/' + r6.autoFallback])
+      const r7 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { wide: 'always', priv: 'deny' }, {})
+      if (r7.action !== 'deny') badAf2.push(['未知档在场时 deny 被降级', r7.action + '/' + r7.autoFallback])
+      const r8 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { wide: 'always', priv: 'auto' }, { priv: 'ask' })
+      if (r8.action !== 'ask') badAf2.push(['未知档在场时 auto/ask 被放成 auto（把「问人」降成「问模型」）', r8.action + '/' + r8.autoFallback])
+      const r9 = atTierAf('sudo rm -rf /etc', 'bash', 'posix', { wide: 'always', priv: 'auto' }, {})
+      if (r9.action !== 'ask') badAf2.push(['未知档在场时 auto 的回落值缺省未折 ask（缺省不是 allow）', r9.action + '/' + r9.autoFallback])
+      const r10 = atTierAf('sudo rm -rf /etc $TARGET', 'bash', 'posix', { wide: 'auto', priv: 'auto', unknown: 'always' }, { wide: 'ask', priv: 'deny' })
+      if (r10.action !== 'auto' || r10.autoFallback !== 'deny') {
+        badAf2.push(['未知档在场时只看 decisive 档的回落值（deny 落在非 decisive 的 auto 档上）', r10.action + '/' + r10.autoFallback])
+      }
+      // ⑨ **非 auto 档的回落值不得参与最严判定**（`if (ds[u] !== 'auto') continue` 这行守卫的
+      //    唯一护栏）。删掉守卫会**放宽**，而上面六格**全绿**（实测，红/绿对照见交付报告）。
+      //
+      //    ⚠️ **本格是契约测试：它的鉴别力在生产链路上不可达**（独立复核；勿据此推断「用户配得出放宽」）：
+      //    `strictestTierAction` 是**导出纯函数**，`ds` 形参**不保证** `autoFallbacks` 的键 ⊆ auto 档；
+      //    本格正是靠这条形参契约注入脏数据。真实宿主链路上有两处归一化**各自独立**挡住该形态
+      //    （实测：真实 `normalizeSubSetting` + `destructiveTiers` + `assessCommand`，输入即本格原始配置）：
+      //      · `normalizeSubSetting` 的 afs 循环判据是 `explicit !== 'auto'` → `outside` 不是 auto，
+      //        故 `afs.outside='deny'` 被**丢弃**（该函数「每档的 auto 回落值」那段）；global 层还
+      //        额外丢掉 `outside` 键本身（`inherit` 不在全局层值域内）。
+      //      · `destructiveTiers` 只在 `out[t] === 'auto'` 时填 `autoFallbacks[t]`（该函数「每档的
+      //        auto 回落值」那段），故**任何**来源的脏 afs 键都进不了下发值。
+      //      另：`explicitOf` 把 `inherit` 视为未表态、末级兜底 `'ask'`，故下发的 `ds` 里**从不出现** `inherit`。
+      //    实测（global 层 / project 层两条路径）：orig 与删守卫**零差异**（都是 ask）；3000 组随机脏配置
+      //    × 12 命令（有效 2822 组）= 33864 格，差异 0；下发值里 afs 含非 auto 档 **0 次**、`inherit` **0 次**。
+      //    故本格守的是**函数契约**（防日后放宽 `ds` 形参的约定、或把归一化挪走），不是端到端回归。
+      //
+      //    形态（tiers 实测 = ['unknown','outside','priv']，三个档各有分工，缺一即空转）：
+      //      priv='auto'       decisive 档，回落 **allow**（模型失败后放行）
+      //      outside='inherit' **非 auto** 档，回落 deny ← 靶心：它没有表态，那句 deny 不该被读
+      //      unknown='always'  本版读不懂的值 → 触发 `hasUnknown`
+      //
+      //    正确 ask：守卫只看 `ds[u] === 'auto'` 的档，唯一命中的 auto 档是 `priv`，回落 allow
+      //    → `worst` 停在 ask → 折 ask。`outside` 的 deny 属于一个**没在委托模型**的档，
+      //    把它算进 `worst` 等于让一个不相干的档替 decisive 档做决定。
+      //    删守卫后（**仅在本格这条注入路径下**；生产链路不可达，见上）：`outside` 的 deny 进入
+      //    `worst` ⇒ `worst === 'deny'` ⇒ `return a`（auto），整条变 **auto/allow** —— 模型失败后
+      //    无人在环放行（`timeoutMs=0` 连弹窗都没有）。这正是「日后若有人放宽 `ds` 形参契约、
+      //    或把上面那两处归一化挪走」时会重现的后果，故本格值得留。
+      //
+      //    ⚠️ 形态为何长这样（原定形态 `tiers=['inside','outside','wide']` **不可达**）：
+      //    `wide` 与 `outside` 都是**半径档**，而 `radiusTierOf` 一次只返回一个 —— 唯一能同时
+      //    产出两者的是 `tierSetOf` 的 `opaqueHiddenPayload` 支，而它**恒并**
+      //    `RADIUS_TIERS_WHEN_UNREADABLE`（`wide ∪ unknown ∪ inside`），故「含 wide + outside
+      //    而不含 unknown」在段级不可达（实测：`rm -rf /tmp/x $(rm -rf C:/Windows)` 是
+      //    `['wide','unknown','outside','inside']`）。这里改用**读不懂值**（`unknown='always'`）
+      //    触发 `hasUnknown`、由 `priv` 当 decisive 档 —— 三个承重角色的关系逐字不变。
+      //    提成常量：下面的第二道防空转判据要引用这两个结构本身（只提取，不重排）
+      const OVER11 = { priv: 'auto', outside: 'inherit', unknown: 'always' }
+      const AF11 = { priv: 'allow', outside: 'deny' }
+      const r11 = atTierAf('sudo rm -rf /tmp/x $TARGET', 'bash', 'posix', OVER11, AF11)
+      // 防空转：三个承重档必须真的都在命中集合里，否则本格静默失效（只判「在不在」，不钉排列）
+      const t11 = (r11.segments[0] && r11.segments[0].tiers) || []
+      if (t11.indexOf('outside') === -1 || t11.indexOf('priv') === -1 || t11.indexOf('unknown') === -1) {
+        badAf2.push(['⑨ 的形态没命中预期的三个承重档（本格空转，需重新构造）', JSON.stringify(t11)])
+      }
+      // 防空转（第二道）：**档名命中 ≠ 该档承重**。上面那条只判「三个档名在不在 `tiers` 里」，
+      // 判不了「提供鉴别力的那个 afs 键是否真的挂在**命中集合内的非 auto 档**上」。实测两种退化
+      // 都能通过上面那条、断言仍绿，而删守卫也绿（本格静默失效）：
+      //   · `AF11` 去掉 `outside:'deny'`（只剩 `priv:'allow'`）→ 守卫在不在都得 ask；
+      //   · `OVER11` 与 `AF11` 同时把 outside 写成 `outsideX` → `tiers` 仍是 `['unknown','outside','priv']`
+      //     （`outside` 由 `/tmp/x`（工作区外目标）命中，`$TARGET` 只贡献 `unknown`），但那个 deny 挂在一个**不在 `tiers` 里**的键上，
+      //     同样无人读 —— 故判据必须带「k 在 t11 里」，只查 `OVER11[k] !== undefined` 抓不到这一族。
+      // 判据：必须存在至少一个「在 `tiers` 里 ∧ 非 auto ∧ 回落值是 deny」的键 —— 这正是本格全部
+      // 鉴别力的来源（删守卫时把 `worst` 从 ask 推到 deny 的那一下）。
+      if (!Object.keys(AF11).some((k) => t11.indexOf(k) !== -1 && OVER11[k] !== undefined && OVER11[k] !== 'auto' && AF11[k] === 'deny')) {
+        badAf2.push(['⑨ 的鉴别力来源（命中集合内非 auto 档上的 deny 回落值）缺失（本格空转，需重新构造）', JSON.stringify(AF11)])
+      }
+      if (r11.action !== 'ask') {
+        badAf2.push(['非 auto 档（outside=inherit）的 deny 回落值被算进最严判定（fail-open）', r11.action + '/' + r11.autoFallback])
+      }
+      ok('★★ AG2 未知动作折 ask 不得越过 auto 的第二层（auto/deny 保持、auto/allow 折 ask、deny 不降级、auto/ask 与缺省折 ask、非 decisive 档的 deny 不得被吃掉、非 auto 档的回落值不得参与最严判定）',
+        badAf2.length === 0, JSON.stringify(badAf2))
+    }
   }
 }
 
@@ -11091,6 +11571,139 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
     }
     ok('★ AH10f `stripHeredocBody` 的 opener 正则必须含 `(?<!<)`、转义在捕获组外、且不用反向引用配对引号（修复 1/4 写法约束）',
       bad.length === 0, JSON.stringify(bad))
+  }
+
+  // ── ⑭ 本轮两项：反引号形态的 `outside` 档 + 未知动作例外的 `ask` 下界 ────────────────
+  // 两项都是「段级分支修了、整行读不懂分支没修」的不对称，方向都是 fail-open。
+  // 为什么**必须**新增断言（现有断言全部无法区分修复前后，实测：把 shell-parse.js 换回
+  // 修复前版本后四套测试**全绿**）：
+  //   · 项 1：`outside=deny` 的既有断言（AH10 / AH10c / AC 组）全部用**无构造的裸命令**
+  //     或 `$( )` / `( )` / `{ }` 三种构造，从未把反引号放进整行读不懂的语料 ——
+  //     而反引号的词法形态与那三种**不同**（词法器不吞它，字面词元留在 `words` 里）。
+  //   · 项 2：`unknown` 折 ask 的既有断言（AG2 ⑤ / AH 组）只覆盖**子设置档位**里的未知值
+  //     （`wide='always'`），从未覆盖**例外动作**是未知值这一族 —— 而例外在整行分支里
+  //     走的是另一条查表路径（`TIER_STRICTNESS[ex.action]`）。
+  // 删除修复后该断言变红的实测结果见交付报告（逐格列出）。
+  {
+    const BT2 = String.fromCharCode(96)
+    const H2 = '<<EOF\nx\nEOF'
+    const dsOut = ONLY('outside')
+
+    // ① 项 1：`outside=deny`（其余七档 allow）下，反引号形态的**四种读不懂写法**
+    //    与裸命令同结论。裸命令是 deny，故四格必须全 deny。
+    //    ⚠️ 语料必须**同时**含「构造独立成段」与「构造挂在其它命令之后」两族：
+    //    只测前一族时，报告者原建议的「逐词元剥反引号」修法也能全绿（实测它只堵住 4/6），
+    //    而 `echo `rm -rf /data`` 那一族剥完段首仍是 `echo`、判不出目标。
+    {
+      const bad2 = []
+      const CASES = [
+        ['独立成段 + heredoc', BT2 + 'rm -rf /data' + BT2 + ' ' + H2],
+        ['独立成段 + 悬空管道', BT2 + 'rm -rf /data' + BT2 + ' |'],
+        ['独立成段 + 未闭合引号', BT2 + 'rm -rf /data' + BT2 + ' "x'],
+        ['挂在 echo 之后 + heredoc', 'echo ' + BT2 + 'rm -rf /data' + BT2 + ' ' + H2],
+        ['挂在 echo 之后 + 悬空管道', 'echo ' + BT2 + 'rm -rf /data' + BT2 + ' |'],
+        ['赋值右值 + heredoc', 'x=' + BT2 + 'rm -rf /data' + BT2 + ' ' + H2],
+      ]
+      for (const [n, c] of CASES) {
+        for (const sh of ['bash', 'pwsh']) {
+          const r = at(c, dsOut, sh)
+          if (r.action !== 'deny') bad2.push([n, sh, r.action, r.code])
+        }
+      }
+      // 反向核查（防空转 + 防过度收紧）：反引号里的目标在**区内**或命令非破坏性时，
+      // `outside` 档不得凭空出现。这两格若被收紧，说明修法把「反引号」本身当成了信号
+      // 而不是「反引号里的区外目标」。
+      for (const c of [BT2 + 'rm -rf ./build' + BT2 + ' ' + H2, BT2 + 'date' + BT2 + ' ' + H2]) {
+        for (const sh of ['bash', 'pwsh']) {
+          if (at(c, dsOut, sh).action !== 'allow') bad2.push(['反向核查被收紧', c, sh, at(c, dsOut, sh).action])
+        }
+      }
+      ok('★★ AH11 反引号形态的区外目标在整行读不懂时同样读得出（`outside=deny` 下必须 deny）',
+        bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+    }
+
+    // ② 项 2：例外动作是**本版不认识的值**时，整行读不懂分支必须把它折成 `ask`，
+    //    而不是把整条例外丢掉（丢掉 → 落分类默认值 allow）。
+    //    三格对应三种读不懂成因（heredoc / 未闭合引号 / 悬空管道），缺一即「只修一支」。
+    //    ⚠️ 同时钉**下界语义**：未知动作只能把 allow 抬到 ask，不得把 `deny` 顶成 ask ——
+    //    否则一条笔误的例外会顶掉用户为破坏性档显式配的 `outside=deny`
+    //    （实测该形态在「未知动作直接短路判定链」的写法下由 deny 变 ask）。
+    {
+      const bad3 = []
+      const dsAsk3 = {}
+      for (const t of ['inside', 'outside', 'wide', 'unknown', 'priv', 'proc', 'power', 'reg']) dsAsk3[t] = 'ask'
+      const excUnknown = { exceptions: ['git *'], excAction: 'atuo', category: 'allow', destructive: 'ask' }
+      for (const c of ['git status ' + H2, 'git status "unclosed', 'git status |']) {
+        const r = run(c, 'bash', excUnknown)
+        if (r.action !== 'ask') bad3.push(['未知动作例外被整行分支丢弃', c.replace(/\n/g, '\\n'), r.action, r.code])
+      }
+      // 下界：未知动作例外不得顶掉子设置的 deny（`outside=deny` + 反引号形态的 rm）
+      for (const c of ['git status && rm -rf /data ' + H2, 'rm -rf /data && git status ' + H2]) {
+        const r = assessCommand(c, 'bash', Object.assign(hooks({ category: 'allow', exceptions: ['git *'], excAction: 'atuo' }),
+          { destructive: () => ONLY('outside') }))
+        if (r.action !== 'deny') bad3.push(['未知动作例外顶掉了子设置的 deny', c.replace(/\n/g, '\\n'), r.action, r.code])
+      }
+      ok('★★ AH12 例外动作未知时整行读不懂分支必须折 ask（且只作下界、不得顶掉 deny）',
+        bad3.length === 0, JSON.stringify(bad3.slice(0, 8)))
+    }
+
+    // ②b 项：**段级**的未知动作不得被同一命令里另一段的 `inherit` 吞掉。
+    //
+    // 段间合并的顺序是 deny → ask → auto → **unknown → inherit** → allow。若把
+    // `anyUnknown` 排在 `anyInherit` **之后**，只要命令里有一段落 `inherit`，其余段的
+    // 「本版读不懂的动作」就被整体吞掉、整条回 `inherit` —— 而宿主把 inherit 折算成
+    // 大分类默认值（command 分类常态 allow），于是 fail-open：
+    //     git status; echo hi   （例外 `git status`=未知动作，分类 inherit）
+    //       → 顺序错时 inherit（宿主折算 allow）❌ / 正确时 ask ✅
+    // 单段形态**测不出**这个缺陷（没有 inherit 段可吞它）—— 故必须用多段命令。
+    // 语义依据与 auto 排在 inherit 之前同源：inherit 表示「该段没表态」，未知动作是
+    // 「有表态、只是读不懂」，有表态必须压过无表态。
+    {
+      const bad4 = []
+      // 用本块既有的 `hooks(opts)` 组装：`{category:'inherit', exceptions:['git *'], excAction:'atuo'}`
+      // 会把分类默认值设为 inherit、并让 `git *` 例外返回未知动作。
+      const hInh = hooks({ category: 'inherit', exceptions: ['git *'], excAction: 'atuo' })
+      // 多段：一段命中未知动作例外，另一段落 inherit（非破坏性命令 + 分类 inherit）
+      for (const c of ['git status; echo hi', 'git status && echo hi', 'echo hi; git status']) {
+        const r = assessCommand(c, 'bash', hInh)
+        if (r.action !== 'ask') bad4.push(['未知动作被 inherit 段吞掉（整条回 inherit → 宿主折算 allow）', c, r.action, r.code])
+      }
+      // 反例对照（防空转）：全 allow 的多段命令仍必须是 allow
+      const rAll = assessCommand('echo a; echo b', 'bash', hooks({ category: 'allow' }))
+      if (rAll.action !== 'allow') bad4.push(['全 allow 的多段命令被误抬', rAll.action, rAll.code])
+      // 反例对照：未知动作 + deny 段 → 仍是 deny（unknown 不得顶掉更严的段）。
+      // ⚠️ 这里**不能**用 `hooks()`：它自带的默认例外表里有 `git status *`→allow，
+      // 会抢在未知动作例外之前命中（实测该格得 ask，而原因是 allow 例外而非 unknown）。
+      // 故手写最小钩子：只让 `git status` 命中未知动作，档位表 inside=deny。
+      const dsInsideDeny = {}
+      for (const x of ['inside', 'outside', 'wide', 'unknown', 'priv', 'proc', 'power', 'reg']) {
+        dsInsideDeny[x] = x === 'inside' ? 'deny' : 'ask'
+      }
+      const rDeny = assessCommand('git status; rm -rf /data', 'bash', {
+        home: HOME, userHome: HOME, platform: 'win32',
+        matchException: (t) => (t === 'git status' ? { action: 'atuo', ruleId: 'e1' } : null),
+        destructive: () => dsInsideDeny,
+        category: () => ({ action: 'inherit' }),
+        isOutsideWorkspace: () => false,
+      })
+      if (rDeny.action !== 'deny') bad4.push(['未知动作顶掉了 deny 段', rDeny.action, rDeny.code])
+      // ── 归因：未知动作折 ask 时，`matched`/`note` 必须指向**那一段**，不能退化成 out[0] ──
+      // 那一段的 `action` 是读不懂的原值（不是 'ask'），故 `out.find(s => s.action === action)`
+      // 会落空 → 退化成 `out[0]`（这里第一段是无关的 echo）。后果：弹窗/AI 收到的例外 id
+      // 指向一条与该次判定无关的规则，用户会去改错配置。
+      const rAttr = assessCommand('echo hi; git status', 'bash', {
+        home: HOME, userHome: HOME, platform: 'win32',
+        matchException: (t) => (t === 'git status' ? { action: 'atuo', ruleId: 'e-unknown', note: '这条读不懂' } : null),
+        destructive: () => null,
+        category: () => ({ action: 'inherit' }),
+        isOutsideWorkspace: () => false,
+      })
+      if (rAttr.action !== 'ask') bad4.push(['归因用例前提不成立（应为 ask）', rAttr.action, rAttr.code])
+      if (rAttr.matched !== 'e-unknown') bad4.push(['未知动作折 ask 时 matched 未指向那条例外', String(rAttr.matched)])
+      if (rAttr.note !== '这条读不懂') bad4.push(['未知动作折 ask 时 note 丢失', String(rAttr.note)])
+      ok('★★ AH13 段级未知动作不得被 inherit 段吞掉（顺序 unknown → inherit；单段测不出）',
+        bad4.length === 0, JSON.stringify(bad4.slice(0, 8)))
+    }
   }
 }
 
