@@ -5157,21 +5157,28 @@ export default {
         // 而「重复调用的提醒盖过 auto」是必须保留的（regressions 的 `merge('auto','ask')`）。
         if (d === b && doom.action === 'auto' && base.action === 'ask') return base
         // ── 两支都是 auto：回落值必须**取严**（§9B / §13）────────────────────────────
-        // 同档（1 对 1）时上面的「相等即接管」让 doom 整体接管 —— 动作相同、理由换成
+        // 同档（1 对 1）时上面的「相等即接管」让 doom 接管理由 —— 动作相同、理由换成
         // 循环提醒，那是对的；但 `autoFallback` 是 auto 的**第二层判据**：
         // `auto/allow` 与 `auto/deny` 在执行侧分别是放行与拒绝。整体接管会把 base 的
-        // `deny` 换成 doom 的 `allow`（deny → allow，本轮新引入的 fail-open）。
+        // `deny` 换成 doom 的 `allow`（deny → allow，fail-open）。
         // 回落值按 `allow < ask < deny` 单独比较，用 `AF_STRICTNESS`（回落值专用域）。
         // **不能**复用 `MODE_STRICTNESS` —— 它含 `auto: 1` 与 `ask: 1` 同档，那是**动作**
         // 域的序；拿它比回落值是错的。缺省 / 非法值按 `ask` 参与比较（与
         // normalizeAutoFallback 的缺省同源）。这张表与 `strictestFallbackOf`、
         // `outsideMatrix` 共用同一份（shell-parse.js 导出），不再各处手写。
-        // ⚠️ 必须返回**新对象**：`doom` 是闭包变量，原地改会污染后续出口。
+        // 回落值相同（同为 ask / 同为 deny）时也要落到 base 上，**不能整条换成 doom**：
+        // `reason` 有意换成 doom 的循环提醒（L-10），但 doom 没有 base 的 `segments` / `blast`
+        // —— 整体接管会让决策记录的段摘要与弹窗的段级信息静默消失。
+        // （doom=auto 时这条 reason 会被 pre-execute 的评审段覆盖，来源靠决策记录的 `cat` 保留。）
+        // `kind` / `value` 则必须跟着 `cat` 一起换（换成 doom 的 null），**不能留 base 的**：
+        // `cat` 变成 `doomloop` 后两者不再配对，弹窗会照 base 的分类给出「允许此项」候选，
+        // 而候选写入用的是 `entry.cat` = `doomloop` —— 该分类没有例外列表（EXC_CATS 不含它），
+        // addProjectException 返回 null，用户点了按钮、弹窗关闭，配置一个字都没变。
         if (doom.action === 'auto' && base.action === 'auto') {
           const afOf = (v) => (v === 'allow' || v === 'deny' ? v : 'ask')
-          const bf = afOf(base.autoFallback)
-          const df = afOf(doom.autoFallback)
-          return Object.assign({}, doom, { autoFallback: AF_STRICTNESS[df] > AF_STRICTNESS[bf] ? df : bf })
+          const worst = AF_STRICTNESS[afOf(doom.autoFallback)] > AF_STRICTNESS[afOf(base.autoFallback)]
+            ? afOf(doom.autoFallback) : afOf(base.autoFallback)
+          return Object.assign({}, base, { autoFallback: worst, reason: doom.reason, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
         }
         return doom
       }
@@ -5390,6 +5397,8 @@ export default {
         code: d.code || null,
         reason: segmentSummary(d),
       }
+      // 触发分类：auto 路径会用模型结论覆盖 reason，doomloop 这类来源只能靠 cat 事后分辨。
+      if (d.cat) rec.cat = String(d.cat)
       // ── auto 专有字段：**必须在记录里**，否则事后分不清是谁拍的板 ──────────────
       // 这四个字段此前只进了 console.log（`[permgate] auto -> …`），日志滚掉之后
       // 「模型放行」与「规则放行」在面板上完全同形（都是绿色 allow）。
@@ -6033,31 +6042,118 @@ export default {
     // 为什么必须自己数顶层成员数：`JSON.parse` 对重复键**只保留最后一个**，
     // 于是 `{"risk":"high","decision":"deny","decision":"allow"}` 会解析成 allow ——
     // 一个精心构造的输出就能绕过「high + allow 不合法」那条语法级防线。
-    function topLevelMemberCount(text) {
-      // 只数**顶层**的 `:`（字符串内、嵌套对象/数组内的都不算）。
-      let depth = 0
-      let count = 0
-      let inStr = false
-      let esc = false
-      for (let i = 0; i < text.length; i++) {
-        const c = text[i]
-        if (inStr) {
-          if (esc) { esc = false; continue }
-          if (c === '\\') { esc = true; continue }
-          if (c === '"') inStr = false
-          continue
-        }
-        if (c === '"') { inStr = true; continue }
-        if (c === '{' || c === '[') { depth++; continue }
-        if (c === '}' || c === ']') { depth--; continue }
-        if (c === ':' && depth === 1) count++
-      }
-      return count
-    }
-
     const REVIEW_DECISIONS = ['allow', 'deny', 'escalate']
     const REVIEW_RISKS = ['low', 'medium', 'high']
     const REVIEW_REASON_MAX = 1000
+    // `topLevelKeyCount` 是递归下降、`JSON.parse` 是迭代实现：不设上限时，嵌套数千层
+    // 的合法 JSON 会让前者抛 RangeError 逃出 parseReviewDecision，把一条协议错变成
+    // infra-error。真正的裁决 JSON 只有一层，200 层是宽到不该有人碰到的上限
+    // （上限过大没有意义：实测无上限时数千层就溢出，而 200 层已远超任何真实的 reason）。
+    const TOP_LEVEL_KEY_MAX_NESTING = 200
+
+    // 顶层键名计数：逐字复刻 JSON 的字面量语法（键名/值字符串 + 嵌套 + 分隔符），得到
+    // 「顶层键名写了几个」。遇到任何与本版 JSON.parse 不一致的形态就返回 `null`
+    // （调用方一律判协议错，不会因此放行）。
+    //
+    // 为什么需要它：`JSON.parse` 会把重复键并成一个，只能回到真实文本上数顶层键名
+    // 出现了几次，再与 `Object.keys` 比；它取的是真实文本，不是 `JSON.parse` 里已被
+    // 并键的那一侧，所以字符串里的 `{\"a\":1}`、单个 `{` / `}`、字符串内的 `:` 都不影响计数。
+    //
+    // 旧实现数的是顶层 `:` 的个数，它在每个合法 JSON 上都恰好等于顶层成员数（键名与
+    // 值字符串内的 `:` 被跳过，嵌套容器里的 `:` 深度 > 1），所以这次重写在 200 层以下
+    // 与旧实现等价，堵的不是某个裁决上的洞；代价是递归下降带来的那条嵌套上限，
+    // 超限的合法 JSON 会被多拒一次。
+    function topLevelKeyCount(text) {
+      let i = 0
+      const ws = () => { while (i < text.length && ' \t\n\r'.indexOf(text[i]) !== -1) i++ }
+      const str = () => {
+        if (text[i] !== '"') return false
+        i++
+        while (i < text.length) {
+          const c = text.charCodeAt(i)
+          if (c === 34) { i++; return true }
+          if (c < 32) return false
+          if (c === 92) {
+            i++
+            const e = text[i]
+            if ('"\\/bfnrt'.indexOf(e) === -1) {
+              if (e !== 'u' || !/^[0-9a-fA-F]{4}$/.test(text.slice(i + 1, i + 5))) return false
+              i += 5
+              continue
+            }
+          }
+          i++
+        }
+        return false
+      }
+      const value = (depth) => {
+        if (depth >= TOP_LEVEL_KEY_MAX_NESTING) return false
+        const c = text[i]
+        if (c === '{') {
+          i++
+          ws()
+          if (text[i] === '}') { i++; return true }
+          for (;;) {
+            ws()
+            if (!str()) return false
+            ws()
+            if (text[i] !== ':') return false
+            i++
+            ws()
+            if (!value(depth + 1)) return false
+            ws()
+            const sep = text[i]
+            i++
+            if (sep === '}') break
+            if (sep !== ',') return false
+          }
+          return true
+        }
+        if (c === '[') {
+          i++
+          ws()
+          if (text[i] === ']') { i++; return true }
+          for (;;) {
+            ws()
+            if (!value(depth + 1)) return false
+            ws()
+            const sep = text[i]
+            i++
+            if (sep === ']') break
+            if (sep !== ',') return false
+          }
+          return true
+        }
+        if (c === '"') return str()
+        const m = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(i))
+        if (!m) return false
+        i += m[0].length
+        return true
+      }
+      ws()
+      if (text[i] !== '{') return null
+      i++
+      let n = 0
+      ws()
+      if (text[i] === '}') { i++; ws(); return i === text.length ? 0 : null }
+      for (;;) {
+        ws()
+        if (!str()) return null
+        n++
+        ws()
+        if (text[i] !== ':') return null
+        i++
+        ws()
+        if (!value(0)) return null
+        ws()
+        const sep = text[i]
+        i++
+        if (sep === '}') break
+        if (sep !== ',') return null
+      }
+      ws()
+      return i === text.length ? n : null
+    }
 
     // 返回 { ok: true, decision, risk, reason } 或 { ok: false, code, detail }
     // code 直接对应 §3.4 的异常原因（protocol-error / contradiction），
@@ -6072,9 +6168,16 @@ export default {
       if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
         return { ok: false, code: 'protocol-error', detail: 'not a single object' }
       }
-      // 重复成员检测：数出的 `:` 个数必须等于实际键数
       const keys = Object.keys(obj)
-      if (topLevelMemberCount(raw) !== keys.length) {
+      // 成员数对不上 = 有重复键（JSON.parse 只留了最后一个）。只有一条判据：
+      // `topLevelKeyCount` 在真实文本上数出顶层键名写了几个，任何合法 JSON 上都与
+      // `Object.keys` 相等，不等即被构造过；它返回 `null` 则是嵌套超限，两条原因分开报。
+      // 它已覆盖所有重复键形态（见上方注释），不再并列旧的数 `:` 判据。
+      const lexical = topLevelKeyCount(raw)
+      if (lexical === null) {
+        return { ok: false, code: 'protocol-error', detail: 'review output too deeply nested' }
+      }
+      if (lexical !== keys.length) {
         return { ok: false, code: 'protocol-error', detail: 'duplicate top-level member' }
       }
       const risk = obj.risk
@@ -8866,6 +8969,11 @@ export default {
             const src = a[t]
             if (!src || typeof src !== 'object') continue
             for (const c of CATS) {
+              // ⚠️ 动作必须在回落值**之前**写：`setCategoryAutoFallback` 只在内存里
+              // 该分类的 `mode` 已是 auto 时才落键（「存了也读不到的值不存」）。
+              // 两块（动作、`<cat>AutoFallback`）同在一个补丁里就说明这是用户的一次合并提交，
+              // 顺序反了会让「切成 auto + 失败后拒绝」变成「切成 auto + 回落 ask」，
+              // 且不报错、面板下一条 statusView 就显示 ask —— 静默失效。
               if (typeof src[c] === 'string') setCategoryMode(rootOf(exec), t, c, src[c])
               // auto 的回落值走同一批补丁通道（面板在切进 auto 时把它一起带上）。
               // 键名是 `<分类>AutoFallback`：与「分类 → 动作」的键在同一层、不嵌套，
@@ -9340,7 +9448,7 @@ export default {
           //
           // `rawOutput` 是模型的**原始输出**（§7.3 第二条）：出问题时可复现它到底说了什么，
           // 而不是只看我们解析出来的 risk/decision。截断在 recordDecision 里做。
-          const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, rawOutput: rv.raw }
+          const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, blast: d.blast, rawOutput: rv.raw }
           if (rv.verdict === 'allow') {
             d2 = Object.assign({}, carry, { action: 'allow', reason: bi('自动审批：模型放行', 'Auto review: allowed by model'), via: 'auto-allow', modelReason: rv.reason || '' })
           } else if (rv.verdict === 'deny') {

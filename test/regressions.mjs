@@ -3410,8 +3410,9 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     //   同档接管会把 base 的 deny 换成 doom 的 allow（deny → allow，fail-open）。
     //   没有这三格，把 out() 里那段取严整段删掉，四套测试仍全绿（已实测）。
     //   ⚠️ 回落值排序是 allow < ask < deny，**不是** MODE_STRICTNESS（auto 与 ask 同档）。
-    const r4 = withDoom({ action: 'auto', autoFallback: 'allow', reason: 'doom' })(
-      { action: 'auto', autoFallback: 'deny', reason: 'base' })
+    const r4 = withDoom({ action: 'auto', autoFallback: 'allow', reason: 'doom', cat: 'doomloop', value: null, kind: null })(
+      { action: 'auto', autoFallback: 'deny', reason: 'base', cat: 'command', value: 'rm -rf build', kind: 'command',
+        segments: [{ code: 'destructive' }], blast: { level: 'broad' } })
     if (!(r4 && r4.action === 'auto' && r4.autoFallback === 'deny')) return false
     // base 无回落值 → 缺省按 ask 参与比较，doom 的 allow 更宽 → 取 base 的 ask
     const r5 = withDoom({ action: 'auto', autoFallback: 'allow', reason: 'doom' })(
@@ -3421,6 +3422,63 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const r6 = withDoom({ action: 'auto', autoFallback: 'deny', reason: 'doom' })(
       { action: 'auto', autoFallback: 'allow', reason: 'base' })
     if (!(r6 && r6.action === 'auto' && r6.autoFallback === 'deny')) return false
+    return true
+  })())
+  // ★★ 两支都是 auto 时的**字段来源**：`segments`/`blast` 取 base，`cat`/`kind`/`value` 取 doom。
+  //
+  // ⚠️ 这一条**必须独立成 ok()**，不能并进上面那条：上面任何一个 `return false`
+  // 都会把它一起跳过，于是「把 `Object.assign({}, base, …)` 改成 `Object.assign({}, doom, …)`」
+  // 这个变异不会被任何断言抓到（实测：合并版里 r1 先失败，本段代码根本没执行）。
+  //
+  // 为什么来源必须这样分：
+  //   · `segments`/`blast` 只有 base 有（doom 是循环检测凭空造的条目，没有真实段信息）——
+  //     丢了它们，决策日志的段摘要与弹窗的爆炸半径会静默消失；
+  //   · `cat`/`kind`/`value` 必须**跟着换成 doom 的**（doomloop / null / null）——
+  //     `cat` 变成 `doomloop` 后若 `value`/`kind` 仍留 base 的，弹窗会照 base 的分类
+  //     给出「允许此项」候选，而候选写入用 `entry.cat` = doomloop —— 该分类没有例外列表
+  //     （EXC_CATS 不含它），addProjectException 返回 null，用户点了按钮、弹窗关闭、
+  //     配置一个字都没变。
+  ok('★★ out() 两支都是 auto 时的字段来源：segments/blast 取 base，cat/kind/value 取 doom', (function () {
+    // 与上一条同源：从源码抠出 out() 真身（不手抄），注入 doom 后调用
+    const iOut2 = src.indexOf('const out = (base) => {')
+    if (iOut2 < 0) return false
+    let depth2 = 0
+    let end2 = -1
+    for (let k = src.indexOf('{', iOut2); k < src.length; k++) {
+      if (src[k] === '{') depth2++
+      else if (src[k] === '}') { depth2--; if (depth2 === 0) { end2 = k; break } }
+    }
+    if (end2 < 0) return false
+    const mT = src.match(/const MODE_STRICTNESS = (\{[^}]*\})/)
+    const mAf = sp.match(/export const AF_STRICTNESS = (\{[^}]*\})/)
+    if (!mT || !mAf) return false
+    let T2 = null
+    let AF2 = null
+    try {
+      T2 = new Function('return (' + mT[1] + ')')()
+      AF2 = new Function('return (' + mAf[1] + ')')()
+    } catch (e) { return false }
+    // doom 也带 segments/blast，但内容与 base **不同** —— 用来分辨来源：
+    // 只查「结果里有 segments」时两边的值都能满足，测不出来源（实测）。
+    const doom2 = { action: 'auto', autoFallback: 'allow', reason: 'doom', cat: 'doomloop', value: null, kind: null,
+      segments: [], blast: null }
+    const base2 = { action: 'auto', autoFallback: 'deny', reason: 'base', cat: 'command', value: 'rm -rf build', kind: 'command',
+      segments: [{ code: 'destructive' }], blast: { level: 'broad' } }
+    let r = null
+    try {
+      r = new Function('MODE_STRICTNESS', 'AF_STRICTNESS', 'doom',
+        'const out = (base) => ' + src.slice(iOut2, end2 + 1).replace(/^const out = \(base\) => /, '') + '; return out')(T2, AF2, doom2)(base2)
+    } catch (e) { return false }
+    if (!r) return false
+    // 回落值取严（deny > allow），这一项顺带确认走的是 auto/auto 分支
+    if (r.autoFallback !== 'deny') return false
+    // segments / blast 必须来自 base（内容级，不是「存在」）
+    if (!(Array.isArray(r.segments) && r.segments.length === 1 && r.segments[0].code === 'destructive')) return false
+    if (!(r.blast && r.blast.level === 'broad')) return false
+    // cat / kind / value 必须来自 doom
+    if (r.cat !== 'doomloop' || r.kind !== null || r.value !== null) return false
+    // reason 必须换成 doom 的（循环提醒，L-10）
+    if (r.reason !== 'doom') return false
     return true
   })())
   // ★ 阈值：默认 6、下限 1、**无上限**（无 MAX 常量）。上限唯一的用途是「不许超过窗口」，
