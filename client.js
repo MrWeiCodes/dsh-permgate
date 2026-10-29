@@ -1631,6 +1631,9 @@ window.__ModuleLoader__.load({
 				// 「自动」一词在本插件历史上有别的含义（编辑器内核的自动判别），
 				// 面板上必须能一眼区分，故用四字全称（见计划 §2.1 的命名决策）。
 				'mode.auto': '自动审批',
+				// 未知动作的降级文案（见 modeLabel 的注释）：`{a}` 是原值。
+				// 不能退化成 key 本身 —— 那会让面板显示「mode.bogus」。
+				'mode.unknown': '未知动作：{a}',
 				// 「模型失败后执行什么」的标签（仅在动作是 auto 时出现在下拉框左侧）
 				'panel.autoFallbackLabel': '失败后：',
 				// 新增行（「添加例外」「添加快捷工具」那两排）的回落值只读提示：
@@ -1652,7 +1655,7 @@ window.__ModuleLoader__.load({
 				'panel.autoModelPh': '模型名，留空用当前会话的',
 				'panel.autoModelHint': '两个都填才生效',
 				'panel.autoSaved': '已保存',
-				'panel.autoBadNumber': '请输入 0 或正整数',
+				'panel.autoBadNumber': '请输入该范围内的整数',
 				'panel.autoMsUnit': '毫秒',
 				'panel.autoTimesUnit': '次',
 				'panel.autoCharsUnit': '字符',
@@ -2062,7 +2065,8 @@ window.__ModuleLoader__.load({
 				'mode.deny': 'Deny',
 				'mode.inherit': 'Inherit global',
 				'mode.auto': 'Auto review',
-				'panel.autoFallbackLabel': 'if it fails:',
+				'mode.unknown': 'Unknown action: {a}',
+				'panel.autoFallbackLabel': 'if it fails: ',
 				'panel.autoFallbackReadonlyHint': 'Fallback cannot be set for a new entry yet; it defaults to Ask. You can change it in the list after adding.',
 				'panel.autoReview': 'Auto review',
 				'panel.autoReviewHint': 'When a category is set to Auto review, each call is checked by a model first. These are its runtime settings, global to all projects.',
@@ -2078,7 +2082,7 @@ window.__ModuleLoader__.load({
 				'panel.autoModelPh': 'model, empty = this session',
 				'panel.autoModelHint': 'both are required',
 				'panel.autoSaved': 'Saved',
-				'panel.autoBadNumber': 'enter 0 or a positive integer',
+				'panel.autoBadNumber': 'enter a whole number in range',
 				'panel.autoMsUnit': 'ms',
 				'panel.autoTimesUnit': 'times',
 				'panel.autoCharsUnit': 'chars',
@@ -2308,7 +2312,20 @@ window.__ModuleLoader__.load({
 		function catLabel(c) { return T('cat.' + c); }
 		// catShort（'catS.*' 短名）随 DockBar 一并删除：它是那条徽标专用的紧凑标签，
 		// 设置面板一律用完整名 catLabel，删除后已无调用者。
-		function modeLabel(m) { return T('mode.' + m); }
+		//
+		// 动作标签。**未知动作不得退化成 key 本身**：归一化侧为了让「更高版本写入的动作」
+		// 不被丢弃而保留了原值（actionAllowed），于是面板真会拿到 `bogus` 这种值，
+		// 而 `T()` 查不到 `mode.bogus` 时返回的就是那个 key —— 用户看到「mode.bogus」，
+		// 要么以为界面坏了，要么以为是他自己填错了某个叫 mode.bogus 的东西。
+		// 降级成「未知动作：bogus」同时说明两件事：本版不认识它（执行侧会折成询问），
+		// 以及原值是什么（排查/手改配置时要能对上）。
+		// 这个兜底只在这里做一次 —— 所有渲染动作名的位置（下拉框、徽标、决策记录）
+		// 都经 modeLabel，逐处判空就是 N 个漏改点。
+		function modeLabel(m) {
+			const k = 'mode.' + m;
+			const s = T(k);
+			return s === k ? T('mode.unknown').replace('{a}', String(m)) : s;
+		}
 		// 快捷工具的用途说明：仅当 i18n 有对应文案时显示（用户自加的工具名不显示说明）
 		function quickDesc(t) {
 			const k = 'quick.' + t;
@@ -3521,6 +3538,8 @@ window.__ModuleLoader__.load({
 			// 新增快捷工具行的回落值：与已存在行同构（仅动作是 auto 时出现）。
 			const [newToolAutoFallback, setNewToolAutoFallback] = React.useState('ask');
 			const [form, setForm] = React.useState({ action: 'deny', tool: '', path: '', args: '', reason: '' });
+			// 新增规则行的回落值：规则动作现在也能选 auto（与快捷工具新增行同构）。
+			const [newRuleAutoFallback, setNewRuleAutoFallback] = React.useState('ask');
 			const [confirm, setConfirm] = React.useState(null);
 			// 一次性提示（非阻塞）：目前用于「大分类与破坏性子设置的严格度不一致」。
 			// 存纯字符串而非对象：原先带过 { key, text }，但 key 全仓无人读取
@@ -3806,7 +3825,7 @@ window.__ModuleLoader__.load({
 					// 而它的框明明还渲染着（用户正在打字，字却消失了）。
 					const keepOk = (tb, tier) => {
 						const a = (subNext[tb] || {})[tier]
-						return finalActionOf(a, subAutoFallbackOf(tier)) === 'deny'
+						return finalActionOf(a, subAutoFallbackOf(tier, s, tb)) === 'deny'
 					}
 					if (focusNow && focusNow.kind === 'sub' && prev && prev[focusNow.tab]
 						&& subNext[focusNow.tab] && keepOk(focusNow.tab, focusNow.key)) {
@@ -3821,7 +3840,7 @@ window.__ModuleLoader__.load({
 					// `auto + 回落 deny` 那一格的理由框仍在渲染，按 raw `=== 'deny'` 判会把它
 					// 正在打的草稿丢掉。
 					if (focusNow && focusNow.kind === 'cat' && prev && prev[focusNow.tab]
-						&& cs[focusNow.tab] && finalActionOf(cs[focusNow.tab][focusNow.key], catAutoFallbackOf(focusNow.key)) === 'deny') {
+						&& cs[focusNow.tab] && finalActionOf(cs[focusNow.tab][focusNow.key], catAutoFallbackOf(focusNow.key, s, focusNow.tab)) === 'deny') {
 						return Object.assign({}, crs, { [focusNow.tab]: Object.assign({}, crs[focusNow.tab], { [focusNow.key]: prev[focusNow.tab][focusNow.key] }) });
 					}
 					return crs;
@@ -3839,7 +3858,7 @@ window.__ModuleLoader__.load({
 				setFbReason((prev) => {
 					// 同 keepOk：按**最终动作**判（与 fbShowReason 同源），`auto + 回落 deny`
 					// 那一格的草稿同样要保住。
-					if (focusNow && focusNow.kind === 'fb' && prev && finalActionOf(fbShow[focusNow.tab], fbAutoFallbackOf()) === 'deny') {
+					if (focusNow && focusNow.kind === 'fb' && prev && finalActionOf(fbShow[focusNow.tab], fbAutoFallbackOf(s, focusNow.tab)) === 'deny') {
 						return Object.assign({}, fbNext, { [focusNow.tab]: prev[focusNow.tab] });
 					}
 					return fbNext;
@@ -3868,7 +3887,7 @@ window.__ModuleLoader__.load({
 				setQuickReason((prev) => {
 					if (focusNow && focusNow.kind === 'quick' && prev && prev[focusNow.key]) {
 						const sub = focusNow.tab === 'global' ? 'g' : 'p';
-						if (qs[focusNow.key] && finalActionOf(qs[focusNow.key][sub], quickAutoFallbackOf(focusNow.key)) === 'deny') {
+						if (qs[focusNow.key] && finalActionOf(qs[focusNow.key][sub], quickAutoFallbackOf(focusNow.key, s, focusNow.tab)) === 'deny') {
 							return Object.assign({}, qr, { [focusNow.key]: Object.assign({}, qr[focusNow.key], { [sub]: prev[focusNow.key][sub] }) });
 						}
 					}
@@ -3893,8 +3912,8 @@ window.__ModuleLoader__.load({
 					// 四支判据都走 finalActionOf（与各自渲染处的 showReason 同源）：
 					// `auto + 回落 deny` 那一格的理由框仍在渲染，按 raw `=== 'deny'` 判会把
 					// 编辑态清掉，而草稿保护也依赖同一判据 —— 两处一起改才保得住。
-					if (kind === 'cat') return !!(cs[t] && finalActionOf(cs[t][key], catAutoFallbackOf(key)) === 'deny');
-					if (kind === 'sub') return !!(subNext[t] && finalActionOf(subNext[t][key], subAutoFallbackOf(key)) === 'deny');
+					if (kind === 'cat') return !!(cs[t] && finalActionOf(cs[t][key], catAutoFallbackOf(key, s, t)) === 'deny');
+					if (kind === 'sub') return !!(subNext[t] && finalActionOf(subNext[t][key], subAutoFallbackOf(key, s, t)) === 'deny');
 					// 例外行：该条仍在（未被别处删掉）**且动作仍是 deny/ask** 时，原因/备注格
 					// 才继续可编辑。用 excActs 同时回答两件事：该条在不在、它的动作是什么。
 					//
@@ -3905,9 +3924,9 @@ window.__ModuleLoader__.load({
 					if (kind === 'exc') return !!(excActs[t] && (excActs[t][key] === 'deny' || excActs[t][key] === 'ask'));
 					if (kind === 'quick') {
 						const sub = t === 'global' ? 'g' : 'p';
-						return !!(qs[key] && finalActionOf(qs[key][sub], quickAutoFallbackOf(key)) === 'deny');
+						return !!(qs[key] && finalActionOf(qs[key][sub], quickAutoFallbackOf(key, s, t)) === 'deny');
 					}
-					return finalActionOf(fbShow[t], fbAutoFallbackOf()) === 'deny';
+					return finalActionOf(fbShow[t], fbAutoFallbackOf(s, t)) === 'deny';
 				};
 				setReasonEditing((cur) => (stillEditable(cur) ? cur : null));
 				if (reasonFocus.current && !stillEditable(reasonKeyOf(reasonFocus.current))) reasonFocus.current = null;
@@ -4097,8 +4116,10 @@ window.__ModuleLoader__.load({
 
 			// auto 的回落值：显示值取自宿主下发的分类块（catAutoFallback 字段），
 			// 缺省 'ask'（与宿主 normalizeAutoFallback 的缺省**同源**，不是各写一份）。
-			const catAutoFallbackOf = (c) => {
-				const block = status && status.categories && status.categories[tab] ? status.categories[tab] : null;
+			const catAutoFallbackOf = (c, st, t) => {
+				const src = st || status;
+				const tb = t || tab;
+				const block = src && src.categories && src.categories[tb] ? src.categories[tb] : null;
 				const v = block && block[c] ? block[c].autoFallback : undefined;
 				return v === 'allow' || v === 'deny' ? v : 'ask';
 			};
@@ -4260,9 +4281,10 @@ window.__ModuleLoader__.load({
 			// 某行快捷工具的**当前**回落值（只有 auto 时可能非空）。与 quickRow 里那段
 			// 内联取法同源 —— 抽成函数是因为 changeQuick 也要用它判编辑态，
 			// 而 qAf 是 quickRow 的局部变量，在 changeQuick 的作用域里拿不到。
-			const quickAutoFallbackOf = (tool) => {
-				const key = tab === 'global' ? 'g' : 'p';
-				const m = status && status.quickTools ? (key === 'g' ? status.quickTools.global : status.quickTools.project) : null;
+			const quickAutoFallbackOf = (tool, st, t) => {
+				const key = (t || tab) === 'global' ? 'g' : 'p';
+				const src = st || status;
+				const m = src && src.quickTools ? (key === 'g' ? src.quickTools.global : src.quickTools.project) : null;
 				const e = m && m[tool];
 				return e && typeof e === 'object' ? e.autoFallback : null;
 			};
@@ -4515,7 +4537,10 @@ window.__ModuleLoader__.load({
 			};
 
 			const setFormKey = (key) => (e) => setForm(Object.assign({}, form, { [key]: e.target.value }));
-			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined });
+			const addRule = () => invoke('permgate:add-rule', { target: tab, action: form.action, tool: form.tool || undefined, path: form.path || undefined, args: form.args || undefined, reason: form.reason || undefined,
+				// 回落值：只在动作是 auto 时下发（与新增快捷工具行同口径；宿主 normalizeRule 走
+				// normalizeAutoFallback，非 auto 时本就丢弃，少传则会静默丢掉用户刚选的回落值）。
+				autoFallback: form.action === 'auto' ? newRuleAutoFallback : undefined });
 			const removeRule = (id) => invoke('permgate:remove-rule', { target: tab, id });
 			// 排序单点：面板只报「把 id 放到 anchor 之前/之后」，怎么落位由宿主决定
 			// （reorderEntries 是唯一实现）。↑↓ 与拖动都走这里 —— 两条入口共用一个原语，
@@ -4874,10 +4899,11 @@ window.__ModuleLoader__.load({
 			//
 			// 项目 tab 显示的是 `inherit` 时（本层未表态），回落值必须取**穿透后**的生效值
 			// —— 因为裁决确实会用全局那一档的回落值，面板的判据也得跟着走。
-			const subAutoFallbackOf = (tier) => {
-				const cs = status && status.commandSub;
+			const subAutoFallbackOf = (tier, st, t) => {
+				const src = st || status;
+				const cs = src && src.commandSub;
 				if (!cs) return null;
-				const m = tab === 'global' ? cs.globalAutoFallbacks : cs.autoFallbacks;
+				const m = (t || tab) === 'global' ? cs.globalAutoFallbacks : cs.autoFallbacks;
 				const v = m ? m[tier] : null;
 				return v === 'allow' || v === 'deny' ? v : 'ask';
 			};
@@ -5241,12 +5267,23 @@ window.__ModuleLoader__.load({
 				const eff = ar.effective || {};
 				const dflt = ar.defaults || {};
 				const explicit = Array.isArray(ar.explicit) ? ar.explicit : [];
+				// 数字项的值域（宿主下发，见 AUTO_REVIEW_RANGES）：缺字段时按空表处理 ——
+				// 回退到写死的上下限就等于在客户端造第二份口径，正是本条要消掉的东西。
+				const ranges = ar.ranges && typeof ar.ranges === 'object' ? ar.ranges : {};
 				// 提交单个字段。null = 恢复默认（宿主 delete 该键）。
 				const setField = (key, value) => {
 					const args = value === null ? { clear: [key] } : { patch: { [key]: value } };
 					invoke('permgate:set-auto-review', args, () => setMsg(T('panel.autoSaved')));
 				};
-				// 数字输入：与宿主 normalizeAutoReview 同口径（非数字/负数 → 拒绝，不静默回落）
+				// 数字输入：与宿主 normalizeAutoReview 同口径（非数字/超范围 → 拒绝，不静默回落）
+				//
+				// 值域取宿主下发的 `ar.ranges`（与 normalizeAutoReview 同一份常量）：客户端**不写死**
+				// 上下限。写死会让宿主调范围后面板仍按旧范围归一，而宿主对超范围的值会自行**钳制**
+				// （负数则丢弃不落键）—— 用户看到「已保存」，落盘值却与他填的不同。
+				//
+				// 处置也刻意与宿主**不同**：宿主钳制（它要容忍手改配置），面板拒绝并提示（用户在
+				// 环里，能当场改）。同一份值域、两种处置不是双份真相 —— 真相是那份表，「拒绝」
+				// 与「钳制」只是两个调用方对同一个越界值的不同应对，且都不会静默改用户填的数。
 				//
 				// unit 是**单位后缀**：光秃秃的 `20000` 没人看得出是毫秒还是秒，
 				// 而这两个字段的单位恰恰是最容易搞错的地方（填 20 以为是 20 秒、实际 20 毫秒）。
@@ -5254,11 +5291,26 @@ window.__ModuleLoader__.load({
 				const numInput = (key, width, unit) => {
 					const cur = eff[key];
 					const isDefault = explicit.indexOf(key) === -1;
+					// 非受控 + key 重挂载：给了 value 却没有 onChange 的框会被 React 判成只读，
+					// 每次 input 事件后把 DOM 值还原回 props.value —— 用户敲进去的字符当场被撤销。
+					// key 取生效值：值一变（提交成功 / 点「恢复默认」/ 外部改动）就重挂载，
+					// 让 defaultValue 重新生效，否则非受控框会一直显示旧值（另一种面板说谎）。
+					const curText = String(cur === undefined ? '' : cur);
 					const input = React.createElement('input', {
 						className: 'pg-field',
-						type: 'number',
+						// 用 text 而不是 number：number 的 value sanitization 会把 "-" / "1e" / "1."
+						// 这类中间态吞成空串，与「用户清空」在 DOM 上不可区分 —— 那样一次误输入 +
+						// 失焦就会走下面的 clear 分支，把显式配置（如 timeoutMs=0）静默删掉、
+						// 回落默认值，面板却照常弹「已保存」。text 下文本原样保留，非法输入
+						// 走「拒绝 + 归位」，清空仍是唯一的 clear 入口。inputMode 保住数字键盘。
+						type: 'text',
+						inputMode: 'numeric',
 						style: Object.assign({ width: width || 90 }, isDefault ? { color: 'rgba(128,128,128,0.95)' } : null),
-						value: String(cur === undefined ? '' : cur),
+						// 非受控（defaultValue + key 重挂载），见上方 curText 的说明。
+						// 用 key 而不是受控 value：本框按设计只在 onBlur 提交，
+						// 受控形态下每次按键都会被还原成 props 值，等于打不进字。
+						key: key + ':' + curText,
+						defaultValue: curText,
 						// placeholder 显示默认值：用户清空后知道会回到哪
 						placeholder: String(dflt[key]),
 						// 用 onBlur 而不是 onChange：数字框每敲一个字符就提交会写入
@@ -5266,9 +5318,35 @@ window.__ModuleLoader__.load({
 						onBlur: (e) => {
 							const raw = String(e.target.value || '').trim();
 							if (raw === '') { setField(key, null); return; }
-							const n = Number(raw);
-							if (!Number.isFinite(n) || n < 0) { setNotice(T('panel.autoBadNumber')); return; }
-							setField(key, Math.floor(n));
+							// 只接受**纯十进制**文本（可带小数）：`Number()` 还认十六进制、
+							// 二进制、八进制与科学计数法（`0x10`→16、`0b11`→3、`1e3`→1000）。
+							// `type: 'number'` 时代浏览器挡住了 `x`/`b`/`e`，改成 text 之后
+							// 这些写法就进得来 —— 用户填 `0x10` 却落成 16 是一次**静默改值**，
+							// 而这条输入路径的全部意义就是「不静默改用户填的东西」。
+							// 负数/`.5`/`1.`/`+3` 也一并不匹配（前两者原本分别被 `n < 0` 与
+							// 「floor 成 0」拦下，结果同样是拒绝，这里统一由格式判据负责）。
+							const n = /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : NaN;
+							if (!Number.isFinite(n)) { setNotice(T('panel.autoBadNumber')); e.target.value = curText; return; }
+							const v = Math.floor(n);
+							// 0 < n < 1 会被 floor 成 0，而 min=0 的两项（timeoutMs / breakerThreshold）
+							// 的 0 是「不弹窗直接按回落值执行」/「永不熔断」这种**禁用**语义 ——
+							// 用户填 0.5 不是要禁用，而是单位写错（把秒当毫秒）。拒绝并归位。
+							if (v === 0 && n > 0) { setNotice(T('panel.autoBadNumber')); e.target.value = curText; return; }
+							// 超范围**不提交**：宿主对超范围值会自行钳制（负数则丢弃不落键），
+							// 不报错，面板照常弹「已保存」。故在这里按宿主下发的
+							// 值域先拦下并提示，而不是让用户看到一个假的成功。
+							const rg = ranges[key];
+							if (rg && ((typeof rg.min === 'number' && v < rg.min) || (typeof rg.max === 'number' && v > rg.max))) {
+								setNotice(T('panel.autoBadNumber'));
+								// 非受控框不会自动还原：把文本归位成生效值，否则框里留着那个没被采纳的值。
+								e.target.value = curText;
+								return;
+							}
+							// 生效值没变就不写盘：只是聚焦再离开不该把默认值物化成显式配置（§2.4）
+							// 但要把框里的文本归位成生效值：非受控框不会再被 React 自动还原，
+							// 否则「20000.7 / 020000」这类输入会留在框里、看起来与落盘值不一致。
+							if (v === cur) { e.target.value = curText; return; }
+							setField(key, v);
 						},
 						disabled: busy,
 					});
@@ -5791,6 +5869,10 @@ window.__ModuleLoader__.load({
 				if (r.args) matchers.push('args="' + r.args + '"');
 				return React.createElement('div', Object.assign({ key: r.id }, sortRowProps(ui)),
 					badge(r.action),
+					// auto 的回落值必须显示：它在执行侧决定模型失败后放行还是拒绝（见 finalActionOf），
+					// 只显示「自动审批」而不显示回落值，等于把这条规则的实际效果藏起来。
+					// 规则列表是只读的（宿主没有 set-rule 路由），故这里只给文本，与快捷工具行的只读态同形。
+					r.action === 'auto' ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)', whiteSpace: 'nowrap' } }, T('panel.autoFallbackLabel') + modeLabel(r.autoFallback === 'allow' || r.autoFallback === 'deny' ? r.autoFallback : 'ask')) : null,
 					React.createElement('span', { style: { fontFamily: 'monospace', fontSize: 12 } }, matchers.join('  ') || T('panel.all')),
 					r.reason ? React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)' } }, '(' + r.reason + ')') : null,
 					React.createElement('div', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
@@ -5836,10 +5918,11 @@ window.__ModuleLoader__.load({
 			const fbVal = status && status.fallback ? (tab === 'global' ? status.fallback.global : status.fallback.project) : (tab === 'global' ? 'ask' : 'inherit');
 			// 兜底的回落值（兜底面板**没有**回落值选择器，故它只可能来自手改配置）。
 			// 项目层 `inherit` 时取全局值（裁决确实会穿透），与 fallbackSetting 同源。
-			const fbAutoFallbackOf = () => {
-				const fb = status && status.fallback;
+			const fbAutoFallbackOf = (st, t) => {
+				const src = st || status;
+				const fb = src && src.fallback;
 				if (!fb) return null;
-				const v = tab === 'global' ? fb.globalAutoFallback : (fb.projectAutoFallback || fb.globalAutoFallback);
+				const v = (t || tab) === 'global' ? fb.globalAutoFallback : (fb.projectAutoFallback || fb.globalAutoFallback);
 				return v === 'allow' || v === 'deny' ? v : 'ask';
 			};
 			// 兜底**最终会拒绝** → 才显示拒绝原因框（`auto + 回落 deny` 也算，判据见 finalActionOf）
@@ -5995,9 +6078,9 @@ window.__ModuleLoader__.load({
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.rules')),
 					React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 } },
-						React.createElement('select', { value: form.action, onChange: setFormKey('action'), className: 'pg-field', disabled: busy },
-							React.createElement('option', { value: 'deny' }, T('panel.actionDeny')), React.createElement('option', { value: 'ask' }, T('panel.actionAsk')), React.createElement('option', { value: 'allow' }, T('panel.actionAllow')),
-						),
+						// 动作 + 失败后：走共用组件（规则是六处里最后一处手写 option 的，auto 一直选不了）
+						actionFallbackCtl(form.action, setFormKey('action'), MODES,
+							newRuleAutoFallback, (e) => setNewRuleAutoFallback(e.target.value), busy),
 						React.createElement('input', { placeholder: T('panel.toolPh'), value: form.tool, onChange: setFormKey('tool'), className: 'pg-field', disabled: busy }),
 						React.createElement('input', { placeholder: T('panel.pathPh'), value: form.path, onChange: setFormKey('path'), className: 'pg-field', disabled: busy }),
 						React.createElement('input', { placeholder: T('panel.argsPh'), value: form.args, onChange: setFormKey('args'), className: 'pg-field', disabled: busy }),

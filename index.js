@@ -1492,7 +1492,7 @@ export default {
     function normalizeQuickEntry(v) {
       const raw = typeof v === 'string' ? { action: v } : (v && typeof v === 'object' ? v : null)
       if (!raw) return null
-      if (ALL_MODES.indexOf(raw.action) === -1) return null
+      if (!actionAllowed(raw.action, ALL_MODES)) return null
       const out = { action: raw.action }
       // auto 的回落值：只在动作是 auto 时才存（判据是第一层，与 reason 无关）
       const af = normalizeAutoFallback(raw.autoFallback, raw.action)
@@ -1530,7 +1530,7 @@ export default {
 
     function normalizeRule(r) {
       if (!r || typeof r !== 'object') return null
-      if (MODES.indexOf(r.action) === -1) return null
+      if (!actionAllowed(r.action, MODES)) return null
       const rule = { id: r.id || 'r' + Math.random().toString(36).slice(2, 8), action: r.action }
       if (r.tool !== undefined && r.tool !== null && r.tool !== '') rule.tool = String(r.tool)
       if (r.path !== undefined && r.path !== null && r.path !== '') rule.path = String(r.path)
@@ -1548,24 +1548,53 @@ export default {
     // 非法值**丢弃**而不是落默认 —— 落默认会经 persist 变成「用户表态」。
     //
     // 值域：
-    //   timeoutMs        ≥ 0 的有限数（0 = 不弹窗，直接按回落值执行）
-    //   breakerThreshold ≥ 0 的有限数（0 = 永不启用）
+    //   timeoutMs        0..2147483647 的整数（0 = 不弹窗，直接按回落值执行）
+    //   breakerThreshold ≥ 0 的有限数（0 = 永不启用；无上限，超大值等价于「永不熔断」）
     //   historyN         1..100 的整数
     //   historyBudget    200..100000 的整数
     //   provider / model 非空字符串（成对才有意义，但这里不强制成对 ——
     //                     reviewTarget 要求两者都在才用，缺一个就回落会话模型）
+    //
+    // 数字项的上下限**只有这一份**（AUTO_REVIEW_RANGES），normalizeAutoReview、
+    // autoReviewTimeoutMs 与 statusView 都从它取：面板据此在提交前就拦住超范围值，
+    // 而不是让宿主钳制/丢弃后仍回「已保存」。两份字面量必然漂移，那时面板就会说谎。
+    //
+    // `timeoutMs` 的 max 是 **setTimeout 的延迟上界**（32 位有符号整数上限），
+    // 超过它 Node 只发 TimeoutOverflowWarning 并把延迟**改成 1ms** —— 若 onTimeout
+    // 是 allow，那就是一次无人在环的立即放行。故这个上限不是「防手滑」，而是
+    // 一条安全边界，`autoReviewTimeoutMs` 必须与它同源（那里曾经另写一遍字面量，
+    // 而 `ranges` 漏了 max，于是面板显示 99999999999、实际生效 2147483647）。
+    const AUTO_REVIEW_RANGES = {
+      timeoutMs: { min: 0, max: 2147483647 },
+      breakerThreshold: { min: 0 },
+      historyN: { min: 1, max: 100 },
+      historyBudget: { min: 200, max: 100000 },
+    }
     function normalizeAutoReview(raw) {
       if (!raw || typeof raw !== 'object') return null
       const out = {}
-      const num = (k, min, max) => {
+      const num = (k) => {
         const v = raw[k]
-        if (typeof v !== 'number' || !Number.isFinite(v) || v < min) return
-        out[k] = max === undefined ? Math.floor(v) : Math.min(Math.floor(v), max)
+        if (typeof v !== 'number' || !Number.isFinite(v)) return
+        // 表里缺键时按「≥0、无上限」处理：这里抛错会让 load 整体失败（插件不可用），
+        // 而缺一个值域只是校验变宽，不该升级成加载故障。
+        const rg = AUTO_REVIEW_RANGES[k] || {}
+        const min = typeof rg.min === 'number' ? rg.min : 0
+        const max = rg.max
+        // 判据用**取整后**的值：负数（含 -0.5 这类小数）一律丢弃，与 normalizeThreshold 一样
+        // 不把误输入落成用户表态 —— 把 -3 钳成 1 会让面板显示「已配置」，磁盘上却是别的值。
+        // min=0 的项（timeoutMs/breakerThreshold）尤其不能钳：0 是「不弹窗直接执行」这种危险语义。
+        // 只有「填小了」（0 <= n < min，如历史量填 0 或 100）才与上限同口径钳到 min ——
+        // 丢弃会让生效值悄悄回到默认，用户填 100 却发出 4000 的历史。
+        const n = Math.floor(v)
+        if (n < 0) return
+        if (n < min) { out[k] = min; return }
+        out[k] = max === undefined ? n : Math.min(n, max)
       }
-      num('timeoutMs', 0)
-      num('breakerThreshold', 0)
-      num('historyN', 1, 100)
-      num('historyBudget', 200, 100000)
+      num('timeoutMs')
+      num('breakerThreshold')
+      num('historyN')
+      num('historyBudget')
       if (typeof raw.provider === 'string' && raw.provider.trim()) out.provider = raw.provider.trim().slice(0, 100)
       if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim().slice(0, 200)
       return Object.keys(out).length ? out : null
@@ -4978,8 +5007,16 @@ export default {
     function outsideMatrix(catKey, fp, root, cwd) {
       // 闸归属单点：调用方不传闸 key，4 个调用点因此一行都不用改。
       const gate = outsideGateOf(catKey)
-      const d = resolveCategory(gate, fp, 'path', root, cwd)
-      const e = resolveCategory(catKey, fp, 'path', root, cwd)
+      // 未知动作先折成 ask 再参与合并（§9A.5）：下面三道分支只认 deny/ask/auto 三个字面值，
+      // 其余一律落到末尾的 allow —— 而归一化侧现在**保留**未知动作（actionAllowed），
+      // 一条命中未知动作的例外因此会由「不匹配 → 落该闸自己的 mode」变成「匹配 → 静默放行」。
+      // 折 ask 与 pre-execute 的归一闸同口径；判据是四档白名单 MODES。
+      // 返回副本而不是就地改写：resolveCategory 的返回值是「这道闸判了什么」的事实，
+      // 就地改写会让那个读不懂的原值消失（告警/诊断再想报它就没有了）；
+      // 副本整体赋给 d/e，下面 `src === d` 这条同一性判据（决定 cat 跟随哪道闸）不受影响。
+      const asKnownAction = (x) => (MODES.indexOf(x.action) !== -1 ? x : Object.assign({}, x, { action: 'ask' }))
+      const d = asKnownAction(resolveCategory(gate, fp, 'path', root, cwd))
+      const e = asKnownAction(resolveCategory(catKey, fp, 'path', root, cwd))
       if (d.action === 'deny' || e.action === 'deny') {
         const src = d.action === 'deny' ? d : e
         const cat = src === d ? gate : catKey
@@ -6639,7 +6676,6 @@ export default {
     function trimUserInstructions(items, budget) {
       const lenOf = (x) => {
         try {
-          if (x && typeof x.text === 'string') return x.text.length
           return JSON.stringify(x).length
         } catch (e) { return 0 }
       }
@@ -6874,7 +6910,7 @@ export default {
       // `limitShape` 只截断过长的结构，不替换任何值 —— 模型看到的就是真实参数。
       const schema = toolSchemaOf(exec, agent)
       const action = { role: 'fact', name: String(exec.name) }
-      if (schema.description) action.description = schema.description
+      if (schema.description) action.description = limitShape(schema.description, 0)
       if (schema.parameters) action.parameters = limitShape(schema.parameters, 0)
       try { action.arguments = limitShape(exec.arguments, 0) } catch (e) { action.arguments = '(unserializable arguments)' }
       // 判定上下文：为什么走到 auto（哪条规则/哪个分类）。
@@ -7081,13 +7117,14 @@ export default {
       }
       if (r.decision === 'escalate') {
         noteAutoOutcome(exec, 'other')
-        // `reason` 必须**单独带出**（除了拼进 detail）：
-        //   · `detail` 是给 `fallbackReason` 用的机械串（`escalate: <reason>`），
-        //     会进决策记录、随 perm_status 下发；
+        // `reason` 必须**单独带出**：
+        //   · `detail` 是给 `fallbackReason` 用的机械串（escalate 时固定为 `model escalated`，
+        //     **不含模型原话** —— 原话混进 note 会与 permgate 自己的说明同形渲染，见 §4.5A），
+        //     会进决策记录；工具侧由 toolView 剥掉，不进 perm_status；
         //   · 弹窗要显示的是模型**原话本身**（见 pre-execute 里 modelReason 的说明），
         //     不能从 detail 里再切一刀 —— 那等于把「格式化过的串」当原文用，
         //     一旦 detail 的格式变了（加前缀/换分隔符）弹窗就跟着错。
-        return { verdict: 'escalate', code: 'escalate', detail: r.reason || 'model escalated', reason: r.reason || '', raw: r.raw }
+        return { verdict: 'escalate', code: 'escalate', detail: 'model escalated', reason: r.reason || '', raw: r.raw }
       }
       if (r.decision === 'allow') {
         noteAutoOutcome(exec, 'allow')     // 清零
@@ -7153,10 +7190,14 @@ export default {
     // 弹窗超时（毫秒）。单独包一层是因为它要被传给 askUser，且必须保证
     // 「非法值 → 0」这条安全性质（见 askUser 的注释：非法值一律回落 0 = 永不超时，
     // 因为 setTimeout 超范围会把延迟改成 1ms，onTimeout=allow 时就是立即放行）。
+    //
+    // 上限取自 `AUTO_REVIEW_RANGES.timeoutMs.max`（**同源**，不另写字面量）：
+    // 那份表已经下发给了面板，面板按它拦截超范围输入。这里再写一遍数字就会漂移，
+    // 而漂移的形态正是「面板显示 99999999999、实际生效 2147483647」。
     function autoReviewTimeoutMs() {
       const v = autoReviewSetting('timeoutMs')
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return 0
-      return Math.min(Math.floor(v), 2147483647)
+      return Math.min(Math.floor(v), AUTO_REVIEW_RANGES.timeoutMs.max)
     }
 
     // ── 熔断器（§3.5）：真·连续语义 ─────────────────────────────────────────────
@@ -7369,7 +7410,9 @@ export default {
           //
           // 正确做法与 reason / intent 完全一致：**存原值**，路由层 `/permgate/pending`
           // 用 `L(e.note, lang)` 投影。`L` 对字符串会原样返回（`if (typeof o === 'string')
-          // return o`），故两种形状都能正确投影，且截断仍在写入侧做（normalizeText）。
+          // return o`），故两种形状都能正确投影。但截断只在**字符串**分支成立（normalizeText）；
+          // 末尾的对象分支原样保留、不经 normalizeText —— 故写入侧必须保证对象里的文案
+          // 本身就是短机械串（auto 异常路径的 `why` 即如此）。
           note: normalizeText(d.note) || normalizeText(o.note) || (d.note && typeof d.note === 'object' ? d.note : (o.note && typeof o.note === 'object' ? o.note : null)),
           // ── 模型原话（auto 专有）──────────────────────────────────────────────
           // 为什么它必须在弹窗上：`escalate` 与各类失败是**弹窗的主要来源**，而模型在那条
@@ -7481,6 +7524,10 @@ export default {
         if (exec.signal && exec.signal.addEventListener) {
           try { exec.signal.addEventListener('abort', onAbort, { once: true }) } catch (e) {}
         }
+        // 已 abort 的 signal 不会再派发 abort 事件（AbortSignal 语义）：注册监听器拦不住
+        // 「注册前就已取消」。不补这一次检查，条目会一直留在 pendingApprovals 里，而
+        // autoFallback=ask 的弹窗按设计永不超时 —— 该次工具调用就永久挂起了。
+        if (exec.signal && exec.signal.aborted) onAbort()
       })
     }
 
@@ -8174,7 +8221,11 @@ export default {
             model: autoReviewSetting('model'),
           },
           defaults: AUTO_REVIEW_DEFAULTS,
-          // 哪些键是用户显式写下的（决定面板是否显示「已配置」标记与「恢复默认」按钮）
+          // 数字项的值域（上下限同源，见 AUTO_REVIEW_RANGES）：面板据此在提交前拦住
+          // 超范围值。不下发就会让面板只判「非负」，而宿主对超范围值自行钳制/丢弃 ——
+          // 用户填 0 或 100 仍看到「已保存」，落盘却是被钳过的值（面板说谎）。
+          ranges: AUTO_REVIEW_RANGES,
+          // 哪些键是用户显式写下的（决定面板显示「已配置」标记与「恢复默认」按钮）
           explicit: (config.global.autoReview && typeof config.global.autoReview === 'object')
             ? Object.keys(config.global.autoReview).filter((k) => Object.prototype.hasOwnProperty.call(AUTO_REVIEW_DEFAULTS, k))
             : [],
@@ -8183,7 +8234,7 @@ export default {
           llmAvailable: !!getLlmService(ctx),
           // ── `ready` 已删除（曾是 `ready: AUTO_REVIEW_READY`）───────────────────────
           // 它恒为 `true`（常量硬编码），且全仓**零消费**：client.js 对 autoReview 的
-          // 读取穷举为 effective / defaults / explicit / llmAvailable（无 Object.keys、
+          // 读取穷举为 effective / defaults / ranges / explicit / llmAvailable（无 Object.keys、
           // 无展开），test/smoke.mjs 只断言 llmAvailable。
           //
           // 删它的理由不是「死代码」这么简单，而是**它是本版新暴露的 HTTP 响应字段**：
@@ -8496,6 +8547,10 @@ export default {
         //
         // 同向条目不标注：读侧首条命中即生效，同向时后面的那条即使被遮蔽，**结论也相同**
         // （allow 被 allow 遮蔽仍是 allow），标注它只会制造噪音（狼来了）。
+        // 「同向」= 第一层动作相同**且**最终动作相同。auto 与裸动作即使回落值相同也**不算**
+        // 同向：auto 多一层模型判断，模型可以给出与回落值相反的结论（`auto/deny` 仍可能放行），
+        // 故它后面那条同回落值的裸 `deny` 确实永远轮不到，必须标注。两支都是 auto 时才比
+        // `autoFallback` —— 与 doom 合并的口径一致（只有两边都是 auto 才把回落值放在一起比）。
         // ask 例外不排除：它同样会「先命中」并改变结果（弹窗 vs 静默放行），是真实冲突。
         //
         // 与 exceptionBlast 同样是**读侧现算**：顺序会随用户拖动而变，落盘会变成
@@ -8568,7 +8623,9 @@ export default {
                 let blocker = null
                 for (let k = 0; k < i; k++) {
                   const prev = exs[k]
-                  if (!prev || prev.action === cur.action) continue
+                  // 「等价」= 第一层动作相同**且**最终动作相同：auto 与裸动作永不判等 ——
+                  // 前者多一层模型判断，即使回落值相同，模型也能给出相反结论。
+                  if (!prev || (prev.action === cur.action && finalActionOf(prev.action, prev.autoFallback) === finalActionOf(cur.action, cur.autoFallback))) continue
                   if (hits(k, target)) { blocker = prev; break }
                 }
                 if (blocker) out[layer][cur.id] = { byId: blocker.id, byAction: blocker.action }
@@ -9123,7 +9180,7 @@ export default {
         if (pathname === '/permgate/add-rule' && method === 'POST') {
           await init(exec)
           if (!a.tool && !a.path && !a.args) return json(res, { error: '至少提供 tool/path/args 之一' })
-          const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: a.action, tool: a.tool, path: a.path, args: a.args, reason: a.reason })
+          const rule = normalizeRule({ id: 'r' + Math.random().toString(36).slice(2, 8), action: a.action, tool: a.tool, path: a.path, args: a.args, reason: a.reason, autoFallback: a.autoFallback })
           if (!rule) return json(res, { error: '非法的规则参数' })
           const block = a.target === 'project' ? ensureProject(rootOf(exec)) : config.global
           if (!block.custom) block.custom = []
@@ -9254,10 +9311,10 @@ export default {
     // 回到主模型上下文 —— 一条以工具结果为载体的二阶注入通道。`rawOutput` 是同一句原话的
     // 截断前原文，同理。两者与 `note` 一样只做「工具侧不下发」的分工，面板照旧。
     //
-    // `fallbackReason` 是**同一句原话的第三条通道**：auto 异常路径把它写成
-    // `why = (rv.code || 'infra-error') + ': ' + rv.detail`，而 `reviewWithModel` 在
-    // escalate 时 `detail: r.reason || 'model escalated'` —— 模型自述的那句话就这样
-    // 进了记录（且那里**没有截断**）。它在本仓**没有任何工具侧消费方**（client.js 零引用、
+    // `fallbackReason` 里没有模型原话：auto 异常路径把它写成
+    // `why = (rv.code || 'infra-error') + ': ' + rv.detail`，而 escalate 的 `detail` 已固定为
+    // `model escalated`（原话只走 `modelReason`），其余 `detail` 是本地机械码/异常消息。
+    // 它在本仓**没有任何工具侧消费方**（client.js 零引用、
     // 只有 recordDecision 写入与一处 console.log 读取），剥掉零影响；
     // 弹窗排障靠 `note`（「原因：<why>」）照旧。
     //
@@ -9477,8 +9534,8 @@ export default {
             // 而那正是他判断的依据。
             //
             // `rv.reason` 在 `verdict === 'escalate'` 时是模型自述的理由（reviewWithModel
-            // 里 `detail: r.reason || 'model escalated'`）；在失败路径上它可能是空串
-            // （协议非法时没有可信的理由），`normalizeText` 会把空串折成 undefined，
+            // 里以 `reason: r.reason || ''` 单独带出，`detail` 只是固定机械串）；在失败
+            // 路径上它可能是空串（协议非法时没有可信的理由），`normalizeText` 会把空串折成 undefined，
             // 于是 entry.modelReason 为 null、弹窗不显示空行 —— 不需要额外判空。
             const mr = rv.reason || ''
             // 超时时长只在这条异常路径上有意义，故在此算一次（下面两个分支共用）。

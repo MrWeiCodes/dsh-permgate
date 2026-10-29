@@ -1490,6 +1490,9 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
     S = new Function('config', 'proj', 'EXC_CATS', 'root', 'pathResolve', [
       // matchCommand 的记忆化变量（真实实现是模块级 let，抠函数体时要一并补上）
       'let memoHay = null; let memoLow = "";',
+      // finalActionOf：遮蔽判据问的是「最终动作」（auto 时看它自己的 autoFallback），
+      // 与被复算的实现同源，故同样抠真实函数体注入。
+      sliceIn(src, 'finalActionOf'),
       sliceIn(src, 'norm'),
       sliceIn(src, 'normAbsPath'),
       sliceIn(src, 'globToRegExp'),
@@ -1529,6 +1532,17 @@ ok('新例外追加到末尾，同向去重命中时原地回写文字（不移�
     const r3 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/x.png' }, { id: 'a2', action: 'allow', path: 'X:/ws/x.png' }])
     ok('★ exceptionShadow：同向条目不标注（结论相同，标了是噪音）',
       Object.keys(r3).length === 0, JSON.stringify(r3))
+    // ③b 「同向」= 动作相同**且**最终动作相同。auto 与裸动作即使回落值相同也不算同向：
+    //     auto 多一层模型判断，模型可以给出与回落值相反的结论，故后面那条裸动作仍永远轮不到。
+    //     两条 auto 回落值不同时同理（前者先命中就按它自己的回落值走）。
+    //     这两条是判据的鉴别点：写成 `prev.action === cur.action` 会让 ③c 漏报，
+    //     写成只比 `finalActionOf` 会让 ③d 漏报 —— 两种都曾真实出现过。
+    const r3c = run([{ id: 'a1', action: 'auto', autoFallback: 'allow', path: 'X:/ws/x.png' }, { id: 'd1', action: 'auto', autoFallback: 'deny', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：两条 auto 回落值不同时后一条被标注（auto/allow 遮蔽 auto/deny）',
+      !!r3c.d1 && r3c.d1.byId === 'a1', JSON.stringify(r3c))
+    const r3d = run([{ id: 'a1', action: 'auto', autoFallback: 'deny', path: 'X:/ws/x.png' }, { id: 'd1', action: 'deny', path: 'X:/ws/x.png' }])
+    ok('★★ exceptionShadow：auto 与同回落值的裸动作不算同向（auto/deny 遮蔽裸 deny）',
+      !!r3d.d1 && r3d.d1.byId === 'a1', JSON.stringify(r3d))
     // ④ 目标不同**不得**标注（不能把「同分类」当成「同目标」）
     const r4 = run([{ id: 'a1', action: 'allow', path: 'X:/ws/x.png' }, { id: 'd1', action: 'deny', path: 'X:/ws/y.png' }])
     ok('★★ exceptionShadow：目标不同不标注（判据是「前面的能命中这一条的目标」）',
@@ -1774,6 +1788,75 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // 卡片内**不再**判 tab（判据在调用点，见下一条断言）
     return body.indexOf("if (tab !== 'global') return null") === -1
   })())
+  // ⑨ 数字框只接受纯十进制文本（不得让 Number() 的宽松语法静默改值）。
+  //
+  // 输入框从 `type: 'number'` 改成 `type: 'text'` 之后，浏览器不再替我们挡住
+  // `x` / `b` / `e` 这些字符，而 `Number()` 认它们：`0x10`→16、`0b11`→3、`1e3`→1000。
+  // 用户填 `0x10` 却落成 16 是一次**静默改值**，而这条输入路径的全部意义正是
+  // 「不静默改用户填的东西」（清空才 clear、非法则拒绝并归位）。
+  //
+  // 判据走**真实求值**：把 numInput 的 onBlur 抽出来，用真实实现跑一批输入，
+  // 看它是否提交、提交了什么。只匹配源码里的正则无法区分「正则写对」与「正则写反」。
+  ok('★★ auto 设置的数字框只接受纯十进制（0x10 / 0b11 / 1e3 不得被静默改值）', (function () {
+    const i = cli.indexOf('const numInput = (key, width, unit) => {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    const submitted = []
+    let f = null
+    try {
+      f = new Function('eff', 'explicit', 'dflt', 'ranges', 'setField', 'setNotice', 'T', 'busy', 'React',
+        body + '\n; return numInput;')(
+        { timeoutMs: 20000 }, [], { timeoutMs: 20000 }, { timeoutMs: { min: 0, max: 2147483647 } },
+        (k, v) => submitted.push([k, v]),
+        () => {},
+        (k) => k,
+        false,
+        // React 桩：把 props 与 children 一并记下来。children 必须取 createElement
+        // 的**第 3 个及之后的实参**（React 的语义），只留 props 会让带单位的输入框
+        // 找不到真正的 <input>（实测踩过：input.props.onBlur 不存在）。
+        { createElement: (tag, props, ...kids) => ({ tag, props: props || {}, kids: kids }) })
+    } catch (e) { return false }
+    if (typeof f !== 'function') return false
+    const el = f('timeoutMs', 90, 'ms')
+    // numInput 有单位时会包一层 span（children = [input, 单位标签]），无单位时直接是 input
+    const input = el && el.tag === 'span' && el.kids ? el.kids[0] : el
+    if (!input || !input.props || typeof input.props.onBlur !== 'function') return false
+    const fire = (text) => {
+      submitted.length = 0
+      const ev = { target: { value: text } }
+      input.props.onBlur(ev)
+      return { n: submitted.length, v: submitted.length ? submitted[0][1] : undefined, restored: ev.target.value }
+    }
+    // ① 宽松语法一律拒绝（不提交），且把框里的文本归位成生效值
+    for (const bad of ['0x10', '0b11', '0o17', '1e3', '1E3', '-5', '+3', '.5', '1.', '  0x10  ', 'abc']) {
+      const r = fire(bad)
+      if (r.n !== 0 || r.restored !== '20000') return false
+    }
+    // ② 合法十进制照常提交（对照：不能靠「一律拒绝」通过 ①）
+    const okPlain = fire('5000')
+    if (okPlain.n !== 1 || okPlain.v !== 5000) return false
+    // ③ 小数被 floor（这是既有语义，改动不得顺手丢掉）
+    const okFrac = fire('5000.9')
+    if (okFrac.n !== 1 || okFrac.v !== 5000) return false
+    // ④ 0 < n < 1 仍拒绝（floor 成 0 是「禁用」语义，不是用户想要的）
+    const zeroish = fire('0.5')
+    if (zeroish.n !== 0) return false
+    // ⑤ 清空仍是唯一的 clear 入口
+    const cleared = fire('')
+    if (cleared.n !== 1 || cleared.v !== null) return false
+    // ⑥ 超范围不提交（值域来自宿主下发的 ranges，不写死）
+    const over = fire('99999999999')
+    if (over.n !== 0) return false
+    // ⑦ 生效值没变就不写盘（只是聚焦再离开不该把默认值物化）
+    const same = fire('20000')
+    return same.n === 0
+  })())
   // ⑥ auto 是独立的第三个 tab，且它**完全挡掉**其余设置卡片。
   //
   // 为什么这条重要：`tab === 'global' ? A : B` 在这个文件里有 100+ 处。
@@ -1817,6 +1900,55 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // ⑥ 评审能力不可用时必须显式提示：否则用户看到「auto 一直弹窗」无从判断原因。
   ok('★ 无 llm 服务时面板显式提示（否则 auto 一直弹窗无从解释）',
     cli.includes("'panel.autoNoLlm'") && /ar\.llmAvailable === false/.test(cli))
+  // ⑦ 未知动作的标签不得退化成 key 本身。
+  //
+  // 归一化侧为了让「更高版本写入的动作」不被丢弃而**保留原值**（actionAllowed），
+  // 于是面板真会拿到 `bogus` 这种值。`T()` 查不到 `mode.bogus` 时返回的就是那个 key，
+  // 用户会在下拉框/徽标/决策记录里看到字面的「mode.bogus」—— 要么以为界面坏了，
+  // 要么以为自己填错了某个叫 mode.bogus 的东西。
+  //
+  // 判据走**真实求值**而不是匹配源码：`modeLabel` 是纯函数，把真表注进去跑三格
+  // （已知动作 / 未知动作 / inherit），任一格错都变红。
+  ok('★★ 未知动作的标签降级成「未知动作：X」，不得露出 mode.X 这个 key', (function () {
+    const zh = {}
+    // 抽真表的 mode.* 与新增的 mode.unknown：直接对 client.js 里那段对象字面量求值，
+    // 而不是在测试里另抄一份文案（抄一份就等于测自己）。
+    // 键**带 mode. 前缀**：生产里 T() 收到的就是完整 key（`modeLabel` 拼好再查），
+    // 桩若按去前缀的键存，查什么都是 miss —— 那样这条断言会对着恒真的 `s === k` 变红
+    // （实测踩过：deny 也返回「未知动作」，看起来像实现坏了，其实是桩错了）。
+    for (const m of cli.matchAll(/'(mode\.\w+)': '((?:[^'\\]|\\.)*)'/g)) {
+      if (!(m[1] in zh)) zh[m[1]] = m[2]
+    }
+    const i = cli.indexOf('function modeLabel(m) {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    let f = null
+    try {
+      // T 走真表：查不到时返回 key 本身 —— 这正是 T() 的生产语义（见 client.js 的 let T = …）
+      f = new Function('T', body + '\n; return modeLabel;')((k) => (zh[k] !== undefined ? zh[k] : k))
+    } catch (e) { return false }
+    if (typeof f !== 'function') return false
+    // ① 已知动作照旧（兜底不得吃掉正常值）
+    if (f('deny') !== zh['mode.deny']) return false
+    if (f('inherit') !== zh['mode.inherit']) return false
+    // ② 未知动作：文案里要有原值，且**不得**含 `mode.` 前缀（那就是退化形态）
+    const u = f('bogus')
+    if (u.indexOf('mode.') !== -1) return false
+    if (u.indexOf('bogus') === -1) return false
+    // ③ 真表里必须真有 mode.unknown（否则上面两条是靠 T 的兜底碰巧成立的）
+    return typeof zh['mode.unknown'] === 'string' && zh['mode.unknown'].indexOf('{a}') !== -1
+  })())
+  // ⑧ 英文侧同样要有 mode.unknown，且占位符一致（漏一个语言就是半截 key 露出来）
+  ok('★ 未知动作文案中英成对（两边都用 {a} 占位）', (function () {
+    const m = cli.match(/mode\.unknown': '([^']*)'/g) || []
+    return m.length === 2 && m.every((s) => s.indexOf('{a}') !== -1)
+  })())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2489,7 +2621,7 @@ ok('聚焦中的拒绝原因草稿不被 status 回填覆盖（且仅在输入�
   let evalCond = null
   try {
     evalCond = new Function('finalActionOf', 'catAutoFallbackOf', 'quickAutoFallbackOf', 'fbAutoFallbackOf',
-      'cs', 'qs', 'fbShow', 'prev', 'focusNow', 'sub',
+      'cs', 'qs', 'fbShow', 'prev', 'focusNow', 'sub', 's',
       // 三处判据各包一层函数：一次只求值被调用的那一路（另两路依赖的夹具形状不同）
       'return [ function () { return (' + catCond + '); },'
       + ' function () { return (' + quickCond + '); },'
@@ -2504,7 +2636,7 @@ ok('聚焦中的拒绝原因草稿不被 status 回填覆盖（且仅在输入�
   for (const [action, af, want] of cases) {
     const afOf = () => (action === 'auto' ? af : null)
     const pick = (i, focusNow, cs, qs, fbShow, prev) => evalCond(
-      fa, afOf, afOf, afOf, cs, qs, fbShow, prev, focusNow, 'g')[i]()
+      fa, afOf, afOf, afOf, cs, qs, fbShow, prev, focusNow, 'g', {})[i]()
     // cat：本层该分类的最终动作
     if (pick(0, { kind: 'cat', tab: 'global', key: 'command' },
       { global: { command: action } }, {}, { global: 'ask' }, { global: {} }) !== want) return false
@@ -2720,7 +2852,7 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
   const run = (fk, action, af) => {
     const fa = new Function(faSrc + '\n; return finalActionOf;')()
     const afOf = () => af
-    const fn = new Function('cs', 'subNext', 'excActs', 'qs', 'fbShow',
+    const fn = new Function('cs', 'subNext', 'excActs', 'qs', 'fbShow', 's',
       'finalActionOf', 'catAutoFallbackOf', 'subAutoFallbackOf', 'quickAutoFallbackOf', 'fbAutoFallbackOf',
       body + '\n; return stillEditable;')
     return fn(
@@ -2729,6 +2861,7 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
       { global: { e1: action }, project: {} },
       { tool: { g: action, p: action }, 'a:b': { g: action, p: action } },
       { global: action, project: action },
+      {},
       fa, afOf, afOf, afOf, afOf)(fk)
   }
   // 四格 × 四动作 × 四回落值：**只有「最终会拒绝」的形态可编辑**。
@@ -2791,14 +2924,14 @@ ok('★ 例外行的编辑态收敛必须判动作（allow 时不得保留编辑
   // 用 new Function 真跑，故「判据写反 / 恒真 / 恒假」都会在这里暴露。
   let fn = null
   try {
-    fn = new Function('cs', 'subNext', 'excActs', 'qs', 'fbShow',
+    fn = new Function('cs', 'subNext', 'excActs', 'qs', 'fbShow', 's',
       body + '\n; return stillEditable;')
   } catch (e) { return false }
   if (typeof fn !== 'function') return false
   const mk = (exc, sub) => fn(
     { global: {} }, sub || { global: {} },
     { global: exc, project: {} },
-    {}, { global: 'ask', project: 'inherit' })
+    {}, { global: 'ask', project: 'inherit' }, {})
   // ① 该条仍在且动作是 deny → 原因格仍渲染 → 编辑态保留
   if (mk({ e1: 'deny' })('exc:global:e1') !== true) return false
   // ② 该条仍在且动作是 ask → 备注格仍渲染 → 编辑态保留（漏判 ask 会把备注格误清）
@@ -2809,7 +2942,7 @@ ok('★ 例外行的编辑态收敛必须判动作（allow 时不得保留编辑
   // ④ 该条已被别处删掉 → 清掉（原有行为，不得因为本次改动丢掉）
   if (mk({})('exc:global:e1') !== false) return false
   // ⑤ 该层整个缺失 → 清掉且不抛错
-  if (fn({}, {}, {}, {}, {})('exc:global:e1') !== false) return false
+  if (fn({}, {}, {}, {}, {}, {})('exc:global:e1') !== false) return false
   // ⑥ 反向：动作是 allow 的另一条不该影响 deny 的那一条（不是「整层有 allow 就全清」）
   if (mk({ e1: 'deny', e2: 'allow' })('exc:global:e1') !== true) return false
   if (mk({ e1: 'deny', e2: 'allow' })('exc:global:e2') !== false) return false

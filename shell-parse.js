@@ -9942,12 +9942,11 @@ export function assessCommand(source, shell, hooks) {
       const b = autoFallbackOf(r.autoFallback) || 'ask'
       if (AF_STRICTNESS[b] > AF_STRICTNESS[a]) auto = r
     }
-    const KNOWN_ACTION = { allow: 1, ask: 1, deny: 1, auto: 1 }
     const first = tryOne(segText)
     if (first && first.action === 'deny') return first
     if (first && first.action === 'ask') ask = first
     else if (first && first.action === 'auto') takeAuto(first)
-    else if (first && KNOWN_ACTION[first.action]) allow = first
+    else if (first && first.action === 'allow') allow = first
     else if (first) unknown = first
     // 收紧方向：`ask` 不是授权、`deny` 只会收紧，两者用扩展出的 label 都安全 ——
     // 这正是「用户写的 `kill *`=deny 拦不住 `sudo kill 1234`」那条既有漏洞的修法。
