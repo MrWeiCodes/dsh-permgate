@@ -3075,7 +3075,7 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 八档之后键集扩大了（七个档位键 + reasons），**原意不变**：仍然是一张**封闭**的键集，
   // 仍然逐个校验值域。故断言改为表达「封闭键集 + 值域校验 + 未知键被丢弃」这三件事。
   ok('★ 子设置键集封闭：normalizeSubSetting 只产出八档键与 reasons（D-12）', (function () {
-    const m = src.match(/function normalizeSubSetting\(raw, inheritDefault\) \{[\s\S]*?\n    \}/)
+    const m = src.match(/function normalizeSubSetting\(raw, inheritDefault, otherSub\) \{[\s\S]*?\n    \}/)
     if (!m) return false
     const body = m[0]
     // 沙箱：**真实求值** normalizeSubSetting（自由变量只有 MODES / ALL_MODES / TIERS /
@@ -3980,11 +3980,21 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 反例：写回 `cat.destructive = normalizeSubSetting(c.destructive, inheritDefault, <档位缺省值>)`
   // —— 推导值会被 persist 固化成显式键，导致「面板设项目 deny 被穿透到全局 ask」与
   // 「放松大分类后子设置粘住 deny」两处实测缺陷。
-  // （档位缺省值那个函数已整体删除，故这里同时钉「不得再给它传第三个实参」。）
+  // （档位缺省值那个函数已整体删除。）
+  //
+  // 第三个实参现在是**另一层已归一化的 destructive 块**（只用于「该档最终会不会拒绝」
+  // 这一个判据，见 normalizeSubSetting 的注释），故断言从「不得有第三实参」改为
+  // 「第三实参必须是全局块、且结果仍只保留用户显式写的值」：
+  //   · 传进去的若是一个**推导出来的档位表**（旧缺陷），会同时满足下面的 `if (sub)`
+  //     与「不物化」两条，所以必须单独钉住它来自 `config.global.command.destructive`。
   ok('★ normalizeCategory 只保留用户显式写的子设置（推导交给读取侧，不物化）',
-    src.includes("const sub = normalizeSubSetting(c.destructive, inheritDefault)")
+    src.includes("const sub = normalizeSubSetting(c.destructive, inheritDefault, gSub)")
     && src.includes('if (sub) cat.destructive = sub')
-    && !/normalizeSubSetting\(c\.destructive,\s*inheritDefault\s*,/.test(src))
+    // 第三实参只能来自**已归一化的全局块**（不是任何形式的推导值 / 缺省档位表）
+    && /const gSub = inheritDefault && config && config\.global && config\.global\.command\s*\n\s*\? config\.global\.command\.destructive : null/.test(src)
+    // 且它只在项目层取（全局层没有可穿透的对象）。判据是「`inheritDefault &&` 必须是
+    // 赋值表达式的一部分」—— 不能写成无条件取全局块（全局层会看到自己，形成自引用）。
+    && /const gSub = inheritDefault && /.test(src))
   // ★ 读取侧八档一律「项目显式 → 全局显式 → ask」（**唯一**一份档位取值规则）
   //
   // 原断言锁的是「函数体里出现 derived = destructiveDefaultOf(mode, false)」这一形状。
@@ -9093,8 +9103,9 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     /const rawReasons = r\.reasons && typeof r\.reasons === 'object' \? r\.reasons : null/.test(src)
     && /if \(txt\) reasons\[t\] = txt/.test(src)
     // 只在**该档最终会拒绝**时保留（allow 不弹窗、ask 有自己的备注，存了也读不到）。
-    // 判据是 finalActionOf：`auto + 回落 deny` 在执行侧就是拒绝，它的理由必须能存。
-    && /if \(finalActionOf\(explicit, rawAfs \? rawAfs\[t\] : null\) !== 'deny'\) continue/.test(src))
+    // 判据是 finalActionOf，回落值走**跨层**取值单点 afForTier（见 59e 的行为断言）：
+    // `auto + 回落 deny` 在执行侧就是拒绝，它的理由必须能存。
+    && /if \(finalActionOf\(explicit, afForTier\(t\)\) !== 'deny'\) continue/.test(src))
   // 某档切离 deny 时**只删该档**的理由（不是整个 reasons 对象）
   //
   // 判据要精确到**顺序**：整对象删除是**合法**的，但只能作为「删空了之后清理空壳」那一步
@@ -9128,9 +9139,13 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
   // 而用户看到自己的 `reason` 键变成 `reasons.inside` 会以为是插件擅自改配置。
   ok('★ 59b 存量 reason 字符串：读取侧归 inside 档，但 normalizeSubSetting **原样保留** reason 键',
     // 归一化侧保留裸 reason（不搬进 reasons）。
-    // 判据是 finalActionOf：`inside` 档 = `out.action` + `autoFallbacks.inside`，
-    // `auto + 回落 deny` 与裸 deny 在执行侧同为拒绝，理由都该留下。
-    /if \(finalActionOf\(out\.action, rawAfs \? rawAfs\.inside : null\) === 'deny'\) \{\s*\n\s*const legacy = normalizeText\(r\.reason\)\s*\n\s*if \(legacy\) out\.reason = legacy/.test(src)
+    // 判据与上面 `reasons[t]` **同一条**：`finalActionOf(out.action, afForTier('inside'))`，
+    // 回落值走跨层取值单点 —— `auto + 回落 deny` 与裸 deny 在执行侧同为拒绝，理由都该留下，
+    // 而回落值可能是**另一层**写的（面板的档位下拉框只提交 action，不提交回落值）。
+    // 不得退回「本层判不了就保留」：那会让「本层 auto 且两层都没写回落值」（最终 ask、
+    // 理由读不到）也把理由留在磁盘上，成为配置里看不见的数据。
+    /if \(finalActionOf\(out\.action, afForTier\('inside'\)\) === 'deny'\) \{/.test(src)
+    && /const legacy = normalizeText\(r\.reason\)\s*\n\s*if \(legacy\) out\.reason = legacy/.test(src)
     // 读取侧把它当作理由兜底（reasons[tier] 优先），且**读取单点**只有一份 ——
     // 面板视图（explicitReasonsOf）与裁决视图（destructiveTiers ③）共用 legacyReasonOf，
     // 不在两处各写一遍「读哪个键、怎么归一」（漂移即面板与裁决给出不同理由）。
@@ -9177,7 +9192,7 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     const afSrc = (src.match(/function normalizeAutoFallback\(v, action\) \{[\s\S]*?\n    \}/) || [''])[0]
     const aaSrc = (src.match(/function actionAllowed\(action, allowed\) \{[\s\S]*?\n\}/) || [''])[0]
     const exSrc = (src.match(/function normalizeException\(r, key\) \{[\s\S]*?\n    \}/) || [''])[0]
-    const subSrc = (src.match(/function normalizeSubSetting\(raw, inheritDefault\) \{[\s\S]*?\n    \}/) || [''])[0]
+    const subSrc = (src.match(/function normalizeSubSetting\(raw, inheritDefault, otherSub\) \{[\s\S]*?\n    \}/) || [''])[0]
     if (!faSrc || !afSrc || !aaSrc || !exSrc || !subSrc) return false
     const NT = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined)
     const M = ['ask', 'allow', 'deny']
@@ -9209,6 +9224,35 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
       // ⑥ 子设置 inside 档（老键 action）+ 回落 deny → 存量裸 reason 也要留下
       const s3 = F.normalizeSubSetting({ action: 'auto', autoFallbacks: { inside: 'deny' }, reason: '老形态理由' }, false)
       if (!s3 || s3.reason !== '老形态理由') return false
+      // ── ⑦ 跨层回落（第三实参）：项目层 auto 且**本层**没写回落值 ──────────────────
+      // 面板的档位下拉框只提交 `{target, tier, action}`、不带回落值（changeSubDestructive），
+      // 于是「全局 wide=auto/回落 deny + 项目把 wide 切成自动审批」时项目层**没有这个键**。
+      // 读取侧 destructiveTiers 会跨层补出 deny（该档最终仍是拒绝、面板照常渲染理由框），
+      // 存储侧必须给出同一个答案，否则磁盘理由在**每次加载**时都被删
+      // （重启或「重新加载配置文件」后理由框回空）。
+      const s4 = F.normalizeSubSetting(
+        { wide: 'auto', reasons: { wide: '该留' } }, true, { wide: 'auto', autoFallbacks: { wide: 'deny' } })
+      if (!s4 || !s4.reasons || s4.reasons.wide !== '该留') return false
+      // ⑧ 反例：另一层的回落值是 ask/allow → 最终不是拒绝，理由不该留
+      for (const af of ['ask', 'allow']) {
+        const s5 = F.normalizeSubSetting(
+          { wide: 'auto', reasons: { wide: '不该留' } }, true, { wide: 'auto', autoFallbacks: { wide: af } })
+        if (!s5 || (s5.reasons && s5.reasons.wide !== undefined)) return false
+      }
+      // ⑨ 反例：**两层都没写回落值** → 最终是 ask（理由读不到）→ 不该留在磁盘上。
+      // 这一格防的是「判不了就保留」那种过度修正：它会让配置里出现看不见的数据，
+      // 而本文件既有口径是「不留看不见的旧理由」（见 setCommandSub 的已知代价）。
+      const s6 = F.normalizeSubSetting({ wide: 'auto', reasons: { wide: '不该留' } }, true, { wide: 'auto' })
+      if (!s6 || (s6.reasons && s6.reasons.wide !== undefined)) return false
+      // ⑩ 本层写了就**不看**另一层（本层优先，与读取侧 afOf(from) 的次序同源）
+      const s7 = F.normalizeSubSetting(
+        { wide: 'auto', autoFallbacks: { wide: 'ask' }, reasons: { wide: '不该留' } }, true,
+        { wide: 'auto', autoFallbacks: { wide: 'deny' } })
+      if (!s7 || (s7.reasons && s7.reasons.wide !== undefined)) return false
+      // ⑪ inside 档同一条判据（存量裸 reason 的保留条件走同一个 afForTier）
+      const s8 = F.normalizeSubSetting(
+        { action: 'auto', reason: '该留' }, true, { action: 'auto', autoFallbacks: { inside: 'deny' } })
+      if (!s8 || s8.reason !== '该留') return false
       return true
     } catch (e) { return false }
   })())

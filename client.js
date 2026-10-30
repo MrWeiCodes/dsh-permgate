@@ -5378,13 +5378,22 @@ window.__ModuleLoader__.load({
 					// 两个框必须**成对**才生效（reviewTarget 要求 provider 与 model 都在）——
 					// 只填一个等于没填，故提示里写明。
 					row('panel.autoModel',
+						// 与数字框同一条纪律：非受控（只在 onBlur 提交）+ `key` 取**生效值**。
+						// 少了 key 时 defaultValue 只在首次挂载生效 —— 点「全部恢复默认」后
+						// 宿主删键、eff.provider 回到 ''，而框里的 DOM 值仍是旧文本（dirty 的
+						// 非受控输入不随 defaultValue 变更）⇒ 面板显示「模型覆盖 openai」而实际
+						// 已无覆盖；用户再点进框失焦时 onBlur 还会把旧文本当 patch 重新提交，
+						// 把刚恢复的默认静默撤销。宿主对这两个键做 slice 截断、以及「重新加载
+						// 配置文件」后外部改动，也都要靠它把新值反映到框里。
 						React.createElement('input', {
 							className: 'pg-field', style: { width: 140 }, placeholder: T('panel.autoProviderPh'),
+							key: 'provider:' + (eff.provider || ''),
 							defaultValue: eff.provider || '', disabled: busy,
 							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('provider', v === '' ? null : v); },
 						}),
 						React.createElement('input', {
 							className: 'pg-field', style: { width: 180 }, placeholder: T('panel.autoModelPh'),
+							key: 'model:' + (eff.model || ''),
 							defaultValue: eff.model || '', disabled: busy,
 							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('model', v === '' ? null : v); },
 						}),

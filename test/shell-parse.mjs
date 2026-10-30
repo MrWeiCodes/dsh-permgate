@@ -11550,13 +11550,12 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
   //     与同族的 `<<END-OF` / `<<END.OF` / `<<""` 全部判不出（实测仍有 4 类漏网）。
   {
     const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
-    const m = /function stripHeredocBody\(source\) \{\n([\s\S]*?)\n\}/.exec(spSrc)
-    const fnBody = m ? m[1] : ''
-    // 只扫**正则声明那一行**：函数体注释里为解释反例也会出现同样的字面量，
-    // 扫整个函数体会把注释误判成代码（实测踩过）。
-    const declLine = (fnBody.split('\n').find((l) => l.includes('const heredoc =')) || '').trim()
+    // 正则现在是**模块级常量** `HEREDOC_OPENER_RE`（两个消费方共用一份，见下面的断言）。
+    // 这里扫它的**声明行**：函数体注释里为解释反例也会出现同样的字面量，
+    // 扫整个文件会把注释误判成代码（实测踩过）。
+    const declLine = (spSrc.split('\n').find((l) => /^const HEREDOC_OPENER_RE = /.test(l)) || '').trim()
     const bad = []
-    if (!declLine) bad.push('未找到 stripHeredocBody 里的 heredoc 正则声明行')
+    if (!declLine) bad.push('未找到模块级 HEREDOC_OPENER_RE 声明行')
     // ① here-string 排除
     if (!declLine.includes('(?<!<)<<-?')) bad.push('缺 (?<!<) —— here-string `<<<x` 会被误当 heredoc')
     // ② 转义在捕获组**外**（源码形态 `\\?(` —— 反斜杠转义紧跟捕获组开括号）
@@ -11569,8 +11568,66 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
     if (!declLine.includes("(?:'") || !declLine.includes('|"')) {
       bad.push('分隔符类不接受引号内的字符 —— `<<E"OF"` / `<<END-OF` / `<<END.OF` 判不出')
     }
-    ok('★ AH10f `stripHeredocBody` 的 opener 正则必须含 `(?<!<)`、转义在捕获组外、且不用反向引用配对引号（修复 1/4 写法约束）',
+    ok('★ AH10f heredoc opener 正则必须含 `(?<!<)`、转义在捕获组外、且不用反向引用配对引号（修复 1/4 写法约束）',
       bad.length === 0, JSON.stringify(bad))
+  }
+  // ★★ opener 正则必须**只有一份**，且两处消费方都指向它。
+  //
+  // 这条守的是一个实测回归：`maskFakeHeredocOpeners`（把引号/注释/算术里的假 opener
+  // 打成字面量）需要知道「真 opener 的标签到哪里结束」才能整段跳过；它曾经自己写了一份
+  // 「跳过开头的连续引号块」的判据，于是**裸词在前、引号块在后**的标签（`cat <<a"b<<c"`，
+  // bash 的 delimiter 是 `ab<<c`）被当成「裸词标签 `a` + 一个普通引号串」—— 后半个引号块
+  // 落进双引号分支被掩码成 `ab <c`，`stripHeredocBody` 于是找不到终止符 `ab<<c`、
+  // 走 `!end` 分支把其后整段真命令截掉。八档全 deny + 大分类 allow 下实测
+  // HEAD=deny → allow（fail-open），受影响的五个标签形态见下一条断言。
+  //
+  // 两份判据各写一遍就是两处会漂移的知识；收敛成一个常量后，改一处两处同步。
+  ok('★★ heredoc opener 正则只有一份定义，stripHeredocBody 与掩码函数共用它', (function () {
+    const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
+    // 定义恰好一次（多份定义 = 又分叉了）
+    const defs = spSrc.match(/const HEREDOC_OPENER_RE = /g) || []
+    if (defs.length !== 1) return false
+    // 两个消费方都必须用这个常量，不得再出现内联的 `<<-?` 正则字面量
+    if (!/const heredoc = HEREDOC_OPENER_RE\.exec\(maskFakeHeredocOpeners\(rest\)\)/.test(spSrc)) return false
+    if (!/HEREDOC_OPENER_RE\.exec\(src\.slice\(i\)\)/.test(spSrc)) return false
+    // 除定义行外，文件里不得再有 heredoc opener 的内联正则（注释里引用不算 —— 那些行
+    // 不以 `const` 或 `= /` 起头，这里按「形如 /(?<!<)<<-?…/ 的字面量」数，含注释则放宽到 1 处）
+    const inline = spSrc.match(/\/\(\?<!<\)<<-\?/g) || []
+    return inline.length === 1
+  })())
+  // ★★ 标签词里含 `<<` 时不得被掩码改掉（上面那条回归的**行为**钉桩）。
+  //
+  // 上一条只证明「用的是同一个常量」，不证明跳过逻辑真的按它走完全程。这一条直接跑
+  // 真实 `assessCommand`：真 bash 会执行 `cat <<标签` 之后的裸 `rm`（heredoc 正文是数据、
+  // 终止符之后的命令照常执行），故八档全 deny 下必须 deny。
+  //
+  // 五个形态全部来自实测（HEAD=deny、改坏的版本=allow）：
+  //   裸词在前 + 引号块在后（`a"b<<c"`）—— 上面那条回归的正中靶心；
+  //   单引号同族；引号块内部以 `<<` 开头（`a"<<"b`）；
+  //   引号块后还有裸词（`a"b<<c"d`）；标签中间夹大写字（`E"O<<F"`）。
+  // 对照格（`"a<<b"` / `'a<<b'` / `EOF`）原本就正确，留着防「修好一族、改坏另一族」。
+  {
+    const bad = []
+    const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', priv: 'deny', proc: 'deny', power: 'deny', reg: 'deny' }
+    const NAKED = 'rm -rf /var/lib/my app'
+    const LABELS = [
+      ['a"b<<c"', 'deny'], ["a'b<<c'", 'deny'], ['a"<<"b', 'deny'],
+      ['a"b<<c"d', 'deny'], ['E"O<<F"', 'deny'],
+      ['"a<<b"', 'deny'], ["'a<<b'", 'deny'], ['EOF', 'deny'],
+    ]
+    for (const [lab, want] of LABELS) {
+      // bash 的 delimiter = 标签词做 quote removal（引号只影响展开，不属于分隔符）
+      const delim = lab.replace(/['"]/g, '')
+      const cmd = 'cat <<' + lab + '\nbody\n' + delim + '\n' + NAKED
+      for (const sh of ['bash', 'pwsh']) {
+        for (const pl of ['win32', 'posix']) {
+          const got = at(cmd, dsAllDeny, sh, { platform: pl }).action
+          if (got !== want) bad.push([lab, sh, pl, want, got])
+        }
+      }
+    }
+    ok('★★ AH10g 标签词里含 `<<` 时不得被掩码改掉（其后真命令仍要判 deny）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
 
   // ── ⑭ 本轮两项：反引号形态的 `outside` 档 + 未知动作例外的 `ask` 下界 ────────────────

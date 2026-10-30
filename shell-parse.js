@@ -4866,6 +4866,214 @@ function replaceCommandSubstitution(text, extracted) {
 }
 
 /**
+ * heredoc opener 的**唯一定义**：`<<` / `<<-` + 可选转义 + 标签词。
+ *
+ * 标签词可以是由引号块与裸词**任意拼接**而成（`EOF` / `'EOF'` / `a"b<<c"` /
+ * `"a"b` / `'a'\"b\"`）：bash 的 delimiter 就是这个词做 quote removal 的结果，
+ * 引号只影响是否做参数展开，**不属于分隔符本身**。
+ *
+ * 为什么必须收敛成一个常量：这个正则有两处消费方，且**必须给出同一个标签**——
+ *   · `stripHeredocBody`：按它找 opener、按 `heredoc[1]` 剥引号得到终止符；
+ *   · `maskFakeHeredocOpeners`：按它判断「这段 `<<` 是不是真 opener」，从而跳过整个标签。
+ * 两处一旦不一致，掩码就会改掉真标签（`cat <<a"b<<c"` 的 delimiter 是 `ab<<c`，
+ * 掩码后成 `ab <c`）⇒ 终止符找不到 ⇒ 其后整段真命令被截掉（fail-open，已实测）。
+ *
+ * `(?<!<)` 排除 here-string 的 `<<<`；字符类排除 `\n`，因为标签不会跨行。
+ */
+const HEREDOC_OPENER_RE = /(?<!<)<<-?[ \t]*\\?((?:'[^'\n]*'|"[^"\n]*"|[^\s;|&()<>'"\\])+)/
+
+/**
+ * 把**引号 / 注释 / 算术展开**里的 `<<` 打成字面量（第一个 `<` 换成空格）。
+ *
+ * 为什么需要它：`stripHeredocBody` 的 opener 正则只看字符、不看上下文，于是
+ * `echo "a<<b"` / `# 用 heredoc（<<DOC）写配置` / `echo $((1<<2))` 里的 `<<` 会被
+ * 当成 heredoc 的开头。那个「标签」（`b` / `DOC` / `2`）在正文里当然找不到单独成行的
+ * 终止符，于是走 `!end` 分支 —— 而该分支在 `stripped === 0` 时把其后**所有行**整段
+ * 丢掉，连真命令一起丢（fail-open）。实测（bash，八档全 deny）：
+ *     echo "a<<b"
+ *     rm -rf /data <<EOF
+ *     body
+ *     EOF
+ *   修复前 `rawCommandNames` 只看到 `echo` ⇒ 整条 allow；而真 bash 会执行那个
+ *   `rm -rf /data`（第一行是独立命令、第二行是合法 heredoc）。
+ *
+ * 做法是**只改喂给 opener 正则的那份文本**：假 opener 的第一个 `<` 换成空格
+ * （长度与换行都不变），于是正则只在命令上下文里命中，而 `heredoc.index` 与标签在
+ * 原文本里仍然对得上（调用方用原文本切片）。没有假 opener 时**原样返回**。
+ *
+ * 上下文判据与 bash 一致，也与本文件词法器同源：
+ *   · 单引号块 / 注释块：内部一切是字面量（注释到行尾为止，`\` 不延长它）；
+ *   · 双引号块：`\` 转义、`<<` 是字面量，但 `$(` 与反引号是**命令替换**
+ *     （真会执行，里面的 `<<` 是真 heredoc）—— 那两段递归回命令上下文；
+ *   · 算术展开 `$(( … ))`：`<<` 是左移（字面量）；其中的 `$(` 极罕见，按字面量处理
+ *     （与「少扫」同向，不新增放宽）；
+ *   · 命令替换（`$( … )` / 反引号）在命令上下文里同样是命令上下文。
+ *
+ * 递归深度上限 8：与 `expandSubstitution` 同一条纪律（防病态输入下打转）。
+ *
+ * @param {string} src 原始文本
+ * @returns {string} 等长文本：假 opener 的第一个 `<` 已换成空格；没有假 opener 时原样返回
+ */
+function maskFakeHeredocOpeners(src) {
+  // 快速路径：没有 `<<` 就既没有 heredoc 也没有假 opener（绝大多数命令走这里，
+  // 判定热路径不因本函数多付一次逐字符扫描）。
+  if (src.indexOf('<<') < 0) return src
+  const hits = []
+  // `#` 只在**词首**才是注释（与词法器的 `char === '#' && !started` 同判据）。
+  // 误判方向的取舍与 `stripLineContinuations` 相同：把「其实不是注释」的位置当成注释
+  // ⇒ 少掩码 ⇒ 退回改动前的行为（不放宽）；反过来才会把命令藏进注释。
+  const isWordBreak = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r'
+    || c === ';' || c === '|' || c === '&' || c === '(' || c === ')' || c === '<' || c === '>'
+  // 把 [from, to) 里的 `<<` 全部记下（字面量上下文：单引号内 / 注释内 / 算术内）
+  const markRun = (from, to) => {
+    for (let k = from; k + 1 < to; k += 1) if (src[k] === '<' && src[k + 1] === '<') hits.push(k)
+  }
+  // 扫**命令上下文** [from, to)；`to < 0` 表示扫到文本末尾。
+  const scanCmd = (from, to, depth) => {
+    if (depth > 8) return
+    let i = from
+    let wordStart = true
+    while (i < src.length && (to < 0 || i < to)) {
+      const c = src[i]
+      // 转义：连同被转义的那个字符一起跳过（`\<` 不是 `<`、`\'` 不开启引号）
+      if (c === '\\') { i += 2; wordStart = false; continue }
+      if (c === "'") {
+        const e = src.indexOf("'", i + 1)
+        // 单引号内**一切**是字面量（`$` / `\` / `<<` 都不特殊），不需要递归
+        markRun(i + 1, e < 0 ? src.length : e)
+        i = e < 0 ? src.length : e + 1
+        wordStart = false
+        continue
+      }
+      if (c === '"') {
+        // ── 双引号块：**按区间**掩码，不逐对匹配 ─────────────────────────────────
+        // 逐对匹配（`if (d === '<' && src[k+1] === '<') { push(k); k += 2 }`）会漏掉
+        // **重叠**的 `<<`：`"a<<<b"` 只掩第一对、残留第二对 `<<b`，opener 正则照样命中，
+        // 于是 `!end` 分支又把其后整段真命令截掉（与 M1 同一族 fail-open，只是数量不同）。
+        // 实测该族：双引号内连续 3/5/7/9/11 个 `<`、`"a<<<b<<<c"`、`"a <<< b"` 全部触发。
+        // 区间掩码（`markRun` 逐个 push，不跳过）对任意数量与位置都成立，与单引号/注释/
+        // 算术三个分支用**同一份**判据 —— 少写一份「配对逻辑」就少一处会漏的地方。
+        // 转义不需要特判：`markRun` 覆盖整段字面量区间，`"\<<"` 里的两个 `<` 照样被掩。
+        // 唯一要排除的是**命令替换**区间（`$( )` / 反引号，真会执行，里面可能是真 heredoc），
+        // 故遇到它们时先把前面的字面量段掩掉，再递归回命令上下文。
+        let k = i + 1
+        let end = -1
+        let segStart = k
+        while (k < src.length) {
+          const d = src[k]
+          if (d === '\\') { k += 2; continue }
+          if (d === '"') { end = k; break }
+          if (d === '$' && src[k + 1] === '(' && src[k + 2] !== '(') {
+            const e2 = skipBalanced(src, k + 1, '(', ')')
+            if (e2 < 0) { k = src.length; break }
+            markRun(segStart, k)
+            scanCmd(k + 2, e2, depth + 1)
+            k = e2 + 1
+            segStart = k
+            continue
+          }
+          if (d === '`') {
+            const e2 = src.indexOf('`', k + 1)
+            if (e2 < 0) { k = src.length; break }
+            markRun(segStart, k)
+            scanCmd(k + 1, e2, depth + 1)
+            k = e2 + 1
+            segStart = k
+            continue
+          }
+          k += 1
+        }
+        markRun(segStart, end < 0 ? src.length : end)
+        i = end < 0 ? src.length : end + 1
+        wordStart = false
+        continue
+      }
+      if (c === '#' && wordStart) {
+        const nl = src.indexOf('\n', i)
+        const stop = nl < 0 ? src.length : nl
+        markRun(i + 1, stop)
+        i = stop
+        wordStart = true
+        continue
+      }
+      if (c === '$' && src[i + 1] === '(' && src[i + 2] === '(') {
+        const e = skipBalanced(src, i + 1, '(', ')')
+        if (e < 0) { i = src.length; break }
+        markRun(i + 3, e)
+        i = e + 1
+        wordStart = false
+        continue
+      }
+      // 算术**命令** `(( … ))`：与 `$(( … ))` 同一种上下文（`<<` 是左移），只是没有 `$`。
+      // 不认它时 `((x<<2))` 打头的行会让 opener 正则把 `<<2` 读成 heredoc，标签 `2`
+      // 找不到终止符 ⇒ `!end` 把其后整段真命令截掉（与 M1 同一族）。
+      // 判据要求**紧邻** `((`（`( (cmd) )` 有空格、不是算术）且能配平 `))`；
+      // 配不平的按普通字符继续扫（`(` 是词界），不猜。
+      if (c === '(' && src[i + 1] === '(') {
+        const e = skipBalanced(src, i, '(', ')')
+        if (e > i + 1) {
+          markRun(i + 2, e)
+          i = e + 1
+          wordStart = false
+          continue
+        }
+      }
+      if (c === '$' && src[i + 1] === '(') {
+        const e = skipBalanced(src, i + 1, '(', ')')
+        if (e < 0) { i = src.length; break }
+        scanCmd(i + 2, e, depth + 1)
+        i = e + 1
+        wordStart = false
+        continue
+      }
+      if (c === '`') {
+        const e = src.indexOf('`', i + 1)
+        if (e < 0) { i = src.length; break }
+        scanCmd(i + 1, e, depth + 1)
+        i = e + 1
+        wordStart = false
+        continue
+      }
+      // ── 命令上下文里的 `<<`：**不掩码**，跳过**整个标签词** ─────────────────────
+      // 它要么是真 heredoc（`stripHeredocBody` 自己会剥离），要么是 here-string 的
+      // `<<<`（下面用 `src[i + 2] !== '<'` 排除，与 opener 正则的 `(?<!<)` 同向）。
+      //
+      // ⚠️ 标签词里可能**含有 `<<`**，而它属于分隔符本身、不是假 opener。必须按
+      // opener 正则**同一个定义**跳过整段标签，否则 `stripHeredocBody` 读到的标签会被掩码
+      // 改掉（`cat <<a"b<<c"` 的 delimiter 是 `ab<<c`，掩码后变成 `ab <c`）⇒ 找不到终止符
+      // ⇒ 走 `!end` 分支把其后整段真命令截掉（fail-open，实测 HEAD=deny → 现在 allow）。
+      //
+      // 曾经这里只「跳过开头的连续引号块」（`while (src[k] === "'" || '"')`），于是
+      // **裸词在前、引号块在后**的标签（`a"b<<c"`）被当成「裸词标签 `a` + 一个普通引号串」：
+      // 裸词部分按「`<` 是标签终止字符」处理（对），但**后面那个引号块**接着被双引号分支
+      // 当字面量掩码了（错）—— 于是同一个标签的两半用了两套判据。实测受影响的五个形态：
+      // `a"b<<c"` / `a'b<<c'` / `a"<<"b` / `a"b<<c"d` / `E"O<<F"`，全部 HEAD=deny → 现在 allow。
+      //
+      // 修法是**判据同源**而不是再补一段「跳过引号块」的循环：正则本来就知道标签到哪结束，
+      // 直接复用它（`HEREDOC_OPENER_RE`，与 `stripHeredocBody` 用的是同一份字面量），
+      // 少写一份「标签词由哪些片段组成」的知识就少一处会漂移的地方。
+      if (c === '<' && src[i + 1] === '<' && src[i - 1] !== '<' && src[i + 2] !== '<') {
+        const m = HEREDOC_OPENER_RE.exec(src.slice(i))
+        // 配不上时（例如 `<<` 后面直接是行尾）按最短步进 —— 只跳过这两个字符，
+        // 与「少掩码」同向（不放宽）。
+        i = m ? i + m[0].length : i + 2
+        wordStart = false
+        continue
+      }
+      wordStart = isWordBreak(c)
+      i += 1
+    }
+  }
+  scanCmd(0, -1, 0)
+  if (!hits.length) return src
+  // 等长替换：只把假 opener 的**第一个** `<` 换成空格（长度与换行都不变，
+  // 故 `heredoc.index` 在原文本里仍然对得上）
+  const chars = src.split('')
+  for (const k of hits) chars[k] = ' '
+  return chars.join('')
+}
+
+/**
  * 从**读不懂的原文**里粗提「可能是命令名」的候选，仅供整行 ok:false 时查 deny 例外。
  *
  * 为什么需要它：整行 ok:false（heredoc / 未闭合引号 / 悬空操作符）时没有段可判，
@@ -4929,8 +5137,14 @@ function stripHeredocBody(source) {
   // 真命令截掉 ⇒ 六处 fail-open（真 bash 实测这些命令**会执行**）。故加**方向守卫**：
   // `!end` 时若 `stripped === 0` 保持既有截断（与 HEAD 同向，不引入新放宽），否则 `break`
   // 返回当前已剥离的文本（**不**截断后续）。
+  //
+  // ⚠️ 方向守卫只覆盖「真 heredoc 之后又出现假 opener」；**第一个 opener 就是假的**
+  // （`echo "a<<b"` 打头，后面才是真命令）同样会被 `!end` 整段截掉。故 opener 的匹配
+  // 必须先过 `maskFakeHeredocOpeners`：它把引号/注释/算术里的 `<<` 打成字面量，
+  // 于是这里的正则只在**命令上下文**命中。两者长度一致，故 `heredoc.index` 在
+  // `rest` 里仍然对得上（下面用 `rest.slice` 取原文本）。
   for (let stripped = 0; ; stripped += 1) {
-    const heredoc = /(?<!<)<<-?[ \t]*\\?((?:'[^'\n]*'|"[^"\n]*"|[^\s;|&()<>'"\\])+)/.exec(rest)
+    const heredoc = HEREDOC_OPENER_RE.exec(maskFakeHeredocOpeners(rest))
     if (!heredoc) break
     const tag = heredoc[1].replace(/['"]/g, '')
     const afterTag = heredoc.index + heredoc[0].length

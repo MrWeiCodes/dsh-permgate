@@ -1338,7 +1338,11 @@ export default {
     //
     // `action` 键义不变是**向后兼容的关键**：老配置原样可读，且旧客户端（不传 tier）
     // 写的就是它。新档位键与 `reasons` 都是**追加**，不改变任何既有键的含义。
-    function normalizeSubSetting(raw, inheritDefault) {
+    // `otherSub` = **另一层已归一化**的 `command.destructive` 块（项目层传全局层、
+    // 全局层传 null）。它只用于「该档的最终动作是不是拒绝」这一个判据：`auto` 的回落值
+    // 可能是另一层写的，而写入侧必须与读取侧（`destructiveTiers`）给出同一个答案。
+    // 默认参数保持既有调用方（含测试里的 `new Function` 沙箱）不改也能跑。
+    function normalizeSubSetting(raw, inheritDefault, otherSub) {
       const r = raw && typeof raw === 'object' ? raw : {}
       const allowed = inheritDefault ? ALL_MODES : MODES
       const actionOk = actionAllowed(r.action, allowed)
@@ -1374,6 +1378,39 @@ export default {
       const rawReasons = r.reasons && typeof r.reasons === 'object' ? r.reasons : null
       const rawAfs = r.autoFallbacks && typeof r.autoFallbacks === 'object' ? r.autoFallbacks : null
       const reasons = {}
+      const keepReason = (t) => {
+        const txt = normalizeText(rawReasons ? rawReasons[t] : null)
+        if (txt) reasons[t] = txt
+      }
+      // ── 该档的**跨层回落值**（决定「最终会不会拒绝」的那一半）──────────────────────
+      // 判据必须是 `finalActionOf`，而 `auto` 的最终动作由回落值决定 —— 回落值又可能是
+      // **另一层**写的。读取侧 `destructiveTiers` 的次序是
+      //     `afOf(from) || afOf(pSub) || afOf(gSub)`（from = 该档动作的来源层），
+      // 这里必须给出**同一个值**，否则存储侧与读取侧对「这一格会不会拒绝」给出两个答案。
+      //
+      // 曾经这里只读本层（`rawAfs[t]`）：回落值为空时 `finalActionOf` 给出 `'ask'`
+      // ⇒ 判成「不会拒绝」⇒ 把用户写的理由删掉。而**面板的档位下拉框只提交
+      // `{target, tier, action}`、不带回落值**（client.js 的 changeSubDestructive），
+      // 于是「全局 wide=auto/回落 deny + 项目把 wide 切成自动审批」这一格在项目层
+      // **没有这个键** —— 读取侧会跨层补出 deny（该档最终仍是拒绝、面板照常渲染理由框），
+      // 而只读本层会得到 null ⇒ 磁盘理由在**每次加载**时都被删 ⇒ 重启或「重新加载配置文件」
+      // 后理由框回空。这是写入侧 `setCommandSub` 那个缺陷的另一半。
+      //
+      // `otherSub` 由 `normalizeCategory` 传入**另一层已归一化**的 destructive 块
+      // （项目层看全局层；全局层没有可穿透的对象，传 null）。
+      //
+      // ⚠️ 不要退回「判不了就保留」：那会让「本层 auto 且两层都没写回落值」（最终 ask、
+      // 理由读不到）也把理由留在磁盘上，成为配置里**看不见的数据** —— 而本文件既有的
+      // 口径是「不留看不见的旧理由」（见 setCommandSub 的已知代价）。判据只能有一个：
+      // 最终动作是不是 deny。
+      const otherAfs = (otherSub && otherSub.autoFallbacks && typeof otherSub.autoFallbacks === 'object')
+        ? otherSub.autoFallbacks : null
+      const afForTier = (t) => {
+        const own = rawAfs ? rawAfs[t] : null
+        if (own === 'ask' || own === 'allow' || own === 'deny') return own
+        const oth = otherAfs ? otherAfs[t] : null
+        return oth === 'ask' || oth === 'allow' || oth === 'deny' ? oth : null
+      }
       for (const t of TIERS) {
         // ⚠️ 这一处是 `keyOfTier`（模块级映射单点）的**唯一强制内联副本**，不能改成
         // `out[keyOfTier(t)]`：本函数会被 test/regressions.mjs 抽取进 `new Function`
@@ -1383,9 +1420,8 @@ export default {
         // 故**改 keyOfTier 的映射时必须同步改这一行**。
         // 语义等价：keyOfTier('inside') === 'action'，其余档 t → t。
         const explicit = t === 'inside' ? out.action : out[t]
-        if (finalActionOf(explicit, rawAfs ? rawAfs[t] : null) !== 'deny') continue
-        const txt = normalizeText(rawReasons ? rawReasons[t] : null)
-        if (txt) reasons[t] = txt
+        if (finalActionOf(explicit, afForTier(t)) !== 'deny') continue
+        keepReason(t)
       }
       // ── 存量 `reason` 字符串：**原样保留，不在这里搬家** ────────────────────────
       // 老配置是 `{ "action": "deny", "reason": "rm 危险" }`，语义是「整个破坏性类别」，
@@ -1399,10 +1435,10 @@ export default {
       // 故：**这里原样保留 `reason`**，由读取侧 `destructiveTiers` 把它当作
       // `reasons.inside` 的兜底（`reasons.inside` 优先，它才是用户在新面板上填的那个）。
       //
-      // 判据同样是 `finalActionOf`（`inside` 档 = `out.action` + `autoFallbacks.inside`）：
-      // `{action:'auto', autoFallbacks:{inside:'deny'}, reason:'…'}` 与
+      // 判据与上面 `reasons[t]` **完全同一条**（`inside` 档 = `out.action` + 跨层回落值），
+      // 不再单独写一份：`{action:'auto', autoFallbacks:{inside:'deny'}, reason:'…'}` 与
       // `{action:'deny', reason:'…'}` 在执行侧同为拒绝，理由都该留下。
-      if (finalActionOf(out.action, rawAfs ? rawAfs.inside : null) === 'deny') {
+      if (finalActionOf(out.action, afForTier('inside')) === 'deny') {
         const legacy = normalizeText(r.reason)
         if (legacy) out.reason = legacy
       }
@@ -1473,7 +1509,13 @@ export default {
       // 现在推导完全交给读取侧（destructiveTiers 的「项目显式 → 全局显式 → ask」），
       // 落盘只承载用户表态，幂等性恢复：destructive 的取值不再取决于「中间有没有发生过一次写盘」。
       if (key === 'command') {
-        const sub = normalizeSubSetting(c.destructive, inheritDefault)
+        // 全局层先归一：项目层的「最终动作」判据要看到**已归一化**的全局回落值
+        // （手改配置塞进来的垃圾值不能在那边被当成合法回落值）。
+        // 顺序是 `normalizeConfig` 本来就有的（global 在前、projects 在后），这里只是
+        // 把结果传下去 —— 不另算一份，也不改变任何写盘内容。
+        const gSub = inheritDefault && config && config.global && config.global.command
+          ? config.global.command.destructive : null
+        const sub = normalizeSubSetting(c.destructive, inheritDefault, gSub)
         if (sub) cat.destructive = sub
       }
       // doomloop 的阈值：与 destructive 同口径 —— **只保留用户显式写下的值**，
@@ -2905,7 +2947,20 @@ export default {
       // 判据是 finalActionOf（**不是** `action !== 'deny'`）：该档 `auto + 回落 deny`
       // 在执行侧就是一次拒绝，它的理由必须能存。回落值已在上方归一好，此处读的是
       // **即将落盘的那个值**。
-      if (finalActionOf(action, afOfTier()) !== 'deny') {
+      //
+      // ⚠️ 回落值必须按**读取侧同一套跨层回落**取，不能只用 `afOfTier()`（它只读本层）：
+      // 面板的档位下拉框只提交 `{target, tier, action}`、不带回落值（见上面 2880 那段），
+      // 于是「全局 wide=auto/回落 deny + 项目把 wide 切成自动审批」时**项目层没有这个键** ——
+      // 读取侧 `destructiveTiers` 会跨层补出 deny（该档最终仍是拒绝），而只读本层会得到
+      // null ⇒ 判成非 deny ⇒ 把用户刚填的理由静默删掉。面板 `subAutoFallbackOf` 读的正是
+      // 跨层生效值、理由框照常渲染，于是「填了保存、下次回填还是空框」= 面板说谎 + 理由丢失。
+      //
+      // 次序与读取侧 `afOf(from) || afOf(pSub) || afOf(gSub)` 同源，只是写入侧的「本层」
+      // 恒是本次写入的那一层（`sub`）：本层 → 另一层（全局）。全局层没有可穿透的对象。
+      const gSub = config.global.command && config.global.command.destructive
+      const gAf = gSub && gSub.autoFallbacks && typeof gSub.autoFallbacks === 'object' ? gSub.autoFallbacks[t] : null
+      const effectiveAf = afOfTier() || (targetKey === 'global' ? null : (gAf === 'ask' || gAf === 'allow' || gAf === 'deny' ? gAf : null))
+      if (finalActionOf(action, effectiveAf) !== 'deny') {
         // 切离 deny：删掉**该档**的理由。`inside` 档额外清存量裸 `reason`
         // （它是类别级字符串，归 `action` 键承载的那一档）。
         if (sub.reasons && typeof sub.reasons === 'object') {
@@ -5217,6 +5272,20 @@ export default {
             ? afOf(doom.autoFallback) : afOf(base.autoFallback)
           return Object.assign({}, base, { autoFallback: worst, reason: doom.reason, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
         }
+        // ── 最后一关：doom 不得把**最终动作**放宽（§9B 的另一半）──────────────────────
+        // 上面按 `MODE_STRICTNESS` 比的是**动作**，而 auto 的最终动作由它自己的回落值决定：
+        // `auto + 回落 deny` 在执行侧就是一次拒绝（见 `finalActionOf` 的注释）。于是
+        // `base = auto/deny` 遇上 `doom = ask` 时 `d === b`（auto 与 ask 同为 1），
+        // 同档例外只堵 `doom=auto`、两支都是 auto 那条也不匹配 ⇒ 落到下面的 `return doom`
+        // ⇒ 最终动作由 deny 变 ask，`base.autoFallback` 一并丢失。用户配的「失败后拒绝」
+        // 被降级成一次弹窗（一次误点即放行），正是本函数开头那句「永不应把 deny 降级」
+        // 要堵的那类 fail-open。
+        // 故这里按**最终动作**再比一次（auto 取它的回落值，与 `AF_STRICTNESS` 同一序），
+        // doom 更宽时以 base 为准 —— 拒绝已经是最严的结论，循环提醒没有可再收紧的余地。
+        const finalRank = (x) => (x.action === 'auto'
+          ? AF_STRICTNESS[(x.autoFallback === 'allow' || x.autoFallback === 'deny') ? x.autoFallback : 'ask']
+          : MODE_STRICTNESS[x.action])
+        if (finalRank(doom) < finalRank(base)) return base
         return doom
       }
       // 会话没选「自定义审查」→ 不归本插件管，放行且**不带理由**。
@@ -9506,6 +9575,26 @@ export default {
           // `rawOutput` 是模型的**原始输出**（§7.3 第二条）：出问题时可复现它到底说了什么，
           // 而不是只看我们解析出来的 risk/decision。截断在 recordDecision 里做。
           const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, blast: d.blast, rawOutput: rv.raw }
+          // ── 拒绝时 `reason` **不能**被 auto 的结论整句顶掉（§4.5A 的另一半）──────────
+          // `d.reason` 是**用户配置的拒绝理由的唯一载体**（decide 的 `exReason` 把分类/例外
+          // 的 reason 拼进「执行命令（…）」这类文案）。存储侧（normalizeCategory /
+          // normalizeException / normalizeSubSetting 走 finalActionOf）与读取侧
+          // （resolveCategory 的 reasonOfAction）都只为「最终会拒绝」的动作保留它，
+          // `auto + 回落 deny` 正是其中一格。
+          // 此前 carry 不带 reason、五个出口又各自 `Object.assign(..., { reason: bi(机械文案) })`
+          // 整体覆盖 ⇒ 这一格用户填的理由**永远到不了 AI**（对照同样 reason 配在裸 deny 上
+          // 能完整回传），而面板渲染了理由框、提示「已保存」—— 面板说谎。这正是 69a0260
+          // 「让 auto+回落 deny 也能填拒绝原因」没覆盖的另一半。
+          //
+          // 只在**最终拒绝**的出口合并：用户理由回答「为什么这么配」，auto 的结论回答
+          // 「这次是谁拍的板」，两句都要（§4.5A 只禁拼**模型原话**，不禁拼用户理由）。
+          // allow / ask 出口不合并 —— 那两格存储侧本就不保留 reason，拼上去只会是
+          // 「执行命令」这类无信息量的前缀。
+          const denyReason = (zh, en) => {
+            const uz = L(d.reason, 'zh')
+            const ue = L(d.reason, 'en')
+            return bi(uz ? uz + '；' + zh : zh, ue ? ue + '；' + en : en)
+          }
           if (rv.verdict === 'allow') {
             d2 = Object.assign({}, carry, { action: 'allow', reason: bi('自动审批：模型放行', 'Auto review: allowed by model'), via: 'auto-allow', modelReason: rv.reason || '' })
           } else if (rv.verdict === 'deny') {
@@ -9519,7 +9608,7 @@ export default {
             //
             // 但**不能整条剥掉 reason**：它承载 permgate 的结论，且 segmentSummary 拼出的
             // 「—— 分段：… 另有 N 段」是 AI 唯一的「哪一段被拦」线索（直接拒绝没有弹窗）。
-            d2 = Object.assign({}, carry, { action: 'deny', reason: bi('自动审批：模型拒绝', 'Auto review: denied by model'), via: 'auto-deny', modelReason: rv.reason || '' })
+            d2 = Object.assign({}, carry, { action: 'deny', reason: denyReason('自动审批：模型拒绝', 'Auto review: denied by model'), via: 'auto-deny', modelReason: rv.reason || '' })
           } else {
             // 【统一异常路径】§3.4：所有失败走同一套机制，不为每种失败单独设计。
             // 回落值缺省 ask（normalizeAutoFallback 已保证存下来的值合法，这里是防御）。
@@ -9562,7 +9651,9 @@ export default {
               // 用独立 action 而不是复用 timeout-allow/deny：后者的语义是「倒计时结束、
               // 无人应答」，而这里是「用户预先说了别问」—— 混用会让审计记录说谎，
               // 用户看到 timeout-* 会以为「我设了 20 秒但没人理」，实际是他自己设了 0。
-              d2 = Object.assign({}, carry, { action: fb, reason: bi('自动审批未能给出结论，按你的设置直接' + (fb === 'allow' ? '放行' : '拒绝'), 'Auto review could not decide; ' + (fb === 'allow' ? 'allowed' : 'denied') + ' by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback-direct', fallbackReason: why })
+              d2 = Object.assign({}, carry, { action: fb, reason: fb === 'deny'
+                ? denyReason('自动审批未能给出结论，按你的设置直接拒绝', 'Auto review could not decide; denied by your fallback setting')
+                : bi('自动审批未能给出结论，按你的设置直接放行', 'Auto review could not decide; allowed by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback-direct', fallbackReason: why })
               recordAction = fb === 'allow' ? 'fallback-allow' : 'fallback-deny'
             }
           }
