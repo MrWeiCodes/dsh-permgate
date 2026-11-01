@@ -1987,6 +1987,204 @@ group('18c. 工作区外读写拆分：存量 directory 配置零迁移、读写
     ok('★★ group18c: 读闸 deny → 区外读图同样被拒（image 也在读闸范围内）', im.verdict === 'deny', JSON.stringify(im))
     ok('★★ group18c: 读图被拒的文案指向读闸（image 走读闸这条链）', /工作区外读取权限/.test(im.reason), im.reason.slice(0, 60))
   }
+
+  // ⑤ 本版读不懂的动作：**保留**（不得丢弃）+ 按 ask 裁决 + 面板生效值与裁决同源。
+  //
+  // 这一格守的是三处**同一条**语义，此前四套测试一条都没有覆盖（实测：把 buildConfig
+  // 的兜底归一退回裸 `MODES.indexOf(...) !== -1`、把 statusView 的 effective 退回
+  // 自己拼的覆盖判据，两处**都全绿**）：
+  //   · 丢弃 = 回落默认值。全局层默认 ask 尚算安全，**项目层默认是 inherit**
+  //     （穿透全局）—— 全局显式配 allow 时，一条笔误就变成静默放行；
+  //   · 面板的 effective 若另算一份（旧 firstEffective 语义），项目写 `denny` 而全局
+  //     deny 时面板显示 `denny`、宿主按 deny 裁决 —— 同一份配置两个答案。
+  //
+  // 判据分五格，缺一格就有一类写法溜过去：
+  //   ① 项目层兜底写 `review` + 全局 allow → **必须不是 allow**（保留 + 折 ask）
+  //   ② 项目层兜底写 `review` + 全局 deny → deny（未知不得宽于全局裸拒绝）
+  //   ③ 项目层分类写 `denny` + 全局 deny → deny（同上，分类侧）
+  //   ④ 项目层分类写 `review` + 全局该分类**默认 allow** → ask（分类侧的行为靶心，
+  //      用默认 allow 的分类才抓得到「丢弃未知值」）
+  //   ⑤ 项目层快捷工具写 `denny` + 全局同一键 deny → deny（快捷工具侧的跨层让位）
+  //   ⑥ effective 必须等于**裁决实际用的动作**（与裁决同源，不是配置原值）
+  {
+    const seedUnknown = async (globalExtra, projectExtra) => {
+      const ws = tmpdirFor('pg-unk-ws-')
+      const home = tmpdirFor('pg-unk-home-')
+      const out = tmpdirFor('pg-unk-out-')
+      mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: Object.assign({ fallbackMode: 'ask' }, globalExtra || {}),
+        projects: { [String(ws).replace(/\\/g, '/')]: projectExtra || {} },
+      }), 'utf8')
+      const h = createHost({ workspaceRoot: ws, dshHome: home })
+      const st = await callRoute(h.routes, 'GET', '/permgate/status')
+      const probe = async (name, args) => {
+        const { done, mark } = settleFlag()
+        let nexted = false
+        const p = h.hooks.get('tools/pre-execute')(makeExec(ws, name, args), async () => { nexted = true; return { kind: 'allow' } })
+        p.then(mark, mark)
+        p.catch(() => {})
+        const item = await awaitPending(name, done, h)
+        if (item) await callRoute(h.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' })
+        const o = await withTimeout(p, 'g18d settle')
+        return { verdict: item ? 'ask' : (nexted ? 'allow' : 'deny'), reason: String((item && item.reason) || (o && o.reason) || '') }
+      }
+      return { st: st.data, probe, out, ws, home, h }
+    }
+
+    // ① 项目层兜底 `review`（本版不认识）+ 全局 allow → 保留并折 ask，**不得**穿透成 allow
+    {
+      const s = await seedUnknown({ fallbackMode: 'allow' }, { fallbackMode: 'review' })
+      const r = await s.probe('my_tool', { a: 1 })
+      ok('★★ group18d: 项目兜底写读不懂的值 + 全局 allow → 不是 allow（保留并折 ask，不穿透）',
+        r.verdict === 'ask', JSON.stringify(r))
+      ok('★ group18d: 该值仍原样下发到面板（不丢弃、用户能改回来）',
+        s.st.fallback.project === 'review', JSON.stringify(s.st.fallback))
+      // 生效值必须与裁决同口径（折 ask），否则面板会在每个未配置工具行显示「未知动作：review」
+      ok('★★ group18d: fallback.effective 折成 ask（与裁决同口径，不显示未知动作）',
+        s.st.fallback.effective === 'ask', JSON.stringify(s.st.fallback))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ② 项目层兜底 `review` + 全局**裸 deny** → deny（未知不得宽于全局裸拒绝）
+    {
+      const s = await seedUnknown({ fallbackMode: 'deny' }, { fallbackMode: 'review' })
+      const r = await s.probe('my_tool', { a: 1 })
+      ok('★★ group18d: 项目兜底读不懂 + 全局裸 deny → deny（不得被笔误降成 ask）',
+        r.verdict === 'deny', JSON.stringify(r))
+      ok('★★ group18d: 此时 effective 也是 deny（全局裸拒绝接管）',
+        s.st.fallback.effective === 'deny', JSON.stringify(s.st.fallback))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ③ 项目层分类 `denny` + 全局 deny → deny；+ 全局 ask → ask 且 effective 也是 ask
+    {
+      const s = await seedUnknown({ command: { mode: 'deny' } }, { command: { mode: 'denny' } })
+      const r = await s.probe('pwsh', { command: 'echo hi' })
+      ok('★★ group18d: 项目分类读不懂 + 全局裸 deny → deny（分类侧同一条判据）',
+        r.verdict === 'deny', JSON.stringify(r))
+      ok('★★ group18d: effective.command 与裁决同源（都是 deny，不是面板显示 denny）',
+        s.st.effective.command === 'deny', JSON.stringify(s.st.effective))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    {
+      const s = await seedUnknown({ command: { mode: 'ask' } }, { command: { mode: 'denny' } })
+      const r = await s.probe('pwsh', { command: 'echo hi' })
+      ok('★★ group18d: 项目分类读不懂 + 全局 ask → ask（折 ask 是下界，不比全局宽）',
+        r.verdict === 'ask', JSON.stringify(r))
+      ok('★★ group18d: effective.command 折成 ask（与裁决同源，不是原始 denny）',
+        s.st.effective.command === 'ask', JSON.stringify(s.st.effective))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ④ **项目分类读不懂 + 全局该分类取默认 allow** → ask（不得静默放行）。
+    //
+    // 这一格是「normalizeCategory 保留未知值」这条改动的**唯一行为靶心**：上面 ③④ 用
+    // command 分类，而它的默认值是 ask —— 于是把判据退回裸白名单丢弃时，项目值被丢成
+    // `inherit`（inheritDefault=true 的 freshCategory）→ 穿透全局 → ③ 得 deny、④ 得 ask，
+    // 与「保留 + 折 ask」逐字同值，两格都抓不到（实测：退回裸判据后 smoke 全绿）。
+    // 必须选一个**默认值就是 allow** 的分类（read / undo / subagent / outsideRead），
+    // 丢弃才等于「落 allow → pre-execute 直接 next()」= 静默放行。
+    //
+    // ⚠️ 用 read 而不是 undo：read 有文件类工具走同一分类（read 工具名在 FILE_READ_TOOLS），
+    // 判定链与 command 一致且不需要构造命令；且 `read` 的默认值就是 allow（见 freshCategory）。
+    {
+      const s = await seedUnknown({}, { read: { mode: 'review' } })
+      const r = await s.probe('read', { path: String(s.ws).replace(/\\/g, '/') + '/a.txt' })
+      ok('★★ group18d: 项目分类读不懂 + 全局默认 allow → ask（不得丢弃后静默放行）',
+        r.verdict === 'ask', JSON.stringify(r))
+      ok('★ group18d: 该值仍原样下发到面板（不丢弃，用户能看见并改回来）',
+        s.st.categories.project && s.st.categories.project.read.mode === 'review',
+        JSON.stringify(s.st.categories.project && s.st.categories.project.read))
+      ok('★★ group18d: effective.read 折成 ask（与裁决同源）',
+        s.st.effective.read === 'ask', JSON.stringify(s.st.effective))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ⑤ 项目层**快捷工具**写读不懂的值 + 全局同一键是裸 deny → deny（跨层让位）。
+    //
+    // 这一格是 quickAction 里 `if (yieldsToGlobalBareDeny(...)) break` 的**唯一行为覆盖**：
+    // 上面几格都走分类 / 兜底，碰不到快捷工具那条优先级链（项目键 → 全局键 → 预设默认）。
+    // 实测：把那一行改成 `if (false) break`，四套测试里只有 regressions 的**函数体字符串
+    // 扫描**会红（smoke 全绿）—— 那是钉实现形态、不是钉行为，等价重写就假红。
+    //
+    // 形态：全局 `quickTools.web_search = { action: 'deny' }`（裸拒绝），项目同键写 `denny`
+    // （本版读不懂）。正确实现：让位到全局 → deny；不让位：项目值折 ask（弹窗，比用户
+    // 写的拒绝宽）。web_search 在 QUICK_PRESET 里，故「项目键 → 全局键」两跳都能命中。
+    {
+      const s = await seedUnknown(
+        { quickTools: { web_search: { action: 'deny' } } },
+        { quickTools: { web_search: { action: 'denny' } } },
+      )
+      const r = await s.probe('web_search', { query: 'x' })
+      ok('★★ group18d: 项目快捷工具读不懂 + 全局裸 deny → deny（跨层让位，不得降成 ask）',
+        r.verdict === 'deny', JSON.stringify(r))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ⑥ 对照：全局**不是**裸 deny 时不得让位（项目值保留、折 ask）。
+    // 没有这一格，把判据写成「命中项目键就无条件落全局」也会全绿 —— 而那会把一条
+    // 用户写的 deny 换成全局的 allow。
+    {
+      const s = await seedUnknown(
+        { quickTools: { web_search: { action: 'allow' } } },
+        { quickTools: { web_search: { action: 'deny' } } },
+      )
+      const r = await s.probe('web_search', { query: 'x' })
+      ok('★★ group18d: 全局非裸 deny 时不让位（项目自己的 deny 照常生效，不被全局 allow 顶掉）',
+        r.verdict === 'deny', JSON.stringify(r))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ⑤ **全局层**的兜底写读不懂的值：必须保留，且任何一次无关写盘都不得把它抹掉。
+    //
+    // 这一格守的是 buildConfig 里 `actionAllowed(g.fallbackMode, MODES)`。此前它写的是裸
+    // `MODES.indexOf(...) !== -1`（不在白名单就丢弃 → 回落 'ask'）。裁决结果两边都是 ask，
+    // 所以**行为上等价**，四套测试全绿 —— 但后果落在磁盘上：一次无关的写盘会把用户手写的
+    // `review` 永久改成 `ask`，用户再也看不到自己写过什么（实测：改项目层兜底后
+    // 磁盘 global.fallbackMode 从 "review" 变成 "ask"）。
+    {
+      const s = await seedUnknown({ fallbackMode: 'review' }, {})
+      ok('★ group18d: 全局兜底写读不懂的值仍原样下发（不丢弃）',
+        s.st.fallback.global === 'review', JSON.stringify(s.st.fallback))
+      // 触发一次**无关**写盘：改项目层的兜底（不动全局）
+      await callRoute(s.h.routes, 'POST', '/permgate/set-fallback', { target: 'project', mode: 'ask', lang: 'zh', sessionId: 'sess-1' })
+      const disk = JSON.parse(readFileSync(join(s.home, 'dsh-permgate', 'config.json'), 'utf8'))
+      ok('★★ group18d: 一次无关写盘不得把全局层读不懂的兜底值抹成 ask（用户写的东西不能被静默改写）',
+        disk.global && disk.global.fallbackMode === 'review', JSON.stringify(disk.global && disk.global.fallbackMode))
+      releaseTmp(s.ws, s.home, s.out)
+    }
+    // ⑥ 决策记录里的 `action` 必须是**实际执行**的那个动作，不是配置原值。
+    //
+    // 这一格守的是 recordDecision 里的 `knownAction(d.action)`。记录发生在 pre-execute 的
+    // 归一闸**之前**，故读不懂的动作会原样落进记录，后果有两个（都已实测）：
+    //   · statusView 的 stats 只认 'deny'/'ask' 两个字面值 → 一次真实的弹窗在面板统计里
+    //     **凭空消失**（实测 ask=0，而实际弹了窗）；
+    //   · 「最近决策」那行的徽标渲染成「未知动作：denny」，而同一面板的分类生效值显示 ask。
+    //
+    // ⚠️ 四条路径都要测：分类走 resolveCategory 的 pick（已折），而规则 / 兜底 / 快捷工具
+    // 三条**不经过 pick**，它们才是真正会漏的那几处。只测分类会让这一格恒绿（实测）。
+    {
+      const cases = [
+        ['分类 command=denny', { command: { mode: 'denny' } }, 'pwsh', { command: 'echo hi' }],
+        ['规则 r1=denny', { custom: [{ id: 'r1', tool: 'my_tool', action: 'denny' }] }, 'my_tool', { a: 1 }],
+        ['兜底 fallbackMode=review', { fallbackMode: 'review' }, 'my_tool', { a: 1 }],
+        ['快捷 web_search=denny', { quickTools: { web_search: { action: 'denny' } } }, 'web_search', { q: 'x' }],
+      ]
+      const bad = []
+      for (const [label, over, tool, args] of cases) {
+        const s = await seedUnknown(over, {})
+        const r = await s.probe(tool, args)
+        const st = await callRoute(s.h.routes, 'GET', '/permgate/status')
+        const last = ((st.data && st.data.recentDecisions) || []).filter((d) => d.tool === tool).pop()
+        const askCount = st.data && st.data.stats && st.data.stats.ask
+        // ① 实际落点是 ask（弹窗），记录的动作也必须是 ask
+        if (r.verdict !== 'ask' || !last || last.action !== 'ask') {
+          bad.push([label, '实际=' + r.verdict, '记录=' + (last && last.action)])
+        }
+        // ② stats 必须数到这一次（未知值两边都不计 = 统计里凭空消失）
+        if (askCount !== 1) bad.push([label, 'stats.ask=' + askCount])
+        releaseTmp(s.ws, s.home, s.out)
+      }
+      ok('★★ group18d: 决策记录与 stats 都用实际执行的 ask（分类/规则/兜底/快捷四条路径一致）',
+        bad.length === 0, JSON.stringify(bad.slice(0, 6)))
+    }
+  }
+
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3268,6 +3466,69 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       try { rmSync(cC.w, { recursive: true, force: true }); rmSync(cC.h, { recursive: true, force: true }) } catch (e) {}
     }
 
+    // ── ★★ 首次加载：项目层 auto 档的 per-tier 理由不得被削掉 ──────────────────────
+    //
+    // 缺陷原状：`normalizeCategory` 判「项目层这一档最终会不会拒绝」时要看**全局层**的
+    // 回落值（`afOf(from) || afOf(pSub) || afOf(gSub)`，跨层取严）。而它原先读的是**闭包里的
+    // `config`**：`load()` 里 `config = buildConfig(parsed)` 是右侧先求值，buildConfig 执行
+    // 期间 `config` 仍是**上一份**（进程首次加载时是 freshConfig()，而 freshCategory 刻意
+    // 不种 destructive）—— 于是首次加载恒拿到 null。
+    //
+    // 后果：项目层 `{wide:'auto', reasons:{wide:'…'}}` + 全局 `{autoFallbacks:{wide:'deny'}}`
+    // 时，写入侧 normalizeSubSetting 会把该理由当成「这一档最终不会拒绝」而**删掉**，
+    // 重启/重载后理由框回空，而面板与裁决侧都按跨层回落认它是拒绝档。
+    //
+    // 为什么必须走**首次加载**：上面那些用例都用 `/permgate/set-command-sub` 写入，
+    // 走的是写入侧而非 `load() → buildConfig → normalizeCategory(…, global.command)`
+    // 这条路径；而缺陷只在「config 还是 freshConfig 的那一次」显形。故这里直接写磁盘、
+    // 再新建宿主读它 —— 这正是用户重启 DSH 时发生的事。
+    //
+    // ⚠️ 不钉 `globalCommand` 这个形参名：判据是**理由还在不在**，形参怎么叫是自由。
+    {
+      const wsF = tmpdirFor('pg-firstload-ws-')
+      const homeF = tmpdirFor('pg-firstload-home-')
+      mkdirSync(join(homeF, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(homeF, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: {
+          fallbackMode: 'ask',
+          command: { mode: 'ask', exceptions: [], destructive: { wide: 'auto', autoFallbacks: { wide: 'deny' } } },
+        },
+        projects: {
+          [String(wsF).replace(/\\/g, '/')]: {
+            command: { mode: 'inherit', destructive: { wide: 'auto', reasons: { wide: '首次加载不能删我' } } },
+          },
+        },
+      }, null, 2), 'utf8')
+      const hF = createHost({ workspaceRoot: wsF, dshHome: homeF })
+      const csF = (await callRoute(hF.routes, 'GET', '/permgate/status')).data.commandSub
+      ok('★★ 首次加载：项目层 wide=auto + 全局 autoFallbacks.wide=deny 时，项目层那句 per-tier 理由必须还在（跨层回落决定「最终会拒绝」）',
+        !!(csF && csF.projectReasons && csF.projectReasons.wide === '首次加载不能删我'),
+        JSON.stringify(csF && { pr: csF.projectReasons, p: csF.project, g: csF.global }))
+      // 反向对照：把全局的回落值改成 allow 后，「这一档最终不会拒绝」成立 → 理由应当**不留**。
+      // 没有这一条，一个「无条件保留理由」的实现也会让上面那条绿（那是另一个缺陷：
+      // 配置里留下读不到的旧理由）。
+      const homeF2 = tmpdirFor('pg-firstload2-home-')
+      mkdirSync(join(homeF2, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(homeF2, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: {
+          fallbackMode: 'ask',
+          command: { mode: 'ask', exceptions: [], destructive: { wide: 'auto', autoFallbacks: { wide: 'allow' } } },
+        },
+        projects: {
+          [String(wsF).replace(/\\/g, '/')]: {
+            command: { mode: 'inherit', destructive: { wide: 'auto', reasons: { wide: '这句该被削掉' } } },
+          },
+        },
+      }, null, 2), 'utf8')
+      const hF2 = createHost({ workspaceRoot: wsF, dshHome: homeF2 })
+      const csF2 = (await callRoute(hF2.routes, 'GET', '/permgate/status')).data.commandSub
+      ok('★ 首次加载反向对照：全局回落值是 allow 时该档最终不会拒绝，项目层那句理由不得留在内存里',
+        !(csF2 && csF2.projectReasons && csF2.projectReasons.wide),
+        JSON.stringify(csF2 && { pr: csF2.projectReasons }))
+      releaseTmp(wsF, homeF)
+      releaseTmp(wsF, homeF2)
+    }
+
     releaseTmp(wsT, homeT)
   }
 
@@ -4403,6 +4664,119 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
       JSON.stringify({ full: (full.data.decisions || []).slice(-1)[0], preview: (onSt.recentDecisions || []).slice(-1)[0] }))
     releaseTmp(ws, home)
   }
+
+  // ── S23：doom 候选对**未知动作的 base** 的接管判据（只接受裸 deny）────────────────
+  //
+  // 这一格守的是 `out()` 里 `if (baseAct !== base.action) { if (doom.action !== 'deny') return base … }`。
+  //
+  // 为什么必须新增（实测）：把整段 `if (baseAct !== base.action) { … }` 删掉，四套测试**全绿**。
+  // 原因是决定性的 doom 候选需要「已有连续静默放行」这个前提，而未知动作本身**永远不会**
+  // 静默放行（它折 ask → 弹窗），所以本组的种子必须先攒计数、再改配置成未知值。
+  // 既有断言全部只测合法动作的 base（regressions 抠 out() 时喂的也是 ask/auto/deny）。
+  //
+  // ⚠️ 这一格**必须注入可用的模型**（requestHeader + llm）：`doom=auto` 的失败形态是
+  // 「被接管成 auto → 问模型 → 模型放行 → 静默放行」，没有模型时它会退化成 escalate → ask，
+  // 与正确实现的 ask 完全同形，断言就失去鉴别力（实测：无模型时删掉该分支仍然全绿）。
+  // 故判据取**模型被问了几次**：正确实现下未知折 ask 直接弹窗，一次都不问。
+  //
+  // 三格：
+  //   ① doom=deny → 被接管成 deny（该管的那一格：用户配的「重复调用就拒绝」不得被丢掉）
+  //   ② doom=auto → **不被**接管（问人不得降级成问模型 —— 模型一放行就无人在环）
+  //   ③ doom=ask  → 不被接管（折 ask 后同档，接管只会把 base 的 cat/段信息换成 doom 的）
+  {
+    const mkLlmAllow = () => {
+      const calls = []
+      return {
+        calls,
+        stream(o) {
+          calls.push(o)
+          return (async function* () {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', text: '{"risk":"low","decision":"allow"}' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })()
+        },
+      }
+    }
+    // 本组自带的 probe（**不能**复用 group22 的）：那个不带 requestHeader，
+    // 评审段拿不到模型，`doom=auto` 的失败形态会伪装成 ask。
+    const probeU = async (h, ws, sess, name, args) => {
+      const pre = h.hooks.get('tools/pre-execute')
+      const exec = {
+        name, arguments: args || {}, callId: 'call-1', token: 'tok-1',
+        agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
+        signal: undefined,
+      }
+      let nexted = false
+      let settled = false
+      let result = null
+      const p = pre(exec, async () => { nexted = true; return { kind: 'allow' } })
+      p.then((r) => { settled = true; result = r }, () => { settled = true })
+      let items = []
+      const t0 = Date.now()
+      while (Date.now() - t0 < 15000) {
+        if (nexted || settled) break
+        if (Date.now() - t0 >= 30) {
+          const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+          items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === name)
+          if (items.length) break
+        }
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      if (nexted) return 'allow'
+      if (!items.length) {
+        if (result && result.kind === 'deny') return 'deny'
+        if (result && result.kind === 'allow') return 'allow'
+        if (!settled) throw new Error('probeU 超时')
+        return 'deny'
+      }
+      const it = items[items.length - 1]
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+      await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+      return { kind: 'ask', cat: it.cat, reason: String(it.reason || '') }
+    }
+    // 种子 → 改配置 → reload → 复测。streak 必须**跨过**这次配置变更（reload 不清计数），
+    // 否则 doom 候选恒为 null，本组三格全部退化成「ask」而假通过。
+    const runCase = async (doomMode) => {
+      const ws = tmpdirFor('pg-unkdoom-ws-')
+      const home = tmpdirFor('pg-unkdoom-home-')
+      const llm = mkLlmAllow()
+      const cfg = {
+        global: {
+          fallbackMode: 'ask',
+          doomloop: { mode: doomMode, threshold: 1 },
+          custom: [{ id: 'r1', tool: T, action: 'allow' }],
+        },
+        projects: {},
+      }
+      mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(cfg, null, 2), 'utf8')
+      const h = createHost({ workspaceRoot: ws, dshHome: home, llm })
+      await callRoute(h.routes, 'GET', '/permgate/status')
+      const seedRun = await probeU(h, ws, 'unkdoom', T, A)   // 静默放行 → streak = 1 ≥ threshold = 1
+      const callsBefore = llm.calls.length
+      // 把规则动作换成**本版读不懂**的值，reload 后重跑同一条调用
+      cfg.global.custom[0].action = 'denny'
+      writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(cfg, null, 2), 'utf8')
+      await callRoute(h.routes, 'POST', '/permgate/reload', { lang: 'zh' })
+      const after = await probeU(h, ws, 'unkdoom', T, A)
+      const asked = llm.calls.length - callsBefore
+      releaseTmp(ws, home)
+      return { seedRun, after, asked }
+    }
+    const rDeny = await runCase('deny')
+    ok('★★ group22 S23: 未知动作的 base + doom=deny → 被接管成拒绝（不得因查不到表就整条丢掉）',
+      rDeny.seedRun === 'allow' && rDeny.after === 'deny',
+      JSON.stringify(rDeny))
+    const rAuto = await runCase('auto')
+    ok('★★ group22 S23: 未知动作的 base + doom=auto → 不被接管（模型一次都不该被问）',
+      rAuto.seedRun === 'allow' && rAuto.after && rAuto.after.kind === 'ask' && rAuto.asked === 0,
+      JSON.stringify(rAuto))
+    const rAsk = await runCase('ask')
+    ok('★ group22 S23: 未知动作的 base + doom=ask → 不被接管（保留 base 的 cat，不被换成 doomloop）',
+      rAsk.seedRun === 'allow' && rAsk.after && rAsk.after.kind === 'ask' && rAsk.after.cat === 'custom',
+      JSON.stringify(rAsk))
+  }
 }
 
 group('23. 决策记录：首屏取「最近」N 条的方向判据（需越过首屏窗口）')
@@ -4955,6 +5329,82 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     releaseTmp(ws, home)
   }
 
+  // ── A13b-abort：**abort 结案不得清零熔断计数**（只有人工结案才清）─────────────────
+  //
+  // 这一格守的是 `if (out.byUser) resetAutoBreaker(exec)` 这个**正向**判据。
+  //
+  // 为什么必须新增（实测）：把判据改回反向写法 `if (!out.timedOut)` —— 也就是本版修掉
+  // 的那个 bug —— 四套测试**全绿**。原因是 smoke 里从来没有 abort 场景：
+  // A13b 只走 /permgate/decide（带 byUser），而 abort 结案（`onAbort`）不带 byUser、
+  // 也不带 timedOut，于是「反向判据」与「正向判据」在既有用例上表现完全一致。
+  //
+  // 后果（无人值守时最要命）：模型连拒 N 次达到阈值 → 第 N+1 次走 escalate(code:'breaker')
+  // （本次**没调模型**）→ 它产出的 ask 被 abort 结案 → 反向判据当成人工决定清零 →
+  // 第 N+2 次又从 0 开始真实调用模型。熔断退化成「每 N+1 次只跳过 1 次」，
+  // 而 §3.5 的表格写的是「失败 / 超时 / escalate → 计数不变」，abort 属同一格。
+  //
+  // 判据：两次 deny 攒满阈值（threshold=2）→ 第 3 次 escalate 弹窗 → **abort 结案** →
+  // 第 4 次仍必须 escalate 弹窗（模型调用数停在 2）。若 abort 误清零，第 4 次会重新问模型
+  // 并拿到 deny（`calls` 变 3、落点 deny 而不是 ask），两个观测点同时变。
+  {
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
+    const { ws, home, h } = mkHostAuto({ breakerThreshold: 2 }, llm)
+    const pre = h.hooks.get('tools/pre-execute')
+    // 与 probeAuto 同形，但带一个**可取消**的 signal，并在弹窗挂起后 abort 它。
+    const probeAbort = async (sess, args) => {
+      const ac = new AbortController()
+      const exec = {
+        name: T, arguments: args || {}, callId: 'c1', token: 't1',
+        agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
+        signal: ac.signal,
+      }
+      let nexted = false
+      let settled = false
+      let result = null
+      const p = pre(exec, async () => { nexted = true; return { kind: 'allow' } })
+      p.then((r) => { settled = true; result = r }, () => { settled = true })
+      let items = []
+      const t0 = Date.now()
+      while (Date.now() - t0 < 15000) {
+        if (nexted || settled) break
+        if (Date.now() - t0 >= 30) {
+          const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+          items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)
+          if (items.length) break
+        }
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      if (nexted) return 'allow'
+      if (!items.length) {
+        if (result && result.kind === 'deny') return 'deny'
+        if (!settled) throw new Error('probeAbort 超时')
+        return 'deny'
+      }
+      // 弹窗挂着 → **abort**（模拟审批被取消：会话中止 / 用户关掉页面），不点按钮
+      ac.abort()
+      await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+      // 防空转：abort 必须真的结案成 deny（若 onAbort 没挂上，条目会一直留在 pending，
+      // 下面第 4 次的观测点就变成「条目还在」而不是「又弹了一次」—— 两种情况都要能区分）
+      const after = await callRoute(h.routes, 'GET', '/permgate/pending')
+      const still = (Array.isArray(after.data) ? after.data : []).filter((x) => x.tool === T)
+      return { kind: 'abort', settled, stillPending: still.length, resultKind: result && result.kind }
+    }
+    const r1 = await probeAuto(h, ws, 'a13bab', T, { i: 0 })
+    const r2 = await probeAuto(h, ws, 'a13bab', T, { i: 1 })
+    const r3 = await probeAbort('a13bab', { i: 2 })
+    const callsAfterAbort = llm.calls.length
+    const r4 = await probeAbort('a13bab', { i: 3 })
+    ok('★★ group24 A13b-abort: abort 结案不清零熔断（模型调用数停在 2，第 4 次仍 escalate）',
+      r1 === 'deny' && r2 === 'deny'
+      && r3 && r3.kind === 'abort' && r3.settled === true && r3.stillPending === 0 && r3.resultKind === 'deny'
+      && callsAfterAbort === 2
+      && r4 && r4.kind === 'abort' && r4.settled === true && r4.stillPending === 0
+      && llm.calls.length === 2,
+      JSON.stringify({ r1, r2, r3, callsAfterAbort, r4, calls: llm.calls.length }))
+    releaseTmp(ws, home)
+  }
+
+  // ── A13c：熔断计数按会话隔离（A 会话的拒绝不牵连 B 会话）──────────────────────
   // ── A13c：熔断计数按会话隔离（A 会话的拒绝不牵连 B 会话）──────────────────────
   {
     const llm = mkLlm(verdict('{"risk":"medium","decision":"deny","reason":"no"}'))
@@ -5024,6 +5474,44 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A16: 异常 + 回落 allow + 超时>0 → 弹窗，并带 deadline 与 onTimeout',
       r && r.kind === 'ask' && typeof r.entry.deadline === 'number' && r.entry.onTimeout === 'allow',
       JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, onTimeout: r.entry.onTimeout } : r))
+    releaseTmp(ws, home)
+  }
+
+  // ── A16e：超时自动结案的**审计档位**必须是 timeout-*，不能被折成 ask ──────────
+  //
+  // 为什么必须测运行时而不是只匹配源码字面量：这条记录经 recordDecision 落库，而该函数
+  // 会把「判定动作」按 knownAction 折成 ask（配置里读出的未知动作 → ask）。档位若塞进
+  // `d.action`（而不是第三参），`timeout-allow` 不在 MODES 里 → 折成 ask，落库结果与
+  // 真正弹窗等待的那条完全同形，面板把一次无人在环的自动放行显示成「询问」。
+  // 源码里 `'timeout-allow'` 这个字面量照样存在，只匹配字面量的断言测不出来。
+  {
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, undefined, { fallbackAutoFallback: 'allow' })
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: { id: 'a16e', requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
+      signal: undefined,
+    }
+    let settled = false
+    const p = pre(exec, async () => ({ kind: 'allow' }))
+    p.then(() => { settled = true }, () => { settled = true })
+    // 等弹窗挂起（评审段失败 → 带 timeoutFallback 的 ask），再触发它的倒计时定时器
+    const t0 = Date.now()
+    while (!settled && Date.now() - t0 < 15000) {
+      const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+      if ((Array.isArray(list.data) ? list.data : []).some((x) => x.tool === T)) break
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    const timer = h.timers.filter((t) => t.ms === 5000).pop()
+    if (timer) timer.fn()
+    await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+    const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+    const list = (dec.data && dec.data.decisions) || []
+    const st = await callRoute(h.routes, 'GET', '/permgate/status')
+    ok('★★ group24 A16e: 超时自动放行记成 timeout-allow（不是 ask），且不计入 ask 统计',
+      list.length === 2 && list[1].action === 'timeout-allow'
+      && st.data && st.data.stats && st.data.stats.ask === 1 && st.data.stats.deny === 0,
+      JSON.stringify({ actions: list.map((x) => x.action), stats: st.data && st.data.stats }))
     releaseTmp(ws, home)
   }
 

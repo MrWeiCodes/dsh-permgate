@@ -1174,8 +1174,15 @@ ok('undo 默认值的影响面如实标注（不再声称仅影响新建配置�
 ok('undo 默认值的取舍论证覆盖 better-edit 的持久化跨会话撤销', src.includes('dsh-better-edit：记录落盘 sqlite') && src.includes('跨会话'))
 ok('默认值改动不做迁移（migrateOld 未针对 undo 特判）', !/migrateOld[\s\S]{0,2500}?c === 'undo'/.test(src))
 // normalizeCategory 只在 mode 缺失/非法时才回落到默认值 —— 老配置里显式落盘的 ask/deny 必须存活，
-// 否则「改默认值」会静默覆盖老用户已经做过的选择
-ok('normalizeCategory 仅在校验失败时回落默认值（显式值存活）', src.includes('const cat = { mode: (inheritDefault ? ALL_MODES : MODES).indexOf(c.mode) !== -1 ? c.mode : def.mode }'))
+// 否则「改默认值」会静默覆盖老用户已经做过的选择。
+//
+// 判据与例外/规则/快捷工具/子设置**同一份**（actionAllowed，§9A.5 降级安全）：完全未知的
+// 动作保留原值、由读取侧折 ask。这里**不再钉源码字面形态** —— 曾经写
+// `src.includes('const cat = { mode: actionAllowed(...) ? c.mode : def.mode }')`，
+// 它把「判据是哪个函数」和「这一行怎么写」绑在一起：改成 `const ok = actionAllowed(...)`
+// 这类等价写法就假红，而真正的回归（退回裸白名单丢弃）在行为上只体现为「未知值被丢弃」。
+// 那条行为由 smoke 的 group18d ④ 覆盖（项目 read=review + 全局默认 allow → 必须 ask），
+// 它是**执行结果**断言、且用默认 allow 的分类才抓得到（command 的默认是 ask，抓不到）。
 // 图片嗅探：直接断言解析行为（构造最小文件头），而非只匹配源码里的格式字面量
 const sn = mod.sniffImage
 const pngHead = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64')
@@ -1949,6 +1956,72 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     const m = cli.match(/mode\.unknown': '([^']*)'/g) || []
     return m.length === 2 && m.every((s) => s.indexOf('{a}') !== -1)
   })())
+  // ⑨ 值域外的当前值必须能在下拉框里显示出来（否则面板说「询问」、宿主按 deny 拒绝）
+  //
+  // 为什么必须新增（实测）：把 `sel` 里的 `options.concat([v])` 去掉（退回只渲染值域内的
+  // option），四套测试**全绿** —— 上面几条钉的是「标签能降级成『未知动作：X』」，
+  // 而 `<select>` 里**根本没有那个 option** 时，标签函数写得再对也显示不出来：
+  // 浏览器会回落到首个选项，用户看到的是「询问」，宿主实际按 deny 拒绝，且在下拉里改不回来。
+  //
+  // 判据是**渲染结果**而不是源码形态：把 `sel` 从 client.js 抠出来、注入一个记录型 React
+  // 桩真跑一遍，数它到底给出了哪些 option。
+  ok('★★ 值域外的当前值在下拉里补成 option（否则面板显示与裁决不一致）', (function () {
+    const i = cli.indexOf('const sel = (v, onChange, options, disabled) =>')
+    if (i < 0) return false
+    // ⚠️ 箭头函数体**跨行**（`React.createElement('select', {...},` 与 `.map(...)` 分两行），
+    // 故不能按行截取 —— 那样只会拿到半个表达式、`new Function` 抛 SyntaxError，
+    // 断言变成恒假（实测踩过）。按**圆括号**配平切到表达式末尾。
+    // 表达式从参数表 `(v, onChange, options, disabled)` 起算：只取 `=>` 之后那段会得到
+    // 一个引用 `v`/`options` 的裸表达式，`new Function` 一调用就 ReferenceError。
+    const paramStart = cli.indexOf('(', cli.indexOf('const sel = '))
+    const exprStart = paramStart
+    let pDepth = 0
+    let exprEnd = -1
+    for (let k = exprStart; k < cli.length; k++) {
+      const ch = cli[k]
+      if (ch === '(') pDepth++
+      else if (ch === ')') pDepth--
+      else if (ch === '\n' && pDepth === 0) { exprEnd = k; break }
+    }
+    if (exprEnd < 0) return false
+    const expr = cli.slice(exprStart, exprEnd).replace(/;\s*$/, '')
+    const mkR = () => ({
+      createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.filter((k) => k != null && k !== false) }),
+    })
+    let sel = null
+    try {
+      sel = new Function('React', 'modeLabel', 'return ' + expr)(mkR(), (m) => 'label:' + m)
+    } catch (e) { return false }
+    if (typeof sel !== 'function') return false
+    const OPTS = ['ask', 'allow', 'deny', 'auto']
+    // option 是以**数组**形式作为第三个实参传进 createElement 的（`.map(...)` 的结果），
+    // 故 kids 是「一个数组」而不是扁平列表 —— 少这一层展开会取到 undefined。
+    const optsOf = (node) => ((node && node.kids) || [])
+      .reduce((acc, k) => acc.concat(Array.isArray(k) ? k : [k]), [])
+      .map((o) => (o && o.props && o.props.value))
+    // ① 值域内：原样四项，不重复、不追加
+    const inDomain = sel('deny', () => {}, OPTS, false)
+    if (JSON.stringify(optsOf(inDomain)) !== JSON.stringify(OPTS)) return false
+    // ② 值域外（读不懂的动作）：必须**多出一项**，且它的 value 就是那个原值 ——
+    //    少了它，`<select value="denny">` 选不中任何 option，浏览器显示成首个选项。
+    const outDomain = sel('denny', () => {}, OPTS, false)
+    const got = optsOf(outDomain)
+    if (got.length !== OPTS.length + 1) return false
+    if (got[got.length - 1] !== 'denny') return false
+    if (JSON.stringify(got.slice(0, OPTS.length)) !== JSON.stringify(OPTS)) return false
+    // ③ select 的 value 必须仍是那个原值（补 option 是给它落脚，不是把值改掉）
+    if (outDomain.props.value !== 'denny') return false
+    // ④ 空值不补（`undefined` / `''` 是「未配置」，补一个空 option 会渲染成空白行）
+    for (const empty of [undefined, null, '']) {
+      const n = optsOf(sel(empty, () => {}, OPTS, false))
+      if (n.length !== OPTS.length) return false
+    }
+    // ⑤ 项目层的 inherit 在值域内时照常（不得因为它在 MODES 之外就被当成未知值再补一份）
+    const projOpts = OPTS.concat(['inherit'])
+    const inh = sel('inherit', () => {}, projOpts, false)
+    return JSON.stringify(optsOf(inh)) === JSON.stringify(projOpts)
+  })())
+
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2420,7 +2493,8 @@ group('14. 拒绝原因（reason）扩展到「默认动作」层级：分类 / 
 // 它的 reason 必须能存 —— 否则「设为自动审批、失败后拒绝」这条路永远填不了理由，
 // 而设成裸 deny 却能填（两者在执行侧毫无区别）。故 autoFallback 必须先算再判。
 ok('分类默认值可带拒绝原因，且只在**最终会拒绝**时保留', (function () {
-  const m = src.match(/function normalizeCategory\(raw, key, inheritDefault\) \{[\s\S]*?\n    \}/)
+  // 只抽函数体判据，不钉参数表（本断言守的是 reason 的判据与顺序，与形参个数无关）
+  const m = src.match(/function normalizeCategory\(raw, key, inheritDefault[^)]*\) \{[\s\S]*?\n    \}/)
   if (!m) return false
   const body = m[0]
   if (!/finalActionOf\(cat\.mode, cat\.autoFallback\) === 'deny'/.test(body)) return false
@@ -2457,6 +2531,170 @@ ok('resolveCategory 的 reason 与 mode 同源取用（项目 inherit 才穿透�
   // 穿透条件仍是「项目显式非 inherit」
   return /if \(pv && pv !== 'inherit'\)/.test(body)
 })())
+// ★★ 「项目层读不懂的值不得宽于全局的**裸**拒绝」必须是**一条**判据、三个读侧共用。
+//
+// 为什么必须新增（实测）：把 yieldsToGlobalBareDeny 的判据改回 `return false`（等于
+// 三处守卫全部失效），四套测试**全绿** —— 上面的 resolveCategory / fallbackSetting /
+// quickAction 断言钉的都是**同源取值**（mode 与 reason 取同一层），没有一条碰得到
+// 「项目值是未知动作、全局是裸 deny」这一格。
+//
+// 三格覆盖判据的全部输入维度（缺一格就有一类写法溜过去）：
+//   ① 未知 + 全局裸 deny → 让位（这是靶心：不让位 = 用户写的拒绝被笔误降成 ask）
+//   ② 未知 + 全局 allow/ask/auto → **不**让位（保留项目值，由 pick 折 ask，不比全局宽）
+//   ③ 已知 + 全局裸 deny → **不**让位（已知动作走正常优先级，不得被这条判据误伤）
+//
+// ⚠️ ② 必须逐值遍历而不是只测 allow：判据写宽成 `globalRaw !== 'allow'` 时，只测 allow
+// 会漏掉 ask / auto 两格（而 auto 那一格正是「auto 的第一层是问模型，不比未知折 ask 严」
+// 这条论证的落点）。
+{
+  const iFn = src.indexOf('function yieldsToGlobalBareDeny(')
+  let fnBody = ''
+  if (iFn >= 0) {
+    let d = 0
+    for (let k = src.indexOf('{', iFn); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { fnBody = src.slice(iFn, k + 1); break } }
+    }
+  }
+  let F = null
+  try {
+    // MODES 必须注入**真实清单**（从源码抠），不得在这里手抄 —— 手抄的副本自己是对的，
+    // 生产清单被改坏时断言照样绿（与上面 normalizeSubSetting 那条同一个理由）。
+    const modStmt2 = (src.match(/const MODES = \[[^\n]*/) || [''])[0]
+    if (!modStmt2) throw new Error('no MODES')
+    F = new Function(modStmt2 + '\n' + fnBody + '\n; return yieldsToGlobalBareDeny;')()
+  } catch (e) { F = null }
+  ok('★★ yieldsToGlobalBareDeny 可独立求值（判据收敛单点的前置）', typeof F === 'function', '')
+  if (typeof F === 'function') {
+    const bad = []
+    // ① 未知动作 + 全局裸 deny → 必须让位
+    for (const u of ['denny', 'review', 'always', 'atuo', 'toString', 'constructor']) {
+      if (F(u, 'deny') !== true) bad.push(['未知值未让位给全局裸拒绝', u])
+    }
+    // ② 未知动作 + 全局不更严 → 不得让位（逐值）
+    for (const gRaw of ['allow', 'ask', 'auto', 'inherit', undefined, null, '']) {
+      if (F('denny', gRaw) !== false) bad.push(['全局不更严时仍让位（项目值被丢弃）', String(gRaw)])
+    }
+    // ③ 已知动作 + 全局裸 deny → 不得让位（已知值走正常优先级）
+    for (const known of ['allow', 'ask', 'auto']) {
+      if (F(known, 'deny') !== false) bad.push(['已知动作被误判成「读不懂」', known])
+    }
+    // ④ inherit 也落在 MODES 之外，但它两支都走全局 → 判据对它是恒等的。
+    //    这里只钉「不抛错」，不钉具体值：两个消费方对它各有分支，结论相同。
+    try { F('inherit', 'deny') } catch (e) { bad.push(['inherit 让求值抛错', e && e.message]) }
+    // ⑤ 空值不得让位（`fallbackMode` 缺键时是 undefined，那是「本层没表态」而非「读不懂」）
+    for (const empty of [undefined, null, '']) {
+      if (F(empty, 'deny') !== false) bad.push(['空值被当成「读不懂」', String(empty)])
+    }
+    ok('★★ 未知动作不得宽于全局裸拒绝（判据单点：只认裸 deny、只对未知值生效）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+  // 三个读侧必须**都**走这个单点。判据是「函数体内调用它」+「不再有手写的等价判据」，
+  // 后者才是收敛的意义所在：留着副本 = 下次改判据要改四处、而漏改一处不会有断言变红。
+  //
+  // 只查 resolveCategory / fallbackSetting / quickAction 三处。**不查 outsideMatrix**：
+  // 它曾有一个 asKnownAction 再折一次，那是不可达的死代码（resolveCategory 的两个 return
+  // 都经 pick，而 pick 已折），已删除。为它保留一条「函数体里出现 knownAction(」的断言
+  // 等于要求实现维持一个死调用 —— 钉的是形态，不是行为。
+  const uses = (name) => {
+    const i = src.indexOf('function ' + name + '(')
+    if (i < 0) return null
+    let d = 0
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+    }
+    return null
+  }
+  const sites = ['resolveCategory', 'fallbackSetting', 'quickAction'].map(uses)
+  const bad2 = []
+  if (sites.some((b) => !b)) bad2.push('切不出三个读侧的函数体')
+  else {
+    for (let k = 0; k < 3; k++) {
+      if (sites[k].indexOf('yieldsToGlobalBareDeny(') === -1) bad2.push(['未走判据单点', ['resolveCategory', 'fallbackSetting', 'quickAction'][k]])
+    }
+  }
+  // 反例：三处不得再有手写的等价判据（`MODES.indexOf(x) === -1 && ... === 'deny'`）
+  // 扫之前先做两件事，否则会把自己扫成「副本」：
+  //   · 剥掉**注释行** —— 本文件的注释里为解释判据会引用这段形状；
+  //   · 剥掉**单点函数体本身** —— 它就是那唯一一份合法实现。
+  const singlePoint = uses('yieldsToGlobalBareDeny') || ''
+  const codeOnly = src.split(singlePoint).join('')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
+  const handWritten = codeOnly.split('\n').filter((l) => /MODES\.indexOf\([^)]*\) === -1 && [^&]*=== 'deny'/.test(l))
+  if (handWritten.length) bad2.push(['仍有手写的等价判据', handWritten.length])
+  ok('★★ 三个读侧（分类 / 兜底 / 快捷工具）共用同一份「未知不得宽于全局裸拒绝」判据',
+    bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+}
+// ★★ 「未知动作折 ask」必须是一条判据、由所有消费方共用（knownAction 单点）。
+//
+// 为什么必须新增（实测）：把 knownAction 改成恒返回原值（等于三处都不再折），
+// 四套测试**全绿** —— 各处的既有断言只钉「保留未知值」（normalizeCategory /
+// actionAllowed 那一侧），没有一条钉「保留之后读成什么」。
+//
+// 三格：① 已知四档原样返回；② 未知值折 ask（不是折 deny：读不懂 ≠ 要拒绝）；
+// ③ 原型链上的名字（toString / constructor）也必须折 ask —— 它们用 `indexOf` 判不到，
+// 但若判据写成 `MODE_STRICTNESS[x] !== undefined` 就会被误认成已知动作（那是真实踩过的坑，
+// 见 out() 里 hasOwnProperty 那段注释）。
+{
+  const iFn = src.indexOf('function knownAction(action) {')
+  let fnBody = ''
+  if (iFn >= 0) {
+    let d = 0
+    for (let k = src.indexOf('{', iFn); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { fnBody = src.slice(iFn, k + 1); break } }
+    }
+  }
+  let F = null
+  try {
+    const modStmt2 = (src.match(/const MODES = \[[^\n]*/) || [''])[0]
+    if (!modStmt2) throw new Error('no MODES')
+    F = new Function(modStmt2 + '\n' + fnBody + '\n; return knownAction;')()
+  } catch (e) { F = null }
+  ok('★ knownAction 可独立求值（折 ask 单点的前置）', typeof F === 'function', '')
+  if (typeof F === 'function') {
+    const bad = []
+    for (const m of ['ask', 'allow', 'deny', 'auto']) {
+      if (F(m) !== m) bad.push(['已知动作被改写', m, String(F(m))])
+    }
+    for (const u of ['denny', 'review', 'always', 'atuo', 'inherit', '', 'toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      if (F(u) !== 'ask') bad.push(['未知动作未折 ask', u, String(F(u))])
+    }
+    // 数值 / 对象等非字符串输入同样不得漏过去（手改 config.json 塞进来的形态）
+    for (const junk of [null, undefined, 0, 1, true, {}, []]) {
+      if (F(junk) !== 'ask') bad.push(['非字符串输入未折 ask', String(junk), String(F(junk))])
+    }
+    ok('★★ 未知动作折 ask（knownAction 单点：不折 deny、原型链名字也折）',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+  // 两个消费方必须都走单点：resolveCategory 的 pick / statusView 的兜底生效值。
+  // （outsideMatrix 曾有第三个消费点，那是不可达的死调用，已删除 —— 理由见上面 uses 处。）
+  const bodyOf = (name) => {
+    const i = src.indexOf('function ' + name + '(')
+    if (i < 0) return null
+    let d = 0
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+    }
+    return null
+  }
+  const pickBody = bodyOf('resolveCategory')
+  const svBody = bodyOf('statusView')
+  const bad2 = []
+  if (!pickBody || pickBody.indexOf('knownAction(') === -1) bad2.push('resolveCategory 的 pick 未走单点')
+  // statusView 的兜底生效值：`effective` 字段必须与分类的 effective[c] 同口径（都折过），
+  // 否则未配置的快捷工具行会显示「未知动作：review」而宿主按 ask 裁决（面板说谎）。
+  if (!svBody || !/effective: knownAction\(fallbackMode\(root\)\)/.test(svBody)) bad2.push('statusView 的 fallback.effective 未折')
+  // 反例：不得在 statusView 里退回裸 fallbackMode(root)（那正是修掉的分叉）
+  if (svBody && /effective: fallbackMode\(root\)/.test(svBody)) bad2.push('fallback.effective 退回未折的裸值')
+  ok('★★ 折 ask 由 pick / 兜底生效值两处共用同一份判据',
+    bad2.length === 0, JSON.stringify(bad2.slice(0, 8)))
+}
+
+// 判据从「两个 return 的字面量」改为**结构性**：fallbackSetting 必须把 mode 与 reason
+
 // 判据从「两个 return 的字面量」改为**结构性**：fallbackSetting 必须把 mode 与 reason
 // 从**同一层**取用（同源），且 auto 时把该层的 autoFallback 一并带上。
 // 原断言钉死两条 return 的字面形态，加 autoFallback 就必须改它 —— 而它守的其实是
@@ -3986,15 +4224,19 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 这一个判据，见 normalizeSubSetting 的注释），故断言从「不得有第三实参」改为
   // 「第三实参必须是全局块、且结果仍只保留用户显式写的值」：
   //   · 传进去的若是一个**推导出来的档位表**（旧缺陷），会同时满足下面的 `if (sub)`
-  //     与「不物化」两条，所以必须单独钉住它来自 `config.global.command.destructive`。
+  //     与「不物化」两条，所以必须单独钉住它来自全局 command 的 destructive 块。
+  //   · 来源必须是**本次归一化**的结果（第 4 参），不能读闭包 `config`：
+  //     `load()` 里 `config = buildConfig(parsed)` 是右侧先求值，buildConfig 执行期间
+  //     闭包里的 config 仍是**上一份**（进程首次加载时是 freshConfig，而 freshCategory
+  //     刻意不种 destructive）—— 首次加载会把项目层理由整条削掉、reload 用上一份
+  //     全局块判定（磁盘已改成 allow 时把读不到的理由留在盘上）。
+  //     ⚠️ 这条**不在下面断言**：曾经有一条正则钉住 `const gSub = inheritDefault && globalCommand
+  //     ? … : null` 的**形参名与单行形态**，改个名字或拆两行就假红。行为判据在 smoke 的
+  //     group20 末尾（首次加载 + 项目层 wide=auto + 全局 autoFallbacks.wide=deny → 理由仍在），
+  //     那条才是「读闭包」真正会变红的地方。
   ok('★ normalizeCategory 只保留用户显式写的子设置（推导交给读取侧，不物化）',
     src.includes("const sub = normalizeSubSetting(c.destructive, inheritDefault, gSub)")
-    && src.includes('if (sub) cat.destructive = sub')
-    // 第三实参只能来自**已归一化的全局块**（不是任何形式的推导值 / 缺省档位表）
-    && /const gSub = inheritDefault && config && config\.global && config\.global\.command\s*\n\s*\? config\.global\.command\.destructive : null/.test(src)
-    // 且它只在项目层取（全局层没有可穿透的对象）。判据是「`inheritDefault &&` 必须是
-    // 赋值表达式的一部分」—— 不能写成无条件取全局块（全局层会看到自己，形成自引用）。
-    && /const gSub = inheritDefault && /.test(src))
+    && src.includes('if (sub) cat.destructive = sub'))
   // ★ 读取侧八档一律「项目显式 → 全局显式 → ask」（**唯一**一份档位取值规则）
   //
   // 原断言锁的是「函数体里出现 derived = destructiveDefaultOf(mode, false)」这一形状。
@@ -6906,8 +7148,13 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   // 字面量**从宿主源码派生**，再要求客户端两份清单都含它们 —— 不能用硬编码数组只与
   // 客户端源码比对：那样是「两份副本各自与自己比对」，宿主侧改名或新增第三种超时落点
   // 时，界面会静默显示裸键名 mode.timeout-xxx 且 MODE_COLORS 回落灰色 #888，测试却全绿。
+  //
+  // ⚠️ 派生锚点**不能带 `action:` 前缀**：审计档位走的是 recordDecision 的第三参
+  // （记录档位 ≠ 执行动作，见该函数的注释），`action` 字段里放的是 allow/deny。
+  // 曾把锚点写成 `action: out.kind === 'allow' ? …`，那正好把「档位塞进 action」这个
+  // 缺陷形状当成了正确形态 —— 改成正确写法后派生结果变空，三条断言一起变红。
   const hostTimeoutActions = [...new Set(
-    [...src.matchAll(/action:\s*out\.kind === 'allow' \? '([a-z-]+)' : '([a-z-]+)'/g)]
+    [...src.matchAll(/out\.kind === 'allow' \? '([a-z-]+)' : '([a-z-]+)'/g)]
       .flatMap((m) => [m[1], m[2]])
   )]
   ok('能从宿主源码派生出超时审计 action 字面量（非空）',

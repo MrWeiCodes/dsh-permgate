@@ -149,6 +149,44 @@ function actionAllowed(action, allowed) {
   //    那条路径才能讲清「保留之后实际怎么处理」，避免这里只报「保留了」却不说后果）
   return true
 }
+// 动作的**归一单点**：本版认识就原样返回，读不懂就折 `ask`。
+//
+// 为什么必须收敛成一处：这条判据同时用在「分类判定的出口」（resolveCategory 的 pick）、
+// 「工作区外合并矩阵的输入」（outsideMatrix）与「兜底的生效值」（statusView 的
+// fallback.effective）。三处各写一份 `MODES.indexOf(x) !== -1 ? x : 'ask'` 时，日后
+// 调折法（例如改成折 deny）要改三处 —— 漏一处就是同一份配置两种答案，而这两处
+// 恰恰是「面板显示什么」与「宿主怎么裁决」的关系。
+//
+// 折 ask 而不是折 deny：「读不懂」不等于「要拒绝」，退化成「问人」最接近原意且方向安全
+// （折 deny 会把一条笔误变成一次静默拒绝）。
+// ⚠️ 与 `actionAllowed` 分工不同：那个判「该不该保留」，这个判「保留之后怎么读」。
+function knownAction(action) {
+  return MODES.indexOf(action) !== -1 ? action : 'ask'
+}
+// 「项目层读不懂的值，不得宽于全局层的**裸**拒绝」——这条判据的**唯一实现**。
+//
+// 归一化侧刻意保留本版读不懂的值（actionAllowed ②：丢弃 = 规则消失 = 继续往下走 =
+// 可能静默放行）。但项目层保留它之后，读取侧若无条件采用，一条笔误（`denny`）就会把
+// 全局显式配的 `deny` 顶成 ask（pre-execute 的归一闸折 ask）—— 用户写的拒绝被一个拼写
+// 错误变成「问人，一次误点即放行」，方向是放宽。
+//
+// 故：项目值是**未知**动作、且全局该处是**裸** `deny` 时，把项目层当成「本层没表态」，
+// 直接走既有的穿透路径（动作 / 理由 / 回落值全部同源来自全局），不新开出口。
+//
+// ⚠️ 判据只认**裸** deny，不能把 `auto + 回落 deny` 也算进来（`finalActionOf`）：
+// 那个回落值是「**模型失败后**的落点」，而 auto 的第一层是**问模型** —— 模型放行时
+// 无人在环，比未知折 ask（弹窗、人必须点）更宽。回落值只在模型失败时才生效，
+// 而放宽发生在模型成功放行那条路径上。同一理由见 decide() 里 out() 的合并段。
+//
+// ⚠️ `inherit` 也落在 MODES 之外，但它在本判据的两个消费方里都另有分支、两支结果相同
+// （都是走全局），故判据对它是恒等的 —— 不必为它加一条特例。
+//
+// 三个消费方（项目层的三处读侧）：resolveCategory / fallbackSetting / quickAction。
+// 收敛成一处之前它们是三份逐字相同的副本，而三处**必须同时**保持同一口径 ——
+// 任一处漏改就是「同一份配置，分类 / 兜底 / 快捷工具三种答案」。
+function yieldsToGlobalBareDeny(projectRaw, globalRaw) {
+  return !!projectRaw && MODES.indexOf(projectRaw) === -1 && globalRaw === 'deny'
+}
 // 档位名 → 存储键 的**映射单点**：`inside` 档由老键 `action` 承载（**老键义不变**，§7.1），
 // 其余七档各有一个同名键。读取侧（destructiveTiers）与写入侧（setCommandSub）都走它。
 //
@@ -1481,10 +1519,20 @@ export default {
       return Math.max(MIN_REPEAT_STREAK, Math.floor(v))
     }
 
-    function normalizeCategory(raw, key, inheritDefault) {
+    // `globalCommand` = **本次**归一化出的全局 command 分类块（由 buildConfig 传入；全局层自身
+    // 调用时没有可穿透的对象，缺省不传）。项目层的「该档最终会不会拒绝」判据必须看它。
+    function normalizeCategory(raw, key, inheritDefault, globalCommand) {
       const def = freshCategory(key, inheritDefault)
       const c = raw && typeof raw === 'object' ? raw : {}
-      const cat = { mode: (inheritDefault ? ALL_MODES : MODES).indexOf(c.mode) !== -1 ? c.mode : def.mode }
+      // mode 与例外 / 规则 / 快捷工具 / 子设置**同一条判据**（actionAllowed）：本层白名单内的
+      // 值原样保留；完全未知的值（更高版本写入的动作、手改的 `denny` 笔误）也保留，
+      // 由 pre-execute 的动作归一闸折成 ask。原先写 `indexOf(c.mode) !== -1 ? c.mode : def.mode`
+      // 是「不在白名单就丢弃」，于是全局 `{"read":{"mode":"review"}}` 被丢弃成
+      // freshCategory('read', false).mode = **allow**（read/undo/subagent/outsideRead 四类默认值
+      // 就是 allow）→ resolveCategory 取到 allow → 静默放行。同一个字符串写在例外/规则里
+      // 会被保留并折 ask，两条路径结论相反，那是 fail-open 的一侧。
+      // 全局层的 `inherit` 仍由 actionAllowed 的 ③ 判成 false 丢弃（既有行为不变）。
+      const cat = { mode: actionAllowed(c.mode, inheritDefault ? ALL_MODES : MODES) ? c.mode : def.mode }
       // 分类默认值的拒绝原因：只在**最终会拒绝**时有用（allow 不弹窗、ask 用自己的 note），
       // 与例外同口径存一个 reason，供 decide() 拼进拒绝文案回给 AI。
       // 判据是 finalActionOf：`mode: 'auto'` + `autoFallback: 'deny'` 在执行侧就是拒绝。
@@ -1513,8 +1561,13 @@ export default {
         // （手改配置塞进来的垃圾值不能在那边被当成合法回落值）。
         // 顺序是 `normalizeConfig` 本来就有的（global 在前、projects 在后），这里只是
         // 把结果传下去 —— 不另算一份，也不改变任何写盘内容。
-        const gSub = inheritDefault && config && config.global && config.global.command
-          ? config.global.command.destructive : null
+        //
+        // ⚠️ 必须用**参数传进来的**本次归一化结果，**不得**读闭包里的 `config`：
+        // load() 的 `config = buildConfig(parsed)` 是右侧先求值，buildConfig 执行期间
+        // `config` 仍是**上一份**（进程首次加载时是 freshConfig()，而 freshCategory 刻意
+        // 不种 destructive）—— 于是首次加载恒拿到 null（项目层理由被削掉），reload 拿到
+        // 上一次的全局块（磁盘已改成 allow 时仍按旧的 deny 判，留下读不到的理由）。
+        const gSub = inheritDefault && globalCommand ? globalCommand.destructive : null
         const sub = normalizeSubSetting(c.destructive, inheritDefault, gSub)
         if (sub) cat.destructive = sub
       }
@@ -1647,7 +1700,14 @@ export default {
     // 会被 JSON.stringify 整体落盘，把计数挂上去就会变成配置文件里的一个字段。
     function buildConfig(parsed, stats) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
-      const gFb = MODES.indexOf(g.fallbackMode) !== -1 ? g.fallbackMode : 'ask'
+      // 兜底与分类 mode / 例外 / 规则 / 快捷工具 / 子设置**同一条判据**（actionAllowed）：
+      // 本层白名单内的值原样保留，完全未知的值（更高版本写入的动作、手改的 `review`）也保留，
+      // 由 pre-execute 的动作归一闸折成 ask。原先写裸 `MODES.indexOf(...) !== -1` 是
+      // 「不在白名单就丢弃」，丢弃 = 回落默认值 —— 项目层的默认值是 `inherit`（穿透全局），
+      // 于是项目层一条读不懂的兜底策略会**静默改用全局的**（全局若显式配了 allow，
+      // 未匹配任何规则的调用就被放行）；全局层的默认值是 `ask`，虽然方向安全，但同样
+      // 会把用户写下的值从磁盘上抹掉。两处都按 actionAllowed 保留，判据与 1497 行同源。
+      const gFb = actionAllowed(g.fallbackMode, MODES) ? g.fallbackMode : 'ask'
       // 迁移闸门：按「该迁移 ID 是否已在本配置的 migrations 名单里」判断，而不是比一个全局版本号。
       // 全局版本号会让「为别的迁移升版本」连带把本条重新执行一遍，从而静默回滚用户的显式设置
       // （已实测复现）。名单式判定下各条迁移互不牵连。
@@ -1682,7 +1742,7 @@ export default {
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
-        const pFb = ALL_MODES.indexOf(p.fallbackMode) !== -1 ? p.fallbackMode : 'inherit'
+        const pFb = actionAllowed(p.fallbackMode, ALL_MODES) ? p.fallbackMode : 'inherit'
         const pb = { quickTools: normalizeQuick(p.quickTools, false), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
         // 项目层兜底的 auto 回落值：与全局层同口径（只在 fallbackMode 是 auto 时存）。
         // `inherit` 时 normalizeAutoFallback 返回 undefined → 不建键，符合「整体继承、
@@ -1693,7 +1753,7 @@ export default {
         const pFbAf = normalizeAutoFallback(p.fallbackAutoFallback, pFb)
         if (pFbAf !== undefined) pb.fallbackAutoFallback = pFbAf
         if (finalActionOf(pFb, pb.fallbackAutoFallback) === 'deny') { const t = normalizeText(p.fallbackReason); if (t) pb.fallbackReason = t }
-        for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true)
+        for (const c of CATS) pb[c] = normalizeCategory(p[c], c, true, global.command)
         projects[key] = pb
       }
       // migrations 落盘：把本次评估过的迁移 ID 记入名单，使各条迁移都只跑一次
@@ -2362,12 +2422,14 @@ export default {
       return true
     }
 
-    // 覆盖语义统一：project 显式配置优先、inherit 穿透到 global、缺省用 def。
-    // fallback 与分类 mode 共用（缺省值不同：fallback='ask'、分类='allow'），避免覆盖判定独立演化
-    function firstEffective(projVal, globalVal, def) {
-      if (projVal && projVal !== 'inherit') return projVal
-      return globalVal || def
-    }
+    // ── 这里曾有一个 `firstEffective(projVal, globalVal, def)` ────────────────────
+    // 语义是「project 显式优先、inherit 穿透 global、缺省用 def」，唯一的调用点是
+    // statusView 里给面板算 `effective`（分类生效值）。已删除：它是一份**独立于裁决**
+    // 的覆盖判据，不认识 resolveCategory 的两条规则（未知动作折 ask、项目层未知动作
+    // 不得宽于全局 deny），于是同一份配置会给出两个答案 —— 面板说 `denny`、宿主按 deny 拒绝。
+    // 现在 `effective` 直接复用 resolveCategory（分类判定的唯一出口），不再有第二份口径。
+    // 删掉而不是留着：留着它就是下一次「有人拿它算个新的展示值」的现成陷阱。
+    // 兜底（fallbackMode）不用它 —— fallbackSetting 本来就是自己按层取值的。
 
     // str_replace_editor 工具定义的文字描述（顶层 + 相关参数）：内核判别与 undo_edit 判别共用
     // 同一次探测，避免两处各自 tools.get + 解析而漂移。探测不到返回 null（未注册 / 无描述 / 抛错）。
@@ -2451,14 +2513,19 @@ export default {
     // autoFallback 同理同源：动作是 auto 时才带上，且缺省 ask（见 normalizeAutoFallback）。
     function fallbackSetting(root) {
       const proj = projectBlock(root)
-      const pv = proj && proj.fallbackMode
+      const pvRaw = proj && proj.fallbackMode
+      const g = config.global
+      const gm = g.fallbackMode || 'ask'
+      // ── 项目层的**未知**兜底策略不得宽于全局的**裸**拒绝 ────────────────────────
+      // 判据收敛在 yieldsToGlobalBareDeny 单点（与 resolveCategory / quickAction 同源，
+      // 理由见该函数注释）：全局裸 deny 时把项目层当成「本层没表态」，走下面既有的
+      // 全局分支 —— mode / reason / autoFallback 全部同源来自全局。
+      const pv = yieldsToGlobalBareDeny(pvRaw, gm) ? 'inherit' : pvRaw
       if (pv && pv !== 'inherit') {
         const o = { mode: pv, reason: normalizeText(proj.fallbackReason) }
         if (pv === 'auto') o.autoFallback = proj.fallbackAutoFallback || 'ask'
         return o
       }
-      const g = config.global
-      const gm = g.fallbackMode || 'ask'
       const o = { mode: gm, reason: normalizeText(g.fallbackReason) }
       if (gm === 'auto') o.autoFallback = g.fallbackAutoFallback || 'ask'
       return o
@@ -2530,9 +2597,21 @@ export default {
       // 而不是在四个 return 处各写一遍 —— 逐处写就是四个漏改点，而漏改的方向是
       // 「auto 生效了、回落值却丢了」→ 模型失败后按缺省 ask 处理，与用户配置不符。
       const pick = (action, ruleId, reason, note, af) => {
-        const o = { action, ruleId, reason, note }
+        // ── 未知动作在**这里**折 ask（唯一出口，下游不必各自兜底）────────────────────
+        // 归一化侧为了不 fail-open 会保留「本版读不懂的动作」（actionAllowed ②），
+        // 而本函数是分类判定的**唯一出口**：decide() 的九个分类点、outsideMatrix、
+        // doomloop 的候选构造全都读它的返回值。下游并不都认识未知值 ——
+        // `out()` 用 `MODE_STRICTNESS[action]` 查表，未知值得 `undefined`，于是
+        // `if (b === undefined || d === undefined || d < b) return base` 直接返回 base：
+        // 实测 doomloop.mode 写错一个字母时循环检测提醒**整体静默失效**（HEAD 归一成
+        // ask、提醒照常弹；只保留原值反而变成 allow）。
+        // 折 ask 与 pre-execute 的归一闸（KNOWN_ACTIONS）同口径；不折 deny：
+        // 「读不懂」不等于「要拒绝」，退化成「问人」最接近原意且方向安全。
+        const a = knownAction(action)
+        const o = { action: a, ruleId, reason, note }
         // 只在动作是 auto 时带上：其它动作的 autoFallback 在归一化阶段就已不存，
         // 这里再判一次是为了防「手改 config.json 塞进来的 autoFallback」被读到并误用。
+        // 判据仍写 `action`：`auto` 是已知动作，`a` 只在未知时才与它不同，两者等价。
         if (action === 'auto') o.autoFallback = af || 'ask'
         return o
       }
@@ -2548,7 +2627,13 @@ export default {
       // 走 reasonOfAction 而不是裸 `normalizeText(pCat.reason)`：分类也可以 `mode: 'auto'`
       // + `autoFallback: 'deny'`，那时 reason 同样是「会回给 AI 的拒绝理由」。
       // （分类没有 note 字段 —— ask 的备注只有例外有，故第三参仍传 undefined。）
-      const pv = pCat && pCat.mode
+      // ── 项目层的**未知**动作不得宽于全局的**裸**拒绝 ─────────────────────────────
+      // 判据收敛在 yieldsToGlobalBareDeny 单点（三个读侧共用同一口径，理由见该函数注释）：
+      // 全局是裸拒绝时把项目层这条当成「本层没表态」，走下面**既有的** inherit 穿透路径
+      // —— 动作 / reason / autoFallback 全部同源来自全局，不新开出口。
+      // 全局不更严（allow / ask / auto）时保留项目值，由 pick 折 ask（不比全局宽）。
+      const pvRaw = pCat && pCat.mode
+      const pv = yieldsToGlobalBareDeny(pvRaw, gCat.mode) ? 'inherit' : pvRaw
       if (pv && pv !== 'inherit') return pick(pv, null, reasonOfAction({ action: pv, autoFallback: pCat.autoFallback, reason: normalizeText(pCat.reason) }), undefined, pCat.autoFallback)
       // 项目未显式配置（缺失或 inherit）才穿透全局：此处 pv 已确定不生效，
       // 故直接取全局值，不再经 firstEffective 传一个恒不命中的 projVal（与 fallbackSetting 同形）。
@@ -4455,10 +4540,30 @@ export default {
       // autoFallback 与 action 同源取用：只在动作是 auto 时才带上（否则 undefined，
       // 由调用方决定要不要建键 —— 与 reason 的处理方式一致）。
       const afOf = (v) => (v && typeof v === 'object' && v.action === 'auto' ? v.autoFallback : undefined)
-      for (const k of Object.keys(pMap)) {
-        if (modeOf(pMap[k]) !== 'inherit' && matchGlob(k, name)) return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]), autoFallback: afOf(pMap[k]) }
-      }
       const gMap = config.global.quickTools || {}
+      // ── 项目层的**未知**动作不得宽于全局层的**裸**拒绝 ────────────────────────
+      // 本函数是「项目键 → 全局键 → 预设默认」的优先级链，原先命中项目条目就无条件返回它
+      // —— 于是一条笔误（`denny`）会把全局显式配的 `deny` 顶成 ask。判据收敛在
+      // yieldsToGlobalBareDeny 单点（与 resolveCategory / fallbackSetting 同源，
+      // 理由见该函数注释）：全局命中项是**裸** deny 时，把项目层这条当成「本层没表态」，
+      // 直接落到下面的全局分支 —— 动作 / reason / autoFallback 全部同源来自全局。
+      //
+      // 只看全局**首条命中**项：下面全局分支也是首条命中即返回，两处必须是同一条判据，
+      // 否则会出现「这里以为全局是 deny、实际返回的是另一条」的错配。
+      const gFirst = (function () {
+        for (const k of Object.keys(gMap)) {
+          if (modeOf(gMap[k]) !== 'inherit' && matchGlob(k, name)) return modeOf(gMap[k])
+        }
+        return null
+      })()
+      // 项目层首条命中即生效（顺序即优先级）。唯一例外：本条是**未知**动作、而全局命中项
+      // 更严 —— 那时 break 出去落全局分支，**不继续往后找第二条项目键**：跳过未知值去找
+      // 下一条合法 allow，等于把用户写的拒绝换成另一条更宽的配置。
+      for (const k of Object.keys(pMap)) {
+        if (modeOf(pMap[k]) === 'inherit' || !matchGlob(k, name)) continue
+        if (yieldsToGlobalBareDeny(modeOf(pMap[k]), gFirst)) break
+        return { action: modeOf(pMap[k]), reason: reasonOf(pMap[k]), autoFallback: afOf(pMap[k]) }
+      }
       for (const k of Object.keys(gMap)) {
         // 与项目分支同口径：全局层本不该出现 inherit（写入侧 setQuickAction 对 global+inherit
         // 走 delete），但手工编辑 config.json 可以塞进来。若不跳过，decide() 拿到的 action 既不是
@@ -5062,16 +5167,17 @@ export default {
     function outsideMatrix(catKey, fp, root, cwd) {
       // 闸归属单点：调用方不传闸 key，4 个调用点因此一行都不用改。
       const gate = outsideGateOf(catKey)
-      // 未知动作先折成 ask 再参与合并（§9A.5）：下面三道分支只认 deny/ask/auto 三个字面值，
-      // 其余一律落到末尾的 allow —— 而归一化侧现在**保留**未知动作（actionAllowed），
-      // 一条命中未知动作的例外因此会由「不匹配 → 落该闸自己的 mode」变成「匹配 → 静默放行」。
-      // 折 ask 与 pre-execute 的归一闸同口径；判据是四档白名单 MODES。
-      // 返回副本而不是就地改写：resolveCategory 的返回值是「这道闸判了什么」的事实，
-      // 就地改写会让那个读不懂的原值消失（告警/诊断再想报它就没有了）；
-      // 副本整体赋给 d/e，下面 `src === d` 这条同一性判据（决定 cat 跟随哪道闸）不受影响。
-      const asKnownAction = (x) => (MODES.indexOf(x.action) !== -1 ? x : Object.assign({}, x, { action: 'ask' }))
-      const d = asKnownAction(resolveCategory(gate, fp, 'path', root, cwd))
-      const e = asKnownAction(resolveCategory(catKey, fp, 'path', root, cwd))
+      // 两道闸的判定直接来自 resolveCategory —— 它返回的 action **已经折过**：
+      // `pick` 是分类判定的唯一出口，而它在返回前调 `knownAction`（未知动作 → ask）。
+      // 故下面三道分支只会看到 deny / ask / auto / allow 四个字面值，不需要在这里再折一次。
+      //
+      // ⚠️ 这里曾有一个 `asKnownAction` 包装（把未知动作折成 ask 并返回副本），它**不可达**：
+      // `resolveCategory` 的全部 return 都经 `pick`，`x.action === knownAction(x.action)`
+      // 恒为真、副本从不产生。留着它的唯一后果是「读代码的人以为这里真的可能出现未知值」，
+      // 以及一条钉住「函数体里出现 knownAction(」的字符串断言（钉的是实现形态、不是行为）。
+      // 折 ask 这条语义本身仍由 pick 单点保证，行为断言在 smoke 的 group18d。
+      const d = resolveCategory(gate, fp, 'path', root, cwd)
+      const e = resolveCategory(catKey, fp, 'path', root, cwd)
       if (d.action === 'deny' || e.action === 'deny') {
         const src = d.action === 'deny' ? d : e
         const cat = src === d ? gate : catKey
@@ -5234,12 +5340,55 @@ export default {
       // 包装后每个出口的语义不变：写出来的仍是我这一支的判定，doomloop 只是额外收紧。
       const out = (base) => {
         if (!doom) return base
-        const b = MODE_STRICTNESS[base.action]
+        // ── 未知动作按「折 ask 后」的动作参与合并（下界）──────────────────────────
+        // 归一化侧为了不 fail-open 会保留读不懂的动作（actionAllowed ②），而 decide() 的
+        // 自定义规则出口**不经过** resolveCategory 的 pick，于是这里真的会收到 `denny`
+        // 这类值。原先 `MODE_STRICTNESS[base.action]` 查不到就直接 `return base`，把 doom
+        // 的更严判定**整条丢掉**：一条读不懂的规则会把用户显式配的 `doomloop: deny`
+        // 降级成一次弹窗（一次误点即放行），而合法的 base 不会被这么吃掉。
+        // 折 ask 与 pick、pre-execute 归一闸同口径，且只作**下界** —— 不折 deny：
+        // 「读不懂」不等于「要拒绝」，但它必须能与更严的判定比较。
+        //
+        // ⚠️ 判「认不认识」必须用 hasOwnProperty，不能写 `MODE_STRICTNESS[x] === undefined`：
+        // 那两张表是对象字面量，`MODE_STRICTNESS['toString']` / `['constructor']` 会命中原型链
+        // 上的函数，于是 `action: 'toString'` 这种**完全未知**的值被误判成已知动作 ——
+        // baseAct 保留原值 → 走不到下面的未知分支 → doom=auto 时被接管去问模型（放宽）。
+        // actionAllowed 对它是保留（MODES/ALL_MODES 里都没有），两条判据必须同口径。
+        const baseAct = Object.prototype.hasOwnProperty.call(MODE_STRICTNESS, base.action) ? base.action : 'ask'
+        const b = MODE_STRICTNESS[baseAct]
         const d = MODE_STRICTNESS[doom.action]
         // 取更严者：doom 不更严（含相等）时一律以 base 为准。
         // 相等时让 doom 接管：动作相同、只是理由换成循环提醒 —— 与旧行为一致（L-10 理由优先），
         // 也是「提醒」这一语义该有的表现（用户需要知道为什么这次被拦）。
         if (b === undefined || d === undefined || d < b) return base
+        // ── 未知动作（折 ask）的接管判据：**只接受裸 deny** ─────────────────────────
+        // 这一支终结未知 base 的全部情形，不与下面的 §9B / 双 auto / finalRank 交织。
+        //
+        // 为什么不接受 `doom=ask`：折 ask 后两者同档，接管只是把理由换成循环提醒 ——
+        // 最终动作不变，却丢掉 base 的 segments / blast（决策日志的段摘要、弹窗的段级
+        // 信息静默消失）。保留 base 更好。
+        //
+        // 为什么不接受 `doom=auto`（**含回落 deny**）：与下面 §9B 那条「base=ask 不被
+        // doom=auto 接管」是同一个理由 —— `auto` 的第一层是**问模型**，不是拒绝。模型判
+        // allow 时 pre-execute 直接放行（无人在环），而未知折 ask 保留 base 会走弹窗
+        // （永不超时，人必须点一下）。「问人 → 问模型」就是放宽，与回落值是 allow 还是
+        // deny 无关：回落值只在**模型失败**时才生效，而放宽发生在模型成功放行那条路径上。
+        // ⚠️ 不能按「doom 的最终动作是不是 deny」判（finalActionOf）：那会把 auto/回落
+        // deny 当成比未知折 ask 更严而接管，恰好放过这个方向。
+        //
+        // ⚠️ 这与 yieldsToGlobalBareDeny（项目层未知值 vs 全局裸拒绝）是**同一条判据的
+        // 两个层次**：那里是**跨层**（项目层读不懂的值会不会顶掉全局的裸拒绝），这里是
+        // **同层**（未知折 ask 会不会被问模型的 doom 接管）。两处都只认裸 deny，都不能
+        // 换成 finalActionOf —— 那会把 `auto + 回落 deny` 当成更严而接管，恰好放过
+        // 「问人 → 问模型」这个方向。
+        if (baseAct !== base.action) {
+          if (doom.action !== 'deny') return base
+          // 接管时字段来源与「两支都是 auto」那条同规则：`cat` / `kind` / `value` 必须
+          // 跟着换成 doom 的（否则弹窗照 base 的分类给候选，而写入用 entry.cat —— 用户
+          // 点了按钮、配置一个字都没变），`segments` / `blast` 只有 base 有、必须留着
+          // （拒绝出口正是用它拼「哪一段、命中哪一档」回给 AI）。
+          return Object.assign({}, base, { action: doom.action, autoFallback: doom.autoFallback, reason: doom.reason, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
+        }
         // ── 唯一的例外：`base=ask` 不被 `doom=auto` 接管（§9B）──────────────────────
         // `ask` 与 `auto` 在 MODE_STRICTNESS 里同为 1，于是上面的「相等即接管」会把
         // 用户显式要求的「问人」降级成「问模型」—— 那是**放宽**（模型可能直接放行）。
@@ -5282,6 +5431,8 @@ export default {
         // 要堵的那类 fail-open。
         // 故这里按**最终动作**再比一次（auto 取它的回落值，与 `AF_STRICTNESS` 同一序），
         // doom 更宽时以 base 为准 —— 拒绝已经是最严的结论，循环提醒没有可再收紧的余地。
+        // （未知动作走不到这里：上面两支已把它拦下或按拒绝接管并返回，故这里按原始
+        // `x.action` 查表即可，不需要再折一次。）
         const finalRank = (x) => (x.action === 'auto'
           ? AF_STRICTNESS[(x.autoFallback === 'allow' || x.autoFallback === 'deny') ? x.autoFallback : 'ask']
           : MODE_STRICTNESS[x.action])
@@ -5487,18 +5638,42 @@ export default {
     // 取 2000：合法输出的正常长度（含 1000 字符 reason 的 JSON 包装）远低于它。
     const RAW_OUTPUT_MAX = 2000
 
-    // 记录一次决策。第三个参数 actionOverride 用于「记录的档位与执行档位不同」的少数情况
-    // （目前只有 auto 异常回落且 timeoutMs === 0：执行档位是 allow/deny，但记录必须写成
-    // fallback-allow/fallback-deny，否则事后看不出这条是无人在环的自动放行）。
+    // 记录一次决策。第三个参数 actionOverride 用于「记录的档位与执行档位不同」的少数情况，
+    // 目前有两个来源：
+    //   · auto 异常回落且 timeoutMs === 0 —— 执行档位是 allow/deny，记录写成
+    //     fallback-allow/fallback-deny；
+    //   · 审批超时自动结案 —— 执行档位是 allow/deny，记录写成 timeout-allow/timeout-deny。
+    // 两者都是**无人在环**的落点，不这样记就与「模型判断」或「人工批准」完全同形。
     function recordDecision(d, exec, actionOverride) {
       // code 一并留痕：它是「为什么问这一次」的机器可读答案（destructive / unparsable /
       // write-outside / segment-* ），与 reason 那种人读长文本互补。
       // 此前 commandDecision 已经把 code 放进返回值，但这里没写 —— 注释声称「决策日志记 code」
       // 而日志里没有这个字段，属于写了没人读的死数据。
+      //
+      // ── `action` 必须是**实际执行的那个动作**，不能是配置里写的原值 ────────────────
+      // 归一化侧刻意保留本版读不懂的动作（actionAllowed ②），于是 d.action 真的可能是
+      // `denny` / `review`。pre-execute 的归一闸会把它折成 ask 再执行，但**记录发生在
+      // 归一闸之前**（它要记下「判定」而不是「结案」，见调用点的注释）—— 直接写 d.action
+      // 就出现「记录说 denny、实际弹了窗」。两个后果都已实测：
+      //   · statusView 的 stats 只认 'deny'/'ask' 两个字面值（index.js 的 stats 循环），
+      //     未知值两边都不计 → 一次真实的弹窗在面板统计里**凭空消失**（ask=0）；
+      //   · 「最近决策」那一行的徽标走 modeLabel，渲染成「未知动作：denny」，
+      //     而同一个面板的分类生效值显示的是 ask —— 同一份配置两个答案。
+      // 故这里折一次（knownAction 单点）。**只折动作，不动 reason**：reason 里那句
+      // 「自定义规则 r1 命中」正是「为什么这条读不懂的配置被命中了」的唯一线索。
+      //
+      // ⚠️ 与 `actionOverride` 的关系：那是无人在环落点的**记录档位**（fallback-allow /
+      // fallback-deny / timeout-allow / timeout-deny），是比动作更细的分类，且已经是本版
+      // 认识的值 —— 它优先，不参与折算。
+      //
+      // ⚠️ 反过来说：**审计档位不能塞进 `d.action`**。那个字段的契约是「本次判定/执行的动作」，
+      // 上面的折算正是按这个契约做的（配置里读出的未知动作 → ask）。timeout-* 不是配置动作、
+      // 不在 MODES 里，塞进去会被折成 ask，于是面板把一次无人在环的自动放行显示成「询问」。
+      // 新增审计档位时一律走第三参。
       const rec = {
         ts: new Date().toISOString(),
         tool: exec.name,
-        action: actionOverride || d.action,
+        action: actionOverride || knownAction(d.action),
         ruleId: d.ruleId || null,
         code: d.code || null,
         reason: segmentSummary(d),
@@ -8153,7 +8328,18 @@ export default {
       const proj = projectBlock(root)
       const effective = {}
       for (const c of CATS) {
-        effective[c] = firstEffective(proj && proj[c] && proj[c].mode, config.global[c] && config.global[c].mode, 'allow')
+        // 与**裁决**同源：effective 就是 resolveCategory 对「没有具体值」的解析结果。
+        // 此前这里用 firstEffective 自己拼一份（项目非 inherit → 项目值，否则全局值），
+        // 而那份不知道 resolveCategory 的两条判据：未知动作折 ask、以及「项目层未知动作
+        // 不得宽于全局 deny 时穿透全局」。于是同一份配置出现两种答案 —— 项目写 `denny`、
+        // 全局 deny 时，面板与 perm_status 显示 `denny`（客户端渲染成「未知动作：denny」），
+        // 宿主实际裁决却是 deny。
+        //
+        // 不新开一份「生效值判据」：resolveCategory 已是分类判定的唯一出口（decide 的
+        // 九个分类点、outsideMatrix、doomloop 都读它），直接复用，日后它再改判据这里
+        // 自动跟随。代价是每个分类多一次 projectBlock 查找（O(projects) 的字符串比较），
+        // 相对 statusView 里已有的 destructiveTiers/decisions 遍历可忽略。
+        effective[c] = resolveCategory(c, null, null, root).action
       }
       // 命令子设置的**生效档位表**：面板与裁决共用同一个来源（§「子设置读取单点」）。
       // 在 statusView 里算一次并复用：既给 `commandSub.effective`，也给
@@ -8431,7 +8617,15 @@ export default {
         // —— 判据是 `finalActionOf(mode, autoFallback) === 'deny'`，缺了它面板就无法
         // 在 `auto + 回落 deny` 时渲染出拒绝原因框（用户写不了理由）。
         // 与 `effective` 同源：走 fallbackSetting，不另算一份。
-        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: fallbackMode(root), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null, globalAutoFallback: config.global.fallbackMode === 'auto' ? (config.global.fallbackAutoFallback || 'ask') : null, projectAutoFallback: (proj && proj.fallbackMode === 'auto') ? (proj.fallbackAutoFallback || 'ask') : null },
+        //
+        // ⚠️ `effective` 必须与分类的 `effective[c]` **同口径**：都经 knownAction 折成
+        // 本版认识的动作。它是「未配置的快捷工具实际会怎样」的最后一级来源
+        // （client.js 的 QUICK_FALLBACK ← quickGlobalValue），面板拿它渲染下拉框。
+        // 不折的后果实测：全局 `fallbackMode: 'review'` 时宿主按 ask 裁决，面板却在
+        // 每个未配置工具行上显示「未知动作：review」—— 与 categories 的 effective 已经
+        // 折过 ask 形成两种口径。`global` / `project` 仍是**原始配置值**（不折），
+        // 兜底那一行的下拉框要靠它们把用户写错的东西显示出来、让用户能改回来。
+        fallback: { global: config.global.fallbackMode || 'ask', project: (proj && proj.fallbackMode) || 'inherit', effective: knownAction(fallbackMode(root)), globalReason: normalizeText(config.global.fallbackReason) || null, projectReason: normalizeText(proj && proj.fallbackReason) || null, globalAutoFallback: config.global.fallbackMode === 'auto' ? (config.global.fallbackAutoFallback || 'ask') : null, projectAutoFallback: (proj && proj.fallbackMode === 'auto') ? (proj.fallbackAutoFallback || 'ask') : null },
         excCats: EXC_CATS,
         // 例外的爆炸半径（只读派生，**不落盘**）：给面板的例外列表标注「这条例外放开的目标
         // 是盘根 / 系统目录 / 家目录 / 工作区外」。
@@ -9055,9 +9249,13 @@ export default {
             }
             const customReason = typeof a.reason === 'string' ? a.reason.trim().slice(0, 500) : ''
             if (ruleCount > 0) await persist(exec)
+            // byUser：这次结案是**人**在弹窗上点出来的（不是超时 / abort 的自动结案）。
+            // pre-execute 只按这个正向标记清零熔断计数（§3.5「人工决定 → 清零」）。
+            // 判据必须正向：反向的「排除 timedOut」漏掉了同样不带该字段的 abort 结案，
+            // 于是刚入池就被取消的条目也会被当成人工决定（见 resetAutoBreaker 调用处）。
             entry.settle(allow
-              ? { kind: 'allow', ruleAdded: ruleCount > 0 }
-              : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')) })
+              ? { kind: 'allow', ruleAdded: ruleCount > 0, byUser: true }
+              : { kind: 'deny', reason: customReason || (lang === 'en' ? (ruleCount > 0 ? 'User denied and rule added' : 'User denied') : (ruleCount > 0 ? '用户拒绝并加入规则' : '用户拒绝')), byUser: true })
             return json(res, { ok: true, ruleAdded: ruleCount > 0 })
           } catch (e) {
             // 已认领但中途失败：必须以结案收尾，否则该审批永久卡死（见上方注释）。
@@ -9721,14 +9919,34 @@ export default {
           // 人工决定 = 用户已在环里 → 熔断计数清零（§3.5：人决定 → 清零）。
           // 这条必须在**任何 return 之前**执行：用户无论是允许还是拒绝，都已经亲自看过
           // 这次调用，模型此前那串拒绝不再说明「模型现在有问题」。
-          resetAutoBreaker(exec)
+          //
+          // ⚠️ 判据是**正向的 `out.byUser`**（只有 /permgate/decide 的人工结案会带），
+          // 不是「排除超时」。三类结案里只有一类是人工：
+          //   · 超时（带 timedOut）—— 用户根本没看过；
+          //   · abort（审批取消 / 注册前已取消）—— 用户同样没看过。这一条尤其隐蔽：
+          //     条目刚 set 进 pendingApprovals、broadcast 刚发出就被结案，用户不可能看过弹窗；
+          //   · decide —— 人工，唯一该清零的一类。
+          // 曾写成 `!out.timedOut`，把 abort 也算成人工决定：无人值守时熔断退化成
+          // 「每 N+1 次只跳过 1 次」—— 模型连续拒绝 N 次达到阈值 → 第 N+1 次走
+          // escalate(code:'breaker')（本次没调模型）→ 带 timeoutFallback 的 ask 被 abort
+          // 结案 → 清零 → 第 N+2 次又从 0 开始真实调用模型。§3.5 的表格写的是
+          // 「失败 / 超时 / escalate → 不变」，abort 属同一格。
+          // 正向判据的另一个好处：日后新增一种自动结案（不带 byUser）默认就不清零，
+          // 失败方向安全；反向判据则要每加一种就记得补一条排除。
+          if (out.byUser) resetAutoBreaker(exec)
           // 超时自动结案必须留痕：recordDecision 在审批**之前**执行且只记 d.action === 'ask'，
           // 若此处不补记，事后无法区分「人工批准」与「超时自动放行」——尤其 onTimeout === 'allow'
           // 是一条无人在环的放行路径，审计缺失会让它彻底不可追溯。
           // 走 recordDecision 单点（不自行 push+splice）：截断口径与字段形状只有一份实现，
           // 否则日后改 MAX_DECISIONS 或给记录增补字段时，这里会静默按旧语义走。
+          //
+          // 档位走**第三参**而不是 `d.action`：后者是「判定动作」通道，会被 knownAction 按
+          // 配置动作折算（timeout-* 不在 MODES 里 → 折成 ask），记录就与真正弹窗等待的那条
+          // 完全同形，正是本段要避免的情形。
           if (out.timedOut) {
-            recordDecision({ action: out.kind === 'allow' ? 'timeout-allow' : 'timeout-deny', ruleId: null, reason: out.reason || '' }, exec)
+            // `action` 仍是**实际执行**的那个动作（allow/deny），记录档位走第三参。
+            recordDecision({ action: out.kind, ruleId: null, reason: out.reason || '' }, exec,
+              out.kind === 'allow' ? 'timeout-allow' : 'timeout-deny')
             console.warn('[permgate] approval timed out ->', out.kind, exec.name)
           }
           if (out.kind !== 'allow') return { kind: 'deny', reason: out.reason || (uiLang === 'en' ? 'User denied' : '用户拒绝') }

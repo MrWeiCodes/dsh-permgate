@@ -4574,8 +4574,18 @@ window.__ModuleLoader__.load({
 			// 于是调用点从三处降为两处 —— 上面那句「都受影响」只覆盖这两处。
 			const badge = (action) => React.createElement('span', { style: { color: MODE_COLORS[action] || '#888', fontWeight: 600, marginRight: 6, fontSize: 12, whiteSpace: 'nowrap' } }, modeLabel(action));
 
+			// ── 值域外的当前值必须能显示出来 ───────────────────────────────────────
+			// 归一化侧刻意**保留**本版读不懂的动作（index.js 的 actionAllowed ②：丢弃等于
+			// 规则消失 = 继续往下走 = 可能静默放行），于是 categories / 例外 / 快捷工具里
+			// 真的可能存着 `denny` 这种值。而 `<select>` 选不中不存在的 option：浏览器会
+			// 显示空白或回落到首个选项 —— 面板于是说「询问」，宿主实际按 deny 拒绝，
+			// 用户既看不出配置写错了，也没法在这个下拉里改回来。
+			//
+			// 故把值域外的当前值补成一个 option，标签走 modeLabel 的「未知动作：X」降级。
+			// 处理放在 sel 这个**唯一渲染单点**：分类 / 例外 / 八档 / 快捷工具 / 兜底
+			// 六处调用点都经它，逐处补 option 就是六份副本、日后必漏。
 			const sel = (v, onChange, options, disabled) => React.createElement('select', { value: v, onChange, className: 'pg-field', style: { padding: '2px 6px' }, disabled: !!disabled },
-				options.map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
+				(v && options.indexOf(v) === -1 ? options.concat([v]) : options).map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m))),
 			);
 
 			// ── 「动作 + 失败后」控件组：**六处共用**的唯一实现 ─────────────────────────

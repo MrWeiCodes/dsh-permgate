@@ -10461,45 +10461,7 @@ export function assessCommand(source, shell, hooks) {
   //   · 规则之间是**优先级**关系（用户用列表顺序表达「哪条更具体」），
   //     所以那边按顺序取首条，让「具体覆盖宽泛」可表达（见 decide() 的规则循环）。
   // 曾经把两者统一成「取最严」，结果是规则侧失去了表达力（实测：具体 allow 被宽泛 deny 吃掉）。
-  let action
-  let code
-  if (anyDeny) { action = 'deny'; code = 'segment-deny' }
-  else if (anyAsk) { action = 'ask'; code = 'segment-ask' }
-  // ── auto 的合并位置：**deny 与 ask 之后、inherit 之前** ──────────────────────────
-  // 一条命令里若有段是 deny，整条就该 deny（模型不该有机会放行一个用户明确拒绝的段）；
-  // 有段是 ask 时同理 —— ask 是「要问人」，而 auto 是「问模型」，人比模型更该被问。
-  // 两者都不在时才轮到 auto：此时没有任何段要求人来定，而至少有一段要求模型看。
-  // 放在 inherit 之前：inherit 表示「该段没有表态」，auto 是**有**表态，故优先。
-  // 若把 auto 放到 inherit 之后（或漏掉），auto 段会被当成「无表态」→ 落到
-  // `all-allow` 分支**静默放行**（fail-open，正是 §9A.4 警告的那一类）。
-  else if (anyAuto) { action = 'auto'; code = 'segment-auto' }
-  // ── 未知动作**必须排在 inherit 之前**（fail-open 修复）────────────────────────────
-  // 顺序反了（`anyInherit` 在前）时，一条命令里只要有一段落 `inherit`，其余段的
-  // 「本版读不懂的动作」就被整体吞掉，整条回 `inherit` —— 而宿主把 inherit 折算成
-  // 大分类默认值（command 分类常态是 allow）。实测：
-  //     git status; echo hi   （例外 `git status`=未知动作，分类 inherit）
-  //       → inherit → 宿主折算 allow   ❌
-  //     单段 `git status` 同配置 → ask ✅（顺序只影响多段，正是本条要堵的）
-  // 语义依据与上面 auto 那一条同源：`inherit` 表示「**该段**没有表态」，而未知动作
-  // 是「有表态、只是本版读不懂」—— 有表态必须压过无表态，否则「把危险段包进多段
-  // 命令」就成了绕过未知动作闸门的手段。折 ask 是「问人」，方向安全。
-  // 注意不能简单把 unknown 并进 anyAsk：那样 `code` 会变成 `segment-ask`，
-  // 而弹窗/日志要靠 `segment-unknown-action` 区分「有人要求确认」与「配置读不懂」。
-  else if (anyUnknown) { action = 'ask'; code = 'segment-unknown-action' }
-  else if (anyInherit) { action = 'inherit'; code = 'all-inherit' }
-  else { action = 'allow'; code = 'all-allow' }
-
-  // 决定最终动作的那一段：它的 reason/ruleId/note 随判定一起下发。
   //
-  // ⚠️ 未知动作折 ask 时，**没有任何段的 `action` 等于 `'ask'`**（那一段的 `action`
-  // 是那个读不懂的原值）—— 于是 `find` 落空、归因退化成 `out[0]`（第一段，可能是
-  // 毫不相关的 `echo`）。故这一支要单独找「动作既不在四档值域、也不是 inherit」的那一段。
-  // ⚠️ 必须排除 `inherit`：它同样不在 `TIER_STRICTNESS` 里，但它表示「该段没表态」，
-  // 不是「读不懂的动作」。不排除时 `echo hi; git status` 会选中 `echo hi` 那一段
-  // （实测 matched=null），归因仍然错位。
-  const decisive = (action === 'ask' && code === 'segment-unknown-action')
-    ? (out.find((s) => s.action !== 'inherit' && !Object.prototype.hasOwnProperty.call(TIER_STRICTNESS, s.action)) || out[0])
-    : (out.find((s) => s.action === action) || out[0])
   // ── 段间 autoFallback 从严合并（deny > ask > allow）──────────────────────────────
   // 回落值**是**权限判据 —— 它就是「模型超时 / 熔断 / 协议错时最终执行什么」。
   // 此前直接取 `decisive` 那一段的值，而 `decisive` 是 `out.find(...)` 的**第一个**匹配段，
@@ -10514,6 +10476,62 @@ export function assessCommand(source, shell, hooks) {
   // `TIER_STRICTNESS`（那是动作域的序）。合并实现复用 `strictestFallbackOf`
   // （段内多档用的是同一个），缺省 ask 的规则也在那里。
   const mergedAutoFallback = strictestFallbackOf(out.filter((s) => s.action === 'auto').map((s) => s.autoFallback))
+  let action
+  let code
+  if (anyDeny) { action = 'deny'; code = 'segment-deny' }
+  else if (anyAsk) { action = 'ask'; code = 'segment-ask' }
+  // ── 未知动作**必须排在 auto 与 inherit 之前**（两处 fail-open 的同一条修法）─────────
+  // 槽序与段级 `resolveException`（`ask || unknown || auto || allow`）**同构**：
+  // 未知动作折 ask，而 ask 是「要问人」、auto 是「问模型」，人比模型更该被问。
+  //
+  // 排在 auto 之前：反了时（HEAD 的 `anyAuto` 无条件优先）一条命令里只要有一段命中
+  // auto 例外，其余段「本版读不懂的动作」就被整体吞掉。实测（例外 `rm -rf /data`=读不懂
+  // 的值、`rm -rf /tmp`=auto/回落 deny）：
+  //     `rm -rf /data`                      → ask（segment-unknown-action，弹窗）✅
+  //     `rm -rf /data; rm -rf /tmp`         → auto/deny ❌ 未知段被完全忽略
+  // 于是「把读不懂的那一段和任意一条 auto 例外拼在一起」就成了绕过未知动作闸门的手段，
+  // 模型判 allow 时那条本应弹窗的段**无人在环**被执行。
+  //
+  // ⚠️ `auto/回落 deny` 也不例外 —— 这一格是**段间**与**段内**的分界，不能类比
+  // `strictestTierAction` 的 `hasUnknown`：那里多档作用在**同一个段**上，用户对该段有
+  // auto 授权，回落 deny 是它自己的第二层；段间是**不同段**，未知那一段没有 auto 授权，
+  // 整条走 auto 等于把「问人」的要求换成「问模型」。`finalActionOf('auto','deny')` 只描述
+  // 模型失败后的落点，不描述模型成功放行那条路径 —— 而那正是放宽发生的地方。
+  // （同一条判据见 index.js 的 out()：未知 base 不被 `doom=auto`（含回落 deny）接管。）
+  //
+  // 排在 inherit 之前：反了时一条命令里只要有一段落 `inherit`，其余段的「本版读不懂的
+  // 动作」就被整体吞掉，整条回 `inherit` —— 而宿主把 inherit 折算成大分类默认值
+  // （command 分类常态是 allow）。实测：
+  //     git status; echo hi   （例外 `git status`=未知动作，分类 inherit）
+  //       → inherit → 宿主折算 allow   ❌
+  //     单段 `git status` 同配置 → ask ✅（顺序只影响多段，正是本条要堵的）
+  // 语义依据与 auto 那一条同源：`inherit` 表示「**该段**没有表态」，而未知动作
+  // 是「有表态、只是本版读不懂」—— 有表态必须压过无表态。
+  // 注意不能把 unknown 并进 anyAsk：那样 `code` 会变成 `segment-ask`，
+  // 而弹窗/日志要靠 `segment-unknown-action` 区分「有人要求确认」与「配置读不懂」。
+  else if (anyUnknown) { action = 'ask'; code = 'segment-unknown-action' }
+  // ── auto 的合并位置：**deny / ask / 未知动作之后、inherit 之前** ────────────────────
+  // 一条命令里若有段是 deny，整条就该 deny（模型不该有机会放行一个用户明确拒绝的段）；
+  // 有段是 ask 或未知动作时同理 —— 那两者都是「要问人」，人比模型更该被问。
+  // 都不在时才轮到 auto：此时没有任何段要求人来定，而至少有一段要求模型看。
+  // 放在 inherit 之前：inherit 表示「该段没有表态」，auto 是**有**表态，故优先。
+  // 若把 auto 放到 inherit 之后（或漏掉），auto 段会被当成「无表态」→ 落到
+  // `all-allow` 分支**静默放行**（fail-open，正是 §9A.4 警告的那一类）。
+  else if (anyAuto) { action = 'auto'; code = 'segment-auto' }
+  else if (anyInherit) { action = 'inherit'; code = 'all-inherit' }
+  else { action = 'allow'; code = 'all-allow' }
+
+  // 决定最终动作的那一段：它的 reason/ruleId/note 随判定一起下发。
+  //
+  // ⚠️ 未知动作折 ask 时，**没有任何段的 `action` 等于 `'ask'`**（那一段的 `action`
+  // 是那个读不懂的原值）—— 于是 `find` 落空、归因退化成 `out[0]`（第一段，可能是
+  // 毫不相关的 `echo`）。故这一支要单独找「动作既不在四档值域、也不是 inherit」的那一段。
+  // ⚠️ 必须排除 `inherit`：它同样不在 `TIER_STRICTNESS` 里，但它表示「该段没表态」，
+  // 不是「读不懂的动作」。不排除时 `echo hi; git status` 会选中 `echo hi` 那一段
+  // （实测 matched=null），归因仍然错位。
+  const decisive = (action === 'ask' && code === 'segment-unknown-action')
+    ? (out.find((s) => s.action !== 'inherit' && !Object.prototype.hasOwnProperty.call(TIER_STRICTNESS, s.action)) || out[0])
+    : (out.find((s) => s.action === action) || out[0])
   // ── 归因段：`matched` / `reason` / `note` 必须指向**真正产生最终动作**的那一段 ──────────
   // 非 auto 动作：产生该动作的段就是 `decisive`（`out.find` 的第一个同动作段），本来正确。
   // auto 不同 —— 整条的动作由**回落值**落地（模型失败时执行 `autoFallback`），而回落值已按

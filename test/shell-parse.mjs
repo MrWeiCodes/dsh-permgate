@@ -11765,6 +11765,88 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+group('AH14. 段间合并：未知动作压过 auto（与段级槽序同构，不看书写顺序）')
+{
+  // ── 这一组守的是什么 ────────────────────────────────────────────────────────
+  // 段级 `resolveException` 的槽序是 `ask || unknown || auto || allow`（未知动作排在
+  // auto 之前、折 ask）。段间合并此前只有 `anyDeny → anyAsk → anyAuto → anyInherit →
+  // allow`，于是只要有一段命中 auto 例外，其余段的「本版读不懂的动作」就被**完全忽略**
+  // —— 把危险段拼在任意一条 auto 例外后面即可绕过未知动作闸门。
+  //
+  // ⚠️ 为什么必须新增这一组（实测）：把 shell-parse.js 里未知动作那一支删掉或挪到 auto
+  // 之后，regressions / meta / smoke **三套全绿** —— AG2 ⑤ 钉的是**段内**多档（`tiers` +
+  // `autoFallbacks`），它根本不经过段间合并这条路径，两者是两份不同的代码。
+  //
+  // 六格一起断言，缺一格就有一类写法溜过去：
+  //   ① `auto/allow + unknown` → ask   （fail-open 的靶心）
+  //   ② `auto/deny  + unknown` → ask   （回落 deny 也不例外，见下）
+  //   ③ `auto/ask   + unknown` → ask   （与 ② 同形不同结论，证明判据是动作而非回落值）
+  //   ④ 单段 `auto/allow`（无未知）→ auto/allow（接线对照：不得把 auto 一律折 ask）
+  //   ⑤ 反向顺序 `unknown` 在前 → 与 ①/② 同结论（证明判据不是「谁先出现」）
+  //   ⑥ 归因：折 ask 时 matched 指向**未知动作那一段**（见 AH13，此处只补段间形态）
+  //
+  // ② 为什么是 ask 而不是保留 auto/deny（这一格**曾经写反过**）：`finalActionOf` 把
+  // `auto/deny` 的最终动作算成 deny，看起来比 ask 严，但那只描述**模型失败后**的落点；
+  // auto 的第一层是问模型，模型判 allow 时那条读不懂的段**无人在环**就被执行了，而折 ask
+  // 是弹窗、人必须点。放宽发生在模型成功那条路径上，与回落值无关。
+  // 不能拿 `strictestTierAction` 的 `hasUnknown` 类比：那里多档作用在**同一个段**上，
+  // 用户对该段有 auto 授权；段间是**不同段**，未知那一段没有 auto 授权。
+  {
+    const bad = []
+    // 例外表：`git status *` = auto（回落值由 excAutoFallback 给），`rm -rf *` = 读不懂的值。
+    // 手写钩子而不是用 hooks()：它自带的默认例外表里有 `git status *`→allow，
+    // 会抢在本组的 auto 例外之前命中（AH13 已记过这个坑）。
+    const DS_ALLOW = { inside: 'allow', outside: 'allow', wide: 'allow', unknown: 'allow', priv: 'allow', proc: 'allow', power: 'allow', reg: 'allow' }
+    const at = (cmd, excAction, af) => assessCommand(cmd, 'bash', {
+      home: HOME, userHome: HOME, platform: 'win32',
+      matchException: (t) => {
+        if (t === 'git status') return { action: 'auto', ruleId: 'e-auto', autoFallback: af }
+        if (t === 'rm -rf /data') return { action: excAction, ruleId: 'e-unk' }
+        return null
+      },
+      destructive: () => DS_ALLOW,
+      category: () => ({ action: 'allow' }),
+      isOutsideWorkspace: () => false,
+    })
+    const UNK = 'alwayz'  // 本版不认识的动作（`always` 的常见笔误）
+    // 防空转：两段必须真的是 auto 与未知动作。少了这条，例外匹配一旦失配
+    // （改词边界、改 label 口径），下面六格会退化成「两个 allow 段」而全部假通过。
+    const probe = at('git status; rm -rf /data', UNK, 'allow')
+    const acts = (probe.segments || []).map((s) => s.action)
+    if (acts.indexOf('auto') === -1 || acts.indexOf(UNK) === -1) {
+      bad.push(['承重形态未命中（本组空转）', JSON.stringify(acts)])
+    }
+
+    const r1 = at('git status; rm -rf /data', UNK, 'allow')
+    if (r1.action !== 'ask') bad.push(['auto/allow + 未知动作 未折 ask（未知段被忽略，fail-open）', r1.action + '/' + r1.autoFallback])
+    const r2 = at('git status; rm -rf /data', UNK, 'deny')
+    if (r2.action !== 'ask') {
+      bad.push(['auto/deny + 未知动作 未折 ask（模型放行时无人在环，比折 ask 宽）', r2.action + '/' + r2.autoFallback])
+    }
+    const r3 = at('git status; rm -rf /data', UNK, 'ask')
+    if (r3.action !== 'ask') bad.push(['auto/ask + 未知动作 未折 ask（判据是动作，不是回落值）', r3.action + '/' + r3.autoFallback])
+    // ④ 接线对照：没有未知段时 auto/allow 必须原样生效（否则本组会变成「auto 一律折 ask」）
+    const r4 = at('git status', UNK, 'allow')
+    if (r4.action !== 'auto' || r4.autoFallback !== 'allow') {
+      bad.push(['单段 auto/allow 被误折（本组判据过宽）', r4.action + '/' + r4.autoFallback])
+    }
+    // ⑤ 顺序无关：未知段在前时 ①/② 的结论不变
+    const r5 = at('rm -rf /data; git status', UNK, 'allow')
+    if (r5.action !== 'ask') bad.push(['未知段在前时 auto/allow 未折 ask（判据与槽序绑定）', r5.action + '/' + r5.autoFallback])
+    const r6 = at('rm -rf /data; git status', UNK, 'deny')
+    if (r6.action !== 'ask') {
+      bad.push(['未知段在前时 auto/deny 未折 ask（判据与槽序绑定）', r6.action + '/' + r6.autoFallback])
+    }
+    // ⑥ 归因：折 ask 必须指向**未知动作那一段**（不是第一段、也不是 auto 段）
+    if (r1.matched !== 'e-unk') bad.push(['折 ask 时 matched 未指向未知动作那一段', String(r1.matched)])
+
+    ok('★★ AH14 段间合并：未知动作一律折 ask（含 auto/deny 与反向顺序），无未知段时 auto 照常',
+      bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 group('AI. `RADIUS_TIERS_WHEN_UNREADABLE` 三档逐档承重（发现：`unknown` 档无断言守护）')
 {
   // ── 这一组盯的是什么 ────────────────────────────────────────────────────────
