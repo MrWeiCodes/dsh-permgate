@@ -21,27 +21,15 @@ const group = (t) => console.log('\n— ' + t)
 /**
  * 把 index.js 的**真实判定链** `destructiveTiers` 抽出来并**实际求值**。
  *
- * 为什么改成求值判定链、而不是继续求值那个推导函数：
- *   这里原先抽的是 `destructiveTierDefaults`（「inside = 本层 mode、其余七档 =
- *   strictest(ask, inside)」）。那套规则**已从生产代码删除**，八档缺省值现在只有一份实现
- *   —— `destructiveTiers` 的「项目显式 → 全局显式 → ask」，也就是裁决真正用的那一份。
- *   继续对已下线的函数求值，会让下面这一整族断言**对着一个没人调用的函数**变绿：
- *   实测把生产实现换成「七档全 allow」的坏实现，那些断言照样通过（零鉴别力）。
- *   故改为对判定链本身求值。
+ * 只对生产判定链求值：对已下线的推导函数求值，会让断言对着一个没人调用的函数变绿。
  *
  * 依赖注入：函数体用到 `projectBlock` / `config` / `TIERS` / `keyOfTier` /
- * `normalizeText` / `legacyReasonOf`（reasons 分支）。
- *   · `keyOfTier` / `legacyReasonOf` **按源码原样抠出**（与下面 ★43 的 `tiersOf` 同源）：
- *     这里曾经注入一份手抄的 `(tier) => (tier === 'inside' ? 'action' : tier)` stub ——
- *     那是 `keyOfTier` 的**第二份口径**，而它正是 index.js:27-31 点名「必须同步改」的那类
- *     副本。实测：按那里的要求把 `keyOfTier` 与 `normalizeSubSetting` 的内联副本同步改名
- *     （inside → 'act'）后，stub 仍去查已下线的 `action` 键 —— 挂在本函数上的 A′/B′/42
- *     一族断言**照旧全绿**（静默对已下线的键名求值），只有走源码抠取路线的 ★43 变红。
- *     故这里不再抄口径：键名映射只有在生产实现里成立才算通过。
- *   · `normalizeText` 仍注入（它是纯文本归一，且抽取窗口里没有它的定义）。
+ * `normalizeText` / `legacyReasonOf`（reasons 分支）。其中 `keyOfTier` / `legacyReasonOf`
+ * **按源码原样抠出**：手抄一份就是给这些口径再造一个副本，副本漂移不会被断言发现。
+ * `normalizeText` 直接注入（纯文本归一，抽取窗口里没有它的定义）。
  *
- * ⚠️ `keyOfTier` 是 `const` 声明，**不得**再作为同名形参注入 ——
- * 否则撞成 `SyntaxError: Identifier 'keyOfTier' has already been declared`（实测踩过）。
+ * ⚠️ `keyOfTier` 是 `const` 声明，不得再作为同名形参注入，
+ * 否则撞成 `SyntaxError: Identifier 'keyOfTier' has already been declared`。
  *
  * 取不到函数（被改名 / 删掉）时返回 null，调用方的断言随即失败 —— 不会静默跳过。
  */
@@ -76,15 +64,12 @@ function tierChainOf(source) {
 /**
  * 把 index.js 的**子设置写入单点** `setCommandSub` 抽出来并**实际求值**。
  *
- * 为什么走求值而不是匹配源码：59g 的 ⑤ 原先匹配字面量
- * `sub.autoFallbacks[t] = req || afOfTier() || 'ask'`。那句实现已改成「本层无值就不写键」
- * （把补 `ask` 的职责留给读取侧的跨层回落），字面量随之消失，而新注释里为说明历史
- * **引用了旧代码原文** —— 正则于是改为命中注释：把实现那一行整个删掉，断言照样绿（实测）。
- * 行为断言不吃这个亏：它不关心代码长什么样，只问「传了回落值，磁盘上是不是它」。
+ * 走行为求值而不是匹配源码字面量：实现改写后字面量会消失，而注释里为说明历史
+ * 引用的旧代码原文反而可能让正则命中注释。
  *
  * 依赖注入：函数体用到 `MODES` / `ALL_MODES` / `TIERS` / `keyOfTier` / `finalActionOf` /
  * `normalizeText` / `config` / `ensureProject` / `freshCategory`。
- *   · `MODES` / `ALL_MODES` / `keyOfTier` / `finalActionOf` **按源码原样抠出**（与 tierChainOf 同源）：
+ *   · `MODES` / `ALL_MODES` / `keyOfTier` / `finalActionOf` **按源码原样抠出**：
  *     手抄一份就是给这些口径再造一个副本，而「漂移即 fail-open」正是本仓库反复踩的坑。
  *   · `normalizeText` 注入（纯文本归一，抽取窗口里没有它的定义）。
  *   · `config` / `ensureProject` / `freshCategory` 注入：写入单点只碰 `config` 里的块，
@@ -401,16 +386,12 @@ group('6b. lint 工具链：配置声称的覆盖范围必须真的被跑')
   }
   // ★★ auto 评审段的 session mock 必须走 `sessionMock()`，不得手写宽松的 `surface.nodes`。
   //
-  // 背景：这里连踩两次同一个坑，两次都是**mock 比真实 API 宽松**：
-  //   ① mock 提供了 `session.events()` —— 那个方法在真实 DSH 里不存在；
-  //   ② mock 写 `surface: { nodes: events.map((_, i) => i) }`，把**所有**事件都塞进 surface
-  //      —— 而 `tool/call` 不是 surface 事件（实测顶层键只有 type/seq/time/data，
-  //      无 `surfaceOp`），真实环境里**永远不在** surface.nodes 里。
+  // mock 必须照抄真实 API 的形状：mock 比真实 API 宽松时，一个在真实环境里恒返回空数组的
+  // 实现会在测试里全绿。两种典型走偏：mock 提供了真实 DSH 里不存在的 `session.events()`；
+  // 或把所有事件都塞进 `surface.nodes`（而 `tool/call` 不是 surface 事件，真实环境里
+  // 永远不在 surface.nodes 里）。
   //
-  // 两次的后果一样：一个在真实环境里恒返回空数组的实现，在测试里全绿。
-  // 教训不是「改那个 bug」，而是**mock 必须照抄真实 API 的形状** ——
-  // 所以把「按真实 surface 规则推导 nodes」收进 `sessionMock()` 一个入口，
-  // 并用反向判据禁止再手写。
+  // 所以把「按真实 surface 规则推导 nodes」收进 `sessionMock()` 一个入口，并用反向判据禁止再手写。
   //
   // 允许的唯一例外：`sessionMock()` 自己内部那一处（它就是推导逻辑）。
   // 注释里出现的同名字符串不算（正则要求出现在赋值语境 `surface: { nodes:` 且不是注释行）。
@@ -475,7 +456,7 @@ group('7. 浏览器半部分：清单以宿主下发为准')
 ok('client 清单为可变并保留默认', cli.includes("let CATS = ['command', 'outsideRead', 'directory', 'read', 'edit', 'image', 'undo', 'subagent', 'doomloop'];") && cli.includes("let EXC_CATS = ['command', 'outsideRead', 'directory', 'read', 'image', 'edit', 'undo'];"))
 ok('client applyStatusLists 覆盖清单', cli.includes('function applyStatusLists(s) {') && cli.includes('applyStatusLists(s);'))
 ok('client 读取 status 下发的清单', cli.includes('s.cats') && cli.includes('s.excCats') && cli.includes('s.modes') && cli.includes('s.allModes'))
-// ★★ `auto` 的「存储」与「展示」必须分离（本轮加第四档时最容易做错的一处）
+// ★★ `auto` 的「存储」与「展示」必须分离
 //
 // 背景：`MODES` 已含 auto（配置能存、判定链认识、降级正确），但评审段尚未接线 ——
 // 此时若把 auto 直接下发给面板，用户选了它实际会按 ask 走（每次都弹窗），
@@ -1176,11 +1157,10 @@ ok('默认值改动不做迁移（migrateOld 未针对 undo 特判）', !/migrat
 // normalizeCategory 只在 mode 缺失/非法时才回落到默认值 —— 老配置里显式落盘的 ask/deny 必须存活，
 // 否则「改默认值」会静默覆盖老用户已经做过的选择。
 //
-// 判据与例外/规则/快捷工具/子设置**同一份**（actionAllowed，§9A.5 降级安全）：完全未知的
-// 动作保留原值、由读取侧折 ask。这里**不再钉源码字面形态** —— 曾经写
-// `src.includes('const cat = { mode: actionAllowed(...) ? c.mode : def.mode }')`，
-// 它把「判据是哪个函数」和「这一行怎么写」绑在一起：改成 `const ok = actionAllowed(...)`
-// 这类等价写法就假红，而真正的回归（退回裸白名单丢弃）在行为上只体现为「未知值被丢弃」。
+// 判据与例外/规则/快捷工具/子设置**同一份**（actionAllowed，降级安全）：完全未知的
+// 动作保留原值、由读取侧折 ask。这里不钉源码字面形态：把「判据是哪个函数」和「这一行
+// 怎么写」绑在一起，改成等价写法就假红，而真正的回归（退回裸白名单丢弃）在行为上只
+// 体现为「未知值被丢弃」。
 // 那条行为由 smoke 的 group18d ④ 覆盖（项目 read=review + 全局默认 allow → 必须 ask），
 // 它是**执行结果**断言、且用默认 allow 的分类才抓得到（command 的默认是 ask，抓不到）。
 // 图片嗅探：直接断言解析行为（构造最小文件头），而非只匹配源码里的格式字面量
@@ -1206,7 +1186,7 @@ ok('工作区外读图走合并矩阵单点（不被区外闸短路）', /if \(i
 // 防回退：read 也必须走合并矩阵（deny 例外与 read=ask 在跨工作区时必须生效）
 ok('工作区外读文件走合并矩阵单点（不被 directory 短路）', /if \(isFileRead\(name, args\)\)[\s\S]{0,400}?outsideMatrix\('read', fp, root, cwd\)/.test(src))
 ok('read/image/edit/undo 共用工作区外合并矩阵单点', (src.match(/outsideMatrix\('/g) || []).length === 4)
-// ★★ 区外合并矩阵必须认识 `auto`，且**排在 allow 之前**（§9A.4 的 fail-open）
+// ★★ 区外合并矩阵必须认识 `auto`，且**排在 allow 之前**
 //
 // outsideMatrix 的合并是「任一道闸 deny → deny；任一道 ask → ask；否则 allow」。
 // 加 auto 时若只在上面两处补分支、忘了它，`auto` 会掉进最后的 allow 分支 ——
@@ -1636,7 +1616,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
 // ③ 在选了 auto 时**看得见**模型失败后会怎样。
 {
   // ① 文案：中英都要有，且中文是「自动审批」四字全称 ——
-  //    单写「自动」会与插件历史上「编辑器内核自动判别」的语义撞车（见计划 §2.1）。
+  //    单写「自动」会与插件历史上「编辑器内核自动判别」的语义撞车。
   ok('★ auto 有中英文案（中文用「自动审批」全称，不缩写为「自动」）',
     cli.includes("'mode.auto': '自动审批'") && cli.includes("'mode.auto': 'Auto review'"))
   // ② 颜色：auto 必须有自己的颜色，且**不得**复用 ask 的橙色 ——
@@ -1652,7 +1632,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   })())
   // ③ 回落值选择器：选了 auto 就必须**看得见**「失败后怎么办」。
   //    没有它，用户以为自己在配 auto，实际连「模型挂了会怎样」都不知道 ——
-  //    而那是 auto 语义的核心（§2.1：选 auto 必须同时指定 autoFallback）。
+  //    而那是 auto 语义的核心：选 auto 必须同时指定 autoFallback。
   //
   // ── 判据从「数调用点」改为「只有一份实现」────────────────────────────────────
   // 旧断言数的是 `sel(mode, changeCat(...))` 与 `mode === 'auto' ? sel(catAutoFallbackOf(`
@@ -1774,7 +1754,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
-    // 宿主 AUTO_REVIEW_DEFAULTS 的 6 个键，每个都要有控件
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 7 个键，每个都要有控件
     //
     // 曾经有第 8 个 `redactContentKeys`（「隐藏参数内容」），已删除：它**从未接线**
     // （`reviewUserText` 一次都没读过它），而它的设计前提也是错的 ——
@@ -1782,10 +1762,29 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // 密钥脱敏（`sk-`/AKIA/PEM/敏感键名）是**始终开启**的另一层，与它无关。
     //
     // 还有第 7 个 `cacheEnabled`（「记住放行过的调用」），也已删除 —— 见下一条断言。
-    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model']
+    //
+    // ⚠️ 这份清单必须与宿主 AUTO_REVIEW_DEFAULTS **逐键对齐**：多一个键而这里没加，
+    // 那条设置就退化成「只能手改 config.json」；这里多一个而宿主没有，则面板会渲染
+    // 一个提交了没人读的控件。两者都是本文件反复记录的面板说谎。
+    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model', 'reasoningEffort']
     for (const k of keys) {
       if (body.indexOf("'" + k + "'") === -1) return false
     }
+    // 与宿主那份常量做**双向**核对：从源码里取 AUTO_REVIEW_DEFAULTS 的键，与上面逐个比对。
+    // 只写死清单的话，日后宿主加键时这条断言照样绿 —— 那正是它要防的事。
+    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+    if (iDef < 0) return false
+    let d2 = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d2++
+      else if (src[k] === '}') { d2--; if (d2 === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    if (!defBody) return false
+    const hostKeys = (defBody.match(/^\s{6}([A-Za-z][A-Za-z0-9]*):/gm) || [])
+      .map((line) => line.trim().replace(/:$/, ''))
+    if (hostKeys.length !== keys.length) return false
+    for (const hk of hostKeys) { if (keys.indexOf(hk) === -1) return false }
     // 缓存开关**必须不存在**：它对应的功能已整体删除（实测命中率上限 1.51%，
     // 中位数 0%，且引入 fail-open 面）。留一个改了没效果的开关就是面板说谎 ——
     // 这正是本文件反复记录的那类缺陷。
@@ -1794,6 +1793,1702 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (!/invoke\('permgate:set-auto-review'/.test(body)) return false
     // 卡片内**不再**判 tab（判据在调用点，见下一条断言）
     return body.indexOf("if (tab !== 'global') return null") === -1
+  })())
+  // ⑨a statusView 必须下发 reasoningEffort 的生效值（否则面板的推理强度下拉恒空）
+  //
+  // 判据走**真实求值**而不是匹配源码：把 autoReviewSetting 与 AUTO_REVIEW_DEFAULTS 抽出来，
+  // 注进一个最小 statusView 片段跑一遍。只匹配源码里的键名无法区分「写了」与「写对位置」——
+  // 实测变异（删掉 statusView 里那一行）时，源码里 `reasoningEffort` 仍有 6 处，
+  // 任何 `includes` 式断言都会照常通过。
+  ok('★★ statusView 下发 reasoningEffort 生效值（删掉它面板下拉就恒空）', (function () {
+    // ① 宿主侧：从真实源码里抽出这两个定义并求值
+    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+    if (iDef < 0) return false
+    let d = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    const iFn = src.indexOf('function autoReviewSetting(key) {')
+    if (iFn < 0) return false
+    let d2 = 0
+    let fnBody = ''
+    for (let k = src.indexOf('{', iFn); k < src.length; k++) {
+      if (src[k] === '{') d2++
+      else if (src[k] === '}') { d2--; if (d2 === 0) { fnBody = src.slice(iFn, k + 1); break } }
+    }
+    if (!defBody || !fnBody) return false
+    let setting = null
+    try {
+      setting = new Function('config', defBody + '\n' + fnBody + '\n; return autoReviewSetting')(
+        { global: { autoReview: { reasoningEffort: 'high' } } })
+    } catch (e) { return false }
+    if (typeof setting !== 'function') return false
+    if (setting('reasoningEffort') !== 'high') return false
+    // 未配置时回落到默认值（空串 = 跟随会话）
+    const def = new Function(defBody + '\n; return AUTO_REVIEW_DEFAULTS.reasoningEffort')()
+    if (def !== '') return false
+    // ② 客户端侧：statusView 的那一行必须真的读它（不是写死某个值）
+    const iView = src.indexOf('reasoningEffort: autoReviewSetting(')
+    return iView !== -1
+  })())
+  // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后
+  //
+  // 判据走真实求值：把 ModelEffortPicker 的档位 pane 构造段抽出来跑，断言两组的
+  // 顺序与值。这条防两类真实回退：
+  //   ① 把内置档位当成「目录的一部分」写进 efforts.map —— adapter 不公布档位时
+  //      下拉里一个选项都没有，用户无法选择任何推理等级；
+  //   ② 把「指定」组也包在条件里/去掉 —— 模型真实公布的档位名（Max）就消失了。
+  ok('★★ 推理等级分「通用/指定」两组：通用四档恒在，指定随后', (function () {
+    // 通用四档由 `effortRows.push(effortOption(...))` 四次给出，
+    // 值分别是 '' / default / **min / max**（顺序即展示顺序）。
+    //
+    // ⚠️ 顺序按**档位强弱由低到高**（最低 → 最高），与紧跟其后的「指定」组同方向
+    // （模型公布的档位表本身就是 low → high → max 升序）。实测反馈「模型最低应该排在
+    // 模型最高前面」—— 原来 max 在前、min 在后，与「指定」组方向相反。
+    const pushes = [...cli.matchAll(/effortRows\.push\(effortOption\('([^']*)', T\('(panel\.autoEffort[A-Za-z]+)'\)\)\)/g)]
+    if (pushes.length !== 4) return false
+    const want = [
+      ['', 'panel.autoEffortSession'],
+      ['default', 'panel.autoEffortDefault'],
+      ['min', 'panel.autoEffortMin'],
+      ['max', 'panel.autoEffortMax'],
+    ]
+    for (let i2 = 0; i2 < 4; i2++) {
+      if (pushes[i2][1] !== want[i2][0] || pushes[i2][2] !== want[i2][1]) return false
+    }
+    // 这两组各有分组标题，且**通用组标题排在最前**（用户要求「中间间隔开来」）。
+    const iPane = cli.indexOf('const effortRows = [];')
+    if (iPane < 0) return false
+    const iCommon = cli.indexOf("effortRows.push(effortGroupHeading('\\u0000gh-common'", iPane)
+    if (iCommon < 0) return false
+    const iFirst = cli.indexOf("effortRows.push(effortOption('',", iPane)
+    if (iFirst < 0) return false
+    if (iCommon > iFirst) return false
+    // 四档在 pane 构造里**无条件**出现：不得被 `if (modelEfforts.length)` 之类的条件包住
+    // —— 那样「模型不公布档位」时它们就没了。
+    //
+    // ⚠️ 判据只看**四条 push 语句本身**，不能把 effortOption 的函数体也算进来：
+    // 那里面本来就有 `if (highlighted !== idx)`（高亮逻辑），
+    // 按「四档之前不得出现 if」整段判会永远红。
+    const iLast = cli.indexOf("effortRows.push(effortOption('max',", iFirst)
+    if (iLast < 0) return false
+    const fourBlock = cli.slice(iFirst, iLast)
+    if (/\bif\s*\(/.test(fourBlock)) return false
+    // 指定组：模型自己公布的档位接在其后（不是替换），且带分组标题。
+    const iSpecific = cli.indexOf("effortRows.push(effortGroupHeading('\\u0000gh-specific'", iLast)
+    if (iSpecific < 0) return false
+    const iLoop = cli.indexOf('for (const e of modelEfforts)', iSpecific)
+    if (iLoop < 0) return false
+    // 值必须带 PG_EFFORT_PIN 前缀 —— 否则模型公布的 `max` 与「模型最高」的符号值
+    // 在配置里是同一个字符串，两种语义就分不开了（换模型时的处置也不同）。
+    if (cli.indexOf('effortOption(PG_EFFORT_PIN + e.id') === -1) return false
+    // 反证：「重名就跳过」的旧写法不得复活 —— 那正是「怎么只有 low 和 high」的成因。
+    const codeLines = cli.split('\n').filter((l) => !/^\s*\/\//.test(l))
+    if (codeLines.some((l) => /PG_EFFORT_SYMBOLS\.indexOf\(e\.id\)/.test(l))) return false
+    return true
+  })())
+  // ⑨c 会话流渲染的两半必须**同名**，且 Definition 认领全部 via
+  //
+  // 这条链路断在哪一半都是「静默不显示」，而两种断法在外部完全同形：
+  //   · Definition 的 buildViewNode 返回的 kind 与 slot 注册的 key 不一致 → 落到 Chat 的
+  //     `unknown` fallback（一个 JSON 折叠块），用户看到的是一坨原始数据；
+  //   · Definition 的 match 只认某几种 via → 另外几种根本不产生节点，什么都不显示。
+  // 故这里既核对两个常量同源，又核对 match 的判据**不按 via 过滤**。
+  ok('★★ 会话流渲染器 key 与 Definition kind 同源，且认领全部 via', (function () {
+    // ① kind 只有一处定义（两处各写一份字面量就是会漂移的那种）
+    const m = cli.match(/const DECISION_KIND = '([^']+)';/)
+    if (!m) return false
+    const kind = m[1]
+    if (kind !== 'permgate-auto') return false
+    // ② 渲染器注册用这个常量（不是另一份字面量）
+    if (cli.indexOf("{ name: 'conversation.chat.node', key: DECISION_KIND }") === -1) return false
+    // ③ buildViewNode 也用它
+    const iNode = cli.indexOf('buildViewNode:')
+    if (iNode < 0) return false
+    const nodeSlice = cli.slice(iNode, iNode + 700)
+    if (nodeSlice.indexOf('kind: DECISION_KIND') === -1) return false
+    // ④ match 不得按 via 过滤：认领条件只能看 type
+    const iMatch = cli.indexOf('match: (event) => {')
+    if (iMatch < 0) return false
+    const matchSlice = cli.slice(iMatch, iMatch + 300)
+    if (matchSlice.indexOf('event.type !== DECISION_RECORD') === -1) return false
+    // 只要 match 里出现了 via，就说明它开始挑食了 —— 那会让某一类决策静默消失
+    if (matchSlice.indexOf('.via') !== -1) return false
+    // ⑤ 四种 via 都要有对应文案（否则某类会渲染成空行）
+    for (const k of ['flow.viaAllow', 'flow.viaDeny', 'flow.viaEscalate', 'flow.viaFallback']) {
+      if (cli.indexOf("'" + k + "'") === -1) return false
+    }
+    return true
+  })())
+  // ⑨d 换模型必须**同时提交 provider**（官方把服务商合并进「模型」这一级）
+  //
+  // 不清/不换的后果是「新 model + 旧 provider」这个**必然无效**的组合被静默提交：
+  // 用户改完模型面板显示一切正常，而宿主那边 reviewTarget 拿到的是不存在的路由，
+  // llm.stream 抛 NO_ADAPTER → 每次都走回落。这正是「面板说谎」的典型形态。
+  //
+  // 判据走**真实求值**：把 onPick 抽出来，注入记录 setFields 调用的桩，
+  // 断言它除了写 model 之外还写了 provider（且 provider 来自所选项，不是猜的）。
+  //
+  // ⚠️ 一次修改必须走**一次** setFields：旧的写法连着调 setField 三次，等于发三个
+  // 并发 POST，每条响应都带整份 statusView 会互相覆盖（见 client.js 里 setFields 的说明）。
+  ok('★★ 换模型时同时提交 provider（同一个请求里，不发多个并发 POST）', (function () {
+    const i = cli.indexOf('onPick: (patch) => {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(cli.indexOf('{', i), k + 1); break } }
+    }
+    if (!body) return false
+    // 桩：记录每次 setFields(patch, clear)。PG_EFFORT_SYMBOLS 也要注入（onPick 用它判相对档）。
+    // 每次场景都**新建**一个 onPick（eff 不同），因为「要不要清」取决于当前配置值。
+    //
+    // ⚠️ `setField` 桩**记录而不抛错**：它是「旧写法还在不在」的信号，
+    // 但抛错会让整个测试套崩在一条用例上（其余断言拿不到结果），
+    // 而这里要的是「这条用例变红、其余照常跑」。
+    const mk = (eff) => {
+      const calls = []
+      const stray = []
+      const fn = new Function('setFields', 'setField', 'PG_EFFORT_SYMBOLS', 'eff', 'groups', 'return (patch) => ' + body)(
+        (p, c) => calls.push({ patch: p || {}, clear: c || [] }),
+        (k, v) => stray.push([k, v]),
+        ['default', 'max', 'min'], eff, [])
+      return { fn, calls, stray }
+    }
+    // ① 从空配置选一个具体模型：model 与 provider 必须在**同一个** patch 里
+    {
+      const { fn, calls, stray } = mk({ model: '', provider: '' })
+      fn({ model: 'm1', provider: 'p1' })
+      if (calls.length !== 1) return false
+      if (calls[0].patch.model !== 'm1') return false
+      if (calls[0].patch.provider !== 'p1') return false
+      // 关键：不得有任何**逐字段** setField 调用 —— 那才是并发的来源
+      if (stray.length !== 0) return false
+    }
+    // ② 从已配置 m1/p1 选「跟随会话」：两个都清，且在**同一个** clear 数组里
+    {
+      const { fn, calls, stray } = mk({ model: 'm1', provider: 'p1' })
+      fn({ model: null, provider: null })
+      if (calls.length !== 1) return false
+      if (calls[0].clear.indexOf('model') === -1) return false
+      if (calls[0].clear.indexOf('provider') === -1) return false
+      if (stray.length !== 0) return false
+    }
+    // ③ 本来就没配置时选「跟随会话」→ 没有东西可清。
+    //    判据不是「一次都没调用」（onPick 仍会调 setFields({}, [])，由它自己早退），
+    //    而是「传下去的参数里没有任何要清的键」—— 若把 undefined 当成要清的值，
+    //    宿主那边会收到 clear: [undefined] 并忽略，但配置里可能留下空串。
+    {
+      const { fn, calls, stray } = mk({ model: '', provider: '' })
+      fn({ model: null, provider: null })
+      const last = calls[calls.length - 1] || { patch: {}, clear: [] }
+      if (Object.keys(last.patch).length !== 0) return false
+      if (last.clear.length !== 0) return false
+      if (stray.length !== 0) return false
+    }
+    return true
+  })())
+  // ⑨e 模型选择是**官方 ModelSelect 的浮层菜单**，不是输入框、不是 <select>、不是内联展开
+  //
+  // 这条防三件事：
+  //   ① 把输入框加回来 —— 手填拼错的模型名 → reviewTarget 拿到不存在的路由 →
+  //      llm.stream 抛 NO_ADAPTER → 用户看到「自动审批一直弹窗」，无任何线索指向「打错了」；
+  //   ② 退回原生 <select> —— 当前值只能塞进选项文字，且表达不了 drill 进下一级；
+  //   ③ 退回**内联展开** —— 设置面板是窄栏 + 可滚动容器，列表展开会把下面内容顶下去，
+  //      也没有浮层的边框/阴影。这是「丑」的直接原因（实测反馈）。
+  //
+  // 官方结构（ui-model-selection 的 ModelSelect）：
+  //   trigger → createPortal 到 document.body 的浮层菜单 → 根面板恰好两行
+  //   （模型 / 推理等级），每行 drill 进自己的 pane；模型 pane 按服务商分组。
+  ok('★★ 模型选择是官方那种浮层菜单（不是输入框 / <select> / 内联展开）', (function () {
+    const iCard = cli.indexOf('const autoReviewCard = () => {')
+    if (iCard < 0) return false
+    const iEnd = cli.indexOf('const tabBtn = (t, label) =>', iCard)
+    if (iEnd < 0) return false
+    const card = cli.slice(iCard, iEnd)
+    // ① 三个手填输入框的文案键必须**不存在**（连定义都不留，否则随时能被接回去）
+    if (cli.indexOf("'panel.autoProviderPh'") !== -1) return false
+    if (cli.indexOf("'panel.autoModelPh'") !== -1) return false
+    if (cli.indexOf("'panel.autoModelManual'") !== -1) return false
+    // ② 卡片里不得再有原生 <select>
+    if (card.indexOf("createElement('select'") !== -1) return false
+    // ③ 卡片把这件事交给 ModelEffortPicker 组件（不是就地拼一堆 button）
+    if (card.indexOf('React.createElement(ModelEffortPicker, {') === -1) return false
+    // ④ 组件必须**portal 到 document.body**（内联展开就是没这一步）
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    if (comp.indexOf('ReactDOM.createPortal(menu, document.body)') === -1) return false
+    // ⑤ 根面板**恰好两行**：模型 / 推理等级（官方根菜单就这两行，服务商不单独成行）
+    if (comp.indexOf("trigger(T('panel.autoModel'), modelLabel, 'model')") === -1) return false
+    if (comp.indexOf("trigger(T('panel.autoEffort'), effortLabel, 'effort')") === -1) return false
+    // 不得有第三行「服务商」—— 官方把服务商合并进模型那一级
+    if (comp.indexOf("'provider')") !== -1) return false
+    // ⑥ 模型 pane 必须**按服务商分组**（官方 MenuGroup：section[role=group] + 分组标题）
+    if (comp.indexOf("role: 'group', 'aria-label': String(fg.group.name || fg.group.id)") === -1) return false
+    // ⑦ 选模型时 provider 与 model 成对提交（由卡片侧 onPick 落实，见 ⑨d）
+    // ⑧ 标签：推理等级照抄官方 locale（menu.effort）；
+    //    模型那一行刻意叫「审批模型」而非官方的「模型」—— 它指的是自动审批去评审工具
+    //    调用的那个模型，与作曲区「当前对话用哪个模型」不是同一个东西。叫法相同会让
+    //    用户以为改这里等于改自己对话的模型（实测要求「这里的[模型]改成[审批模型]」）。
+    if (cli.indexOf("'panel.autoModel': '审批模型'") === -1) return false
+    if (cli.indexOf("'panel.autoEffort': '推理等级'") === -1) return false
+    return true
+  })())
+  // ⑨e2b 浮层里的 **option** 照抄官方；但**设置卡片里的两行 trigger** 必须与
+  //       同卡片其它行同一套排版（这是刻意偏离官方 .cell 的地方）
+  //
+  // 踩过的真实问题：trigger 原本照抄官方 .cell（fontSize 13 / padding 0 8px / cellValue
+  // flex:auto 右对齐），但那是给作曲区浮层用的组件；放进 permgate 的设置卡片后，
+  // 标签字号与相邻行不同、行内左右内边距让标签整体右移、值被推到最右边 —— 观感割裂。
+  //
+  // 故分两类判据：
+  //   ① **浮层内**（option / menu / check）仍逐项照抄官方数值；
+  //   ② **卡片内**（cell）与 `row()` 同值：fontSize 12 / minWidth 130 / gap 8 /
+  //      padding 0 / 值不伸展。
+  ok('★★ 浮层选项照抄官方，但卡片里的选择行与相邻行同一套排版（左边对齐）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+
+    // ① 浮层部分（menu / option / check）保持官方数值
+    const official = [
+      "minWidth: 'min(240px, 100vw - 32px)'",  // .menu 最小宽
+      "maxWidth: 'min(420px, 100vw - 32px)'",  // .menu 最大宽
+      "maxHeight: 'min(360px, 100vh - 96px)'", // .menu 最大高
+      "minHeight: 34",                         // .option 行高
+      "padding: '5px 7px'",                    // .option 内边距
+      "flex: '0 0 14px'",                      // .check 勾选位
+      "textOverflow: 'ellipsis'",              // .modelName 截断
+    ]
+    for (const s of official) if (comp.indexOf(s) === -1) return false
+
+    // ② 卡片内的行：必须与 row() 同值
+    const iCell = comp.indexOf('const cellStyle = {')
+    if (iCell < 0) return false
+    const cellEnd = comp.indexOf('};', iCell)
+    if (cellEnd < 0) return false
+    const cell = comp.slice(iCell, cellEnd)
+    // 字号 12（与 row 的标签同）、gap 8（与 row 同）、padding 0（不能有水平内边距）
+    if (cell.indexOf('fontSize: 12') === -1) return false
+    if (cell.indexOf('gap: 8') === -1) return false
+    if (!/padding: 0\b/.test(cell)) return false
+    // 不得再是官方 .cell 的 34px / 13px / 0 8px
+    if (cell.indexOf('height: 34') !== -1) return false
+    if (cell.indexOf('fontSize: 13') !== -1) return false
+    if (cell.indexOf("padding: '0 8px'") !== -1) return false
+
+    // ③ 标签：minWidth 130 + fontSize 12（与 row 的标签同值，保证左边缘对齐）
+    const iLab = comp.indexOf('const cellLabelStyle = ')
+    if (iLab < 0) return false
+    const labLine = comp.slice(iLab, comp.indexOf('\n', iLab))
+    if (labLine.indexOf('minWidth: 130') === -1) return false
+    if (labLine.indexOf('fontSize: 12') === -1) return false
+
+    // ④ 值**不得**被推到最右：不能 textAlign:right，也不能 flex:auto
+    const iVal = comp.indexOf('const cellValueStyle = {')
+    if (iVal < 0) return false
+    const valEnd = comp.indexOf('};', iVal)
+    if (valEnd < 0) return false
+    const val = comp.slice(iVal, valEnd)
+    if (val.indexOf("textAlign: 'right'") !== -1) return false
+    if (/flex:\s*'auto'/.test(val)) return false
+
+    // ④b 浮层背景必须**不透明**（这次「越往下越浅」的真凶）
+    //
+    // 半透明背景 + 未生效的 backdrop-filter 会让下面面板的文字透上来：
+    // 官方材质是 `--dsw-menu-surface-fill: #f8f9fa94`（alpha 148/255）**配**
+    // `backdrop-filter: var(--dsw-menu-backdrop-filter)` 才有磨砂效果，而那个取值
+    // 只在 `[data-menu-material]` 选择器下定义 —— 这个 div 没有该属性，
+    // var() 解析失败退回 `none`。面板里深浅不一（输入框、灰字、分割线），
+    // 叠出来就是「越到下面的项越浅」。
+    const iMenu = comp.indexOf('const menuStyle = {')
+    if (iMenu < 0) return false
+    const menuEnd = comp.indexOf('};', iMenu)
+    if (menuEnd < 0) return false
+    const menu = comp.slice(iMenu, menuEnd)
+    // 不得再用半透明的 menu-surface-fill
+    if (menu.indexOf('--dsw-menu-surface-fill') !== -1) return false
+    // 必须用不透明的 bg-overlay
+    if (menu.indexOf('--dsw-alias-bg-overlay') === -1) return false
+    // 不得留一个不生效的 backdrop-filter（会让人误以为有磨砂）
+    if (menu.indexOf('backdropFilter') !== -1) return false
+
+    // ⑤ 唯一允许的 class 是 `pg-hoverable`（内联 style 表达不了 :hover）
+    const classAttrs = comp.match(/className: '[^']*'/g) || []
+    for (const ca of classAttrs) {
+      if (ca !== "className: 'pg-hoverable'") return false
+    }
+    if (cli.indexOf('PG_HOVER_CSS') === -1) return false
+    // ⑥ 图标优先用官方 primitives
+    if (comp.indexOf('Primitives.IconChevronRightOutlineRegular') === -1) return false
+    if (comp.indexOf('Primitives.IconCheckOutlineRegular') === -1) return false
+    return /width: 12, height: 12/.test(comp)
+  })())
+  // ⑨e4 列表项必须有**鼠标激活效果**：hover 底色 + mousemove 高亮
+  //
+  // 踩过的真实 bug：`.pg-hoverable:hover` 规则一直存在，但**从没生效过** ——
+  // 因为选项的 style 里写了 `background: 'transparent'`，而**内联样式优先级
+  // 高于类选择器**，那条 :hover 被永久压死（实测反馈「没有鼠标激活效果」）。
+  //
+  // 官方还有第二层：模型项的高亮**不是** :hover，而是 `optionActive` 类，
+  // 由 mousemove 与 ↑↓ 共同驱动的 activeModelIndex 决定。所以两样都要有。
+  ok('★★ 列表项有鼠标激活效果（hover 底色 + mousemove 高亮，且内联不得写 background）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    // ① 样式表必须有 :hover 与 .pg-active 两条规则
+    const iCss = cli.indexOf('const PG_HOVER_CSS = [')
+    if (iCss < 0) return false
+    const cssSrc = cli.slice(iCss, cli.indexOf(']', iCss))
+    if (!/\.pg-hoverable:hover:not\(:disabled\)/.test(cssSrc)) return false
+    if (!/\.pg-hoverable\.pg-active:not\(:disabled\)/.test(cssSrc)) return false
+    // ①b 底色必须用 **solid** 令牌，不能用 `--dsw-alias-interactive-bg-hover`。
+    //
+    // 这条防的是一次「规则全对但看不见」的真实问题：后者浅色是 `#2631480f`
+    // （**alpha 只有 6%**）、深色 `#ffffff14`（8%）。而 permgate 浮层背景是
+    // MenuSurface 的半透明材质（`#f8f9fa94`），6% 的灰叠上去只差 1~2 个色阶，
+    // 肉眼就是「鼠标指上去颜色不变」（实测反馈）。
+    // solid 版是 `#f1f3f5` / 深色 `#353638`，不透明实色，才真的看得见。
+    //
+    // 判据必须落在 **PG_HOVER_BG 这一行的 var() 里**：只查「文件里出现过 solid」
+    // 会被 fallback 里的 rgba 或别处的注释满足（实测该写法变异后仍 GREEN）。
+    const iBg = cli.indexOf('const PG_HOVER_BG = ')
+    if (iBg < 0) return false
+    const bgLine = cli.slice(iBg, cli.indexOf('\n', iBg))
+    if (bgLine.indexOf('var(--dsw-alias-interactive-bg-hover-solid') === -1) return false
+    // 反证：不得再引用那条 6% 的令牌（含 fallback 位置）
+    if (/\bvar\(--dsw-alias-interactive-bg-hover,/.test(cli)) return false
+    if (/\bvar\(--dsw-alias-interactive-bg-hover\)/.test(cli)) return false
+    // ② **可 hover 的列表项**的 style 里不得含 background 键 —— 有一个就压死那条 :hover。
+    //    判据只盯 optionStyle / cellStyle 这两个对象（菜单本身、搜索框、清除按钮
+    //    确实需要内联背景，它们不是 hover 目标，不能一起判）。
+    const iOpt = comp.indexOf('const optionStyle = {')
+    const iCell = comp.indexOf('const cellStyle = {')
+    if (iOpt < 0 || iCell < 0) return false
+    const grab = (i) => {
+      const j = comp.indexOf('};', i)
+      return j < 0 ? '' : comp.slice(i, j)
+    }
+    if (/\bbackground\s*:/.test(grab(iOpt))) return false
+    if (/\bbackground\s*:/.test(grab(iCell))) return false
+    // ③ 可选项必须挂 onMouseMove（驱动高亮）与 pg-hoverable 类
+    if (!/onMouseMove: rowIndex >= 0 \?/.test(comp)) return false
+    if (comp.indexOf("' pg-active'") === -1) return false
+    if (comp.indexOf("'pg-hoverable'") === -1 && comp.indexOf('pg-hoverable') === -1) return false
+    // ④ 推理等级 pane 同样要有 hover + 高亮（不是只有模型 pane 有）
+    if (!/onMouseMove: \(\) => \{ if \(highlighted !== idx\)/.test(comp)) return false
+    return true
+  })())
+  // ⑨e4b hover 与高亮必须**可区分**（否则「已是高亮项的那一行」划过没反应）
+  //
+  // 踩过的真实问题（用户反馈「不同厂商 hover 效果不一样」）：`:hover` 与 `.pg-active`
+  // 原本用**同一个底色**，而高亮项默认就是「当前选中的那一项」
+  // （activeIndex 回退到 currentVisibleIndex）。于是：
+  //   · 选中那一行 → 本来就有底色，鼠标移上去**颜色不变**；
+  //   · 其它行     → 移上去变出底色。
+  // 用户看到的「有的行有反应、有的没有」，因为选中项恰好在某个服务商分组里，
+  // 看起来就像「某个厂商不一样」。与厂商无关。
+  //
+  // 判据走**真实求值**：抽出 CSS，用「选择器命中 + 特异性比较」模拟浏览器，
+  // 断言四种状态（普通/高亮/选中/选中+高亮）在 hover 前后背景都**必须变化**。
+  ok('★★ hover 与高亮可区分（已高亮项划过也要有变化，否则看起来像某个厂商坏了）', (function () {
+    // 起点必须是 PG_OVERLAY_BG：PG_HOVER_BG_SOFT 依赖它（混透明色会得到半透明色，
+    // 那正是「越往下越浅」的成因，见 ⑨e4c）。从 PG_HOVER_BG 起抽会漏掉这个依赖。
+    const iFirst = cli.indexOf('const PG_OVERLAY_BG = ')
+    const iLast = cli.indexOf('const PG_EXC_CSS = ')
+    if (iFirst < 0 || iLast < 0) return false
+    let v = null
+    try {
+      v = new Function(cli.slice(iFirst, iLast) + '\n; return { PG_HOVER_BG, PG_HOVER_BG_SOFT, PG_HOVER_CSS };')()
+    } catch (e) { return false }
+    if (!v || typeof v.PG_HOVER_CSS !== 'string') return false
+    // ① 两档必须不同值
+    if (v.PG_HOVER_BG_SOFT === v.PG_HOVER_BG) return false
+    // ② 必须有「已高亮项被划过」的专门规则
+    if (!/\.pg-hoverable\.pg-active:hover:not\(:disabled\)/.test(v.PG_HOVER_CSS)) return false
+    // ②b 所有底色必须**不透明**（这次「越往下越浅」的真凶）
+    //
+    // 半透明色叠在浮层上，下面的设置面板内容会透上来：面板里深浅不一
+    // （输入框、灰字、分割线），叠出来的观感就是「越到下面的项越浅」。
+    // 判据：CSS 里不得出现 `, transparent)` 这种把颜色稀释成半透明的写法。
+    if (/,\s*transparent\s*\)/.test(v.PG_HOVER_CSS)) return false
+    // SOFT 档必须混的是不透明底色（PG_OVERLAY_BG），不是 transparent
+    if (v.PG_HOVER_BG_SOFT.indexOf('transparent') !== -1) return false
+    if (v.PG_HOVER_BG_SOFT.indexOf('--dsw-alias-bg-overlay') === -1) return false
+    // ③ 拆规则 + 算特异性，模拟浏览器
+    const ruleList = []
+    {
+      const re = /([^{}]+)\{([^{}]*)\}/g
+      let m
+      while ((m = re.exec(v.PG_HOVER_CSS)) !== null) {
+        for (const one of m[1].split(',').map((s) => s.trim())) ruleList.push({ sel: one, decl: m[2].trim() })
+      }
+    }
+    const spec = (sel) => {
+      let b = 0
+      let c = 0
+      let s = sel
+      const notRe = /:not\(([^)]*)\)/g
+      let m
+      while ((m = notRe.exec(s)) !== null) b += (m[1].match(/:[a-z-]+|\.[A-Za-z_-][\w-]*/g) || []).length
+      s = s.replace(notRe, '')
+      b += (s.match(/\.[A-Za-z_-][\w-]*/g) || []).length
+      b += (s.match(/(?<!:):[a-z-]+/g) || []).length
+      c += (s.match(/(^|[\s>+~])[a-z][\w-]*/gi) || []).length
+      return [b, c]
+    }
+    const matches = (sel, st) => {
+      if (sel === '.pg-hoverable') return true
+      if (sel.includes('.pg-selected') && !st.selected) return false
+      if (sel.includes('.pg-active') && !st.active) return false
+      if (sel.includes(':not(.pg-active)') && st.active) return false
+      if (sel.includes(':not(:hover)') && st.hover) return false
+      if (sel.includes(':hover') && !st.hover) return false
+      if (sel.includes(':focus-visible')) return false
+      if (sel.includes(':disabled') && st.disabled) return false
+      return true
+    }
+    const bgOf = (st) => {
+      const hits = ruleList.filter((r) => matches(r.sel, st))
+      hits.sort((a, b) => { const sa = spec(a.sel); const sb = spec(b.sel); return (sb[0] - sa[0]) || (sb[1] - sa[1]) })
+      return hits.length ? hits[0].decl : '(none)'
+    }
+    // 四种状态，每种都必须「hover 前后不同」
+    const states = [
+      { active: false, selected: false },   // 普通项
+      { active: true, selected: false },    // 高亮项（键盘/鼠标当前）
+      { active: false, selected: true },    // 选中项（未高亮）
+      { active: true, selected: true },     // 选中且高亮（打开面板的默认状态）
+    ]
+    for (const st of states) {
+      const idle = bgOf({ ...st, hover: false })
+      const hov = bgOf({ ...st, hover: true })
+      if (idle === hov) return false
+    }
+    return true
+  })())
+  // ⑨e4c 鼠标离开列表项时必须**交还高亮**，否则会留下「白印子」
+  //
+  // 踩过的真实问题（实测反馈「鼠标移开之后还有个白色的印子留在那」）：
+  // 只挂 `onMouseMove → setHighlighted(idx)`、**没有任何地方重置它**时，
+  // 鼠标划过的最后一行永远留着 `pg-active` 的底色 —— 一整行的白印子，
+  // 既不是选中态（没有 ✓）也不会消失，用户只能关掉菜单再打开。
+  //
+  // 正确行为：`activeModelIndex` 表达「指针/键盘当前所在项」。指针离开后应回到
+  // 「当前选中项」——即 `setHighlighted(null)`，由 `activeIndex` 回退到
+  // currentVisibleIndex（模型 pane 本来就有这条回退）。
+  //
+  // 判据走**真实渲染**：把组件跑起来，取出每一行，断言都挂了 onMouseLeave；
+  // 再模拟「移入第 3 行 → 移出」，断言 highlighted 被清空、且**没有任何行有底色**
+  // （底色只表示鼠标位置；选中项由 ✓ 表示，见 ⑨e4d）。
+  ok('★★ 鼠标离开列表项时交还高亮（否则留下一整行白印子）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    // ① 源码：必须有 onRowLeave 的定义与两处挂载（模型 pane + 推理等级 pane）
+    if (comp.indexOf('const onRowLeave = () => { setHighlighted(null); };') === -1) return false
+    if (comp.indexOf('onMouseLeave: rowIndex >= 0 ? onRowLeave : undefined') === -1) return false
+    if (comp.indexOf('onMouseLeave: onRowLeave') === -1) return false
+    // ② 菜单容器也要有兜底
+    if (comp.indexOf('onMouseLeave: () => { setHighlighted(null); }') === -1) return false
+    // ③ 真实渲染 + 交互模拟
+    const iStart = cli.indexOf('const PG_EFFORT_PIN = ')
+    const compSrc = cli.slice(iStart, iCompEnd)
+    const mkReact = () => {
+      const states = []
+      let si = 0
+      return {
+        createElement(tag, props, ...kids) {
+          const flat = []
+          for (const k of kids) {
+            if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+            else if (k !== null && k !== undefined && k !== false) flat.push(k)
+          }
+          if (typeof tag === 'function') return tag(props || {})
+          return { tag, props: props || {}, kids: flat }
+        },
+        Fragment: 'Fragment',
+        useState(init) {
+          const i = si++
+          if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+          return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+        },
+        useRef(init) { return { current: init } },
+        useEffect() {},
+        useLayoutEffect() {},
+        __states: states,
+        __reset: () => { si = 0 },
+      }
+    }
+    const portals = []
+    const React2 = mkReact()
+    const RealDocument = globalThis.document
+    // ⚠️ document mock 必须覆盖**整个渲染过程**，不能只包住 new Function：
+    // 组件里 portal 那一步是 `typeof document !== 'undefined' ? createPortal(...) : menu`
+    // —— 它在**每次渲染**时求值。提前还原会让 portal 分支永不执行、portals 为空。
+    globalThis.document = { body: {}, addEventListener() {}, removeEventListener() {} }
+    try {
+      let Picker = null
+      try {
+        Picker = new Function('React', 'ReactDOM', 'Primitives', 'T',
+          compSrc + '\n; return ModelEffortPicker;')(
+          React2,
+          { createPortal(node) { portals.push({ node }); return node } },
+          {
+            IconChevronRightOutlineRegular: function (p) { return { tag: 'ICR', props: p || {}, kids: [] } },
+            IconCheckOutlineRegular: function (p) { return { tag: 'IC', props: p || {}, kids: [] } },
+          },
+          (k) => k,
+        )
+      } catch (e) { return false }
+      if (typeof Picker !== 'function') return false
+      const groups = [
+        { id: 'a', name: 'A', models: [{ id: 'm1', name: 'M1' }, { id: 'm2', name: 'M2' }, { id: 'm3', name: 'M3' }] },
+        { id: 'b', name: 'B', models: [{ id: 'm4', name: 'M4' }, { id: 'm5', name: 'M5' }] },
+      ]
+      const S_PANE = 0
+      const S_HL = 3
+      const collectRows = (menu) => {
+        const out = []
+        const walk = (n) => {
+          if (!n || typeof n !== 'object') return
+          if (n.props && n.props.role === 'menuitemradio') out.push(n)
+          for (const k of n.kids || []) walk(k)
+        }
+        walk(menu)
+        return out
+      }
+      const render = (model, provider) => {
+        portals.length = 0
+        React2.__reset()
+        Picker({ model: model || '', provider: provider || '', effort: '', effective: {}, groups, efforts: [], disabled: false, onPick: () => {} })
+        return { menu: portals[portals.length - 1].node, rows: collectRows(portals[portals.length - 1].node) }
+      }
+      const activeLabels = (rows) => rows.filter((r) => String(r.props.className).includes('pg-active')).map((b) => b.kids[0].kids[0].kids[0])
+
+      // 每行都必须挂 onMouseLeave（两处 pane）
+      React2.__states[S_PANE] = 'model'
+      React2.__states[S_HL] = null
+      let r = render()
+      if (r.rows.some((x) => typeof x.props.onMouseLeave !== 'function')) return false
+      // 移入第 3 行 → 移出 → **没有任何行有底色**（见 ⑨e4d：底色只表示鼠标位置，
+      // 不再回退到选中项 —— 那个回退正是「选中项一会白一会暗」的成因）。
+      r.rows[2].props.onMouseMove()
+      r = render()
+      if (JSON.stringify(activeLabels(r.rows)) !== JSON.stringify(['M2'])) return false
+      r.rows[2].props.onMouseLeave()
+      if (React2.__states[S_HL] !== null) return false
+      r = render()
+      if (activeLabels(r.rows).length !== 0) return false
+      // 选中项仍然由 ✓ 标识（不靠底色）
+      const selRows = r.rows.filter((x) => String(x.props.className).includes('pg-selected'))
+      if (selRows.length !== 1) return false
+      // 推理等级 pane 同样
+      React2.__states[S_PANE] = 'effort'
+      React2.__states[S_HL] = null
+      r = render('m1', 'a')
+      if (r.rows.some((x) => typeof x.props.onMouseLeave !== 'function')) return false
+      r.rows[1].props.onMouseMove()
+      if (React2.__states[S_HL] !== 1) return false
+      r.rows[1].props.onMouseLeave()
+      if (React2.__states[S_HL] !== null) return false
+      return true
+    } finally {
+      if (RealDocument === undefined) delete globalThis.document
+      else globalThis.document = RealDocument
+    }
+  })())
+  // ⑨e4d 鼠标扫过别的行时，**选中项的视觉状态不得变化**（不闪）
+  //
+  // 踩过的真实问题（实测反馈「鼠标移入移出其他项的时候，选中项会一会白一会暗晃眼睛」）：
+  // `activeIndex` 原本是 `highlighted ?? currentVisibleIndex` —— 没有鼠标时**回退到选中项**。
+  // 于是鼠标划过别的行：选中项的底色消失（变暗）；鼠标一离开，`highlighted` 变 null
+  // → 底色又回到选中项（变白）。来回扫动就一直闪。
+  //
+  // 根因是**用一个视觉信号表达了两件事**：
+  //   · 「现在选中谁」   → 右侧 ✓（持久，由 props.model 决定）
+  //   · 「鼠标/键盘在哪」 → 底色（瞬时，由 highlighted 决定）
+  // 修法：底色**只**表示后者 —— highlighted === null 时**没有任何行有底色**，
+  // 不回退到选中项。选中项靠 ✓ 标识，不需要底色再强调。
+  // （键盘导航仍用 navIndex 回退到选中项作起点 —— 那是行为，不是视觉。）
+  ok('★★ 鼠标扫过别的行时选中项不闪（底色只表示鼠标位置，不回退到选中项）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    // ① 视觉高亮必须是 `highlighted === null ? -1 : highlighted`（不回退）
+    if (!/const activeIndex = highlighted === null \? -1 : highlighted;/.test(comp)) return false
+    // ② 键盘导航仍保留回退（navIndex），且搜索框的 ↑↓/Enter 用它
+    if (!/const navIndex = Math\.min\(/.test(comp)) return false
+    if (comp.indexOf('const next = (navIndex + (e.key') === -1) return false
+    if (comp.indexOf('const row = visibleRows[navIndex];') === -1) return false
+    // ②b navIndex 的**回退目标**必须是「第一个模型行」，不能是 0、也不能是选中项。
+    //
+    // 这是「视觉不回退、但键盘导航要回退」的另一半：按 ↓ 应当从**当前选中项**往下走，
+    // 而不是永远从第一项开始；选中项不在当前列表里（-1）时，落点必须是第一个模型行。
+    //
+    // ⚠️ 不能只查定义体里有没有 `currentVisibleIndex` —— 坏写法
+    // `highlighted === null ? Math.max(0, currentVisibleIndex) : highlighted` 同样含它。
+    // 判据把定义体抽出来**求值**：注入「选中项不在列表里」（currentVisibleIndex = -1）
+    // 与非空的 visibleRows，断言落点是第一个模型行（1），而不是 0（「跟随会话」）。
+    const iNav = comp.indexOf('const navIndex = Math.min(')
+    if (iNav < 0) return false
+    let dNav = 0
+    let navEnd = -1
+    for (let k = comp.indexOf('(', iNav); k < comp.length; k++) {
+      if (comp[k] === '(') dNav++
+      else if (comp[k] === ')') { dNav--; if (dNav === 0) { navEnd = k + 1; break } }
+    }
+    if (navEnd < 0) return false
+    let navAt = -1
+    try {
+      navAt = new Function(
+        'highlighted', 'currentVisibleIndex', 'firstModelIndex', 'visibleRows',
+        comp.slice(iNav, navEnd) + '\n; return navIndex;',
+      )(null, -1, 1, [{ kind: 'follow' }, { kind: 'model' }])
+    } catch (e) { return false }
+    if (navAt !== 1) return false
+
+    // ④ 真实渲染 + 扫动模拟：鼠标在别处时，选中项的视觉签名必须全程唯一
+    const iStart = cli.indexOf('const PG_EFFORT_PIN = ')
+    const compSrc = cli.slice(iStart, iCompEnd)
+    const mkReact = () => {
+      const states = []
+      let si = 0
+      return {
+        createElement(tag, props, ...kids) {
+          const flat = []
+          for (const k of kids) {
+            if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+            else if (k !== null && k !== undefined && k !== false) flat.push(k)
+          }
+          if (typeof tag === 'function') return tag(props || {})
+          return { tag, props: props || {}, kids: flat }
+        },
+        Fragment: 'Fragment',
+        useState(init) {
+          const i = si++
+          if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+          return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+        },
+        useRef(init) { return { current: init } },
+        useEffect() {},
+        useLayoutEffect() {},
+        __states: states,
+        __reset: () => { si = 0 },
+      }
+    }
+    const portals = []
+    const React2 = mkReact()
+    const RealDocument = globalThis.document
+    globalThis.document = { body: {}, addEventListener() {}, removeEventListener() {} }
+    try {
+      let Picker = null
+      try {
+        Picker = new Function('React', 'ReactDOM', 'Primitives', 'T',
+          compSrc + '\n; return ModelEffortPicker;')(
+          React2,
+          { createPortal(node) { portals.push({ node }); return node } },
+          {
+            IconChevronRightOutlineRegular: function (p) { return { tag: 'ICR', props: p || {}, kids: [] } },
+            IconCheckOutlineRegular: function (p) { return { tag: 'IC', props: p || {}, kids: [] } },
+          },
+          (k) => k,
+        )
+      } catch (e) { return false }
+      if (typeof Picker !== 'function') return false
+      const groups = [
+        { id: 'a', name: 'A', models: [{ id: 'm1', name: 'M1' }, { id: 'm2', name: 'M2' }, { id: 'm3', name: 'M3' }] },
+        { id: 'b', name: 'B', models: [{ id: 'm4', name: 'M4' }, { id: 'm5', name: 'M5' }] },
+      ]
+      const S_PANE = 0
+      const S_HL = 3
+      const collectRows = (menu) => {
+        const out = []
+        const walk = (n) => {
+          if (!n || typeof n !== 'object') return
+          if (n.props && n.props.role === 'menuitemradio') out.push(n)
+          for (const k of n.kids || []) walk(k)
+        }
+        walk(menu)
+        return out
+      }
+      const render = () => {
+        portals.length = 0
+        React2.__reset()
+        Picker({ model: 'm2', provider: 'a', effort: '', effective: {}, groups, efforts: [], disabled: false, onPick: () => {} })
+        return collectRows(portals[portals.length - 1].node)
+      }
+      const labelOf = (b) => b.kids[0].kids[0].kids[0]
+      const visualOf = (row) => {
+        const cls = String(row.props.className)
+        return {
+          label: labelOf(row),
+          active: cls.includes('pg-active'),
+          selected: cls.includes('pg-selected'),
+          check: !!(row.kids[1] && row.kids[1].kids && row.kids[1].kids.length > 0),
+        }
+      }
+      React2.__states[S_PANE] = 'model'
+      React2.__states[S_HL] = null
+      let rows = render()
+      const sel = rows.map(visualOf).filter((v) => v.selected)
+      if (sel.length !== 1) return false
+      const selLabel = sel[0].label
+      const sig = (v) => JSON.stringify({ a: v.active, s: v.selected, c: v.check })
+      const samples = []
+      // 扫动：交替移入/移出不同的行（跳过选中项自己 —— 指针在它身上时有底色是正常反馈）
+      for (const idx of [0, 3, 4, 5, 3, 1, 0, 4]) {
+        if (React2.__states[S_HL] !== null) {
+          const cur = React2.__states[S_HL]
+          rows[cur].props.onMouseLeave()
+          rows = render()
+          if (labelOf(rows[idx]) !== selLabel) samples.push(sig(rows.map(visualOf).filter((v) => v.label === selLabel)[0]))
+        }
+        rows = render()
+        if (labelOf(rows[idx]) === selLabel) continue
+        rows[idx].props.onMouseMove()
+        rows = render()
+        samples.push(sig(rows.map(visualOf).filter((v) => v.label === selLabel)[0]))
+        rows[idx].props.onMouseLeave()
+        rows = render()
+        samples.push(sig(rows.map(visualOf).filter((v) => v.label === selLabel)[0]))
+      }
+      if (samples.length < 6) return false
+      // 全程唯一，且必须是「未高亮 + 选中 + 有✓」
+      if ([...new Set(samples)].length !== 1) return false
+      const only = JSON.parse(samples[0])
+      return only.a === false && only.s === true && only.c === true
+    } finally {
+      if (RealDocument === undefined) delete globalThis.document
+      else globalThis.document = RealDocument
+    }
+  })())
+  // ⑨e6 推理等级 pane 必须**真实渲染**出「通用/指定」两组，且重名档位不丢
+  //
+  // 踩过的真实问题（实测反馈，配图显示列表只有「跟随会话/模型默认/最高/最低/Low/High」）：
+  // 模型公布的档位若与内置符号档重名（最典型：末档 id 就叫 `max`）就直接跳过，
+  // 用户就看不到 `Max` 这个名字，以为「怎么只有 low 和 high」。
+  // 而 `max` 恰好是最常见的末档 id（pi-ai 的 THINKING_LEVELS 末位就是 max）。
+  //
+  // 判据走真实渲染：断言分组标题存在且顺序正确、通用四档在前、指定组列出**全部**公布档位
+  // （含与符号档重名的 `max`）、指定组的值为 `@` 前缀。
+  ok('★★ 推理等级浮层真实渲染出「通用/指定」两组，重名档位（max）不丢', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const iStart = cli.indexOf('const PG_EFFORT_PIN = ')
+    const compSrc = cli.slice(iStart, iCompEnd)
+    const mkReact = () => {
+      const states = []
+      let si = 0
+      return {
+        createElement(tag, props, ...kids) {
+          const flat = []
+          for (const k of kids) {
+            if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+            else if (k !== null && k !== undefined && k !== false) flat.push(k)
+          }
+          if (typeof tag === 'function') return tag(props || {})
+          return { tag, props: props || {}, kids: flat }
+        },
+        Fragment: 'Fragment',
+        useState(init) {
+          const i = si++
+          if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+          return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+        },
+        useRef(init) { return { current: init } },
+        useEffect() {},
+        useLayoutEffect() {},
+        __states: states,
+        __reset: () => { si = 0 },
+      }
+    }
+    const portals = []
+    const React2 = mkReact()
+    const RealDocument = globalThis.document
+    globalThis.document = { body: {}, addEventListener() {}, removeEventListener() {} }
+    try {
+      const DICT = {
+        'panel.autoEffortSession': '跟随会话',
+        'panel.autoEffortDefault': '模型默认',
+        'panel.autoEffortMax': '模型最高',
+        'panel.autoEffortMin': '模型最低',
+        'panel.autoEffortGroupCommon': '通用',
+        'panel.autoEffortGroupSpecific': '指定',
+      }
+      const Tstub = (k) => (Object.prototype.hasOwnProperty.call(DICT, k) ? DICT[k] : String(k))
+      let Picker = null
+      try {
+        Picker = new Function('React', 'ReactDOM', 'Primitives', 'T',
+          compSrc + '\n; return ModelEffortPicker;')(
+          React2,
+          { createPortal(node) { portals.push({ node }); return node } },
+          {
+            IconChevronRightOutlineRegular: function (p) { return { tag: 'ICR', props: p || {}, kids: [] } },
+            IconCheckOutlineRegular: function (p) { return { tag: 'IC', props: p || {}, kids: [] } },
+          },
+          Tstub,
+        )
+      } catch (e) { return false }
+      if (typeof Picker !== 'function') return false
+      // herdgate 的真实形态：公布 low / high / max —— 末档就叫 max，与符号档重名。
+      const groups = [{ id: 'herdgate', name: 'herdgate', models: [{
+        id: 'group/deepseek-v4.1-f', name: 'group/deepseek-v4.1-f',
+        reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' }] },
+      }] }]
+      const base = { model: '', provider: '', effort: '', groups, efforts: [], disabled: false, onPick: () => {} }
+      portals.length = 0
+      React2.__reset()
+      React2.__states[0] = 'effort'
+      // ⚠️ **配置了具体审批模型**（model 非空）——「指定」组只在这种情况出现，见下方 ⑤。
+      Picker(Object.assign({}, base, {
+        model: 'group/deepseek-v4.1-f', provider: 'herdgate',
+        effective: { model: 'group/deepseek-v4.1-f', provider: 'herdgate', effort: 'max' },
+      }))
+      if (!portals.length) return false
+      // 按渲染顺序收集：标题（div，无 role）与选项（button[role=menuitemradio]）
+      const seq = []
+      const walk = (n) => {
+        if (!n || typeof n !== 'object') return
+        if (n.props && n.props.role === 'menuitemradio') {
+          seq.push({ kind: 'opt', label: n.kids[0].kids[0].kids[0], value: n.props['data-value'] })
+        } else if (n.tag === 'div' && n.kids.length === 1 && typeof n.kids[0] === 'string') {
+          seq.push({ kind: 'head', label: n.kids[0] })
+        }
+        for (const k of n.kids || []) walk(k)
+      }
+      walk(portals[portals.length - 1].node)
+      const heads = seq.filter((s) => s.kind === 'head').map((s) => s.label)
+      const opts = seq.filter((s) => s.kind === 'opt').map((s) => s.label)
+      // ① 两个分组标题都在，且「通用」在前、「指定」在后
+      if (JSON.stringify(heads) !== JSON.stringify(['通用', '指定'])) return false
+      // ② 通用四档在前，顺序按**档位强弱由低到高**（最低 → 最高），与「指定」组同方向
+      if (JSON.stringify(opts.slice(0, 4)) !== JSON.stringify(['跟随会话', '模型默认', '模型最低', '模型最高'])) return false
+      // ③ 指定组列出**全部**公布档位 —— 关键：`Max` 必须在（旧版会被跳过）
+      if (JSON.stringify(opts.slice(4)) !== JSON.stringify(['Low', 'High', 'Max'])) return false
+      // ④ 「模型最高」与「Max」是**两个不同的选项值**（否则两种语义又混成一个）
+      const vals = seq.filter((s) => s.kind === 'opt').map((s) => s.value)
+      if (vals.slice(0, 4).indexOf('max') === -1) return false
+      if (vals.slice(4).indexOf('@max') === -1) return false
+      // ⑤ **跟随会话时不渲染「指定」组**（实测反馈「审批模型选择跟随会话的时候，
+      //    为啥下面会有选择？」）。根因：跟着会话时 `shownSel` 回退到当前对话的模型，
+      //    于是列出来的是「这个对话碰巧在用的模型」的档位 —— 换对话就变，而「指定」
+      //    是钉住具体档位 id，钉在一个会漂的模型上没有意义（换过去就 config-error）。
+      //    功能上无损失：「模型最高/最低」已能表达相对语义。
+      portals.length = 0
+      React2.__reset()
+      React2.__states[0] = 'effort'
+      Picker(Object.assign({}, base, {
+        model: '', provider: '',
+        effective: { model: 'group/deepseek-v4.1-f', provider: 'herdgate', effort: 'max' },
+      }))
+      const seqFollow = []
+      const walkF = (n) => {
+        if (!n || typeof n !== 'object') return
+        if (n.props && n.props.role === 'menuitemradio') seqFollow.push({ kind: 'opt' })
+        else if (n.tag === 'div' && n.kids.length === 1 && typeof n.kids[0] === 'string') seqFollow.push({ kind: 'head', label: n.kids[0] })
+        for (const k of n.kids || []) walkF(k)
+      }
+      walkF(portals[portals.length - 1].node)
+      // 只有「通用」一个标题，恰好 4 项 —— 没有任何「指定」的痕迹
+      if (JSON.stringify(seqFollow.filter((s) => s.kind === 'head').map((s) => s.label)) !== JSON.stringify(['通用'])) return false
+      if (seqFollow.filter((s) => s.kind === 'opt').length !== 4) return false
+      // ⑥ 模型不公布档位时不渲染空的「指定」组（只有一个标题比没有更让人困惑）
+      portals.length = 0
+      React2.__reset()
+      React2.__states[0] = 'effort'
+      const noReason = [{ id: 'x', name: 'X', models: [{ id: 'm', name: 'M' }] }]
+      Picker(Object.assign({}, base, { model: 'm', provider: 'x', groups: noReason, effective: { model: 'm', provider: 'x' } }))
+      const seq2 = []
+      const walk2 = (n) => {
+        if (!n || typeof n !== 'object') return
+        if (n.props && n.props.role === 'menuitemradio') seq2.push({ kind: 'opt' })
+        else if (n.tag === 'div' && n.kids.length === 1 && typeof n.kids[0] === 'string') seq2.push({ kind: 'head', label: n.kids[0] })
+        for (const k of n.kids || []) walk2(k)
+      }
+      walk2(portals[portals.length - 1].node)
+      if (JSON.stringify(seq2.filter((s) => s.kind === 'head').map((s) => s.label)) !== JSON.stringify(['通用'])) return false
+      return seq2.filter((s) => s.kind === 'opt').length === 4
+    } finally {
+      if (RealDocument === undefined) delete globalThis.document
+      else globalThis.document = RealDocument
+    }
+  })())
+  //
+  // 官方在模型数 > 4 时出现搜索框，用 rankByName（大小写不敏感的**有序子序列**匹配
+  // 加打分，不是简单的 includes）。实测反馈「没有搜索功能」。
+  ok('★★ 模型列表有搜索（>4 个模型时出现，按官方 rankByName 匹配）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    // ① 阈值与官方一致（> 4）
+    if (!/const showSearch = allChoices\.length > 4;/.test(comp)) return false
+    // ② 搜索框是 input[role=searchbox] + placeholder + 清除按钮
+    if (comp.indexOf("role: 'searchbox'") === -1) return false
+    if (comp.indexOf("placeholder: T('panel.autoSearchPh')") === -1) return false
+    if (comp.indexOf("T('panel.autoSearchClear')") === -1) return false
+    // ③ 过滤走 pgRankByName（不是 includes / indexOf）
+    if (comp.indexOf('pgRankByName(') === -1) return false
+    // ④ 空状态分两句（官方 empty.models / search.empty）
+    if (comp.indexOf("activeQuery ? T('panel.autoSearchEmpty') : T('panel.autoModelEmpty')") === -1) return false
+    // ⑤ rankByName 必须存在且是**有序子序列**打分（不是 includes）
+    if (cli.indexOf('function pgRankByName(items, query) {') === -1) return false
+    // ⑥ 切换 pane 时清空搜索词（官方 drill() 同样 setQuery("")）
+    if (!/const toggle = \(key\) => \{[\s\S]{0,200}?setQuery\(''\)/.test(comp)) return false
+    return true
+  })())
+  // ⑨e7 样式注入必须「存在就更新」，不能「存在就跳过」
+  //
+  // 踩过的真实问题：注入守卫原本是
+  //   `if (document.querySelector(...) === null) { 建标签; 写 CSS }`
+  // —— 只有标签**不存在**时才写。插件热重载时旧 <style> 还在，
+  // 于是**新增/修改的 CSS 永远进不了 DOM**，新规则全部失效。
+  // 表现就是「改了 CSS 却毫无变化」：模型选择器第一版样式完全没生效
+  // （标签被压成竖排）正是这个原因；这次 hover 规则也是同一条路。
+  //
+  // 判据：`injectCss` 必须**在 if 之外**写 textContent（存在则更新），
+  // 且三份样式表都走它（不能有一处还在用旧的「=== null 才写」写法）。
+  ok('★★ 样式注入是「存在就更新」（否则热重载后改的 CSS 永远不生效）', (function () {
+    const iFn = cli.indexOf('const injectCss = (pluginCss, text) => {')
+    if (iFn < 0) return false
+    let d = 0
+    let end = -1
+    for (let k = cli.indexOf('{', iFn); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { end = k + 1; break } }
+    }
+    if (end < 0) return false
+    const fnSrc = cli.slice(iFn, end)
+    // ① 必须在 if 之外写 textContent：判据是「tag.textContent = text」出现在
+    //    「if (tag === null) { ... }」这个块的闭合花括号**之后**。
+    const iNullIf = fnSrc.indexOf('if (tag === null) {')
+    if (iNullIf < 0) return false
+    let d2 = 0
+    let iIfEnd = -1
+    for (let k = fnSrc.indexOf('{', iNullIf); k < fnSrc.length; k++) {
+      if (fnSrc[k] === '{') d2++
+      else if (fnSrc[k] === '}') { d2--; if (d2 === 0) { iIfEnd = k + 1; break } }
+    }
+    if (iIfEnd < 0) return false
+    const iAssign = fnSrc.indexOf('tag.textContent = text;')
+    if (iAssign < 0) return false
+    if (iAssign < iIfEnd) return false
+    // ② 三份样式表都走 injectCss
+    for (const key of ["'dsh-permgate'", "'dsh-permgate-diff'", "'dsh-permgate-diff2'"]) {
+      if (cli.indexOf('injectCss(' + key) === -1) return false
+    }
+    // ③ 反证：不得再出现「=== null 才写 CSS」的旧形态
+    if (/querySelector\('style\[data-plugin-css="[^"]+"\]'\) === null\) \{\s*\n\s*const tag = document\.createElement\('style'\)/.test(cli)) return false
+    return true
+  })())
+  // ⑨e8 所有 CSS 常量必须是 **string**，不能是数组
+  //
+  // 踩过的真实问题（这次「颜色完全没变化」的真凶）：`PG_HOVER_CSS` 是一个**数组**，
+  // 但漏了 `.join(' ')`。它被 `+` 拼进 `tag.textContent` 时，数组被隐式转成
+  //   "a,b,c"
+  // —— 于是相邻两条规则之间多了一个逗号：
+  //   `.pg-hoverable{...},.pg-hoverable:hover{...}`
+  // 这整条选择器是**非法的**，浏览器把整条规则一起丢掉（不是只丢一条），
+  // 所以 hover 从头到尾没有任何效果。而它前面的规则正常，页面看起来「别的都对」，
+  // 极难联想到「少了一次 join」。
+  //
+  // 判据走**真实求值**：把常量区跑一遍，逐个断言 typeof === 'string'，
+  // 再按 apply() 的方式拼成 textContent，断言其中没有 `},.` 这种残留。
+  ok('★★ 所有 CSS 常量都是 string（数组漏 join 会让整条规则非法而静默失效）', (function () {
+    const iFirst = cli.indexOf('const CSS = ')
+    const iLast = cli.indexOf('const PG_TRIGGER_SELECTOR =')
+    if (iFirst < 0 || iLast < 0) return false
+    const names = ['CSS', 'RADIO_DISABLED_CSS', 'PG_CARD_CSS', 'PG_SORT_CSS', 'PG_BLAST_CSS',
+      'PG_TIER_CSS', 'PG_EXC_CSS', 'PG_HOVER_CSS', 'PG_HOVER_BG']
+    // 常量区从 `const CSS = ` 起就自带 PG_MIN_W / PG_MIN_H 等尺寸常量，
+    // 不要再补一遍（重复声明会直接 SyntaxError）。
+    const block = cli.slice(iFirst, iLast)
+    const exportLine = '\n;return {' + names.map((n) => n + ': typeof ' + n + ' === "undefined" ? undefined : ' + n).join(', ') + '};\n'
+    let v = null
+    try {
+      v = new Function(block + exportLine)()
+    } catch (e) { return false }
+    if (!v) return false
+    // ① 每个常量都必须是 string
+    for (const n of names) {
+      if (typeof v[n] !== 'string') return false
+    }
+    // ② 按 apply() 的方式拼接，不得出现 `},.`（数组未 join 的残留）
+    const full = v.CSS + v.RADIO_DISABLED_CSS + v.PG_CARD_CSS + v.PG_SORT_CSS
+      + v.PG_BLAST_CSS + v.PG_TIER_CSS + v.PG_EXC_CSS + v.PG_HOVER_CSS
+    if (/\}\s*,\s*\./.test(full)) return false
+    // ③ hover 三条必须真的在最终文本里（且用 solid 令牌）
+    if (full.indexOf('.pg-hoverable:hover:not(:disabled)') === -1) return false
+    if (full.indexOf('.pg-hoverable.pg-active:not(:disabled)') === -1) return false
+    if (full.indexOf('--dsw-alias-interactive-bg-hover-solid') === -1) return false
+    // ④ 花括号配平
+    let braces = 0
+    for (const ch of full) {
+      if (ch === '{') braces++
+      else if (ch === '}') { braces--; if (braces < 0) return false }
+    }
+    return braces === 0
+  })())
+  // ⑨e6 rankByName 的匹配语义必须与官方一致（**真实求值**，不是查字符串）
+  //
+  // 这条防的是一次真实 bug：把官方的 `p = max(p, h + g - 2)`（g 是**下标**）
+  // 误写成 `prevPrev + prev[i] - 2`，结果 `v41` 一个都匹配不上
+  // （纯前缀查询如 `deepseek` 恰好还能过，因为它靠 prefix 标志排序、不依赖分数 ——
+  // 这正是「只测前缀就发现不了」的原因）。
+  ok('★★ rankByName 匹配语义与官方一致（v41 能匹配 V4.1，不是子串匹配）', (function () {
+    const iFn = cli.indexOf('function pgRankByName(items, query) {')
+    if (iFn < 0) return false
+    let d = 0
+    let end = -1
+    for (let k = cli.indexOf('{', iFn); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { end = k + 1; break } }
+    }
+    if (end < 0) return false
+    let rank = null
+    try {
+      rank = new Function(cli.slice(iFn, end) + '\n; return pgRankByName;')()
+    } catch (e) { return false }
+    if (typeof rank !== 'function') return false
+    const items = [
+      { name: 'DeepSeek-V4.1-Flash' },
+      { name: 'DeepSeek-V4-Pro' },
+      { name: 'GPT-6.1 Sol · routing group' },
+      { name: 'group/deepseek-v4.1-f' },
+    ]
+    const names = (q) => rank(items, q).map((x) => x.name)
+    // 空查询：全部返回且保持原顺序
+    if (JSON.stringify(names('')) !== JSON.stringify(items.map((x) => x.name))) return false
+    // 有序子序列：`v41` 命中两个 V4.1（子串匹配做不到）
+    const v41 = names('v41')
+    if (v41.length !== 2) return false
+    if (v41.indexOf('DeepSeek-V4.1-Flash') === -1 || v41.indexOf('group/deepseek-v4.1-f') === -1) return false
+    // 跳字匹配：`gpt6sol` 命中 `GPT-6.1 Sol`
+    if (names('gpt6sol').length !== 1) return false
+    if (names('gpt6sol')[0] !== 'GPT-6.1 Sol · routing group') return false
+    // 前缀优先：`pro` 的首个结果是 V4-Pro（前缀）而不是其它含 p/r/o 的
+    if (names('pro')[0] !== 'DeepSeek-V4-Pro') return false
+    // 无匹配返回空
+    if (names('zzz').length !== 0) return false
+    // 大小写不敏感
+    if (names('V41').length !== 2) return false
+    return true
+  })())
+  // ⑨e3 推理等级的**候选档位表**要按真正会被使用的模型查
+  //
+  // 两个真实 bug，方向相反：
+  //   ① 只从 `cur`（由 props.model 查出）取。默认状态是「跟随会话」，此时 cur 为 null、
+  //      档位表为空 —— 于是浮层里列不出目标模型公布的档位（只剩四个符号档）。
+  //   ② 修 ① 时改成了「cur 为空就 fallback 到 effective」，但**没有判 props.model**：
+  //      配了模型 A、而 A 不在目录里（被删 / 目录没取到）时，档位表会变成**会话模型 B** 的，
+  //      于是浮层列的是 B 支持的档位，选完派发给 A → 宿主 config-error。
+  //
+  // 判据：fallback 必须带 `!props.model` 前置条件。这条同时守住 ① 和 ②。
+  ok('★★ 推理等级候选档位按「配置的模型」查，只有未配置时才用会话模型（且不得跨模型串档）', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const comp = cli.slice(iComp, iCompEnd)
+    const iSel = comp.indexOf('const shownSel = cur')
+    if (iSel < 0) return false
+    // 边界取到下一行 `const reasoning`：中间就是整个 shownSel 的三元表达式
+    const iNext = comp.indexOf('const reasoning = ', iSel)
+    if (iNext < 0) return false
+    const selSrc = comp.slice(iSel, iNext)
+    // ① 必须考虑 effective（否则跟随会话时档位表为空）
+    if (selSrc.indexOf('effective.model') === -1) return false
+    // ② fallback 必须判 !props.model（否则「配了 A、A 不在目录」时串成会话模型的档位）
+    if (!/!props\.model\s*&&/.test(selSrc)) return false
+    // 档位表必须从 shownSel 取（不是从 cur 取）
+    if (!/const reasoning = shownSel && shownSel\.model\.reasoning/.test(comp)) return false
+    // 反证：不得再出现「只按 cur 取档位表」的旧写法
+    if (/const reasoning = cur && cur\.model\.reasoning/.test(comp)) return false
+    return true
+  })())
+  // ⑨f autoReviewCard 里**不得有任何 hook 调用**
+  //
+  // 踩过的真实崩溃：模型目录的 `React.useEffect` 最初写在 `autoReviewCard()` 里，
+  // 而那个函数只在 `tab === 'auto'` 时被调用 —— 切 tab 就改变了组件的 hook 数量，
+  // React 抛 #310「Rendered more hooks than during the previous render」，
+  // 整个设置页白屏（实测：切到自动审批 tab 立刻崩，`settings.section` slot entry crashed）。
+  //
+  // 与本文件上方「添加成功后滚到列表末尾」那段注释是同一条规则：
+  // hook 不能出现在条件分支或按需调用的函数里。组件层的 hook 数量恒定。
+  //
+  // 判据：卡片函数体内不得出现 React.useState / useEffect / useRef / useMemo / useCallback。
+  // 这条能抓到「顺手在卡片里加一个 hook」的所有变体。
+  ok('★★ autoReviewCard 里没有 hook（否则切 tab 会抛 #310 整页白屏）', (function () {
+    const i = cli.indexOf('const autoReviewCard = () => {')
+    if (i < 0) return false
+    // 取到卡片函数结尾：从 `{` 配平到对应的 `}`
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    for (const hk of ['React.useState', 'React.useEffect', 'React.useRef', 'React.useMemo', 'React.useCallback', 'React.useLayoutEffect']) {
+      if (body.indexOf(hk) !== -1) return false
+    }
+    return true
+  })())
+  // ⑨g 设置页只显示**配置值**，不显示会随对话漂的生效值
+  //
+  // 踩过的真实问题（实测反馈「选择跟随会话的时候应该只显示跟随会话吧，而不是还有一个
+  // 模型名吧，那我切换不同对话的时候模型还不一样，设置页不应该显示模型名吧」）：
+  // 把 `effective.model`（宿主下发的**当前活动会话**模型）当成「未配置时的显示值」，
+  // 推理等级同理退到 `effective.effort`，同一个**全局**设置项就会：
+  //   · 切到另一个对话 → 显示成另一个模型名 / 另一个档位；
+  //   · 它既不是配置值，也不是任何稳定事实 —— 用户以为设置会跟着对话变。
+  //
+  // 这一行回答的是「**我配了什么**」：没配置就写「跟随会话」四个字，
+  // 「跟随会话」项本身也只写四个字（不带括号里的会话模型名）。
+  //
+  // 判据走**真实渲染**：同一份 props 只改 effective（模拟切换对话），
+  // 断言两行 trigger 的文本**逐字不变**；再断言配置了就显示配置的那个。
+  ok('★★ 设置页只显示配置值，不显示会随对话漂的生效模型/档位（跟随会话就只写四个字）', (function () {
+    // ① 宿主仍然下发 target（推理等级 pane 要靠它列对档位，见 ⑨e3），但
+    //    客户端**不得**把它当成显示值。
+    if (src.indexOf('target: (function () {') === -1) return false
+    if (cli.indexOf('const tgt = ar.target') === -1) return false
+    if (cli.indexOf('effective: { model: tgtMod, provider: tgtProv, effort: tgtEffort }') === -1) return false
+    // ② 被删掉的 i18n 键不得复活（留着就随时能被接回去）
+    if (cli.indexOf("'panel.autoModelFollowWith'") !== -1) return false
+    if (cli.indexOf("'panel.autoUnknown'") !== -1) return false
+    // ③ 真实渲染
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const iStart = cli.indexOf('const PG_EFFORT_PIN = ')
+    const compSrc = cli.slice(iStart, iCompEnd)
+    const mkReact = () => {
+      const states = []
+      let si = 0
+      return {
+        createElement(tag, props, ...kids) {
+          const flat = []
+          for (const k of kids) {
+            if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+            else if (k !== null && k !== undefined && k !== false) flat.push(k)
+          }
+          if (typeof tag === 'function') return tag(props || {})
+          return { tag, props: props || {}, kids: flat }
+        },
+        Fragment: 'Fragment',
+        useState(init) {
+          const i = si++
+          if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+          return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+        },
+        useRef(init) { return { current: init } },
+        useEffect() {},
+        useLayoutEffect() {},
+        __states: states,
+        __reset: () => { si = 0 },
+      }
+    }
+    const portals = []
+    const React2 = mkReact()
+    const RealDocument = globalThis.document
+    globalThis.document = { body: {}, addEventListener() {}, removeEventListener() {} }
+    try {
+      let Picker = null
+      // T 用**最小真实字典**：只有这两条文案映射到中文，其余回落到 key 本身。
+      // 这样若代码错误地引用了别的键（例如被删的 `panel.autoModelFollowWith`），
+      // 渲染出来就是那个 key，断言「只写四个字」当场变红。
+      const DICT = {
+        'panel.autoModelFollow': '跟随会话',
+        'panel.autoEffortSession': '跟随会话',
+        'panel.autoEffortDefault': '模型默认',
+        'panel.autoEffortMax': '模型最高',
+        'panel.autoEffortMin': '模型最低',
+        'panel.autoEffortGroupCommon': '通用',
+        'panel.autoEffortGroupSpecific': '指定',
+      }
+      const Tstub = (k) => (Object.prototype.hasOwnProperty.call(DICT, k) ? DICT[k] : String(k))
+      try {
+        Picker = new Function('React', 'ReactDOM', 'Primitives', 'T',
+          compSrc + '\n; return ModelEffortPicker;')(
+          React2,
+          { createPortal(node) { portals.push({ node }); return node } },
+          {
+            IconChevronRightOutlineRegular: function (p) { return { tag: 'ICR', props: p || {}, kids: [] } },
+            IconCheckOutlineRegular: function (p) { return { tag: 'IC', props: p || {}, kids: [] } },
+          },
+          Tstub,
+        )
+      } catch (e) { return false }
+      if (typeof Picker !== 'function') return false
+      const groups = [
+        { id: 'a', name: 'A', models: [
+          { id: 'm1', name: 'M1', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'max', name: 'Max' }] } },
+          { id: 'm2', name: 'M2', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'max', name: 'Max' }] } },
+        ] },
+      ]
+      const S_PANE = 0
+      const walk = (n, out) => {
+        if (!n || typeof n !== 'object') return out
+        out.push(n)
+        for (const k of n.kids || []) walk(k, out)
+        return out
+      }
+      // 取出两行 trigger 的值文本（role=menuitem，第二个 span 是值）
+      const triggerValues = (props) => {
+        portals.length = 0
+        React2.__reset()
+        React2.__states[S_PANE] = 'root'
+        const tree = Picker(props)
+        const btns = walk(tree, []).filter((n) => n.props && n.props.role === 'menuitem')
+        if (btns.length !== 2) return null
+        return btns.map((b) => (b.kids[1] && b.kids[1].kids ? b.kids[1].kids[0] : undefined))
+      }
+      const base = {
+        model: '', provider: '', effort: '',
+        groups, efforts: [{ id: 'low', name: 'Low' }, { id: 'max', name: 'Max' }],
+        disabled: false, onPick: () => {},
+      }
+      // ③a 未配置：两行都写「跟随会话」，**不出现**任何模型名/档位名
+      const v1 = triggerValues(Object.assign({}, base, { effective: { model: 'm1', provider: 'a', effort: 'max' } }))
+      if (!v1) return false
+      if (v1[0] !== '跟随会话' || v1[1] !== '跟随会话') return false
+      // ③b 换一个对话（effective 变了）→ 显示**逐字不变**
+      const v2 = triggerValues(Object.assign({}, base, { effective: { model: 'm2', provider: 'a', effort: 'low' } }))
+      if (!v2) return false
+      if (JSON.stringify(v1) !== JSON.stringify(v2)) return false
+      // ③c 根本没有会话（effective 为空）→ 还是那四个字，不是「未知」
+      const v3 = triggerValues(Object.assign({}, base, { effective: {} }))
+      if (!v3) return false
+      if (JSON.stringify(v1) !== JSON.stringify(v3)) return false
+      // ③d 配了具体模型与档位 → 显示配置的那个。
+      //     两种配置形态显示不同，这正是 `@` 前缀存在的意义：
+      //       'max'  → 「模型最高」（相对值，跟着模型走）
+      //       '@max' → 「Max」    （钉住这个档位 id）
+      const v4 = triggerValues(Object.assign({}, base, {
+        model: 'm2', provider: 'a', effort: 'max',
+        effective: { model: 'm1', provider: 'a', effort: 'low' },
+      }))
+      if (!v4) return false
+      if (v4[0] !== 'M2' || v4[1] !== '模型最高') return false
+      const v5 = triggerValues(Object.assign({}, base, {
+        model: 'm2', provider: 'a', effort: '@max',
+        effective: { model: 'm1', provider: 'a', effort: 'low' },
+      }))
+      if (!v5) return false
+      if (v5[0] !== 'M2' || v5[1] !== 'Max') return false
+      // ③e 模型 pane 里的「跟随会话」项也只写四个字（不带括号里的会话模型）
+      portals.length = 0
+      React2.__reset()
+      React2.__states[S_PANE] = 'model'
+      React2.__states[3] = null
+      Picker(Object.assign({}, base, { effective: { model: 'm1', provider: 'a', effort: 'max' } }))
+      if (!portals.length) return false
+      const rows = walk(portals[portals.length - 1].node, []).filter((n) => n.props && n.props.role === 'menuitemradio')
+      if (!rows.length) return false
+      const followLabel = rows[0].kids[0].kids[0].kids[0]
+      if (followLabel !== '跟随会话') return false
+      // ④ 推理等级显示的是**名称**不是 id（官方 effortLabel 取 efforts[].name）
+      const comp = cli.slice(iComp, iCompEnd)
+      if (comp.indexOf('const effortNameOf = (v) =>') === -1) return false
+      if (comp.indexOf('modelEfforts.find((e) => e.id === id)') === -1) return false
+      return true
+    } finally {
+      if (RealDocument === undefined) delete globalThis.document
+      else globalThis.document = RealDocument
+    }
+  })())
+  // ⑨g2 换模型时推理等级怎么处置：符号档保留、钉住的档位按新模型校验
+  //
+  // 三种设置的语义不同，处置也必须不同（实测反馈里问到「切换模型的时候没有就回退到
+  // 默认或者最高或者最低？」）：
+  //   · 未配置 / 跟随会话 → 不动；
+  //   · 通用相对档（default / max / min）→ **保留**。它们是相对值，换任何模型都成立；
+  //     清空等于替用户改成「跟随会话」，是没让他做的决定；
+  //   · 指定档（`@` + id）→ 新模型没这一档就回退到 **default（模型默认）**，
+  //     不选「最高」或「最低」：那会替用户做「更慢更贵」或「判断更弱」的选择，
+  //     而「模型默认」是唯一不表态的答案。
+  //
+  // 判据走真实渲染 + 点击：模拟「选另一个模型」，断言实际提交的字段。
+  ok('★★ 换模型时符号档保留、钉住的档位不支持则回退到「模型默认」', (function () {
+    const iComp = cli.indexOf('function ModelEffortPicker(props) {')
+    if (iComp < 0) return false
+    const iCompEnd = cli.indexOf('function Panel(props) {', iComp)
+    if (iCompEnd < 0) return false
+    const iStart = cli.indexOf('const PG_EFFORT_PIN = ')
+    const compSrc = cli.slice(iStart, iCompEnd)
+    // 弹层里的模型行不支持按 data 属性取值，故这里只需要「点哪一行」= 按标签找。
+    const mkReact = () => {
+      const states = []
+      let si = 0
+      return {
+        createElement(tag, props, ...kids) {
+          const flat = []
+          for (const k of kids) {
+            if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+            else if (k !== null && k !== undefined && k !== false) flat.push(k)
+          }
+          if (typeof tag === 'function') return tag(props || {})
+          return { tag, props: props || {}, kids: flat }
+        },
+        Fragment: 'Fragment',
+        useState(init) {
+          const i = si++
+          if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+          return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+        },
+        useRef(init) { return { current: init } },
+        useEffect() {},
+        useLayoutEffect() {},
+        __states: states,
+        __reset: () => { si = 0 },
+      }
+    }
+    const portals = []
+    const React2 = mkReact()
+    const RealDocument = globalThis.document
+    globalThis.document = { body: {}, addEventListener() {}, removeEventListener() {} }
+    try {
+      let Picker = null
+      try {
+        Picker = new Function('React', 'ReactDOM', 'Primitives', 'T',
+          compSrc + '\n; return ModelEffortPicker;')(
+          React2,
+          { createPortal(node) { portals.push({ node }); return node } },
+          {
+            IconChevronRightOutlineRegular: function (p) { return { tag: 'ICR', props: p || {}, kids: [] } },
+            IconCheckOutlineRegular: function (p) { return { tag: 'IC', props: p || {}, kids: [] } },
+          },
+          (k) => k,
+        )
+      } catch (e) { return false }
+      if (typeof Picker !== 'function') return false
+      // 两个模型：m1 公布 low/high/max（末档叫 max），m2 公布 low/high（**没有** max）。
+      // 这正是「钉住 @max 后换到不支持它的模型」的真实形态。
+      const groups = [{ id: 'a', name: 'A', models: [
+        { id: 'm1', name: 'M1', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' }] } },
+        { id: 'm2', name: 'M2', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } },
+      ] }]
+      // 模拟「点模型 pane 里的某一行」：返回这一行 → 触发 onClick → 收集 onPick 的 patch。
+      const pickModel = (effort, targetModel) => {
+        const picked = []
+        portals.length = 0
+        React2.__reset()
+        React2.__states[0] = 'model'
+        React2.__states[2] = null
+        Picker({
+          model: 'm1', provider: 'a', effort,
+          effective: {}, groups, efforts: [], disabled: false,
+          onPick: (patch) => picked.push(patch),
+        })
+        const menu = portals[portals.length - 1].node
+        let row = null
+        const walk = (n) => {
+          if (!n || typeof n !== 'object') return
+          if (n.props && n.props.role === 'menuitemradio') {
+            const label = n.kids[0] && n.kids[0].kids && n.kids[0].kids[0] && n.kids[0].kids[0].kids[0]
+            if (label === targetModel) row = n
+          }
+          for (const k of n.kids || []) walk(k)
+        }
+        walk(menu)
+        if (!row) return null
+        row.props.onClick()
+        return picked
+      }
+      // ① 通用相对档 `max`：换到 m2（没有 max 这一档）→ **不改推理等级**。
+      //    相对档是「模型最高」，m2 的最高是 high，仍然成立。
+      const p1 = pickModel('max', 'M2')
+      if (!p1) return false
+      const patch1 = p1[0] || {}
+      if (patch1.model !== 'm2' || patch1.provider !== 'a') return false
+      // ②③④⑤ 走**真实执行 onPick**（抽出来注入桩），断言实际提交内容 ——
+      //    比查源码字符串可靠：源码里换个变量名就会让字符串断言失效，而行为不变。
+      const onPick = (function () {
+        const i = cli.indexOf('onPick: (patch) => {')
+        if (i < 0) return null
+        let d = 0
+        let body = ''
+        for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+          if (cli[k] === '{') d++
+          else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(cli.indexOf('{', i), k + 1); break } }
+        }
+        if (!body) return null
+        return body
+      })()
+      if (!onPick) return false
+      const runPick = (eff, next) => {
+        const calls = []
+        const stray = []
+        const fn = new Function('setFields', 'setField', 'PG_EFFORT_SYMBOLS', 'eff', 'groups', 'return (patch) => ' + onPick)(
+          (p, c) => calls.push({ patch: p || {}, clear: c || [] }),
+          // 记录而不抛错：抛错会让整包崩在这条用例上，其余断言拿不到结果
+          (k, v) => stray.push([k, v]),
+          ['default', 'max', 'min'],
+          eff, groups)
+        fn(next)
+        // 逐字段 setField 出现 = 并发请求的来源，这条断言必须变红
+        if (stray.length !== 0) calls.push({ stray: stray.slice() })
+        return calls
+      }
+      // ② 相对档 `max` 换到 m2 → 只提交 model/provider，**推理等级不动**
+      const c1 = runPick({ model: 'm1', provider: 'a', reasoningEffort: 'max' }, { model: 'm2', provider: 'a' })
+      if (c1.length !== 1) return false
+      if (c1[0].patch.model !== 'm2') return false
+      if (Object.prototype.hasOwnProperty.call(c1[0].patch, 'reasoningEffort')) return false
+      if (c1[0].clear.length !== 0) return false
+      // ③ 钉住 `@max` 换到 m2（没有 max）→ 同一个 patch 里回退到 'default'
+      const c2 = runPick({ model: 'm1', provider: 'a', reasoningEffort: '@max' }, { model: 'm2', provider: 'a' })
+      if (c2.length !== 1) return false
+      if (c2[0].patch.reasoningEffort !== 'default') return false
+      // ④ 回退目标必须是 default —— 不是 max/min（那会替用户选更快或更弱）
+      if (c2[0].patch.reasoningEffort === 'max' || c2[0].patch.reasoningEffort === 'min') return false
+      // ⑤ 切回「跟随会话」→ 清掉档位（放 clear 里，与 model/provider 同一个请求）
+      const c3 = runPick({ model: 'm1', provider: 'a', reasoningEffort: '@max' }, { model: null, provider: null })
+      if (c3.length !== 1) return false
+      if (c3[0].clear.indexOf('reasoningEffort') === -1) return false
+      if (c3[0].clear.indexOf('model') === -1) return false
+      if (c3[0].clear.indexOf('provider') === -1) return false
+      // ⑥ 目录查不到新模型档位表 → 不动（没有依据就不改，交给宿主报 config-error）
+      const c4 = runPick({ model: 'm1', provider: 'a', reasoningEffort: '@max' }, { model: 'unknown', provider: 'a' })
+      if (c4.length !== 1) return false
+      if (Object.prototype.hasOwnProperty.call(c4[0].patch, 'reasoningEffort')) return false
+      return true
+    } finally {
+      if (RealDocument === undefined) delete globalThis.document
+      else globalThis.document = RealDocument
+    }
+  })())
+  // ⑨g4 符号档清单必须是**一份**，不能既写数组又写映射
+  //
+  // 这两个常量表达同一份知识（哪些值是「相对档」）：
+  //   · PG_EFFORT_SYMBOL_LABELS —— 值 → 文案键（显示用）；
+  //   · PG_EFFORT_SYMBOLS      —— 值清单（判成员用）。
+  // 若各写一份字面量，加一个符号档时只改一处，另一处静默按具体档位处理：
+  // 面板会把 `xhigh` 显示成原始 id（而不是「模型最高」那样的固定文案），
+  // 或者换模型时把它当成钉住的档位清掉 —— 两处都不报错，只是行为悄悄不对。
+  //
+  // 判据：PG_EFFORT_SYMBOLS 必须从映射**派生**（Object.keys），不得是字面量数组。
+  ok('★ 符号档清单从映射派生（一份字面量，不会两处漂）', (function () {
+    const iLab = cli.indexOf('const PG_EFFORT_SYMBOL_LABELS = {')
+    if (iLab < 0) return false
+    const iSym = cli.indexOf('const PG_EFFORT_SYMBOLS = ', iLab)
+    if (iSym < 0) return false
+    const symLine = cli.slice(iSym, cli.indexOf('\n', iSym))
+    // 必须派生，不得是 ['default','max','min'] 这样的第二份字面量
+    if (symLine.indexOf('Object.keys(PG_EFFORT_SYMBOL_LABELS)') === -1) return false
+    const codeLines = cli.split('\n').filter((l) => !/^\s*\/\//.test(l))
+    if (codeLines.some((l) => /PG_EFFORT_SYMBOLS\s*=\s*\[/.test(l))) return false
+    // 映射本身仍要有三个符号档（防止为了绕过断言把映射也删空）
+    const mapBody = cli.slice(iLab, cli.indexOf('};', iLab))
+    for (const k of ['default', 'max', 'min']) {
+      if (mapBody.indexOf(k + ':') === -1) return false
+    }
+    return true
+  })())
+  // ⑨g5 「该模型不公布档位」的判据必须按**当前生效的那个模型**，不是全目录并集
+  //
+  // 踩过的真实问题：判据原本用 `efforts.length === 0`，而 `efforts` 是**全部 provider
+  // 全部模型**档位的并集 —— 只要目录里有任意一个模型公布了档位就非空。于是
+  // 「该模型不公布推理强度档位」这句提示几乎永远不会出现：用户看到一个没有「指定」组
+  // 的推理等级列表，却没有任何解释。
+  //
+  // 判据走真实执行：把 effortHintText 的计算抽出来跑三种场景。
+  ok('★★ 「该模型不公布档位」按当前模型判，不是按全目录并集', (function () {
+    // 抽出 effortOwner 的 IIFE 与 effortHintText 的三元
+    const iOwner = cli.indexOf('const effortOwner = (function () {')
+    if (iOwner < 0) return false
+    const iHint = cli.indexOf('const effortHintText = llmCat.loading', iOwner)
+    if (iHint < 0) return false
+    // effortHintText 是 llmCat.loading ? A : X —— 取到语句末尾的分号
+    const iHintEnd = cli.indexOf(';\n', cli.indexOf('T(\'panel.autoEffortHint\')', iHint)) + 1
+    if (iHintEnd <= 0) return false
+    const src = cli.slice(iOwner, iHintEnd)
+    // 注入依赖：groups / eff / tgtProv / tgtMod / llmCat / T。
+    // ⚠️ `efforts`（全目录并集）也一并注入 —— 旧写法会引用它，若不给就会 ReferenceError，
+    // 那样变异体会「崩」而不是「断言变红」，测不出真正的行为差异。
+    const run = (deps) => {
+      const allEfforts = []
+      for (const g of deps.groups) for (const m of g.models) {
+        for (const e of ((m.reasoning && m.reasoning.efforts) || [])) allEfforts.push(e)
+      }
+      return new Function(
+        'groups', 'eff', 'tgtProv', 'tgtMod', 'tgtEffort', 'llmCat', 'T', 'efforts',
+        src + '\n; return effortHintText;')(deps.groups, deps.eff, deps.tgtProv, deps.tgtMod, deps.tgtEffort, deps.llmCat, (k) => k, allEfforts)
+    }
+    const G = [
+      { id: 'p1', name: 'P1', models: [
+        { id: 'withEffort', name: 'WE', reasoning: { efforts: [{ id: 'low', name: 'Low' }] } },
+        { id: 'noEffort', name: 'NE' },
+      ] },
+    ]
+    // ① 配了「不公布档位」的模型 → 必须提示「该模型不公布档位」
+    const r1 = run({ groups: G, eff: { model: 'noEffort', provider: 'p1' }, tgtProv: '', tgtMod: '', tgtEffort: '', llmCat: { loading: false } })
+    if (r1 !== 'panel.autoEffortNone') return false
+    // ② 配了「有档位」的模型 → 常规说明（即便目录里还有别的模型）
+    const r2 = run({ groups: G, eff: { model: 'withEffort', provider: 'p1' }, tgtProv: '', tgtMod: '', tgtEffort: '', llmCat: { loading: false } })
+    if (r2 !== 'panel.autoEffortHint') return false
+    // ③ 关键反证：目录里**有**别的模型公布档位时，判据不得被它带偏。
+    //    （旧写法用全目录并集，此时并集非空 → 场景① 会错判成「有档位」。）
+    //    场景① 已经覆盖这一点，因为 G 里 withEffort 公布了档位。
+    // ④ 跟随会话（未配置）：按生效模型判 —— 生效模型不公布档位 → 提示
+    const r4 = run({ groups: G, eff: {}, tgtProv: 'p1', tgtMod: 'noEffort', tgtEffort: '', llmCat: { loading: false } })
+    if (r4 !== 'panel.autoEffortNone') return false
+    // ⑤ 跟随会话 + 生效模型有档位 → 常规说明
+    const r5 = run({ groups: G, eff: {}, tgtProv: 'p1', tgtMod: 'withEffort', tgtEffort: '', llmCat: { loading: false } })
+    if (r5 !== 'panel.autoEffortHint') return false
+    // ⑥ 模型查不到（目录没取到 / 被删）→ **不提示「不公布档位」**（没有依据就不下断言）
+    const r6 = run({ groups: G, eff: { model: 'gone', provider: 'p1' }, tgtProv: '', tgtMod: '', tgtEffort: '', llmCat: { loading: false } })
+    if (r6 !== 'panel.autoEffortHint') return false
+    // ⑦ loading 时显示「读取中」
+    const r7 = run({ groups: G, eff: { model: 'noEffort', provider: 'p1' }, tgtProv: '', tgtMod: '', tgtEffort: '', llmCat: { loading: true } })
+    return r7 === 'panel.autoModelLoading'
+  })())
+  // ⑨g3 「全部恢复默认」必须有二次确认
+  //
+  // 踩过的真实问题（实测反馈「全部恢复默认没有二次确认」）：这个按钮清掉的是本卡片
+  // **全部**显式配置（超时 / 熔断 / 历史量 / 模型覆盖 / 推理等级），一次误点就全没了，
+  // 而且**没有撤销**。它与同面板的「删除一条例外/规则」不同：后者只影响一行。
+  //
+  // 判据不只看「有没有 confirm 字样」——那可以被任意注释/无关分支满足。分两层：
+  //   ① 源码：按钮必须走 `confirmDelete('auto-reset', ...)`，且 `invoke(clear)` 只在
+  //      那个回调里（即**不能**在 onClick 里直接调用）；
+  //   ② 真实执行：把 `resetAllButton` 这个具名局部函数抽出来跑。它是卡片里唯一的
+  //      批量删除入口，边界清楚（不像 JSX 表达式那样要靠缩进猜结尾）。
+  ok('★★ 「全部恢复默认」有二次确认（第一次点击只变色，第二次才真的清）', (function () {
+    const iCard = cli.indexOf('const autoReviewCard = () => {')
+    if (iCard < 0) return false
+    const iCardEnd = cli.indexOf('const tabBtn = (t, label) =>', iCard)
+    if (iCardEnd < 0) return false
+    const card = cli.slice(iCard, iCardEnd)
+    // ① 按钮定义存在，且走 confirmDelete，key 为 'auto-reset'
+    if (card.indexOf('const resetAllButton = () => {') === -1) return false
+    if (!/confirmDelete\('auto-reset', \(\) => invoke\('permgate:set-auto-review', \{ clear: explicit \}/.test(card)) return false
+    // ①b invoke 只出现在 confirmDelete 的回调里：剥掉那一行后，resetAllButton 里
+    //     不得再有清空调用（防止「加了确认按钮，但原来的直接调用还在」——那等于没加）
+    const iFn = card.indexOf('const resetAllButton = () => {')
+    const iFnEnd = card.indexOf('\n\t\t\t\t};', iFn)
+    if (iFnEnd < 0) return false
+    // ⚠️ 补回收尾的 `};` —— 上面的锚点只匹配到 `}` 之前
+    const fnSrc = card.slice(iFn, iFnEnd) + '\n\t\t\t\t};'
+    const stripped = fnSrc.replace(/confirmDelete\('auto-reset',[\s\S]*?\)\)\)/, '')
+    if (stripped.indexOf("invoke('permgate:set-auto-review', { clear: explicit }") !== -1) return false
+    // ①c 第一次点击的文案必须是问句，不是原来的「全部恢复默认」
+    if (fnSrc.indexOf('armed ? T(\'panel.autoResetConfirm\') : T(\'panel.autoReset\')') === -1) return false
+    // ①d 必须有取消按钮 —— 只有「确认/取消」成对才是可撤回的确认，
+    //     单一个变红的按钮等于把误点成本翻倍而不是消除。
+    if (fnSrc.indexOf('onClick: () => setConfirm(null)') === -1) return false
+    // ①e 无显式配置时不渲染（没有可恢复的东西时给个按钮是误导）
+    if (fnSrc.indexOf('if (!explicit.length) return null;') === -1) return false
+
+    // ② 真实执行 resetAllButton
+    const calls = []
+    const mkReact = () => ({
+      createElement(tag, props, ...kids) {
+        const flat = []
+        for (const k of kids) {
+          if (Array.isArray(k)) flat.push(...k.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false))
+          else if (k !== null && k !== undefined && k !== false) flat.push(k)
+        }
+        if (typeof tag === 'function') return tag(props || {})
+        return { tag, props: props || {}, kids: flat }
+      },
+      Fragment: 'Fragment',
+    })
+    // confirmDelete 的语义在真实代码里是「同 key 再来一次才执行」；这里用一个与真实实现
+    // 同构的假件（读闭包里的 pending），而不是「直接执行回调」——否则测不到「第一次不执行」。
+    const run = (confirmState, explicitList) => {
+      let pending = confirmState
+      const fn = new Function('React', 'explicit', 'confirm', 'confirmDelete', 'invoke', 'T', 'setMsg', 'setConfirm', 'busy',
+        fnSrc + '\n; return resetAllButton;')
+      const render = fn(
+        mkReact(),
+        explicitList,
+        confirmState,
+        (key, f) => { calls.push({ kind: 'confirm', key }); if (pending === key) { pending = null; f() } else pending = key },
+        (method, args) => { calls.push({ kind: 'invoke', method, args }) },
+        (k) => k,
+        () => {},
+        (v) => { calls.push({ kind: 'setConfirm', v }) },
+        false,
+      )
+      return render()
+    }
+    // ②a 未确认：点一下 → 只 arm，不 invoke
+    calls.length = 0
+    let tree = run(null, ['timeoutMs'])
+    if (!tree) return false
+    const btns0 = []
+    const walk0 = (n) => { if (!n || typeof n !== 'object') return; if (n.tag === 'button') btns0.push(n); for (const k of n.kids || []) walk0(k) }
+    walk0(tree)
+    if (btns0.length !== 1) return false   // 未确认时只有一个按钮（确认态才多出取消）
+    btns0[0].props.onClick()
+    if (calls.some((c) => c.kind === 'invoke')) return false
+    if (!calls.some((c) => c.kind === 'confirm' && c.key === 'auto-reset')) return false
+    // ②b 已确认态：两个按钮（确认 + 取消），点确认才 invoke
+    calls.length = 0
+    tree = run('auto-reset', ['timeoutMs'])
+    if (!tree) return false
+    const btns1 = []
+    const walk1 = (n) => { if (!n || typeof n !== 'object') return; if (n.tag === 'button') btns1.push(n); for (const k of n.kids || []) walk1(k) }
+    walk1(tree)
+    if (btns1.length !== 2) return false
+    btns1[0].props.onClick()
+    const inv = calls.find((c) => c.kind === 'invoke')
+    if (!inv || inv.method !== 'permgate:set-auto-review') return false
+    if (!inv.args || !Array.isArray(inv.args.clear) || inv.args.clear[0] !== 'timeoutMs') return false
+    // ②c 取消按钮只清确认态，不发起请求
+    calls.length = 0
+    btns1[1].props.onClick()
+    if (calls.some((c) => c.kind === 'invoke')) return false
+    if (!calls.some((c) => c.kind === 'setConfirm' && c.v === null)) return false
+    // ②d 没有显式配置 → 不渲染任何按钮
+    if (run(null, []) !== null) return false
+    return true
+  })())
+  //
+  // 踩过的真实问题（两次，形态不同）：
+  //   第一次 `if (!catProv && !catMod) return` ——「配置为空 = 不用查」。错：
+  //     空配置恰恰最需要目录，用户正是要从「跟随会话」改成具体模型。
+  //   第二次 去掉早退但仍然传 provider=已配置值 —— 宿主据此 listModels，
+  //     没配过的时候照样拿到空列表，下拉里只剩「跟随会话」一项。
+  // 现在宿主照抄官方 buildModelCatalog：一次拉全部 provider，失败按 provider 隔离。
+  ok('★★ 目录一次拉全部 provider（不按已配置值过滤，否则永远只剩一项）', (function () {
+    // ① 宿主侧：不得再按 query 参数过滤 provider / model
+    if (src.indexOf("search.get('provider')") !== -1) return false
+    if (src.indexOf("search.get('model')") !== -1) return false
+    // ② 宿主侧：必须遍历 listProviders 的**全部**结果
+    if (!/providers\.map\(async \(p\) => \{/.test(src)) return false
+    // ③ 宿主侧：返回形状是官方的 { groups, failures }
+    if (!/return json\(res, \{ groups, failures \}\)/.test(src)) return false
+    // ④ 客户端侧：调用不得带任何查询键（第二个参数必须是空对象）
+    //    注意别在整行上判 'model' —— 方法名字面量 `permgate:llm-models` 里就有它。
+    if (cli.indexOf("call('permgate:llm-models', {})") === -1) return false
+    // ⑤ 客户端侧：不得出现「两个都空就 return」这类早退。
+    //    判据只看**代码行**：注释里记着这条坑（`曾经这里带 if (!catProv && !catMod) return`），
+    //    整文件正则会被自己的说明文字命中 —— 那种断言会在「注释提到它」时永远红。
+    const codeLines = cli.split('\n').filter((l) => !/^\s*\/\//.test(l))
+    if (codeLines.some((l) => /if \(!catProv && !catMod\)/.test(l))) return false
+    return true
   })())
   // ⑨ 数字框只接受纯十进制文本（不得让 Number() 的宽松语法静默改值）。
   //
@@ -3582,15 +5277,14 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     const body = src.slice(i, i + 1200)
     return body.includes('block.custom.push(rule)') && !body.includes('block.custom.unshift(rule)')
   })())
-  // 弹窗「记住此决定」那处写入**也改成 push**（本轮统一：新条目一律追加到末尾）。
-  // 这里曾经断言「保持 HEAD 原状（unshift）」—— 那条断言的前提（「不在改动范围」）已经变了。
+  // 弹窗「记住此决定」那处写入也改成 push（新条目一律追加到末尾）。
   // 现在守的是「三处写入口径一致」：若哪天有人把其中一处改回 unshift，
   // 就会出现「面板加的排最后、弹窗加的排最前」这种同源入口行为分叉。
   // 计数是 3：addProjectException 的 custom 分支、弹窗记住规则、面板 add-rule 路由。
   ok('新规则一律追加到末尾（三处写入口径一致，无 unshift 残留）',
     (src.match(/block\.custom\.push\(/g) || []).length === 3
     && !src.includes('block.custom.unshift('))
-  // ══ 循环检测（doomloop）结构性断言（doomloop-plan §3.3）══════════════════
+  // ══ 循环检测（doomloop）结构性断言 ═══════════════════════════════════════
   // 这些断言守的是「删掉的东西不许复活」与「做法 A 的形状不许回退」。
   // 运行时行为由 smoke group22 覆盖；这里只钉结构 —— 两者分工见文件头。
   //
@@ -3682,13 +5376,12 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
       && doomCats === 1 && doomReturns === 0
   })())
   // ★★ `MODE_STRICTNESS` 必须覆盖**所有**可产出的动作，否则 out() 里 `b === undefined`
-  // 会直接 `return base`，doomloop 的收紧被静默忽略（fail-open，§9B）。
+  // 会直接 `return base`，doomloop 的收紧被静默忽略（fail-open）。
   //
-  // 这里**不再钉字面量**（原断言是 `src.includes('const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }')`）。
-  // 钉字面量的两个问题：① 加 `auto` 这种正确改动也会红；② 它只证明「那行字还在」，
-  // 不证明表里的值真的产生正确合并 —— 把 auto 写成 2（只有 deny 能盖过）字面量照样在，
-  // 而那正是本断言要防的那个 bug。故改为**真实求值表 + 跑合并组合**。
-  ok('★★ MODE_STRICTNESS 覆盖全部动作，且 auto 不被 doomloop 的 ask 盖过（§9B）', (function () {
+  // 这里不钉字面量（原断言是 `src.includes('const MODE_STRICTNESS = { allow: 0, ask: 1, deny: 2 }')`）：
+  // 钉字面量时加 `auto` 这种正确改动也会红，而且它只证明「那行字还在」，不证明表里的值
+  // 真的产生正确合并。故改为**真实求值表 + 跑合并组合**。
+  ok('★★ MODE_STRICTNESS 覆盖全部动作，且 auto 不被 doomloop 的 ask 盖过', (function () {
     const m = src.match(/const MODE_STRICTNESS = (\{[^}]*\})/)
     if (!m) return false
     let T = null
@@ -3717,14 +5410,14 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     // 故只需覆盖 ask / deny 两种 doom。
     // ★ 关键断言：auto 作 base 时，doomloop 的 **ask 与 deny 都必须能盖过**它。
     //   写 `auto: 2` 会让 ask 盖不过（`1 < 2` → return base）—— 重复调用的提醒对 auto
-    //   静默失效，方向 fail-open，正是 §9B 记录的那个 bug。
+    //   静默失效，方向 fail-open。
     if (merge('auto', 'ask') !== 'ask') return false
     if (merge('auto', 'deny') !== 'deny') return false
     // 既有行为的回归护栏：allow/ask/deny 作 base 时合并方向不变
     if (merge('allow', 'ask') !== 'ask' || merge('allow', 'deny') !== 'deny') return false
     if (merge('ask', 'ask') !== 'ask' || merge('ask', 'deny') !== 'deny') return false
     if (merge('deny', 'ask') !== 'deny' || merge('deny', 'deny') !== 'deny') return false
-    // ④ doom 自身为 auto 时（doomloop 分类被设成 auto，§9B 的另一半）也必须参与合并，
+    // ④ doom 自身为 auto 时（doomloop 分类被设成 auto）也必须参与合并，
     //    不能被 `d === undefined` 挡掉。取 1 与 ask 同档 → 对 deny 不接管、对 allow 接管。
     if (merge('allow', 'auto') !== 'auto') return false
     if (merge('deny', 'auto') !== 'deny') return false
@@ -3739,10 +5432,10 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   // 上面那条断言守的是 `merge` 这份**复算**，不是 `out()` 本身 —— 实测把
   // `out()` 里那行 `if (d === b && doom.action === 'auto' && base.action === 'ask') return base`
   // 整行删掉，regressions 与 smoke **两套全绿**（复算自带例外、谁也不去看生产代码）。
-  // 这正是 §9B.1 记的教训：两份实现只同步其中一份，等于新规则没有测试。
+  // 两份实现只同步其中一份，等于新规则没有测试。
   // 故这里把 `out()` 的函数体从源码里抠出来真跑（与 withEncMeta 同一套做法），
   // 喂它一个「base=ask + doom=auto」的输入，断言返回的是 base 而不是 doom。
-  ok('★★ out() 的同档例外真实生效：base=ask 不被 doom=auto 接管（§9B）', (function () {
+  ok('★★ out() 的同档例外真实生效：base=ask 不被 doom=auto 接管', (function () {
     const iOut = src.indexOf('const out = (base) => {')
     if (iOut < 0) return false
     let i = src.indexOf('{', iOut), depth = 0
@@ -7171,8 +8864,15 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   ok('★ cat 为 null/未知时回落到通用图标 + 工具名',
     /PG_CAT_ICON\[cat\] \|\| PG_CAT_ICON\.generic/.test(cli)
     && /return label === key \? String\(tool \|\| ''\) : label/.test(cli))
-  ok('方块用内联 SVG mask（不 require 平台 ui-primitives）',
-    !/dsh-client-ui-primitives/.test(cli))
+  // 缩小方块（.pg-min-icon）的图标是内联 SVG mask，不依赖平台 ui-primitives。
+  //
+  // 判据落在**渲染那一处接线**上：`pgCatIcon()` 产出的 data URI 真的接到了
+  // mask-image 上 —— 删掉这处接线，方块就退化成空 span、图标消失。
+  // 只查「文件里出现过 -webkit-mask」不够：PG_CSS 的触发器徽标与设置页导航图标
+  // 也有 mask 规则，它们与方块无关。
+  ok('方块图标用内联 SVG mask（不依赖平台 ui-primitives）',
+    /const icon = pgCatIcon\(p\.cat\)/.test(cli)
+    && /className: 'pg-min-icon', style: \{ WebkitMaskImage: icon, maskImage: icon \}/.test(cli))
   ok('方块横向排列：图标 + 文字（.pg-min 用 flex + gap）',
     /\.pg-min \{[^}]*display: flex/.test(cli) && /\.pg-min \{[^}]*gap: 6px/.test(cli))
 
@@ -7256,7 +8956,9 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
   ok('★ 清定时器收成 clearTimer 单点（cleanup 与 cancelTimeout 共用一份）',
     /const clearTimer = \(\) => \{\s*\n\s*if \(timer !== null\) \{ try \{ timer\(\) \} catch \(e\) \{\} timer = null \}\s*\n\s*\}/.test(ask)
     && /cleanup\(\) \{\s*\n\s*clearTimer\(\)/.test(ask)
-    && /cancelTimeout\(\) \{\s*\n\s*clearTimer\(\)/.test(ask)
+    // cancelTimeout 允许先有守卫（`if (settled) return`：已被认领/结案就不该再有副作用），
+    // 断言只要求它最终调用同一个 clearTimer 单点，不要求它是函数体的第一句。
+    && /cancelTimeout\(\) \{(?:[^}]*\n)*?\s*clearTimer\(\)/.test(ask)
     // 不允许任何一处再写内联副本：漏改其中一份不会让别的断言变红
     && (ask.match(/if \(timer !== null\)/g) || []).length === 1)
   ok('★ 结案走 claim() 单点认领（只有第一个认领者能结案，不会双结案）',
@@ -9025,7 +10727,7 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
   //   ④ per-tier 理由优先于类别级裸 `reason`（更具体的那句先给），反之才回落裸 reason
   //      —— 这是**同一层内部**的次序，不要与下面 ⑦ 的跨形态次序混为一谈；
   //   ⑤⑥ 本层 per-tier 优先（含动作来源为全局的另一半）；
-  //   ⑦ **本层裸 `reason` 与「本层 per-tier 理由」同级优先于另一层**（本轮修复的正是这一格）；
+  //   ⑦ **本层裸 `reason` 与「本层 per-tier 理由」同级优先于另一层**；
   // ⑧ ⑦ 的**代价格**（有意取舍，见该处注释）—— 本层裸 `reason` 压过另一层 per-tier。
   // ⑨ `legacyReasonOf(from)` 必须保留（`from` 为全局层时它是唯一能取到全局那句的项）。
   // `bad60f` 只是给失败时带出**逐格诊断**（哪一格、期望什么、实际什么），不是判据本身。
@@ -9071,7 +10773,7 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     if (R(d7, 'wide') !== 'G_WIDE') bad.push('⑥动作来源层未优先: ' + JSON.stringify(R(d7, 'wide')))
     // ⑦ ★★ 本层**裸 `reason`** 必须与「本层 per-tier 理由」**同级**优先于另一层 ────────────
     //
-    // 缺陷原状（本轮修复）：③ 的 `||` 链曾把 per-tier 的两项跨层回落**插在本层裸 `reason`
+    // 缺陷原状：③ 的 `||` 链曾把 per-tier 的两项跨层回落**插在本层裸 `reason`
     // 之前**（`本层 per-tier → 项目 per-tier → 全局 per-tier → 本层裸 → …`），于是「本层有理由」
     // 时仍可能取**另一层**的 per-tier 理由 —— 与本条 ① 的注释自称的次序（本层 → 项目 → 全局）
     // **自相矛盾**，且相对更早版本是行为回归。上面 ①⑥ 只覆盖了「per-tier 对本层 per-tier」，

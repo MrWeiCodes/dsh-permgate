@@ -649,9 +649,9 @@ group('4. 全新 home 的配置迁移 + 持久化（只迁当前工作区 key，
   const lv = losslessViolation(view)
   ok('★ perm_status 返回值满足 DSH 的 lossless-JSON 校验', lv.length === 0, lv.join(' | '))
 
-  // ★★ 八档体系新增字段的 lossless 复算（§7.3）：`commandSub` 从「一个动作 + 一个理由」
+  // ★★ 八档体系新增字段的 lossless 复算：`commandSub` 从「一个动作 + 一个理由」
   // 扩成「八档 + reasons + source + groups」，新增字段每一个都可能引入 undefined ——
-  // 而那正是上一轮让 perm_status 整个报错的原因（键在、值为 undefined）。
+  // 而那会让 perm_status 整个报错（键在、值为 undefined）。
   // 这里**逐个配置态**复算：八档的每种取值组合都会走到不同的赋值分支，
   // 只测一个态覆盖不到「deny 但没写理由」「项目层只设了一档」这些形态。
   {
@@ -1655,7 +1655,7 @@ group('17. 非 UTF-8 预览：有 dsh-fs-encoding 服务就复用，没有也不
   }
 
   // ⑧ 写类预览（edit）的编码标注必须有**行为覆盖**：group17 此前只触发 read 审批，
-  // 而「写类 diff / 撤销预览曾整块漏挂编码标注」正是本轮要防的事——纯文本断言
+  // 而「写类 diff / 撤销预览曾整块漏挂编码标注」正是要防的事——纯文本断言
   // （源码里出现 encoding/decided 字样）证明不了数据真的流到 payload。
   {
     const svc = { tryDecode: async () => ({ ok: true, result: { text: '你好世界\n第二行\n', encoding: 'gbk', decided: 'guessed', hasBOM: false, lineEnding: '\n' } }) }
@@ -2489,7 +2489,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     blocked.length === 0, JSON.stringify(blocked))
 
   // ★ D-6 核心回归：command 大分类 = allow 时，破坏性命令仍不返回 next()
-  // （现有实现在此场景下会放行 —— 这正是 §1.2b 的缺陷）
+  // （现有实现在此场景下会放行 —— 这正是该缺陷本身）
   await callRoute(h.routes, 'POST', '/permgate/set-category', { target: 'project', category: 'command', mode: 'allow', lang: 'zh', sessionId: 'sess-1' })
   const DESTRUCTIVE = ['Remove-Item -Recurse -Force B:\\x', 'taskkill /f /im x.exe',
     'icacls B:\\x /grant everyone:F', 'rm -rf ~/.dsh']
@@ -2574,7 +2574,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   let nexted2 = false
   const pre2 = h2.hooks.get('tools/pre-execute')
   // 用**工作区外**目标：mode=allow 时 `inside` 档会跟随大分类放行（本计划的**有意**变化，
-  // 见 §6.1），而这里要守的是「老配置升级后大范围破坏仍被拦」——那属于其余七档。
+  // 而这里要守的是「老配置升级后大范围破坏仍被拦」——那属于其余七档。
   const p2 = pre2(makeExec(ws2, 'bash', { command: 'rm -rf ~/.dsh' }), async () => { nexted2 = true; return { kind: 'allow' } })
   p2.catch(() => {})
   await Promise.race([p2, new Promise((r) => setTimeout(r, 300))])
@@ -2584,7 +2584,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   //
   // ── 期望已按用户指定的新规则改写 ───────────────────────────────────────────────
   // 旧规则：`command=deny` + 无 destructive 键 → 八档按本层 mode 推导为 **deny**
-  //   （本条原名「显式收紧的 command=deny 不得被子设置默认值放松」，是 §6.2② 的核心断言）。
+  //   （本条原名「显式收紧的 command=deny 不得被子设置默认值放松」）。
   // 新规则（用户指定，忽略旧配置迁移兼容）：八档一律「项目显式 → 全局显式 → ask」。
   //   → `command=deny` + 无 destructive 键 ⇒ 八档全 **ask**，破坏性命令**弹窗询问**。
   //
@@ -2619,7 +2619,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   // 反例：shell-parse 的 destructive 判定写回 `!unparsable && …`，本组即失败。
   // 注意这里**只收「段首就是破坏性命令」的形态**：`bash -lc "..."` 这类段首是解释器的
   // 嵌套调用按 D-4 落大分类默认值（大分类 allow 即放行）—— 那是计划里明确接受的取舍
-  // （§10.5 登记为「参考工程是 deny，本计划是 ask」），不在本组的断言范围。
+  // （参考工程是 deny，本插件是 ask），不在本组的断言范围。
   const opaqueCases = ['rm -rf ~/.dsh $(true)', 'rm -rf ~/.dsh `true`', 'if true; then rm -rf ~/.dsh; fi',
     'find . -exec rm -rf {} +', 'Remove-Item -Recurse -Force $(Get-Location)']
   await callRoute(h3.routes, 'POST', '/permgate/set-command-sub', { target: 'global', action: 'ask', lang: 'zh', sessionId: 'sess-1' })
@@ -2775,7 +2775,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
   releaseTmp(wsF, homeF)
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // group20g：八档体系的端到端（计划 blast-tier-plan.md §6.1 / §5.5 / §7.3）
+  // group20g：八档体系的端到端
   // ═══════════════════════════════════════════════════════════════════════════
   // 本组走**真实 tools/pre-execute 链路**，验证本计划的核心收益与必须守住的红线：
   //   ① mode=allow 时 `rm test.txt`（区内）**不再弹窗** —— 这是计划的目标，不是回归；
@@ -2871,7 +2871,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ok('★★ group20g: 同一配置下七档仍不松于 ask（大范围/提权/进程/电源/读不出 → 不是 allow）',
       leaked.length === 0, JSON.stringify(leaked))
 
-    // ③ §5.5 的核心收益：删整个项目**不再静默**（改前一族五种写法全落 inside → allow）
+    // ③ 核心收益：删整个项目**不再静默**（改前一族五种写法全落 inside → allow）
     const wsRoot = []
     for (const c of ['rm -rf .', 'rm -rf *', 'rm -rf ./*']) {
       const v = await probeT(c)
@@ -2880,7 +2880,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     ok('★★ group20g: mode=allow 时删整个项目根仍要问（工作区根归 wide，§5.5 核心收益）',
       wsRoot.length === 0, JSON.stringify(wsRoot))
 
-    // ④ §7.3：statusView 下发八档 + groups
+    // ④ statusView 下发八档 + groups
     //    ⚠️ 期望已按新规则改写：配置里没写 destructive ⇒ 八档全 ask（含 inside）。
     //    旧规则下 inside 由 mode 推导为 allow。
     //    `globalDefault` / `projectDefault` 两个字段**已删除**（连同「按本层 mode 推导
@@ -2962,7 +2962,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     }
     // ② `{action:'deny'}` + mode=allow → probe 里**只有 inside 档是 deny**，其余七档 ask
     //
-    //    ⚠️ 期望已按新规则改写：旧规则把 `action` 摊成八档全 deny（§6.2②），
+    //    ⚠️ 期望已按新规则改写：旧规则把 `action` 摊成八档全 deny，
     //    新规则下 `action` 只是 inside 那一档的键，其余七档各自继承/兜底。
     //    本条不再需要「不得回落 globalDefault」那半句 —— 那个字段（以及它代表的
     //    「按本层 mode 推导档位」规则）**已整体删除**，不存在第二来源可回落。
@@ -3010,13 +3010,13 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
           && csR.global && csR.global.wide === 'deny'),
         JSON.stringify(csR && { probe: csR.globalEffectiveProbe, g: csR.global }))
     }
-    // ── ★★ 60e：decisive 档无理由时理由必须回落到**并列在最严档**的命中档（发现 6）──────
+    // ── ★★ 60e：decisive 档无理由时理由必须回落到**并列在最严档**的命中档 ──────
     // 本组是本缺陷的**生产现场**：用户在新面板上逐档填理由（这里填 `outside`），而
     // `unknown` 档**没有**用户写下的理由（用户只为 `outside` 写过）—— 它是被
     // `tierSetOf` 因「目标读不出」并进来的，或用户设了动作却没填理由。
     //
     // 而 `tierSetOf` 对「读得出的目标 + 读不出的目标」同段共存会并列并入 `unknown`
-    // （发现 1 的修法），`TIER_ORDER` 里 `unknown` 排在 `outside` **之前** ——
+    // ，`TIER_ORDER` 里 `unknown` 排在 `outside` **之前** ——
     // 于是 decisive 档从 `outside` 变成 `unknown`，`tierVerdict` 取不到理由：
     //     rm -rf /etc          → deny，理由含「删工作区外文件」✅
     //     rm -rf /etc $TARGET  → deny，理由**不含**该句 ❌（同一句理由在面板上仍显示着）
@@ -3098,7 +3098,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
       releaseTmp(ws6, home6)
     }
 
-    // ⑦ §7.2d 的缺陷回归：改 wide 的理由**不得**改动 inside 的动作
+    // ⑦ 缺陷回归：改 wide 的理由**不得**改动 inside 的动作
     // 这条走真实路由，正是 `commitSubReason` 修复前会写错的那条路径
     // （它硬编码 `action: 'deny'` 且不带 tier → 写到缺省档 inside）。
     const before7 = (await callRoute(hT.routes, 'GET', '/permgate/status')).data.commandSub
@@ -3245,7 +3245,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
 
     // ── ★★ 存量 `reason` 必须**随拒绝一起下发**，非 inside 档也不例外 ──────────────
     // 缺陷原状（本差异引入）：`tierVerdict` 只在 `decisiveTierOf` 选中的那一档取理由，
-    // 而读取侧把存量裸 `reason` **只**归入 `reasons.inside`（§7.1/§6.2 的有意设计）。
+    // 而读取侧把存量裸 `reason` **只**归入 `reasons.inside`（有意的设计）。
     // §6.2 把七档一起推成 deny 之后，**所有非 inside 档的命中都拿不到理由**：
     // 用户写过的拒绝理由静默消失，AI 收到的拒绝指令是空的 —— 而面板上那句理由仍显示在
     // inside 档（`explicitReasonsOf` 的口径），即「面板看得见、AI 收不到」= 面板说谎。
@@ -3254,7 +3254,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
     // 拿得到理由，只有 `destructiveTiers`（生产路径）拿不到 —— 两条路径分叉，
     // 而纯函数/形状断言够不到这个分叉（它只在真实钩子返回值上显形）。
     //
-    // 三档各覆盖一类判据（§3.2）：wide=半径档、proc=组档、priv=半径+组并存。
+    // 三档各覆盖一类判据：wide=半径档、proc=组档、priv=半径+组并存。
     // ⚠️ 旧的 `legacyReasonCases` 列表已随摊派规则一起删除 —— 新规则下这三档是 ask，
     // 「每档都拿到拒绝理由」这个需求不再存在（见下）。
     // ── 存量裸 `reason` 的**归属**：只随 inside 档下发 ─────────────────────────────
@@ -3285,7 +3285,7 @@ group('20. 命令判定：段级例外（真实运行时链路，计划 §6.2）
         !nextedW && !!outW && outW.kind === 'timeout' && String(outW.reason || '').indexOf('rm 危险') === -1,
         JSON.stringify({ nexted: nextedW, kind: outW && outW.kind, reason: outW && outW.reason }))
     }
-    // 且面板视图的口径**不变**：裸 `reason` 仍只显示在 inside 档（§7.1 的有意设计）。
+    // 且面板视图的口径**不变**：裸 `reason` 仍只显示在 inside 档。
     // 这一条与上面两条**不是**矛盾 —— 面板回答「用户在哪一档上写下了理由」（归 inside），
     // 裁决回答「AI 该收到哪句话」（每档都给）。两个提问不同，故口径不同是**有意**的。
     // 断言它，是为了防止下一个人把两处「统一」掉时**悄悄改掉面板语义**而无人发现。
@@ -4415,7 +4415,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
   }
 
   // ── S17：T17（计数实现的等价性：模型级对拍）──────────────────────────────
-  // 这条验证的是 §2.3 里「数组是纯冗余」这个**结论本身**（它是删掉窗口与 REPEAT_STREAK_MAX
+  // 这条验证的是「数组是纯冗余」这个**结论本身**（它是删掉窗口与 REPEAT_STREAK_MAX
   // 的依据）。故它是模型级断言：用同一串随机记录分别喂给「旧数组回扫」与「(键,次数) 计数」，
   // 逐次比较**查询结果**（两者都在记录之前查，与 decide() 的次序一致）。
   // 两件事要分开说清：
@@ -4475,7 +4475,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
     for (let i = 0; i < 4; i++) noSess.push(await probe(h, ws, null, T, A))
     ok('★★ group22 T18: 会话键取不到时不触发循环检测（阈值 1 也一次都不触发）',
       noSess.every((v) => v === 'allow'), JSON.stringify(noSess))
-    // ★★ 桶数不增长 —— 这是「不建桶」的**唯一可观察证据**（plan §2.3 明确要求断言它）。
+    // ★★ 桶数不增长 —— 这是「不建桶」的**唯一可观察证据**。
     // 只断言「不触发」是不够的：一个「取不到会话就每次调用建一个独立桶」的实现同样不触发，
     // 但它会让 Map 无界增长（或把真实会话的桶挤出 LRU）。实测：把 loopSessionKey 改成
     // 每次返回唯一值，只断言落点的版本**完全测不出来**。
@@ -4536,7 +4536,7 @@ group('22. 循环检测（doomloop）：会话分桶 / 只记静默放行 / 取�
   }
 
   // ── S20：计数点必须在**所有拦截之后**（沙箱升级被拒 = 未执行 → 不计数）────────
-  // §2.2 的表格明确要求「沙箱升级被拒 → 不计数」，而这是唯一一条「判定放行（d.action==='allow'）
+  // 「沙箱升级被拒 → 不计数」，而这是唯一一条「判定放行（d.action==='allow'）
   // 但最终没执行」的路径。计数点若放在升级闸之前，这条路径会推进计数 —— 方向是「提醒偏多」，
   // 不危险，但会让「连续静默放行」这个语义失真（用户看到的是「已连续放行 N 次」，
   // 而其中几次其实被沙箱闸拦下了、根本没放行）。
@@ -4866,7 +4866,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   }
   // 一次「模型说 X」的完整块流。block-start 必须用**真实形状**（`blockType` 字段）：
   // 此前这里写的是 `{ block: { type: 'text' } }`，恰好命中生产代码读错字段的那条分支，
-  // 于是块结构校验（§4.6）从未被执行过、测试却全绿。
+  // 于是块结构校验从未被执行过、测试却全绿。
   const verdict = (json) => [
     { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', text: json },
@@ -4986,7 +4986,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   //
   // 材料不再是「拼接文本」，每段是 `<段名>\n<JSON>`，段之间空行分隔。
   // 断言必须解析 JSON 后查字段，**不能再用 `text.indexOf('[human-instruction] xxx')`
-  // 这类字符串匹配** —— 那种写法在改格式时会全红，而功能其实是对的（本轮实测 11 条）。
+  // 这类字符串匹配** —— 那种写法在改格式时会全红，而功能其实是对的。
   // 更要紧的是：字符串匹配断言**测不出伪造**，因为伪造出来的也是同样的字符串。
   //
   // 返回 `{ 段名: 解析后的值 }`，解析失败的段值为 undefined（并记录在 `__bad` 里）。
@@ -5017,7 +5017,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     const pre = h.hooks.get('tools/pre-execute')
     const exec = {
       name, arguments: args || {}, callId: 'c1', token: 't1',
-      // session 必须带 requestHeader()：reviewTarget 从它取会话当前模型（§4.2 第 ② 级）。
+      // session 必须带 requestHeader()：reviewTarget 从它取会话当前模型。
       // 少了它 reviewTarget 返回 null → 走「no model available」异常路径，
       // 于是所有 A1/A2 这类「模型说 X」的用例都会变成 ask，看起来像实现错了。
       agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
@@ -5300,7 +5300,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
 
   // ── A13b：人工决定 → 熔断计数清零（允许与拒绝都清）────────────────────────────
   //
-  // §3.5 的四行表格里，前三行（deny +1 / allow 清零 / 失败不变）由 A10–A13 钉住，
+  // 熔断计数的四行表格里，前三行（deny +1 / allow 清零 / 失败不变）由 A10–A13 钉住，
   // 「人工决定清零」此前一行都没有 —— 而它是「真·连续」与参考工程的关键差异：
   // 参考工程只按模型拒绝计数，用户点过一次允许之后模型再拒一次照样熔断。
   // 这条钉的是「人已在环里，模型此前那串拒绝不再说明问题」：删掉 pre-execute 里的
@@ -5341,7 +5341,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   // 后果（无人值守时最要命）：模型连拒 N 次达到阈值 → 第 N+1 次走 escalate(code:'breaker')
   // （本次**没调模型**）→ 它产出的 ask 被 abort 结案 → 反向判据当成人工决定清零 →
   // 第 N+2 次又从 0 开始真实调用模型。熔断退化成「每 N+1 次只跳过 1 次」，
-  // 而 §3.5 的表格写的是「失败 / 超时 / escalate → 计数不变」，abort 属同一格。
+  // 而设计口径是「失败 / 超时 / escalate → 计数不变」，abort 属同一格。
   //
   // 判据：两次 deny 攒满阈值（threshold=2）→ 第 3 次 escalate 弹窗 → **abort 结案** →
   // 第 4 次仍必须 escalate 弹窗（模型调用数停在 2）。若 abort 误清零，第 4 次会重新问模型
@@ -5539,10 +5539,13 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     // `fallbackReason`（`escalate: model escalated`，机械串、不含模型原话）面板要它排障，
     // 主模型不能要（toolView 里与 modelReason/rawOutput 一起剥掉）。两处对照着看 ——
     // 只查工具侧时，场景哪天不再产出该字段，断言会退化成恒真。
+    //
+    // via 这里是 `auto-escalate`（模型诚实弃权），不是 `auto-fallback`（线路/协议失败）——
+    // 两者在持久化日志与会话流里要分开显示，见 index.js 的 viaKind。
     const fbDec = await callRoute(h.routes, 'GET', '/permgate/decisions')
-    const fbPanel = ((fbDec.data && fbDec.data.decisions) || []).filter((x) => x.via === 'auto-fallback')
+    const fbPanel = ((fbDec.data && fbDec.data.decisions) || []).filter((x) => x.via === 'auto-escalate')
     const fbStv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
-    const fbTool = (Array.isArray(fbStv && fbStv.recentDecisions) ? fbStv.recentDecisions : []).filter((x) => x.via === 'auto-fallback')
+    const fbTool = (Array.isArray(fbStv && fbStv.recentDecisions) ? fbStv.recentDecisions : []).filter((x) => x.via === 'auto-escalate')
     ok('★★ group24 A16b: 回落的 fallbackReason 只留面板，经 perm_status 返回时被剥掉',
       fbPanel.length === 1 && String(fbPanel[0].fallbackReason || '').indexOf('escalate') === 0
       && fbTool.length === 1 && !('fallbackReason' in fbTool[0]),
@@ -5678,6 +5681,32 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       ar0.effective.timeoutMs === 20000 && ar0.effective.breakerThreshold === 10
       && ar0.explicit.length === 0 && ar0.llmAvailable === false,
       JSON.stringify({ t: ar0.effective.timeoutMs, b: ar0.effective.breakerThreshold, x: ar0.explicit }))
+    // ── ①a 生效值（target）必须下发：供推理等级浮层列对档位 + 诊断来源 ─────────────
+    //
+    // ⚠️ 它**不是**给设置页显示用的（曾经那样用，是错的）：模型名/档位名属于当前活动
+    // 会话，切个对话就变；写进全局设置项就是「同一个设置在不同对话里显示不同值」。
+    // 仍要下发是因为：跟随时推理等级浮层要列**真正会用**的那个模型公布的档位
+    // （列错模型的档位 → 选完派发给目标模型 → 宿主 config-error）。
+    //
+    // 两条都要验，否则「恒等于设置值」或「恒等于会话值」都能通过一半：
+    //   ① 无会话 → null（不猜一个模型出来）；
+    //   ② 有会话且无覆盖 → 来自会话 header；有覆盖 → 来自设置。
+    ok('★★ group24 A20: 无会话时 target 为 null（不猜一个模型出来）',
+      !!(ar0 && ar0.target === null),
+      JSON.stringify(ar0 && ar0.target))
+    {
+      // perm_status 的 exec 带真实 session → statusView 走会话分支
+      const sess = {
+        id: 'a20-target',
+        requestHeader: () => ({ config: { provider: 'sess-p', model: 'sess-m', reasoningEffort: 'high' } }),
+      }
+      const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}, sess))
+      const tgt = stv && stv.autoReview && stv.autoReview.target
+      ok('★★ group24 A20: 无覆盖时 target 取自会话模型（推理等级浮层据此列档位）',
+        !!(tgt && tgt.provider === 'sess-p' && tgt.model === 'sess-m'
+          && tgt.effort === 'high' && tgt.effortSource === 'session' && tgt.fromSetting === false),
+        JSON.stringify(tgt))
+    }
     // ── ①b 值域必须下发，且 timeoutMs 的 max 就是**生效侧的钳制上界** ────────────
     //
     // 这条守的是「面板说谎」：`ranges` 是为了让面板在提交前拦住超范围值而加的，
@@ -5780,6 +5809,387 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       JSON.stringify(llm.calls[0] && { p: llm.calls[0].provider, m: llm.calls[0].model }))
     releaseTmp(ws, home)
   }
+
+  // ── A25：推理强度真的被传给模型（符号值按能力表解析）────────────────────────
+  //
+  // 三种形态都要覆盖，因为它们走的是**不同**代码路径：
+  //   · 空（跟随会话）→ 取会话 requestHeader 的 reasoningEffort；
+  //   · 'max' / 'min' → 按该模型公布的 efforts 表取最后一档 / 第一档；
+  //   · 具体档位 id → 原样传，且**模型不支持时必须报错而不是静默丢弃**。
+  //
+  // 假 llm 带 `prepareCall`（真宿主有它）：能力表由 configure 回调的第二个入参提供，
+  // 这正是生产路径 —— 不用 resolveModelInfo 另查一次，避免能力表与派发不是同一代注册。
+  const mkLlmEffort = (efforts, sessionEffort) => {
+    const calls = []
+    const answer = () => (async function* () {
+      for (const c of verdict('{"risk":"low","decision":"allow"}')) yield c
+    })()
+    return {
+      calls,
+      // ⚠️ `stream` 必须存在：getLlmService 的能力判据是 `typeof svc.stream === 'function'`，
+      // 缺了它整个 llm 服务会被判成「不可用」，所有 auto 用例都会走 infra-error 回落
+      // —— 于是「推理强度没传对」会以「根本没调模型」的形式失败，看不出真正原因。
+      stream(options) { calls.push(options); return answer() },
+      prepareCall(config, signal, configure) {
+        const info = { provider: config.provider, id: config.model, name: config.model, reasoning: efforts ? { efforts, defaultEffort: efforts[0].id } : undefined }
+        const controls = configure ? configure({}, info) : {}
+        const merged = Object.assign({}, config, controls)
+        // 复刻平台的校验：模型不公布档位时**任何** requested 都抛（`resolveCallWithInfo`
+        // 的 `reasoning === undefined` 分支），公布了档位但请求的不在表里同样抛。
+        // 少了前一半，实现在无能力表时透传会照绿，而真实平台必抛 UNSUPPORTED_REASONING_EFFORT。
+        if (merged.reasoningEffort !== undefined && (!efforts || !efforts.some((e) => e.id === merged.reasoningEffort))) {
+          const err = new Error('unsupported effort ' + merged.reasoningEffort)
+          err.code = 'UNSUPPORTED_REASONING_EFFORT'
+          throw err
+        }
+        return {
+          config: merged,
+          stream(options) { calls.push(options); return answer() },
+        }
+      },
+    }
+  }
+  const EFFORTS = [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }]
+  {
+    // ① 空 = 跟随会话（会话 header 里有 high）
+    //
+    // ⚠️ 必须用 probeAuto 而不是裸调 pre：这里兜底是 auto，模型说 allow 才会 next()，
+    // 而裸调 pre 时**模型调用本身是异步的**，await 它会等一个「永远不 settle 的
+    // 弹窗路径」—— 实测会挂成 unsettled top-level await（因为 mkHostAuto 的兜底是 auto、
+    // 回落是 ask，模型说 allow 后还要过沙箱闸）。probeAuto 自带超时与结案，是唯一安全的驱动方式。
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const pre = h.hooks.get('tools/pre-execute')
+    const exec = {
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: { id: 'a25a', requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model', reasoningEffort: 'high' } }) } },
+      signal: undefined,
+    }
+    // `p` 不 await：这条用例只关心「模型被调用时带了什么档位」，不等整条链路结案
+    // （结案可能落到弹窗，await 会挂）。收尾在下面统一结案。
+    pre(exec, async () => ({ kind: 'allow' }))
+    // 模型调用是**同步可见**的：prepareCall 在 reviewWithModel 里先于任何 await 点被调用，
+    // 故这里只需等一个宏任务，不必等整条链路结案。
+    await new Promise((r) => setTimeout(r, 20))
+    ok('★★ group24 A25: 推理强度留空 = 跟随会话（取会话 header 的档位）',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'high',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    // 收尾：把还挂着的审批结案，避免污染后续用例的 pending 列表
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'allow', lang: 'zh' })
+    }
+    releaseTmp(ws, home)
+  }
+  {
+    // ② 'max' = 该模型公布的最高档（不是某个写死的 'high'）
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: 'max' }, llm)
+    await probeAuto(h, ws, 'a25b', T, A)
+    ok('★★ group24 A25: 「最高」按模型公布的档位取（不写死档位名）',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'high',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ③ 'min' = 第一档
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: 'min' }, llm)
+    await probeAuto(h, ws, 'a25c', T, A)
+    ok('★★ group24 A25: 「最低」按模型公布的档位取',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'low',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ④ 具体档位 id 原样传
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: 'medium' }, llm)
+    await probeAuto(h, ws, 'a25d', T, A)
+    ok('★ group24 A25: 具体档位 id 原样传给模型',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'medium',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑤ 模型不支持的档位 → **必须报错走回落**，不得静默丢弃后照常评审。
+    //    判据：模型一次都没被调用（在派发前就被拦下），且最终落点是回落值（这里 ask）。
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: 'nonsense' }, llm)
+    const r = await probeAuto(h, ws, 'a25e', T, A)
+    ok('★★ group24 A25: 模型不支持的推理档位报错走回落（不静默丢弃）',
+      llm.calls.length === 0 && r && r.kind === 'ask',
+      JSON.stringify({ calls: llm.calls.length, r: r && r.kind }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑥ `@max`（面板「指定」组存的形态）= **钉住的**具体档位，不是「模型最高」。
+    //
+    // 为什么必须分开：模型公布的末档通常就叫 `max`，与「模型最高」的符号值同名。
+    // 二者派发出去在这一代模型上恰好是同一个档位，但语义不同 ——
+    // 「模型最高」跟着模型走，「指定 max」钉住这个 id。若 `@max` 被当成符号值解析，
+    // 换到一个档位表不同的模型时它会**悄悄变成那个模型的最高档**（可能是别的档位名），
+    // 而用户明明指定的是 max。
+    //
+    // 判据：`@max` 命中枚举里的 low（EFFORTS 的末位是 high，不是 max），
+    // 说明它按具体档位查表、而不是按符号 max 取末位。
+    const llm = mkLlmEffort([{ id: 'low', name: 'Low' }, { id: 'max', name: 'Max' }, { id: 'high', name: 'High' }])
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: '@max' }, llm)
+    await probeAuto(h, ws, 'a25f', T, A)
+    ok('★★ group24 A25: `@max` 按具体档位派发（不被当成「模型最高」符号值）',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'max',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑦ `@` + 模型**没有**的档位 → 报错走回落（钉住语义的必然结果）。
+    //    与「模型最高」的关键区别：后者在没有档位表时返回空（不传），前者必须报错 ——
+    //    因为用户指定的是一个具体档位，而它不存在。
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: '@xhigh' }, llm)
+    const r = await probeAuto(h, ws, 'a25g', T, A)
+    ok('★★ group24 A25: `@` 指定了模型没有的档位 → 报错走回落（不静默降级）',
+      llm.calls.length === 0 && r && r.kind === 'ask',
+      JSON.stringify({ calls: llm.calls.length, r: r && r.kind }))
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑧ `@` 前缀只影响档位语义，**不影响**空值判定：`@` 单独一个字符（理论上不该出现）
+    //    剥完是空串 → 走「跟随会话」，不得把空字符串当档位 id 传下去。
+    const llm = mkLlmEffort(EFFORTS)
+    const { ws, home, h } = mkHostAuto({ reasoningEffort: '@' }, llm)
+    const pre = h.hooks.get('tools/pre-execute')
+    pre({ name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session: { id: 'a25h', requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model', reasoningEffort: 'high' } }) } },
+      signal: undefined }, async () => ({ kind: 'allow' }))
+    await new Promise((r) => setTimeout(r, 20))
+    ok('★★ group24 A25: `@` 剥离后为空 → 按跟随会话处理（不把空串当档位）',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'high',
+      JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'allow', lang: 'zh' })
+    }
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑨ 模型不公布任何档位时，**任何**具体档位都不得派发（`@` 钉住的与早期裸 id 同口径）。
+    //
+    //    踩过的真实问题：`resolveEffort` 原先对「没有能力表」的情形一律原样透传
+    //    （理由是「无法判断，交给适配器裁决」）。平台并不放行这一步 ——
+    //    `resolveCallWithInfo` 在 `reasoning` 为 undefined 时对**任何** requested 都抛
+    //    UNSUPPORTED_REASONING_EFFORT，于是「透传给适配器裁决」根本到不了适配器：
+    //    每次评审都在派发前失败、全部走回落值，而面板照常显示配置的那个档位。
+    //
+    //    判据：模型不公布档位（efforts 为 undefined）时，评审调用不带 reasoningEffort。
+    for (const want of ['@max', 'high']) {
+      const llm = mkLlmEffort(null)   // reasoning 为 undefined = 不公布任何档位
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: want }, llm)
+      await probeAuto(h, ws, want === '@max' ? 'a25i' : 'a25j', T, A)
+      ok('★★ group24 A25: 模型不公布档位时 `' + want + '` 不派发（平台对该模型拒收任何 requested）',
+        llm.calls.length === 1 && llm.calls[0].reasoningEffort === undefined,
+        JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A26：模型目录路由（/permgate/llm-models）────────────────────────────────
+  //
+  // 面板的模型 / 推理等级选择器全靠它。四条性质（形状照抄官方 buildModelCatalog）：
+  //   · **一次拉全部 provider**，不需要任何查询参数（拿「已配置的 provider」当键
+  //     会让没配过的时候拿到空列表 —— 实测下拉里只剩一项）；
+  //   · 每个模型自带它公布的 reasoning.efforts（推理等级要显示**名称** `Max`）；
+  //   · 空分组不入列（官方 filter(models.length > 0)）；
+  //   · 单个 provider 失败按 provider 隔离到 failures，不 500、不影响其余分组。
+  {
+    const llm = Object.assign(mkLlmEffort(EFFORTS), {
+      listProviders: () => [{ id: 'p1', name: 'Provider One' }, { id: 'p2', name: 'Provider Two' }],
+      listModels: async (p) => (p === 'p1'
+        ? [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }]
+        : [{ id: 'm3', name: 'Model Three' }]),
+      resolveModelInfo: async (p, m) => ({ provider: p, id: m, name: m, reasoning: { efforts: EFFORTS, defaultEffort: 'low' } }),
+    })
+    const { ws, home, h } = mkHostAuto({}, llm)
+    // 不带任何查询参数 —— 这正是「配置为空时也能拿到全部模型」的判据
+    const r1 = await callRoute(h.routes, 'GET', '/permgate/llm-models?lang=zh')
+    ok('★★ group24 A26: 不带参数也回全部 provider 分组（否则没配过时只剩「跟随会话」）',
+      r1.data && Array.isArray(r1.data.groups) && r1.data.groups.length === 2
+      && r1.data.groups[0].id === 'p1' && r1.data.groups[0].models.length === 2
+      && r1.data.groups[1].id === 'p2' && r1.data.groups[1].models.length === 1
+      && Array.isArray(r1.data.failures) && r1.data.failures.length === 0,
+      JSON.stringify(r1.data))
+    ok('★★ group24 A26: 分组顺序与 listProviders 一致（并发完成顺序不影响菜单）',
+      r1.data && r1.data.groups.map((g) => g.id).join(',') === 'p1,p2',
+      JSON.stringify(r1.data && r1.data.groups.map((g) => g.id)))
+    ok('★★ group24 A26: 每个模型自带公布的推理档位（推理等级显示名称而非 id）',
+      r1.data && r1.data.groups[0].models[0].reasoning
+      && Array.isArray(r1.data.groups[0].models[0].reasoning.efforts)
+      && r1.data.groups[0].models[0].reasoning.efforts.length === 3
+      && r1.data.groups[0].models[0].reasoning.efforts[0].id === 'low'
+      && r1.data.groups[0].models[0].reasoning.defaultEffort === 'low',
+      JSON.stringify(r1.data && r1.data.groups[0].models[0]))
+    // 单个 provider 失败 → 隔离到 failures，另一个照常返回（官方同）
+    const llmPart = Object.assign(mkLlmEffort(EFFORTS), {
+      listProviders: () => [{ id: 'p1', name: 'Provider One' }, { id: 'bad', name: 'Bad' }],
+      listModels: async (p) => {
+        if (p === 'bad') throw new Error('boom')
+        return [{ id: 'm1', name: 'Model One' }]
+      },
+      resolveModelInfo: async (p, m) => ({ provider: p, id: m, name: m }),
+    })
+    const part = mkHostAuto({}, llmPart)
+    const r2 = await callRoute(part.h.routes, 'GET', '/permgate/llm-models?lang=zh')
+    ok('★★ group24 A26: 单个 provider 失败按 provider 隔离（不 500、不拖垮其余分组）',
+      r2.status === 200 && r2.data
+      && r2.data.groups.length === 1 && r2.data.groups[0].id === 'p1'
+      && r2.data.failures.length === 1 && r2.data.failures[0].id === 'bad',
+      JSON.stringify({ status: r2.status, d: r2.data }))
+    // listProviders 整体抛错 → 空目录而不是 500
+    const llmBad = Object.assign(mkLlmEffort(EFFORTS), {
+      listProviders: () => { throw new Error('boom') },
+      listModels: async () => { throw new Error('boom') },
+    })
+    const bad = mkHostAuto({}, llmBad)
+    const r3 = await callRoute(bad.h.routes, 'GET', '/permgate/llm-models?lang=zh')
+    ok('★★ group24 A26: 目录查询整体失败降级为空目录（不 500）',
+      r3.status === 200 && r3.data && Array.isArray(r3.data.groups) && r3.data.groups.length === 0,
+      JSON.stringify({ status: r3.status, d: r3.data }))
+    // 没有可用模型的分组不入列（官方 filter(models.length > 0)）
+    const llmEmpty = Object.assign(mkLlmEffort(EFFORTS), {
+      listProviders: () => [{ id: 'p1', name: 'P1' }],
+      listModels: async () => [],
+    })
+    const emp = mkHostAuto({}, llmEmpty)
+    const r4 = await callRoute(emp.h.routes, 'GET', '/permgate/llm-models?lang=zh')
+    ok('★★ group24 A26: 空分组不入列（没模型的 provider 不在菜单里出现）',
+      r4.data && Array.isArray(r4.data.groups) && r4.data.groups.length === 0,
+      JSON.stringify(r4.data))
+    releaseTmp(ws, home)
+    releaseTmp(part.ws, part.home)
+    releaseTmp(bad.ws, bad.home)
+    releaseTmp(emp.ws, emp.home)
+  }
+
+  // ── A27：持久化决策日志（plugin:permgate/decision）────────────────────────────
+  //
+  // 这一组必须用**真 Session**（`Session.create`）：appendPluginRecord 对 receiver 做
+  // 品牌校验，普通对象会抛 "Receiver must be an instance of class Session"。
+  // 那条 catch 分支本身也要测（见 ③），但正向验证必须走真对象。
+  {
+    const { Session, pluginRecordOf } = await loadDep('@deepseek-ai/dsh-session')
+    // ① 模型放行 → 落一条 via=auto-allow 的记录，且不进模型可见面
+    //
+    // ⚠️ **不能 await 这条 pre 调用**：模型说 allow 之后还要过沙箱升级闸/计数，
+    // 而 mkHostAuto 的兜底是 auto + 回落 ask —— 一旦哪一步落到弹窗，await 会挂成
+    // unsettled top-level await（实测踩过）。日志是在 auto 分支**同步写完**的，
+    // 故这里只等到记录出现即可，然后照常结案收尾。
+    const session = Session.create('a27-allow')
+    // 真 Session 没有 header 事件时 requestHeader() 返回 undefined → reviewTarget 的
+    // 第 ② 级（会话当前模型）拿不到，会退成 infra-error 回落。补一条初始 header，
+    // 让这条用例走「模型真的被调用」的正向路径。
+    session.append('request/header', { header: { config: { provider: 'test-provider', model: 'test-model' } } }, { reason: 'initial' })
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const pre = h.hooks.get('tools/pre-execute')
+    // 不 await（见上方说明）：这条用例只等到记录出现即可。
+    pre({
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session },
+      signal: undefined,
+    }, async () => ({ kind: 'allow' }))
+    // 等到记录真的写进来（最多 2 秒），不依赖「链路已经结案」
+    let recs = []
+    for (let i = 0; i < 200; i++) {
+      recs = session.snapshotEvents().map((e) => pluginRecordOf(e)).filter(Boolean)
+      if (recs.length) break
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    const evs = session.snapshotEvents()
+    ok('★★ group24 A27: 模型放行落一条 plugin:permgate/decision（via=auto-allow）',
+      recs.length === 1 && recs[0].type === 'plugin:permgate/decision'
+      && recs[0].data.via === 'auto-allow' && recs[0].data.action === 'allow'
+      && recs[0].data.tool === T,
+      JSON.stringify(recs.map((x) => ({ t: x.type, v: x.data.via, a: x.data.action }))))
+    // 不进模型上下文：deriveMessages 必须是 0 条（plugin 记录不在 surface 白名单里）
+    ok('★★ group24 A27: 决策日志不进模型上下文（deriveMessages 为空）',
+      session.deriveMessages().length === 0,
+      String(session.deriveMessages().length))
+    // ② 记录带 ignorable（持久化读取对未知类型的 fail-closed 靠它放行）
+    const raw = evs.find((e) => e.type === 'plugin:permgate/decision')
+    ok('★★ group24 A27: 记录带 ignorable:true（否则会话日志重开会失败）',
+      !!raw && raw.ignorable === true, JSON.stringify(raw && raw.ignorable))
+    releaseTmp(ws, home)
+  }
+  {
+    // ③ 记录里能分清「模型弃权」与「模型挂了」（via 五值）
+    //
+    // 必须自己驱动（不能用 probeAuto）：那个 helper 用的是它内置的普通对象 session，
+    // 而 appendPluginRecord 要真 Session 才写得进去 —— 用它会得到「记录为空」的假绿。
+    const { Session, pluginRecordOf } = await loadDep('@deepseek-ai/dsh-session')
+    const session = Session.create('a27-escalate')
+    session.append('request/header', { header: { config: { provider: 'test-provider', model: 'test-model' } } }, { reason: 'initial' })
+    const llm = mkLlm(verdict('{"risk":"medium","decision":"escalate","reason":"拿不准"}'))
+    const { ws, home, h } = mkHostAuto({ timeoutMs: 3000 }, llm)
+    const pre = h.hooks.get('tools/pre-execute')
+    const p = pre({
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session },
+      signal: undefined,
+    }, async () => ({ kind: 'allow' }))
+    let recs = []
+    for (let i = 0; i < 200; i++) {
+      recs = session.snapshotEvents().map((e) => pluginRecordOf(e)).filter(Boolean)
+      if (recs.length) break
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    ok('★★ group24 A27: 模型弃权记 auto-escalate（与线路失败 auto-fallback 分开）',
+      recs.length === 1 && recs[0].data.via === 'auto-escalate'
+      && String(recs[0].data.fallbackReason || '').indexOf('escalate') === 0,
+      JSON.stringify(recs.map((x) => ({ v: x.data.via, f: x.data.fallbackReason }))))
+    // 收尾：escalate 会弹窗（回落 ask），结案掉，否则污染后续 pending
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 500))])
+    releaseTmp(ws, home)
+  }
+  {
+    // ④ 写日志失败**不得影响审批结果**：session 不是真 Session → appendPluginRecord 抛，
+    //    appendDecisionLog 吞掉，调用照常放行。
+    const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a27c', T, A)   // probeAuto 的 session 是普通对象
+    ok('★★ group24 A27: 落盘失败不影响审批（审计通道故障不升级为误拒/误放）',
+      r === 'allow', JSON.stringify(r))
+    releaseTmp(ws, home)
+  }
+  {
+    // ⑤ 非 auto 决策**不写**持久化日志（规则 allow/ask/deny 一律不记）
+    const { Session, pluginRecordOf } = await loadDep('@deepseek-ai/dsh-session')
+    const session = Session.create('a27-noauto')
+    const { ws, home, h } = mkHostAuto({}, null)
+    const pre = h.hooks.get('tools/pre-execute')
+    // 兜底设 ask（mkHostAuto 的默认是 auto），这里显式改成规则 ask
+    await callRoute(h.routes, 'POST', '/permgate/set-fallback', { target: 'global', mode: 'ask', lang: 'zh' })
+    // 规则 ask 会弹窗 → 不能 await（会挂）；等一小会确认没写记录，然后结案收尾。
+    const p = pre({
+      name: T, arguments: A, callId: 'c1', token: 't1',
+      agent: { cwd: ws, session },
+      signal: undefined,
+    }, async () => ({ kind: 'allow' }))
+    await new Promise((r) => setTimeout(r, 60))
+    const recs = session.snapshotEvents().map((e) => pluginRecordOf(e)).filter(Boolean)
+    ok('★★ group24 A27: 非 auto 决策不写持久化日志（只记 auto）',
+      recs.length === 0, JSON.stringify(recs.map((x) => x.data)))
+    const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+    for (const it of (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)) {
+      await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'allow', lang: 'zh' })
+    }
+    await Promise.race([p, new Promise((r) => setTimeout(r, 500))])
+    releaseTmp(ws, home)
+  }
+
 
   // ── A24：historyN / historyBudget 必须**真的读设置**，不是读常量 ──────────────
   //
@@ -6703,7 +7113,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   // 记录点曾经在 `decide()` 之后、auto 消化**之前** —— 于是 `d.action === 'auto'`
   // 被原样写进决策记录，而 `via`（auto-allow / auto-deny / …）与模型原始输出
   // 只进了 console.log。日志滚掉之后，面板上「模型放行」与「规则放行」完全同形
-  // （都是绿色 allow），而 §7.3 第一条要求的正是「事后能分辨」。
+  // （都是绿色 allow），而决策日志第一条要求的正是「事后能分辨」。
   //
   // 两条断言分别守两个方向：
   //   ① 模型放行 → 记录里 action 是 allow（不是 auto）、via 是 auto-allow、有 rawOutput
@@ -6968,7 +7378,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   // 用 mock 注入 `{"risk":"medium","decision":"allow"}` 只能证明「模型说 allow
   // 时插件放行」，证明不了「策略让模型判对了」—— 那是循环论证。
   //
-  // 所以这里钉的是**判据存在且措辞是抽象的**，行为证据记在文档 §4.5C
+  // 所以这里钉的是**判据存在且措辞是抽象的**。
   // （跨 6 个领域 19 个用例的实测：该拒的从 15/21 提到 19/21，该放的保持 35/36）。
   //
   // 措辞必须**不含具体动作名**：曾经写过一版列举 `commit / pushing / publishing
@@ -7002,7 +7412,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       && /do not extend it to related or follow-on operations/.test(policyText)
       && /vague reference become authorization/.test(policyText),
       JSON.stringify({ text: policyText.slice(-320) }))
-    // 反面对照：**不得**用具体动作名举例（那正是上一版不通用的原因）
+    // 反面对照：**不得**用具体动作名举例（那正是不通用的原因）
     const lower = policy.toLowerCase()
     for (const word of ['commit', 'pushing', 'publishing', 'deleting', 'pushing,']) {
       ok('★ group24 A49: 通用判据不得列举具体动作名（' + word + '）',

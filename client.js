@@ -5,10 +5,20 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let React = require("react");
+		// react-dom 与 ui-primitives 是 Web 前端的静态模块（`__ModuleLoader__` 的 staticModules
+		// 表，见 dsh-web-frontend 的 OZ()），任何插件都能 require，不需要写进 dsh.client.inject
+		// （inject 是 Cordis 服务依赖，与模块解析是两回事）。
+		//
+		// 仍然 try/catch：静态模块表是运行时注入的，万一某个部署裁掉了（例如纯 CLI 无前端），
+		// 拿不到就降级成内联样式，而不是整个客户端插件加载失败。
+		let ReactDOM = null;
+		try { ReactDOM = require("react-dom"); } catch (e) { ReactDOM = null; }
+		let Primitives = null;
+		try { Primitives = require("@deepseek-ai/dsh-client-ui-primitives"); } catch (e) { Primitives = null; }
 
 		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-args-note { color: #bf8700; white-space: nowrap; margin-left: 6px; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
 
-		// ── 审批卡片：拖动柄 + 缩略按钮 + 缩小方块（计划 §3/§4）───────────────
+		// ── 审批卡片：拖动柄 + 缩略按钮 + 缩小方块 ─────────────────────────────
 		// 标题栏整条是拖动柄（cursor:move 给出可拖暗示）；缩略按钮在柄内，需自身拦掉
 		// 指针事件。方块与弹窗同一坐标系（shell.overlay 是 fixed 层，不受父容器裁剪），
 		// 默认位置由 CSS 给（右上角），拖动后改用显式 left/top。
@@ -26,7 +36,10 @@ window.__ModuleLoader__.load({
 			'.pg-modal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; cursor: move; touch-action: none; user-select: none; }',
 			'.pg-modal-head .pg-modal-title { flex: 1; min-width: 0; margin-bottom: 0; }',
 			'.pg-modal-min { flex: none; width: 22px; height: 22px; padding: 0; line-height: 1; font-size: 14px; cursor: pointer; color: var(--dsw-alias-label-secondary, #57606a); background: transparent; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 5px; }',
-			'.pg-modal-min:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.12)); }',
+			// hover 底色用 solid 版：`--dsw-alias-interactive-bg-hover` 只有 6% alpha，
+			// 而卡片背景不透明（--dsw-alias-bg-overlay），6% 的灰几乎看不出变化。
+			// 理由详见 PG_HOVER_CSS 处的说明。
+			'.pg-modal-min:hover { background: var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,0.14)); }',
 			'.pg-min { position: fixed; z-index: 9999; display: flex; align-items: center; gap: 6px; box-sizing: border-box; width: ' + PG_MIN_W + 'px; height: ' + PG_MIN_H + 'px; padding: 0 9px; cursor: move; touch-action: none; user-select: none; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.28); font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; animation: pgMinPulse 2.2s ease-in-out infinite; }',
 			'.pg-min-icon { flex: none; width: 16px; height: 16px; background-color: currentColor; -webkit-mask-position: center; mask-position: center; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-size: contain; mask-size: contain; }',
 			'.pg-min-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
@@ -71,30 +84,16 @@ window.__ModuleLoader__.load({
 		// 行需要 hover 高亮、分组头要画真分隔线，这两件事内联 style 都做不到
 		// （内联表达不了 :hover / ::after）。
 		//
-		// ── 折叠态为什么是「动作计数」而不是一句摘要 ──────────────────────────────
-		// 上一版折叠时只给一句 `其余档位均为「询问」`，被挤在标题行里截断成
-		// `其余档位均为「继承全`（面板宽度有限，标题 + 摘要 + 按钮三者抢一行）。
-		//
-		// 中途试过「一排色点」表示八档各自的动作，**渲染出来否掉了**：8 个 9px 圆点
-		// 连成一串橙色的毛毛虫，既不说明颜色含义、又与每行左侧的状态点重复计数
-		// （实测折叠态共 9 个点，看起来像串里有 9 档）。
-		//
-		// 现在折叠态给**按动作分组的计数**：`拒绝 2 · 询问 4`。它精确、无颜色依赖、
-		// 不依赖逐档识别，回答的正是折叠态该回答的那个问题 ——「有没有哪档被设成了
+		// 折叠态给**按动作分组的计数**（`拒绝 2 · 询问 4`）：它精确、无颜色依赖、
+		// 不依赖逐档识别，回答的正是折叠态该回答的问题 ——「有没有哪档被设成了
 		// 意外的值」。要看具体是哪一档就展开，展开后逐行有状态点。
 		const PG_TIER_CSS = [
 			// 标题行：只有标题（摘要挪进下方那个展开链接里 —— 见 .pg-tier-link）。
 			'.pg-tier-head { margin-bottom: 2px; }',
 			'.pg-tier-title { font-size: 12px; font-weight: 600; }',
-			// 说明行：独立一行，不再与标题挤在一起（上一版它是拼在标题后面的）。
+			// 说明行：独立一行，不与标题挤在一起。
 			'.pg-tier-hint { font-size: 11px; color: rgba(128,128,128,0.9); margin-bottom: 2px; }',
 			// 展开/折叠入口：**与上方例外列表同一套交互**（左对齐蓝字链接，▸/▾ 前缀）。
-			//
-			// 曾经是标题行右侧的一个按钮，两个问题：
-			//   ① 它在行的最右端，与左侧内容隔着整行空白 —— 用户的视线扫过标题、
-			//      说明、档位行之后根本注意不到那里还有个可点的东西（实测反馈）；
-			//   ② 同一个面板里例外列表用左对齐蓝字链接，这里用右侧按钮，
-			//      两套交互并存，用户得学两遍。
 			// 折叠/展开的语义在两处完全相同，长得就该一样。
 			//
 			// 摘要（`询问 3 · 拒绝 3 · 继承全局 1`）**放进这个链接里**而不是留在标题行：
@@ -110,8 +109,7 @@ window.__ModuleLoader__.load({
 			//
 			// **右侧不留内边距**（`padding: … 0`）—— 这是对齐的关键：容器右边缘与上方
 			// 分类标题行等宽，行内又无右内边距，于是档位下拉框的右边缘与分类下拉框
-			// 严格齐平。上一版给行加了 6px 右内边距，实测右边缘差 6px（773 vs 767），
-			// 在截图上表现为「档位的下拉框比分类的短一截」。
+			// 严格齐平。行若带右内边距，档位下拉框会比分类下拉框短一截。
 			'.pg-tier-box { margin: 1px 0 0 2px; padding-left: 8px; border-left: 2px solid rgba(128,128,128,0.25); }',
 			// 单行：三列网格 = 状态点 / 标签 / 控件。第三列 auto，配合上面的「无右内边距」
 			// 使八个下拉框右边缘落在同一条线上（即使某档多出一个拒绝原因框，
@@ -139,6 +137,75 @@ window.__ModuleLoader__.load({
 		// 改成与 flex 基座配合：右侧控件用 margin-left:auto 顶到右边。
 		// 视觉结果与档位行的 grid 一致（各行的控件**右边缘**对齐），且拖动的
 		// 落点线/半透明等既有样式全部保留。
+		// ── 模型/推理强度选择行：样式**内联**写在组件里，不在这里 ──────────────────
+		// 官方 @deepseek-ai/dsh-client-ui-model-selection 的 CSS Module 取值
+		// （.cell / .cellLabel / .cellValue / .cellChevron / .option / .check）已逐项
+		// 抄进 pickerRowEl 的 style 对象里。
+		//
+		// ⚠️ 为什么不用 <style> 注入的 class：本文件的样式注入有去重守卫
+		// （`querySelector('style[data-plugin-css="dsh-permgate"]')`），那个 <style> 在插件
+		// 首次加载时就已存在，于是**后续新增的 CSS 常量不会被写进去** —— HMR 重载后
+		// class 找不到任何规则，实测表现为「标签被压成竖排、整块布局崩掉」。
+		// 本文件其它组件（row / numInput / sel）一律用内联 style，正是同一个原因。
+		//
+		// 唯一的例外是 `PG_HOVER_CSS`：内联 style **表达不了 :hover / :focus-visible**，
+		// 而官方 .cell:hover / .option:hover 有底色反馈（没有它用户不知道那一行可点）。
+		//
+		// ⚠️ 坑①：**内联 style 的优先级高于类选择器**。如果元素上同时写了
+		// `style={{ background: 'transparent' }}`，这条 :hover 永远不生效。
+		// 所以凡是要 hover 反馈的元素，background **只能由这里给**。
+		//
+		// ⚠️ 坑②（这次）：官方那条令牌 `--dsw-alias-interactive-bg-hover` 是
+		// `#2631480f` —— **alpha 只有 6%**（浅色）/ `#ffffff14`（8%，深色）。
+		// 在官方自己的 UI 里它够用，因为官方菜单背景是**不透明**的；
+		// 而 permgate 的浮层用了 MenuSurface 的 `--dsw-menu-surface-fill: #f8f9fa94`
+		// （alpha 148/255，**半透明**），底色再被 6% 的灰叠一层，
+		// 实际差异只有 1~2 个色阶 —— 肉眼就是「鼠标指上去颜色不变」（实测反馈）。
+		//
+		// 故这里改用 **solid 版**：`--dsw-alias-interactive-bg-hover-solid`
+		// = `--dsw-static-neutral-bluish-75` = `#f1f3f5`，不透明实色。
+		// 深浅两套主题各有一份定义（浅色 #f1f3f5 / 深色由 dark 段覆盖），
+		// 且不依赖浮层背景的透明度 —— 这才是「看得见」的 hover。
+		//
+		// ⚠️ 坑③（这次「不同厂商 hover 效果不一样」）：`:hover` 与 `.pg-active`
+		// 原本用**同一个底色**，于是**已经是高亮项的那一行，鼠标移上去颜色不变**
+		// —— 而高亮项默认就是「当前选中的那一项」（activeIndex 回退到
+		// currentVisibleIndex）。用户看到的是「有一行划过没反应」，
+		// 由于选中项恰好在某个服务商分组里，看起来就像「某个厂商不一样」。
+		//
+		// 修法：两者用**可区分的强度**——
+		//   · :hover   = 瞬时反馈，浅一档；
+		//   · pg-active = 持久高亮（键盘/鼠标当前项），深一档。
+		// 这样「已经高亮的行」被划过时仍会再加深一点，反馈始终存在。
+		//
+		// 强度用**不透明**色阶叠出来（不能混 transparent —— 那会得到半透明色，
+		// 半透明色叠在半透明浮层上，下方文字会透出来，观感是「越往下越浅」）。
+		//   hover   = solid 底色与浮层底色各半（比满档浅，但不透明）
+		//   active  = solid 底色 100%
+		//   active+hover = solid 底色向「更深一阶」偏 18%（保证划过必有变化）
+		const PG_OVERLAY_BG = 'var(--dsw-alias-bg-overlay, #ffffff)';
+		const PG_HOVER_BG = 'var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,0.14))';
+		// ⚠️ 注意 color-mix 的两个颜色都必须**不透明**。混 transparent 得到的是
+		// alpha < 1 的颜色 —— 在浮层里会被下面的面板内容透上来（实测反馈「越往下越浅」）。
+		const PG_HOVER_BG_SOFT = 'color-mix(in srgb, ' + PG_HOVER_BG + ' 55%, ' + PG_OVERLAY_BG + ')';
+		const PG_HOVER_CSS = [
+			// 基础透明：让 hover 规则有东西可覆盖（也保证未 hover 时无底色）。
+			'.pg-hoverable { background: transparent; }',
+			// 鼠标划过 / 键盘聚焦：**浅一档**的瞬时反馈（不透明）。
+			'.pg-hoverable:hover:not(:disabled), .pg-hoverable:focus-visible:not(:disabled) { background: ' + PG_HOVER_BG_SOFT + '; }',
+			// 键盘/鼠标高亮项（官方 optionActive）：**满档**的持久高亮（不透明）。
+			// 由 JS 的 activeModelIndex 驱动（↑↓ 与 mousemove 都改它），不是 :hover。
+			// 它比 :hover 深，故「已高亮的行」被划过时仍能看出变化（见坑③）。
+			'.pg-hoverable.pg-active:not(:disabled) { background: ' + PG_HOVER_BG + '; }',
+			// 已高亮项被划过：再深一档，保证「划过必有变化」。
+			// 混的是「文字弱化色」（不透明），不是 transparent —— 理由同上。
+			'.pg-hoverable.pg-active:hover:not(:disabled) { background: color-mix(in srgb, ' + PG_HOVER_BG + ' 84%, var(--dsw-alias-label-tertiary, #8b949e)); }',
+			// 选中项**不**加底色（官方 .selected { background: 0 0 }）：选中态由右侧的 ✓ 表达，
+			// 再加底色会与 hover 混淆。基础透明规则已经覆盖它，**不要**再加一条
+			// `.pg-selected:not(:hover):not(.pg-active)` 的兜底 —— 那条的特异性 (0,4,0)
+			// 高于 `:focus-visible` 的 (0,3,0)，会把键盘聚焦到选中行时的焦点底色抹成透明，
+			// 而 optionStyle 的 outline:'none' 不提供焦点环，焦点行因此没有任何视觉指示。
+		].join(' ')
 		const PG_EXC_CSS = [
 			// 内容区：允许收缩，否则长模式会把右侧控件挤出容器（flex 项默认 min-width:auto）。
 			// **允许换行**（wrap）：内容区里有「模式 + 原因/备注」两样，窄屏下让它们各占一行
@@ -429,6 +496,9 @@ window.__ModuleLoader__.load({
 
 		const ROUTES = {
 			'permgate:status': ['GET', '/permgate/status'],
+			// 模型目录（provider / 模型 / 推理强度）：只读、按 provider+model 查询。
+			// 不放进 status：那条视图被面板反复取，而本路由可能走网络（见宿主侧注释）。
+			'permgate:llm-models': ['GET', '/permgate/llm-models'],
 			// 决策记录的展开通道：statusView 只带首屏 10 条，展开时按需取全量。
 			'permgate:decisions': ['GET', '/permgate/decisions'],
 			'permgate:pending': ['GET', '/permgate/pending'],
@@ -1629,7 +1699,7 @@ window.__ModuleLoader__.load({
 				'mode.inherit': '继承全局',
 				// 第四档：交给模型判断。文案取「自动审批」而不是「自动」——
 				// 「自动」一词在本插件历史上有别的含义（编辑器内核的自动判别），
-				// 面板上必须能一眼区分，故用四字全称（见计划 §2.1 的命名决策）。
+				// 面板上必须能一眼区分，故用四字全称。
 				'mode.auto': '自动审批',
 				// 未知动作的降级文案（见 modeLabel 的注释）：`{a}` 是原值。
 				// 不能退化成 key 本身 —— 那会让面板显示「mode.bogus」。
@@ -1650,16 +1720,54 @@ window.__ModuleLoader__.load({
 				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
 				'panel.autoHistory': '工具调用历史',
 				'panel.autoHistoryHint': '左边是带几条最近的工具调用，右边是这些文字的总长上限（超了从最早的开始丢）。你本人说过的话不受这里限制，总是发给模型',
-				'panel.autoModel': '用哪个模型',
-				'panel.autoProviderPh': '服务商，留空用当前会话的',
-				'panel.autoModelPh': '模型名，留空用当前会话的',
-				'panel.autoModelHint': '两个都填才生效',
+				// 标签：推理等级照抄官方 locale（ui-model-selection 的 menu.effort）；
+				// **模型这一行刻意偏离**（实测要求「这里的[模型]改成[审批模型]」）：
+				// 官方那套是作曲区的「当前对话用哪个模型」，而这里是**自动审批**用哪个模型
+				// 去评审工具调用 —— 同一个词在两处指的是两个不同的模型，叫法必须区分开，
+				// 否则用户会以为改这里等于改自己对话用的模型。
+				'panel.autoModel': '审批模型',
+				'panel.autoEffort': '推理等级',
+				'panel.autoModelFollow': '跟随会话',
+				'panel.autoPickerAria': '审批模型与推理等级',
+				// 搜索框（官方 search.placeholder / search.clear / search.empty）
+				'panel.autoSearchPh': '搜索模型…',
+				'panel.autoSearchClear': '清除搜索',
+				'panel.autoSearchEmpty': '没有匹配的模型。',
+				// 目录为空时模型 pane 里的说明（官方 empty.models 同位置）。
+				'panel.autoModelEmpty': '暂无可用模型',
+				'panel.autoEffortHint': '「跟随会话」用当前对话的设置；「模型最高」「模型最低」按所选模型公布的档位取；模型不公布档位时跟随它自己的默认',
+				'panel.autoEffortSession': '跟随会话',
+				'panel.autoEffortDefault': '模型默认',
+				'panel.autoEffortMax': '模型最高',
+				'panel.autoEffortMin': '模型最低',
+				// 推理等级 pane 的两个分组（与模型 pane 的服务商分组同一套标题样式）：
+				//   通用 = 相对于任何模型都成立的相对档（含「跟随会话」）；
+				//   指定 = 该模型**自己公布**的具体档位（Low / High / Max …）。
+				'panel.autoEffortGroupCommon': '通用',
+				'panel.autoEffortGroupSpecific': '指定',
+				'panel.autoEffortNone': '该模型不公布推理强度档位',
+				'panel.autoModelLoading': '读取中…',
+				// ── 会话流里的自动审批行 ────────────────────────────────────────
+				'flow.viaAllow': '自动审批：模型放行 {tool} → {action}',
+				'flow.viaDeny': '自动审批：模型拒绝 {tool} → {action}',
+				'flow.viaEscalate': '自动审批：模型拿不准 {tool} → {action}',
+				'flow.viaFallback': '自动审批未能使用模型 {tool} → {action}{direct}',
+				'flow.directTag': '（按你的设置直接执行）',
+				'flow.action.allow': '放行',
+				'flow.action.ask': '询问',
+				'flow.action.deny': '拒绝',
+				'flow.why': '原因：',
+				'flow.modelReason': '模型说明：',
+				'flow.risk': '模型判定风险：',
+				'flow.rule': '命中规则：',
 				'panel.autoSaved': '已保存',
 				'panel.autoBadNumber': '请输入该范围内的整数',
 				'panel.autoMsUnit': '毫秒',
 				'panel.autoTimesUnit': '次',
 				'panel.autoCharsUnit': '字符',
 				'panel.autoReset': '全部恢复默认',
+				'panel.autoResetConfirm': '确认全部恢复？',
+				'panel.autoResetWarn': '会清掉本页全部显式设置，且无法撤销',
 				'panel.autoResetDone': '已恢复默认',
 				// 审计专用动作值（宿主无人在环结案）：不在设置页下拉里，只出现在「最近决策」。
 				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
@@ -1775,7 +1883,7 @@ window.__ModuleLoader__.load({
 				// 而它恰恰是**最后**才生效的一个（例外与破坏性命令都比它优先）。
 				// 其余五个分类仍叫默认动作（留在标题行）—— 见 catBlock 处的说明。
 				'panel.subRest': '其余情况',
-				// ── 破坏性命令的八档（§7.4 默认折叠）──────────────────────────────
+				// ── 破坏性命令的八档（默认折叠）──────────────────────────────
 				// 标签必须**说清它管什么**，而不是照抄内部标识符：用户要判断的是
 				// 「我这条命令会不会被它拦」，看不懂名字就只能一律设成允许（那等于关掉保护）。
 				//
@@ -1839,45 +1947,16 @@ window.__ModuleLoader__.load({
 				// 档位会发现下拉里没有这一项 —— 与本次把「默认动作」改成「其余情况」同一个理由：
 				// 提示里点名的控件必须是面板上找得到的那个名字。
 				'panel.subMismatch': '注意：「命令」的「其余情况」是「{cat}」，但「破坏性命令」里「{tier}」这一档是「{sub}」—— 判定链上破坏性命令优先，命中该档的破坏性命令会按「{sub}」处理（不会按「{cat}」）。若想让「其余情况」生效，请把该档也改成「{cat}」或「继承全局」。',
-				// 命令类工具的管辖边界。这条提示存在的理由是一个**真实的语义缺口**，不是文档洁癖：
-				// 命令工具（pwsh/bash）的判定链是 例外 → 破坏性八档 → 本分类默认值，与
-				// read/image/edit/undo/outsideRead/directory 六道闸**完全无关**（实测：把区外写闸
-				// 与编辑都设为 deny 后，`Set-Content G:/outside/x.txt`、`Get-Content G:/outside/secret.txt`
-				// 仍判 allow）。九个分类平铺展示会让人读成「九个维度都生效」，而命令块又排在最前，
-				// 于是「我把区外写设成拒绝就安全了」是一个很容易形成的错误结论。
+				// 命令类工具的管辖边界。这条提示存在的理由是一个**真实的语义缺口**：命令工具
+				// （pwsh/bash）的判定链是 例外 → 破坏性八档 → 本分类默认值，与 read/image/edit/
+				// undo/outsideRead/directory 六道闸**完全无关**（区外写闸=deny、编辑=deny 时，
+				// `Set-Content G:/outside/x.txt` 与 `Get-Content G:/outside/secret.txt` 仍判 allow）。
+				// 九个分类平铺展示会让人读成「九个维度都生效」，而命令块又排在最前，于是
+				// 「我把区外写设成拒绝就安全了」是一个很容易形成的错误结论。
 				//
-				// ── 主体必须是「AI」，不是「命令工具」，也不是「DSH」────────────────────
-				// 这个主体被用户连续纠正过两次，两个错法各有各的偏差：
-				//   · 初版「命令工具可用 Set-Content…直接读写文件」—— 工具自己不会「用命令」，
-				//     读起来像「这个工具自带读写能力」，而本条要传达的是「AI 能绕过文件分类」。
-				//   · 二版「DSH 可通过执行命令直接读写文件」—— DSH 是**载体/宿主**（框架本身），
-				//     做决策、发工具调用的是**模型**。把行为归给 DSH，等于说「软件自己会读写」，
-				//     而这条警告防的是「AI 会绕过你设的文件分类」这个判断失误。
-				// 面板既有文案一律用「AI」（见「会告知 AI 为什么被拒」「中断 AI」「AI 连续重复
-				// 相同调用」三处），本行跟随同一口径 —— 术语一致比各自斟酌更重要。
-				//
-				// ── 为什么是「绕过」而不是「不受…限制」────────────────────────────────
-				// 两者字面都成立，但语义强度不同，而这条提示的全部价值就在强度上：
-				//   · 「不受 X 限制」是**静态描述** —— 读起来像「文件分类的设计范围本来就不含命令」，
-				//     是一个中性的边界说明，用户容易读成「各管各的、很正常」。
-				//   · 「绕过 X」是**动态行为** —— 点出这是 AI 主动走的一条旁路，被绕开的那道闸
-				//     仍然立在那里、用户以为它生效。这正是要提醒的风险（「我设了区外写拒绝」）。
-				// 英文侧本来就是 bypassing，中文改成「绕过」后两边语义对齐。
-				// 实测的判据也支持「绕过」：区外写闸=deny 时 `Set-Content G:/outside/x.txt`
-				// 仍判 allow —— 那道 deny 确实被跨过去了，不是「不适用」。
-				//
-				// ── 为什么不写「怎么拦住」──────────────────────────────────────────
-				// 初版还给了两条出路，**两条都不成立**，实测逐条推翻：
-				//   · 「用『破坏性命令』档位」—— 那八档只覆盖破坏性命令（rm/format/diskpart 那类）。
-				//     实测八档全设 deny 时，`Set-Content G:/outside/x.txt` 与
-				//     `Get-Content G:/outside/secret.txt` 仍判 allow，只有 `Remove-Item` 被拦。
-				//     非破坏性的读写它根本不覆盖，拿它当出路是错的。
-				//   · 「把本分类设为拒绝」—— 拦得住，但代价是**所有** pwsh/bash 全禁，
-				//     不是「拦住读写」的解法，是「禁用命令」的解法，性质不同。
-				// 真正能定向拦的是**命令例外**（写一条 `Set-Content *`=deny），但那是例外列表的
-				// 用法、不是这一行要教的事；把它塞进这句说明会让文案重新变长。
-				// 故本文案只陈述**边界事实**，不给出路 —— 用户知道「这里的设置管不到它」之后，
-				// 该用什么手段由他自己判断（例外 / 沙箱 / 全禁各有代价）。
+				// 主体必须是「AI」（做决策、发工具调用的是模型，不是命令工具也不是 DSH），
+				// 措辞用「绕过」而不是「不受…限制」—— 前者点出这是 AI 主动走的旁路。
+				// 只陈述边界事实、不给出路：真正能定向拦的是命令例外，但那是例外列表的用法。
 				'panel.cmdScopeNote': '注意：AI 可通过执行命令直接读写文件（Set-Content、echo > 等），绕过「读取文件 / 编辑文件 / 工作区外读写」等文件分类限制。',
 				// ── 循环检测（doomloop）阈值 ────────────────────────────────────────
 				// 文案只留「管什么」+「留空什么语义」：不解释计数口径（弹窗批准不算、被拒清零…
@@ -2077,16 +2156,45 @@ window.__ModuleLoader__.load({
 				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
 				'panel.autoHistory': 'Tool call history',
 				'panel.autoHistoryHint': 'how many recent tool calls to include on the left, and the total length cap for that text on the right (oldest dropped first). What you typed yourself is not limited here and is always sent',
-				'panel.autoModel': 'Which model',
-				'panel.autoProviderPh': 'provider, empty = this session',
-				'panel.autoModelPh': 'model, empty = this session',
-				'panel.autoModelHint': 'both are required',
+				// 标签：推理等级照抄官方（menu.effort）；「审批模型」是本卡片专用的叫法
+				// —— 它指的是**自动审批**去评审工具调用的模型，不是作曲区那个对话模型。
+				'panel.autoModel': 'Approval model',
+				'panel.autoModelFollow': 'Follow session',
+				'panel.autoPickerAria': 'Approval model and effort',
+				'panel.autoSearchPh': 'Search models…',
+				'panel.autoSearchClear': 'Clear search',
+				'panel.autoSearchEmpty': 'No matching models.',
+				'panel.autoModelEmpty': 'No models available.',
+				'panel.autoEffort': 'Effort',
+				'panel.autoEffortHint': '"Follow session" uses this conversation\'s setting; "Model highest"/"Model lowest" pick from the effort levels the chosen model publishes; a model that publishes none uses its own default',
+				'panel.autoEffortSession': 'Follow session',
+				'panel.autoEffortDefault': 'Model default',
+				'panel.autoEffortMax': 'Model highest',
+				'panel.autoEffortMin': 'Model lowest',
+				'panel.autoEffortGroupCommon': 'Generic',
+				'panel.autoEffortGroupSpecific': 'Specific',
+				'panel.autoEffortNone': 'This model publishes no reasoning levels',
+				'panel.autoModelLoading': 'Loading…',
+				'flow.viaAllow': 'Auto review: model allowed {tool} → {action}',
+				'flow.viaDeny': 'Auto review: model denied {tool} → {action}',
+				'flow.viaEscalate': 'Auto review: model was unsure about {tool} → {action}',
+				'flow.viaFallback': 'Auto review could not use the model for {tool} → {action}{direct}',
+				'flow.directTag': ' (ran directly per your setting)',
+				'flow.action.allow': 'allow',
+				'flow.action.ask': 'ask',
+				'flow.action.deny': 'deny',
+				'flow.why': 'Reason: ',
+				'flow.modelReason': 'Model note: ',
+				'flow.risk': 'Model risk: ',
+				'flow.rule': 'Matched rule: ',
 				'panel.autoSaved': 'Saved',
 				'panel.autoBadNumber': 'enter a whole number in range',
 				'panel.autoMsUnit': 'ms',
 				'panel.autoTimesUnit': 'times',
 				'panel.autoCharsUnit': 'chars',
 				'panel.autoReset': 'Reset all to defaults',
+				'panel.autoResetConfirm': 'Reset everything?',
+				'panel.autoResetWarn': 'clears every explicit setting on this tab; cannot be undone',
 				'panel.autoResetDone': 'Reset to defaults',
 				'mode.timeout-allow': 'Auto-allowed (timeout)',
 				'mode.timeout-deny': 'Auto-denied (timeout)',
@@ -2362,12 +2470,12 @@ window.__ModuleLoader__.load({
 
 		// ── 审批卡片外壳：拖动 + 缩小 ─────────────────────────────────────────
 		// 位置与缩小态是**每个卡片各自的视图状态**，只活在前端（宿主只认审批内容），
-		// 且刻意不持久化（计划 §3.2：不记忆，每次回默认位置）。
+		// 且刻意不持久化（不记忆，每次回默认位置）。
 		// 拖动用 Pointer Events 统一鼠标/触摸/笔；shell.overlay 是 click-through 层，
 		// 只有卡片本体接收指针事件，故不会挡住下层 UI。
 		// 注：PG_MIN_W/PG_MIN_H/PG_MIN_GAP/PG_MIN_EDGE 已在文件顶部（PG_CARD_CSS 之前）
 		// 声明 —— 那里是唯一一份，勿在此重复声明。
-		// 槽位登记：只决定「新方块放哪」，永不重排（计划 §4.5）。
+		// 槽位登记：只决定「新方块放哪」，永不重排。
 		// 条目随卡片卸载删除，于是空出的槽位会被下一个新方块自然复用。
 		const pgMinSlots = new Map();   // id -> { col, row }
 		function pgTakeMinSlot(id) {
@@ -2589,7 +2697,7 @@ window.__ModuleLoader__.load({
 				className: 'pg-modal',
 				style: pos ? { left: pos.x + 'px', top: pos.y + 'px', right: 'auto' } : undefined,
 			},
-				// 标题栏 = 拖动柄（计划 §3.2：手柄限定在标题栏这个非交互区域）。
+				// 标题栏 = 拖动柄（手柄限定在标题栏这个非交互区域）。
 				// 拖动事件**只绑在这一条上**，不能绑卡片根节点：根节点捕获指针会让
 				// 卡内所有按钮的 click 目标变成卡片本身（见 onDown 注释）。
 				React.createElement('div', Object.assign({ className: 'pg-modal-head' }, dragHandlers('card')),
@@ -3410,6 +3518,958 @@ window.__ModuleLoader__.load({
 		// 时挂载，OverlayRoot 还额外覆盖 hero 界面与「确实无会话」的 defaultView 分支）。
 		// 故删除后 pgScanCustom 拿到的数据不降级。
 
+		// ════════════════════════════════════════════════════════════════════════════
+		// ModelEffortPicker —— 复刻官方 `ui-model-selection` 的 ModelSelect
+		// ════════════════════════════════════════════════════════════════════════════
+		//
+		// 官方：一个 trigger + **portal 到 document.body 的浮层菜单**；根面板恰好两行
+		// （模型 / 推理等级），点一行 **drill 进该行的 pane**；模型 pane 按服务商分组。
+		// 内联展开（在行下方铺开列表）在设置面板里行不通：面板是窄栏 + 可滚动容器，
+		// 列表一展开就把下面的内容顶下去，且没有浮层的边框/阴影/背景。
+		//
+		// 官方实现依赖的 react-dom createPortal、ui-primitives 图标、useAnchoredPosition
+		// 都是 Web 前端的静态模块（见文件顶部 require 处的说明），permgate 可直接 require。
+		//
+		// 与官方**刻意保留**的差异只有两处，都是为了 permgate 的语义：
+		//   ① 模型 pane 第一项是「跟随会话」（官方没有这个概念，它总是绑一个确切模型）；
+		//   ② 推理等级分成**两组**：
+		//        · 通用（跟随会话 / 模型默认 / 模型最低 / 模型最高）—— 相对值，
+		//          对任何模型都成立，无需知道模型公布了什么；
+		//        · 指定（模型自己公布的档位 Low / High / Max …）—— 绝对值。
+		//      官方在模型不公布档位时整行不渲染，而用户明确要求
+		//      「即使模型列表是空的，也要有这几个默认选项」。
+		//
+		// 「指定」里的档位 id 可能与通用档**重名**（最典型：模型公布的末档就叫 `max`，
+		// 而「模型最高」的符号值也是 `max`）。二者派发出去是同一个档位，但配置语义不同：
+		// 「模型最高」跟着模型走（换模型仍是最高），「指定 Max」钉住这个 id（换到没有
+		// `max` 的模型就该重新选）。故「指定」组的值统一存成 **`@` + 档位 id**，
+		// 与同名的符号档在配置里可区分；宿主 `resolveEffort` 剥前缀后按具体档位校验。
+		// 「指定」组选项值的前缀。放在这里而不是拼字面量：宿主与客户端必须**同源**，
+		// 否则一边存 `@max` 一边按 `max` 查档位表，永远查不到（表现为「选了不生效」）。
+		const PG_EFFORT_PIN = '@';
+		// 通用档的符号值 → 文案键。**这份映射就是「哪些值是符号档」的唯一声明**：
+		//   · 显示（effortNameOf）据此判断「这是相对档，要显示固定文案而不是档位名」；
+		//   · 卡片里换模型时据此判断「这是相对档，保留不动」。
+		//
+		// ⚠️ 不要再另写一个 `PG_EFFORT_SYMBOLS = ['default','max','min']` 数组 ——
+		// 那是同一份知识的第二份字面量，加一个符号档时只改一处、另一处静默按具体档位
+		// 处理（显示成原始 id，或换模型时被当成钉住档位清掉）。下面从映射派生即可。
+		const PG_EFFORT_SYMBOL_LABELS = {
+			default: 'panel.autoEffortDefault',
+			max: 'panel.autoEffortMax',
+			min: 'panel.autoEffortMin',
+		};
+		// 派生：符号档值的清单（顺序无关，只用于 indexOf 判成员）。
+		const PG_EFFORT_SYMBOLS = Object.keys(PG_EFFORT_SYMBOL_LABELS);
+
+		// ── 按名字模糊匹配并排序（照抄官方 ui-primitives 的 rankByName）────────────
+		// 官方 `rankByName` 不是「子串包含」，而是**大小写不敏感的有序子序列**匹配
+		// 加打分：前缀命中优先，其次按匹配的紧凑程度（连续字符、词边界 `-`/`_` 加分）。
+		// 所以 `v41` 能匹配 `deepseek-v4.1-f`，`gpt6sol` 能匹配 `GPT-6.1 Sol`。
+		//
+		// 为什么照抄而不写个简单的 includes：官方搜索框就是这个行为，用户按 `v41`
+		// 能搜到 `V4.1`，换成 includes 就搜不到 —— 同一个 UI 里两套匹配规则。
+		//
+		// 参数与官方一致：items 是 [{ name, label? }]，返回**过滤并重排后**的数组。
+		function pgRankByName(items, query) {
+			const q = String(query || '').toLowerCase();
+			if (q === '') return items;
+			// 词边界加分：位置 0、或前一个字符是 `-` / `_`
+			const boundary = (s, i) => (i === 0 || s.charAt(i - 1) === '-' || s.charAt(i - 1) === '_' ? 8 : 0);
+			// 有序子序列打分。返回 undefined = 不匹配。
+			const score = (s, needle) => {
+				if (needle.length > s.length) return undefined;
+				const NEG = Number.NEGATIVE_INFINITY;
+				let prev = new Array(s.length).fill(NEG);
+				for (let i = 0; i < s.length; i++) {
+					if (s.charAt(i) === needle.charAt(0)) prev[i] = 1 + boundary(s, i) - i;
+				}
+				for (let k = 1; k < needle.length; k++) {
+					const cur = new Array(s.length).fill(NEG);
+					let prevPrev = NEG;   // prev[i-1]（官方的 h）
+					let prevSame = NEG;   // prev[i]（官方的 u）
+					let gapBest = NEG;    // 官方的 p
+					for (let i = 0; i < s.length; i++) {
+						// ⚠️ 官方是 `p = max(p, h + g - 2)`，其中 **g 是下标**，
+						// 不是 `prev[i]`。写成 `prevPrev + prev[i] - 2` 会让打分完全跑偏：
+						// 实测 `v41` 一个都匹配不上（`deepseek` 这类纯前缀恰好还能过，
+						// 因为它靠 prefix 标志排序、不依赖分数）。
+						if (prevPrev !== NEG) gapBest = Math.max(gapBest, prevPrev + i - 2);
+						if (s.charAt(i) === needle.charAt(k)) {
+							const bonus = 1 + boundary(s, i);
+							let best = NEG;
+							if (prevSame !== NEG) best = prevSame + bonus + 4;                  // 连续
+							if (gapBest !== NEG) best = Math.max(best, gapBest + bonus + 1 - i); // 跳跃
+							cur[i] = best;
+						}
+						prevPrev = prevSame;
+						prevSame = prev[i];
+					}
+					prev = cur;
+				}
+				let out = NEG;
+				for (const v of prev) out = Math.max(out, v);
+				return out === NEG ? undefined : out;
+			};
+			const hits = [];
+			items.forEach((item, index) => {
+				const fields = item.label === undefined ? [item.name] : [item.name, item.label];
+				let prefix = false;
+				let best;
+				for (const raw of fields) {
+					const s = String(raw || '').toLowerCase();
+					const sc = score(s, q);
+					if (sc === undefined) continue;
+					if (s.startsWith(q)) prefix = true;
+					best = best === undefined ? sc : Math.max(best, sc);
+				}
+				if (best !== undefined) hits.push({ item, index, prefix, score: best });
+			});
+			// 排序：前缀命中优先 → 分数高优先 → 保持原顺序（稳定）
+			hits.sort((a, b) => (Number(b.prefix) - Number(a.prefix)) || (b.score - a.score) || (a.index - b.index));
+			return hits.map((h) => h.item);
+		}
+
+		function ModelEffortPicker(props) {
+			// props: {
+			//   model, provider, effort    —— 用户**配置**的值（'' = 未配置 = 跟随会话）
+			//   effective                  —— 宿主下发的**实际生效** {model, provider, effort}
+			//   groups                     —— [{ id, name, models: [{ id, name, reasoning? }] }]
+			//   efforts                    —— 扁平档位表（模型自己的 reasoning 取不到时兜底）
+			//   disabled, onPick(patch)    —— patch 形如 {model, provider} 或 {reasoningEffort}
+			// }
+			const groups = Array.isArray(props.groups) ? props.groups : [];
+			const flatEfforts = Array.isArray(props.efforts) ? props.efforts : [];
+			const effective = props.effective && typeof props.effective === 'object' ? props.effective : {};
+			// `pane` 同时承担两件事：**哪一行被点开**、以及浮层显示哪一级内容。
+			// 'root' = 没打开；'model' / 'effort' = 那一行 drill 进了自己的列表。
+			// 官方是 `open` + `pane` 两个状态（根面板本身就在浮层里）；
+			// permgate 的两行直接长在设置面板上（常显），所以「没打开」与
+			// 「停在根面板」是同一件事，一个状态就够 —— 两个状态会允许
+			// 「open=true 但 pane=root」这种无意义组合，还得额外兜。
+			const [pane, setPane] = React.useState('root');
+			const [pos, setPos] = React.useState(null);
+			// 搜索词：官方 `query` 状态，只在模型 pane 生效（推理等级 pane 没有搜索框）。
+			const [query, setQuery] = React.useState('');
+			// 键盘/鼠标高亮项的下标（官方 `highlightedIndex`）。
+			// 官方把「当前选中项」与「高亮项」分开：前者是 ✓，后者是底色。
+			// 打开时置 null = 跟随当前选中项（官方 activeModelIndex 的默认值）。
+			const [highlighted, setHighlighted] = React.useState(null);
+			// 浮层里的行节点，下标与 visibleRows / effortList 一致（两个 pane 的下标空间
+			// 不同，故各存一份）。打开浮层时把焦点送到当前项、↑↓ 时跟着搬，都按它取节点。
+			const rowRefs = React.useRef({ model: [], effort: [] });
+			// 上一次渲染时的 pane：浮层打开/收起时据此把焦点搬进/搬出。
+			const prevPaneRef = React.useRef('root');
+			// 点浮层外面关掉时不要把焦点抢回 trigger —— 用户已经点去别处了。
+			const skipRestoreRef = React.useRef(false);
+			const pickerRootRef = React.useRef(null);
+			const menuRef = React.useRef(null);
+			const listRef = React.useRef(null);
+			const searchRef = React.useRef(null);
+			// 每一行各一个锚点：浮层必须贴在被点的那一行下面。
+			// 共用一个 ref 的话，后渲染的那行会覆盖前者，点「模型」却锚在「推理等级」下方。
+			const anchorRefs = React.useRef({ model: null, effort: null });
+			const open = pane !== 'root';
+
+			// ── 当前选中项 ────────────────────────────────────────────────────────────
+			// 官方 `currentChoice` 由 (provider, model) 在 choices 里查出来；查不到就
+			// 说明当前模型不在目录里（被删了、或目录没取到）。此时**显示配置值本身**
+			// 而不是「未知」——用户至少能看到自己配的是哪个 id。
+			const choices = [];
+			for (const g of groups) for (const m of (Array.isArray(g.models) ? g.models : [])) choices.push({ group: g, model: m });
+			const cur = props.model
+				? (choices.find((c) => c.model.id === props.model && c.group.id === props.provider) || null)
+				: null;
+			// 这一行回答「**我配了什么**」，不是「现在跑的是哪个模型」：未配置时显示「跟随会话」，
+			// 不回退到 `effective.model` —— 那是会话当前模型，切一个对话就变，写进全局设置项会让人
+			// 以为「设置跟着对话漂」。
+			//
+			// 取值链：目录里查得到 → 模型名（配置值）；查不到但配置了 → 配置的 id；没配置 → 「跟随会话」。
+			const modelLabel = cur
+				? String(cur.model.name || cur.model.id)
+				: (props.model ? String(props.model) : T('panel.autoModelFollow'));
+
+			// ── 推理等级的显示名 ──────────────────────────────────────────────────────
+			// 档位表必须按**当前显示的那个模型**查：只看配置值时，「跟随会话」下 cur 为 null、
+			// 档位表为空，显示会回落成原始 id（`max` 而不是 `Max`）。
+			// 取值：配置了就用配置的模型；**没配置**（跟随会话）才用会话当前的模型
+			// —— 它只决定「展开后能选哪些档位」，不决定这一行显示什么（见下）。
+			//
+			// ⚠️ fallback 必须带 `!props.model` 这个前置条件：配置了模型 A、但目录里查不到 A
+			// （模型被删 / 目录没取到）时，若不判就直接 fallback 到会话模型 B，
+			// 档位列表会列成 **B 的**档位 —— 而那是一个这里根本没在用的模型。
+			const shownSel = cur
+				? { provider: cur.group.id, model: cur.model }
+				: ((!props.model && effective.model)
+					? (choices.find((c) => c.model.id === effective.model && (!effective.provider || c.group.id === effective.provider)) || null)
+					: null);
+			const reasoning = shownSel && shownSel.model.reasoning && typeof shownSel.model.reasoning === 'object'
+				? shownSel.model.reasoning : null;
+			const modelEfforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : [];
+			// 「指定」组的值带 `@` 前缀（见 PG_EFFORT_PIN）。显示与查名时都要剥掉，
+			// 否则面板会写出 `@max` 这种既不是档位名、也不是用户该看到的东西。
+			const effortBare = (v) => {
+				const s = String(v || '');
+				return s.charAt(0) === PG_EFFORT_PIN ? s.slice(1) : s;
+			};
+			const effortNameOf = (v) => {
+				if (!v) return '';
+				const id = effortBare(v);
+				// 符号档显示它自己的固定文案（「模型最高」），不是档位名 ——
+				// 「模型最高」跟着模型走，写死成某个模型的 `Max` 会在换模型后变成假话。
+				if (Object.prototype.hasOwnProperty.call(PG_EFFORT_SYMBOL_LABELS, v)) return T(PG_EFFORT_SYMBOL_LABELS[v]);
+				const hit = modelEfforts.find((e) => e.id === id) || flatEfforts.find((e) => e.id === id);
+				return hit && hit.name ? String(hit.name) : id;
+			};
+			// 与模型那一行同一条纪律：这一行回答「**我配了什么**」。
+			//
+			// 不能取 `props.effort || effective.effort`：`effective.effort` 是宿主下发的
+			// 会话当前档位，未配置时显示它，同一个全局设置项就会随对话漂移 ——
+			// 换个对话，它显示成另一个档位。没配置就写「跟随会话」，不写具体值。
+			const effortLabel = props.effort
+				? effortNameOf(props.effort)
+				: T('panel.autoEffortSession');
+
+			// ── 图标：官方 primitives 优先，缺失时退回内联 SVG ─────────────────────────
+			// 官方 .cellChevron = IconChevronRightOutlineRegular（12×12）；
+			//      .check 里 = IconCheckOutlineRegular（14×14）。
+			const IconChevronRight = Primitives && Primitives.IconChevronRightOutlineRegular;
+			const IconCheck = Primitives && Primitives.IconCheckOutlineRegular;
+			const chevronRight = () => (IconChevronRight
+				? React.createElement(IconChevronRight, { style: { width: 12, height: 12, flex: 'none', color: 'var(--dsw-alias-menu-icon, rgba(128,128,128,0.9))' } })
+				: React.createElement('svg', {
+					viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', focusable: 'false',
+					style: { width: 12, height: 12, flex: 'none', color: 'var(--dsw-alias-menu-icon, rgba(128,128,128,0.9))' },
+				}, React.createElement('path', {
+					d: 'M6 3.5L10.5 8L6 12.5', stroke: 'currentColor', strokeWidth: 1.5,
+					strokeLinecap: 'round', strokeLinejoin: 'round',
+				})));
+			const checkMark = () => (IconCheck
+				? React.createElement(IconCheck, { style: { width: 14, height: 14 } })
+				: React.createElement('span', { 'aria-hidden': 'true' }, '\u2713'));
+
+			// ── 浮层定位 ──────────────────────────────────────────────────────────────
+			// 官方 useAnchoredPosition：锚点左对齐、下边缘 +4px、四边留 8px、随滚动/resize 重算。
+			// 用 useLayoutEffect 是为了「先量后画」——否则浮层会先在 (0,0) 闪一帧。
+			React.useLayoutEffect(() => {
+				if (!open) return;
+				if (typeof window === 'undefined') return;
+				const place = () => {
+					const el = anchorRefs.current[pane];
+					const menu = menuRef.current;
+					if (!el || !menu) return;
+					const r = el.getBoundingClientRect();
+					const w = menu.offsetWidth;
+					const h = menu.offsetHeight;
+					const margin = 8;
+					const left = Math.min(Math.max(r.left, margin), Math.max(margin, window.innerWidth - w - margin));
+					const top = Math.min(Math.max(r.bottom + 4, margin), Math.max(margin, window.innerHeight - h - margin));
+					setPos({ left, top });
+				};
+				place();
+				window.addEventListener('scroll', place, true);
+				window.addEventListener('resize', place);
+				return () => {
+					window.removeEventListener('scroll', place, true);
+					window.removeEventListener('resize', place);
+				};
+			}, [open, pane]);
+
+			// ── 键盘导航要把高亮项滚进视野 ────────────────────────────────────────────
+			// 列表本身会滚动（见 listStyle），高亮项若落在视口外，屏幕上就没有任何反馈 ——
+			// 官方同样在 activeModelIndex 变化时 scrollIntoView({ block: 'nearest' })。
+			// 两个 pane 的高亮都落在 `.pg-active` 上，故不必各写一套。
+			React.useLayoutEffect(() => {
+				if (!open) return;
+				const list = listRef.current;
+				if (!list || typeof list.querySelector !== 'function') return;
+				const row = list.querySelector('.pg-active');
+				if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+			}, [open, pane, highlighted]);
+
+			// ── 关闭：点外面 / Escape ─────────────────────────────────────────────────
+			// 官方 Escape 是「先退出已 drill 的 pane，再关菜单」。这里 pane='root' 就是
+			// 「已关」，故 Escape 直接关（没有更上一级可退）。
+			React.useEffect(() => {
+				if (!open) return;
+				const onDown = (ev) => {
+					const t = ev.target;
+					if (pickerRootRef.current && pickerRootRef.current.contains(t)) return;
+					if (menuRef.current && menuRef.current.contains(t)) return;
+					skipRestoreRef.current = true;
+					setPane('root');
+				};
+				const onKey = (ev) => {
+					// 组合态里的 Esc 属于输入法（取消候选词），不是「关闭浮层」。
+					// 这个监听器挂在 document 上、浮层里任何输入框的按键都会冒泡到这里，
+					// 故判据必须在这一层 —— 各输入框自己的 onKeyDown 提前 return 拦不住它。
+					if (ev.isComposing || ev.keyCode === 229) return;
+					if (ev.key === 'Escape') setPane('root');
+				};
+				document.addEventListener('mousedown', onDown);
+				document.addEventListener('keydown', onKey);
+				return () => {
+					document.removeEventListener('mousedown', onDown);
+					document.removeEventListener('keydown', onKey);
+				};
+			}, [open]);
+
+			const close = () => { setPane('root'); setQuery(''); setHighlighted(null); };
+			const choose = (patch) => { close(); props.onPick(patch); };
+			// 点同一行再点一次 = 收起；点另一行 = 直接切过去（不用先关再开）。
+			// 切换 pane 时**清空搜索词与高亮**（官方 drill() 里同样 `setQuery("")`）：
+			// 留着上一个 pane 的搜索词，切到推理等级会看到「搜索框没了但列表被过滤了」
+			// 那种无从解释的状态。
+			const toggle = (key) => {
+				if (pane === key) { close(); return; }
+				setQuery('');
+				setHighlighted(null);
+				setPane(key);
+			};
+
+			// ── 样式：行排版与同卡片其它行**逐项同值** ─────────────────────────────────
+			// 参照 `row()`（本卡片里「等待人工的时限 / 连续拒绝上限 / 工具调用历史」三行）：
+			//   { display:'flex', alignItems:'center', gap:8, marginTop:6, flexWrap:'wrap' }
+			//   标签 { fontSize:12, minWidth:130 }
+			// 这里只把「行」换成可点的 button，其余数值全部对齐 —— 否则两套排版并排出现，
+			// 观感就是「这一块和别处不是一个东西」（实测反馈）。
+			//
+			// 与官方 .cell 的差异是**刻意的**：官方那套是给作曲区浮层用的（字号 13、
+			// 值靠右、行内左右 8px 内边距），放进设置卡片就会与相邻行错位。
+			// 视觉一致性优先于「逐像素照抄另一个界面的组件」。
+			const cellStyle = {
+				boxSizing: 'border-box', borderRadius: 6, width: '100%', minWidth: 0,
+				height: 26, color: 'var(--dsw-alias-label-primary, inherit)',
+				cursor: props.disabled ? 'default' : 'pointer',
+				textAlign: 'left', border: 'none', outline: 'none',
+				alignItems: 'center', gap: 8, padding: 0, marginTop: 6,
+				fontSize: 12, lineHeight: '20px',
+				display: 'flex', fontFamily: 'inherit',
+			};
+			// 标签：与 row() 的 `fontSize:12, minWidth:130` 同值（保证左边缘对齐）。
+			const cellLabelStyle = { whiteSpace: 'nowrap', flex: 'none', fontSize: 12, minWidth: 130 };
+			// 值：**紧跟标签**（不 flex:auto 推到最右）。官方 cellValue 是右对齐的，
+			// 但那在设置卡片里会让值孤零零地贴到右边缘，与旁边行完全脱节。
+			// 这里只做截断，不伸展。
+			const cellValueStyle = {
+				textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left', minWidth: 0,
+				color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.95))', flex: '0 1 auto', overflow: 'hidden',
+			};
+			// .option { box-sizing:border-box; border-radius:md; width:auto; min-width:100%;
+			//           min-height:34px; text-align:left; cursor:pointer;
+			//           align-items:center; gap:6px; padding:5px 7px; display:flex }
+			//
+			// ⚠️ **background 不能写在这里**。官方 .option 的 `background:0 0` 在 CSS 里，
+			// 而 hover / optionActive 的底色来自**类**（`.pg-hoverable:hover`）。
+			// 内联 style 的优先级永远高于类选择器 —— 只要这里写 `background:'transparent'`，
+			// 那个 :hover 规则就永远不会生效（实测：鼠标划过没有任何反馈）。
+			// 所以底色交给注入的样式表，这里只放布局。
+			const optionStyle = {
+				boxSizing: 'border-box', borderRadius: 8, width: 'auto', minWidth: '100%',
+				minHeight: 34, color: 'inherit', textAlign: 'left', cursor: 'pointer',
+				border: 'none', outline: 'none',
+				alignItems: 'center', gap: 6, padding: '5px 7px', display: 'flex', fontFamily: 'inherit',
+			};
+			// .optionCopy { flex-direction:column; flex:1; min-width:0; display:flex }
+			const optionCopyStyle = { flexDirection: 'column', flex: 1, minWidth: 0, display: 'flex' };
+			// .modelName { text-overflow:ellipsis; white-space:nowrap; font-size:13px;
+			//              font-weight:400; line-height:18px; overflow:hidden }
+			const modelNameStyle = { textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: 400, lineHeight: '18px', overflow: 'hidden' };
+			// .check { color:label-primary; flex:0 0 14px; place-items:center; display:grid }
+			const checkStyle = { color: 'var(--dsw-alias-label-primary, inherit)', flex: '0 0 14px', placeItems: 'center', display: 'grid' };
+			// .menu { width:max-content; min-width:min(240px,100vw - 32px);
+			//         max-width:min(420px,100vw - 32px); max-height:min(360px,100vh - 96px);
+			//         padding:4px; flex-direction:column; display:flex; overflow:hidden;
+			//         border-radius:lg; box-shadow:elevation-prominent }
+			//
+			// ⚠️ 背景**必须是完全不透明**的（这次「越往下越浅」的真凶）。
+			// 官方 MenuSurface 的材质是 `--dsw-menu-surface-fill: #f8f9fa94`（alpha 148/255）
+			// **加上** `backdrop-filter: blur(40px) saturate(150%)` 才有那个磨砂效果。
+			// 而那个 filter 的取值定义在 `[data-menu-material]` 选择器下
+			// （`body[data-ds-dark-theme] [data-menu-material]{--dsw-menu-backdrop-filter:...}`）——
+			// 我这个 div 没有 `data-menu-material` 属性，`var()` 解析失败退回 `none`。
+			//
+			// 结果：**半透明背景 + 没有模糊** = 下发设置面板的文字直接透上来。
+			// 面板内容是深浅不一的（有输入框、有灰字），叠在不同位置上明暗不同，
+			// 看起来就是「越到下面的项越浅」——其实是下面透上来的东西不一样。
+			//
+			// 故改用**不透明**的 `--dsw-alias-bg-overlay`（浅色 bluish-150 / 深色有对应值）。
+			// 不追求官方那种磨砂玻璃质感：那需要 MenuSurface 的完整材质层，
+			// 而设置在窄栏里、浮层贴着面板，不透明反而更清晰。
+			const menuStyle = {
+				position: 'fixed', zIndex: 1100, boxSizing: 'border-box',
+				width: 'max-content', minWidth: 'min(240px, 100vw - 32px)', maxWidth: 'min(420px, 100vw - 32px)',
+				maxHeight: 'min(360px, 100vh - 96px)',
+				borderRadius: 'var(--dsw-radius-lg, 12px)',
+				boxShadow: 'var(--dsw-elevation-prominent, 0 8px 28px rgba(0,0,0,0.28))',
+				background: 'var(--dsw-alias-bg-overlay, #ffffff)',
+				color: 'var(--dsw-alias-label-primary, inherit)',
+				border: '0.5px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3))',
+				padding: 4, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+				fontFamily: 'inherit',
+				left: pos ? pos.left : 0, top: pos ? pos.top : 0,
+				visibility: pos ? 'visible' : 'hidden',
+			};
+			// ── 列表滚动容器 ──────────────────────────────────────────────────────────
+			// 浮层要两层：外层是 `overflow:hidden` 的裁剪盒（圆角 + maxHeight），
+			// 列表自己在一个 `min-height:0; overflow-y:auto` 的容器里滚动。
+			// 只有外层时，超出 maxHeight 的行既看不到也滚不到 —— 目录里的模型越多，
+			// 界面越像「目录里只有前几个」。
+			//
+			// `minHeight: 0` 不能省：flex 子项的默认 min-height 是内容高度，
+			// 不置 0 会被内容撑开，永远触发不了滚动。
+			const listStyle = { minHeight: 0, overflowY: 'auto' };
+
+			// ── trigger：与同卡片其它行**同一套排版** ─────────────────────────────────
+			// 官方 trigger 是作曲区的按钮（模型名 · 档位 + 下箭头）；但这里不是作曲区，
+			// 而是 permgate 的设置卡片 —— 它必须和上面的「等待人工的时限 / 连续拒绝上限 /
+			// 工具调用历史」那几行长得一样。
+			//
+			// 踩过的真实问题：照抄官方 .cell 的排版（fontSize 13、padding 0 8px、cellValue
+			// `flex:auto` + `textAlign:right`）放进设置卡片会有三处问题：标签字号与旁边行不同；行内左右
+			// 内边距让标签整体右移、与旁边行对不齐；值被推到最右边，而旁边行的值紧跟标签。
+			//
+			// 故改为与 `row()` 逐项同值：字号 12、无水平内边距、标签 minWidth 130、
+			// gap 8。值**紧跟在标签后面**（不推右），与旁边行完全同一条竖线。
+			//
+			// 仍然保留 chevron：它表明「点这行会展开」，是官方语义的一部分。
+			const trigger = (label, value, key) => React.createElement('button', {
+				ref: (el) => { anchorRefs.current[key] = el; },
+				type: 'button', role: 'menuitem', 'aria-haspopup': 'menu',
+				'aria-expanded': pane === key, disabled: props.disabled === true,
+				className: 'pg-hoverable', style: cellStyle, onClick: () => toggle(key), 'data-picker': key,
+			},
+				React.createElement('span', { style: cellLabelStyle }, label),
+				React.createElement('span', { style: cellValueStyle }, value),
+				chevronRight(),
+			);
+
+			// ── 根面板：恰好两行（模型 / 推理等级）────────────────────────────────────
+			const rootPane = React.createElement(React.Fragment, null,
+				trigger(T('panel.autoModel'), modelLabel, 'model'),
+				trigger(T('panel.autoEffort'), effortLabel, 'effort'),
+			);
+
+			// ── 模型 pane：按服务商分组（官方 MenuGroup）+ 搜索 + 高亮 ─────────────────
+			//
+			// 三件事都是官方有而这里需要的：
+			//   ① 搜索框：官方 `choices.length > 4` 时出现，按 rankByName 过滤 + 重排；
+			//   ② 高亮：官方 `activeModelIndex`，由 mousemove 与 ↑↓ 共同驱动，
+			//      底色来自 `.pg-active` 类（**不是** :hover —— 见 optionStyle 处的说明）；
+			//   ③ 空结果说明：官方 `search.empty`（有目录但没匹配）与
+			//      `empty.models`（目录为空）是**两句不同的话**。
+			//
+			// 官方把「跟随会话」这类项也放进同一个 visibleModels 列表里编号，
+			// 故高亮下标与「可选项」一一对应。这里同样先拼一个扁平的可选项列表，
+			// 再按它渲染分组 —— 否则分组结构里的下标与高亮下标对不上。
+			const allChoices = [];
+			for (const g of groups) for (const m of (Array.isArray(g.models) ? g.models : [])) {
+				allChoices.push({ provider: g.id, group: g, model: m, name: String(m.name || m.id) });
+			}
+			// 「跟随会话」项就写「跟随会话」四个字：它表达的是**配置意图**（不覆盖），
+			// 不是「实际在用谁」。后者属于**当前对话**，切个对话就变，写进全局设置项
+			// 只会让人以为「设置跟着对话漂」；想知道某个对话用的是谁，看会话本身。
+			const followModelLabel = T('panel.autoModelFollow');
+			// 搜索只在模型数 > 4 时出现（官方 `showSearch = choices.length > 4`）：
+			// 两三个模型时搜索框只是噪音，还占掉浮层高度。
+			const showSearch = allChoices.length > 4;
+			const activeQuery = showSearch ? query : '';
+			// 过滤 + 重排。官方对**每个分组**各跑一次 rankByName（不是整表重排），
+			// 所以分组顺序不变、组内顺序按匹配度。这里照做。
+			//
+			// 写成函数是因为搜索框要在 onChange 里**按新词**求默认高亮项（见
+			// highlightForQuery）：那一刻列表还是旧词的，用它算出来的是上一个词的结论。
+			const rankGroups = (q) => {
+				// 匹配前统一裁剪：搜索框给的是**原始输入**，前导/尾随空格（误触空格键、
+				// 输入法上屏带空格、粘贴模型名）会让 pgRankByName 拿空格去匹配模型名 ——
+				// 明明有匹配却显示「没有匹配的模型」。官方同样在调用点 query.trim()
+				// （pgRankByName 本身照抄官方，不做裁剪）。
+				const needle = String(q || '').trim();
+				const out = [];
+				for (const g of groups) {
+					const models = Array.isArray(g.models) ? g.models : [];
+					if (!models.length) continue;
+					const ranked = pgRankByName(models.map((m) => ({ name: String(m.name || m.id), model: m })), needle);
+					if (ranked.length) out.push({ group: g, items: ranked });
+				}
+				return out;
+			};
+			const filteredGroups = rankGroups(activeQuery);
+			// 高亮的可选项目录：先「跟随会话」，再按分组展开 —— 与渲染顺序一致。
+			// 搜索时「跟随会话」不参与匹配（它不是模型），但仍留在第一位：
+			// 用户搜 `gpt` 时不该把「跟随会话」过滤掉（那是退出覆盖的唯一入口）。
+			//
+			// ⚠️ 由此有一条纪律：**下标 0 恒为「跟随会话」**，第一个模型行恒为 1。
+			// 官方的 `setHighlightedIndex(0)` 之所以安全，是因为它的 visibleModels 里
+			// 没有这一项；这里的 0 是个会把 model/provider 从配置里删掉的破坏性动作。
+			const visibleRows = [{ kind: 'follow', __key: '\u0000follow', __idx: 0 }];
+			for (const fg of filteredGroups) for (const it of fg.items) {
+				visibleRows.push({
+					kind: 'model', provider: fg.group.id, group: fg.group, model: it.model,
+					__key: fg.group.id + '/' + it.model.id, __idx: visibleRows.length,
+				});
+			}
+			// 当前选中项在 visibleRows 里的下标（官方 currentVisibleIndex）。
+			const currentVisibleIndex = visibleRows.findIndex((r) => (r.kind === 'follow'
+				? !props.model
+				: (props.model === r.model.id && props.provider === r.provider)));
+			// 搜索框改词后的默认高亮项。**按新词现算**，不能用当前渲染的列表：
+			// onChange 里 setQuery 之后列表还是旧词的，用旧列表算出来的是上一个
+			// 搜索词的结论（词改到无匹配时第一个模型不存在，下标会落回 0 —— 而 0 恒为
+			// 「跟随会话」，回车就把 model/provider 从配置里删了）。
+			//
+			// 规则与官方一致：落在**第一个匹配的模型**上；一个都没匹配到则为 -1，
+			// 此时回车不动作（官方同样在 visibleModels 为空时什么都不做）。
+			// 下标从 1 起算，与 visibleRows 同构（第 0 项恒为「跟随会话」）。
+			const highlightForQuery = (q) => (rankGroups(q).length ? 1 : -1);
+			// ── 高亮与选中是**两个独立信号** ──────────────────────────────────────────
+			//   · 「现在选中谁」= 右侧 ✓（持久、由 props.model 决定）
+			//   · 「鼠标/键盘在哪」= 底色（瞬时、由 highlighted 决定）
+			// 底色**只**表示后者：highlighted === null → **没有任何行有底色**（不回退到选中项）。
+			// 选中项的可辨识性由 ✓ 单独承担。
+			//
+			// `navIndex` 仍保留回退（选中项优先），它只服务键盘导航的「起点」——
+			// 那是行为而非视觉，回退是必要的（按 ↓ 应该从选中项往下走）。
+			//
+			// ⚠️ 回退目标**不能是 0**。官方的 `Math.max(0, currentVisibleIndex)` 依赖
+			// 「0 永远是一个模型」这个前提（它的 visibleModels 不含「跟随会话」）；
+			// 这里第 0 项恒为「跟随会话」，于是「配置的模型不在当前列表里」时
+			// （被删 / 改名 / 目录还没加载完 / 取失败）`currentVisibleIndex` 为 -1，
+			// 钳到 0 就把**回车**的落点指向了那个会把 model/provider 从配置里删掉的
+			// 破坏性动作 —— 用户什么都没选，只是打开面板按了个回车。
+			//
+			// 故回退到**第一个模型行**（官方那里 0 就是第一个模型，语义等价）；
+			// 一个模型都没有时是 -1 = 没有目标：取项落空，回车不动作。
+			const firstModelIndex = visibleRows.findIndex((r) => r.kind === 'model');
+			const navIndex = Math.min(
+				highlighted === null
+					? (currentVisibleIndex >= 0 ? currentVisibleIndex : firstModelIndex)
+					: highlighted,
+				visibleRows.length - 1,
+			);
+			// 视觉高亮：只认 highlighted（null = 无）。
+			const activeIndex = highlighted === null ? -1 : highlighted;
+
+			// ── 鼠标离开时的处理：把高亮交还 ──────────────────────────────────────────
+			// `activeModelIndex` 表达「当前指针/键盘所在项」；指针离开列表后应回到「当前选中项」。
+			// 故每一行的 onMouseLeave 都 setHighlighted(null)：行与行之间移动也会触发前一行的
+			// mouseleave —— 先清空再由下一行的 mousemove 设上，指针始终只有一个高亮项。
+			// 只挂容器的 onMouseLeave 时行间移动不触发，指针停在分组标题/菜单内边距上时
+			// 仍会留着上一行的高亮。
+			const onRowLeave = () => { setHighlighted(null); };
+
+			const optionRow = (key, rowIndex, label, selected, onClick) => React.createElement('button', {
+				key, type: 'button', role: 'menuitemradio',
+				// rowIndex 就是 visibleRows 的下标：焦点导航按它取节点。
+				ref: rowIndex >= 0 ? (el) => { rowRefs.current.model[rowIndex] = el; } : undefined,
+				'aria-checked': selected, title: label,
+				className: 'pg-hoverable'
+					+ (rowIndex >= 0 && rowIndex === activeIndex ? ' pg-active' : '')
+					+ (selected ? ' pg-selected' : ''),
+				'data-highlighted': rowIndex >= 0 && rowIndex === activeIndex ? '' : undefined,
+				style: optionStyle,
+				// 鼠标划过即高亮（官方 onMouseMove → setHighlightedIndex）。
+				// 用 mousemove 而不是 mouseover：后者在子元素之间移动时会反复触发。
+				onMouseMove: rowIndex >= 0 ? () => { if (highlighted !== rowIndex) setHighlighted(rowIndex); } : undefined,
+				// 鼠标**离开这一项**就把高亮交还出去（见下方 onMouseLeave 的说明）。
+				onMouseLeave: rowIndex >= 0 ? onRowLeave : undefined,
+				onClick,
+			},
+				React.createElement('span', { style: optionCopyStyle },
+					React.createElement('span', { style: modelNameStyle }, label)),
+				React.createElement('span', { style: checkStyle }, selected ? checkMark() : null),
+			);
+			// 给 visibleRows 补上 key，供上面的 onMouseMove 查下标。
+			// （直接在构造时写入，比在渲染里再算一次更不容易漂。）
+			visibleRows.forEach((r, i) => {
+				r.__key = r.kind === 'follow' ? '\u0000follow' : (r.provider + '/' + r.model.id);
+				r.__idx = i;
+			});
+
+
+			const modelRows = [];
+			// 搜索框（官方 .searchRow / .search）：放在滚动容器**外面**，不随列表滚走。
+			let searchRow = null;
+			if (showSearch) {
+				searchRow = React.createElement('div', {
+					key: '\u0000search', style: { flexShrink: 0, margin: '2px 0 3px', position: 'relative' },
+				},
+					React.createElement('input', {
+						ref: searchRef, type: 'text', role: 'searchbox',
+						'aria-label': T('panel.autoSearchPh'),
+						placeholder: T('panel.autoSearchPh'),
+						value: query,
+						// 官方 searchRow .search: border-radius:md; background:0 0; border:0;
+						//   height:auto; padding:5px 7px; display:flex；输入框 font-size:12px
+						style: {
+							boxSizing: 'border-box', width: '100%', borderRadius: 8,
+							background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08))',
+							border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25))',
+							color: 'inherit', outline: 'none',
+							padding: '5px 7px', fontSize: 12, lineHeight: 'normal', fontFamily: 'inherit',
+						},
+						// 默认项必须是**第一个匹配模型**，不是下标 0：0 恒为「跟随会话」，
+						// 把它设为默认等于让「输入搜索词 → 回车」默认清空配置。
+						// 必须按**新词**算（见 highlightForQuery）：按当前渲染的列表算，
+						// 拿到的是上一个搜索词的结论 —— 词改到没有匹配时下标会落回 0。
+						onChange: (e) => {
+							setQuery(e.target.value);
+							setHighlighted(highlightForQuery(e.target.value));
+						},
+						// 搜索框里的 ↑↓ / Enter 交给浮层处理（官方在 root 的 onKeyDown 里统一处理）
+						onKeyDown: (e) => {
+							// 组合态里的按键属于输入法：中文用户按回车确认候选词、按 ↑↓ 翻候选页
+							// 时同样会派发这些键。不排除就会拿还没上屏的拼音串去选中模型，
+							// 而用户从未打算选它。
+							// ⚠️ 这里只挡得住输入框自己那几支；Escape 的关闭动作在 document 级
+							// 监听器里，那里的组合态判据是独立的（见「关闭：点外面 / Escape」）。
+							if (e.nativeEvent && (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return;
+							if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+								e.preventDefault();
+								if (!visibleRows.length) return;
+								// navIndex 为 -1 = **没有导航目标**（搜索词无匹配 / 目录为空 /
+								// 配置的模型不在列表里且没有任何模型行）。取模运算会把 -1 绕成
+								// 0，而 0 恒为「跟随会话」—— 再回车就把 model/provider 从配置里
+								// 删了。没有目标就不导航。
+								if (navIndex < 0) return;
+								// 键盘导航用 navIndex（有回退到选中项），不是视觉高亮 activeIndex
+								const next = (navIndex + (e.key === 'ArrowDown' ? 1 : -1) + visibleRows.length) % visibleRows.length;
+								setHighlighted(next);
+								return;
+							}
+							if (e.key === 'Enter') {
+								e.preventDefault();
+								const row = visibleRows[navIndex];
+								if (!row) return;
+								if (row.kind === 'follow') choose({ model: null, provider: null });
+								else choose({ model: row.model.id, provider: row.provider });
+								return;
+							}
+							if (e.key === 'Escape') { e.preventDefault(); close(); }
+						},
+					}),
+					// 清除按钮（官方 search.clear）：有词才出现。
+					query !== '' ? React.createElement('button', {
+						type: 'button', 'aria-label': T('panel.autoSearchClear'), title: T('panel.autoSearchClear'),
+						onClick: () => { setQuery(''); setHighlighted(null); if (searchRef.current) searchRef.current.focus(); },
+						style: {
+							position: 'absolute', top: '50%', right: 4, transform: 'translateY(-50%)',
+							width: 24, height: 24, padding: 0, border: 'none', borderRadius: '50%',
+							background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)',
+							cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+							fontSize: 14, lineHeight: 1,
+						},
+					}, '\u00d7') : null,
+				);
+			}
+
+			// 「跟随会话」项。搜索时仍保留（见 visibleRows 的说明）。
+			modelRows.push(optionRow(
+				'\u0000follow', 0, followModelLabel, !props.model,
+				() => choose({ model: null, provider: null }),
+			));
+			// 分组。标题照抄官方 .heading 的 padding / 字色 / 字号 / 字重
+			// （sticky 只在浮层自己滚动时有意义，这里保留其余，去掉 position）。
+			for (const fg of filteredGroups) {
+				const rows = fg.items.map((it) => {
+					const row = visibleRows.find((r) => r.kind === 'model' && r.model === it.model && r.provider === fg.group.id);
+					const selected = props.model === it.model.id && props.provider === fg.group.id;
+					return optionRow(
+						fg.group.id + '/' + it.model.id, row ? row.__idx : -1,
+						String(it.model.name || it.model.id), selected,
+						() => choose({ model: it.model.id, provider: fg.group.id }),
+					);
+				});
+				modelRows.push(React.createElement('section', {
+					key: 'g:' + fg.group.id, role: 'group', 'aria-label': String(fg.group.name || fg.group.id),
+					style: { position: 'relative', marginTop: 3 },
+				},
+					React.createElement('div', {
+						style: {
+							padding: '4px 7px 2px', color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.95))',
+							fontSize: 11, lineHeight: '16px', fontWeight: 500,
+						},
+					}, String(fg.group.name || fg.group.id)),
+					rows,
+				));
+			}
+			// 空状态。官方区分两句（`empty.models` / `search.empty`）：
+			//   · 目录为空 → 「暂无可用模型」（去配置服务商）
+			//   · 有目录但没匹配 → 「没有匹配的模型」（改搜索词）
+			// 混成一句会让用户看着满屏模型却被告知「暂无可用模型」，无从处置。
+			if (!filteredGroups.length) {
+				modelRows.push(React.createElement('div', {
+					key: '\u0000empty', role: 'status',
+					style: {
+						color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.95))',
+						padding: 8, fontSize: 12, lineHeight: '18px',
+					},
+				}, activeQuery ? T('panel.autoSearchEmpty') : T('panel.autoModelEmpty')));
+			}
+
+			// ── 推理等级 pane ─────────────────────────────────────────────────────────
+			// 两组，中间用分组标题隔开（与模型 pane 的服务商分组同一套标题样式）：
+			//   通用：跟随会话 / 模型默认 / 模型最低 / 模型最高 —— 相对值，任何模型都成立；
+			//   指定：该模型**公布**的具体档位（Low / High / Max …）。
+			//
+			// 为什么不再「遇到重名就跳过模型档位」：那正是「怎么只有 low 和 high」的成因
+			// —— 模型公布的 `max` 被内置的「最高」吞掉，用户看不到 Max 这个名字。
+			// 现在两者都列，值用 `@` 前缀区分（见 PG_EFFORT_PIN 处说明）。
+			const effortRows = [];
+			// 推理等级 pane 没有搜索框，故高亮按「pane 内序号」算（与模型 pane 分开）。
+			// ⚠️ 序号必须按**渲染顺序**连续递增 —— 分组标题不占序号（它不可选中），
+			// 否则高亮下标与行对不上，键盘 ↑↓ 会跳项。
+			const effortList = [];
+			const effortOption = (v, label) => {
+				const idx = effortList.length;
+				effortList.push(v);
+				const selected = (props.effort || '') === v;
+				return React.createElement('button', {
+					key: 'e:' + (v || '\u0000'), type: 'button', role: 'menuitemradio',
+					// idx 就是 effortList 的下标：焦点导航按它取节点。
+					ref: (el) => { rowRefs.current.effort[idx] = el; },
+					'aria-checked': selected,
+					// 值本身不显示在界面上，但它是**配置里真正写下去的字符串**。
+					// 落在 data 属性上：调试时能直接看到「这一行会存什么」，
+					// 也避免测试只能靠标签文字反推值（`模型最高` 与 `Max` 的标签不同、
+					// 值也不同，光看标签会以为它们一样）。
+					'data-value': v,
+					className: 'pg-hoverable'
+						+ (highlighted === idx ? ' pg-active' : '')
+						+ (selected ? ' pg-selected' : ''),
+					style: optionStyle,
+					onMouseMove: () => { if (highlighted !== idx) setHighlighted(idx); },
+					// 与模型 pane 同：鼠标离开就交还高亮（否则留下「白色印子」）。
+					onMouseLeave: onRowLeave,
+					onClick: () => choose({ reasoningEffort: v === '' ? null : v }),
+				},
+					React.createElement('span', { style: optionCopyStyle },
+						React.createElement('span', { style: modelNameStyle }, label)),
+					React.createElement('span', { style: checkStyle }, selected ? checkMark() : null),
+				);
+			};
+			// 分组标题：与模型 pane 的 `.heading` 逐项同值（padding / 字号 / 字重 / 颜色），
+			// 否则两个 pane 的标题看起来是两种东西。
+			const effortGroupHeading = (key, label) => React.createElement('div', {
+				key,
+				style: {
+					padding: '4px 7px 2px', color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.95))',
+					fontSize: 11, lineHeight: '16px', fontWeight: 500,
+				},
+			}, label);
+			// 第一组：通用（相对值）。
+			// 顺序按**档位强弱由低到高**（最低 → 最高），与「指定」组（模型公布的档位表
+			// 本身就是升序：low → high → max）保持同一方向。
+			effortRows.push(effortGroupHeading('\u0000gh-common', T('panel.autoEffortGroupCommon')));
+			effortRows.push(effortOption('', T('panel.autoEffortSession')));
+			effortRows.push(effortOption('default', T('panel.autoEffortDefault')));
+			effortRows.push(effortOption('min', T('panel.autoEffortMin')));
+			effortRows.push(effortOption('max', T('panel.autoEffortMax')));
+			// 第二组：指定（该模型公布的档位）。
+			//
+			// ⚠️ **只在配置了具体审批模型时才渲染**（实测反馈「审批模型选择跟随会话的时候，
+			// 为啥下面会有选择？」）：跟随会话时模型未定，`shownSel` 用的是**当前这个对话**
+			// 正在跑的模型（见上方 fallback），于是「指定」组列出来的是那个模型的档位 ——
+			// 换个对话，模型变了、档位表也变了。而「指定」的语义是**钉住一个具体档位 id**
+			// （值带 `@` 前缀），钉在一个随对话漂移的模型上没有意义：换到不支持该档位的对话
+			// 时，宿主 resolveEffort 会直接报 config-error，表现为「自动审批莫名一直弹窗」。
+			//
+			// 跟随会话时功能上也没有损失：「模型最高 / 模型最低」是相对值，已经能表达
+			// 「要当前模型的最高档 / 最低档」，换任何对话都成立。
+			//
+			// 模型不公布档位时不渲染这一组 —— 一个只有标题、下面什么都没有的分组
+			// 比没有它更让人困惑（用户会以为「加载失败」）。此时提示文案
+			// `panel.autoEffortNone` 已经说明了原因。
+			if (cur && modelEfforts.length) {
+				effortRows.push(effortGroupHeading('\u0000gh-specific', T('panel.autoEffortGroupSpecific')));
+				for (const e of modelEfforts) {
+					// 值加 `@` 前缀：与通用的符号档（尤其 `max`）在配置里可区分。
+					// 不做「重名就跳过」—— 那会让用户看不到模型真实公布的档位名。
+					effortRows.push(effortOption(PG_EFFORT_PIN + e.id, String(e.name || e.id)));
+				}
+			}
+
+			// ── 焦点进出浮层 ─────────────────────────────────────────────────────────
+			// 浮层是 portal 到 body 末尾的，trigger 在设置面板里。不搬焦点的话，键盘用户
+			// 点开之后焦点仍在 trigger 上：↑↓ 没有反应、Enter 又把菜单收起来，要 Tab 穿过
+			// 整块设置面板才够得到列表。官方在 drill/close 时同样搬（见 ModelSelect）。
+			//
+			// 判据只看「pane 变了」：打开 → 搜索框（有搜索时）或当前选中项；
+			// 收起 → 还给被点的那一行（点浮层外面关掉的除外，那时用户已点去别处）。
+			React.useEffect(() => {
+				const prev = prevPaneRef.current;
+				prevPaneRef.current = pane;
+				if (prev === pane) return;
+				if (pane === 'root') {
+					if (skipRestoreRef.current) { skipRestoreRef.current = false; return; }
+					const back = anchorRefs.current[prev];
+					if (back && typeof back.focus === 'function') back.focus();
+					return;
+				}
+				// 两个 pane 的下标空间不同：模型 pane 用 navIndex（已回退到选中项或
+				// 第一个模型行；一个模型都没有时是 -1，此时退到浮层容器），推理等级
+				// pane 用「当前档位在 effortList 里的下标」。
+				let target = null;
+				if (pane === 'model') {
+					if (showSearch) target = searchRef.current;
+					else target = rowRefs.current.model[navIndex];
+				} else {
+					// 配置的档位不在当前列表里（换了模型 / 指定档位失效）时**不**回退到 0 号：
+					// 那是「跟随会话」，焦点自动停上去再按回车就把 reasoningEffort 删了。
+					// 与模型 pane 的 navIndex 同一条纪律：没有对应项就把焦点交给浮层容器，
+					// 由 ↑↓ 进入列表（落点同样跳过「跟随会话」，见 menuKeyDown）。
+					const at = effortList.indexOf(props.effort || '');
+					if (at >= 0) target = rowRefs.current.effort[at];
+				}
+				if (!target) target = menuRef.current;
+				if (target && typeof target.focus === 'function') target.focus();
+			}, [pane]);
+			// ── 浮层内的键盘导航（列表行）─────────────────────────────────────────────
+			// 搜索框有自己的 onKeyDown（它还要处理输入）；这里管的是焦点落在某个
+			// menuitemradio 上的情况 —— 打开浮层时焦点就被送进去，之后 ↑↓ 要能在
+			// 列表里走、Enter 要能选中。推理等级 pane 没有搜索框，它的键盘操作
+			// **只有**这一条。
+			//
+			// 高亮与焦点是同一件事：按键改高亮后把焦点一起搬过去，否则读屏器读的
+			// 仍是旧行（高亮只是底色，不是可访问性状态）。
+			const menuKeyDown = (e) => {
+				// 浮层没打开时这里只是冒泡路径上的普通容器（trigger 的按键也经过它），
+				// 不接管任何键 —— 否则「Escape 关浮层」会在浮层没开时把设置页的
+				// Escape 一起吃掉。
+				if (!open) return;
+				// 搜索框的按键由它自己处理，事件会冒泡到这里 —— 不排除就会选两次。
+				if (e.target === searchRef.current) return;
+				// ── Escape 必须在这里先消费，且判据**不看焦点落在哪一行** ──────────────
+				// 浮层是 portal 到 body 的，设置面板的模态层（useModalLayer）在 document 上
+				// 同样监听 Escape，判据只有 `ev.defaultPrevented` —— 这里不拦下，按 Escape
+				// 关浮层会连着把整个设置页关掉，面板里未提交的数字输入、例外编辑态、原因草稿
+				// 随 Panel 卸载一起丢。焦点可能落在行上、搜索框的清除按钮上，或（目录为空时）
+				// 浮层容器本身（见「焦点进出浮层」），三条路都必须能只关浮层。
+				if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+				const rows = pane === 'model' ? visibleRows : effortList;
+				if (!rows.length) return;
+				// 焦点不在任何一行上（例如搜索框的清除按钮）时，↑↓ 不接管。
+				const at = rowRefs.current[pane].indexOf(e.target);
+				if (at < 0) {
+					// 例外：焦点落在浮层容器本身（见「焦点进出浮层」——目录为空或选中项
+					// 不在列表里时 navIndex 为 -1，没有可聚焦的行）。此时 ↑↓ 从这里进入
+					// 列表，否则焦点进得来却动不了，键盘用户仍只能用鼠标。
+					// Enter 仍不接管：焦点还没落在任何一行上，选中必须由用户先走到那一行。
+					if (e.target !== menuRef.current) return;
+					if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+					e.preventDefault();
+					// 进入列表的落点必须跳过「跟随会话」（模型 pane 的 0 号、推理等级 pane 的
+					// `''`）：那是**把配置删掉**的动作，不能作为焦点自动进入列表的第一站 ——
+					// 用户只是想把键盘挪进列表，不该在第一下按键后就把配置交出去。与 navIndex
+					// 的回退目标同一条纪律（见「高亮与选中是两个独立信号」）。
+					const entry = pane === 'model'
+						? rows.findIndex((r) => r.kind === 'model')
+						: rows.findIndex((v) => v !== '');
+					if (entry < 0) return;
+					const next = e.key === 'ArrowDown' ? entry : rows.length - 1;
+					setHighlighted(next);
+					const el = rowRefs.current[pane][next];
+					if (el && typeof el.focus === 'function') el.focus();
+					return;
+				}
+				if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+					e.preventDefault();
+					const next = (at + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+					setHighlighted(next);
+					const el = rowRefs.current[pane][next];
+					if (el && typeof el.focus === 'function') el.focus();
+					return;
+				}
+				if (e.key !== 'Enter') return;
+				const row = rows[at];
+				if (!row) return;
+				e.preventDefault();
+				if (pane === 'model') {
+					if (row.kind === 'follow') choose({ model: null, provider: null });
+					else choose({ model: row.model.id, provider: row.provider });
+				} else {
+					choose({ reasoningEffort: row === '' ? null : row });
+				}
+			};
+
+			// ── 键盘与失焦的作用域 = 整个 picker（trigger + 浮层）─────────────────────
+			// 这两件事必须覆盖同一棵树。只挂 menu 时，焦点退到 trigger（它在 pickerRoot
+			// 里、不在 menu 的 React 子树里）就出现缺口：onBlur 判「内部」时认 pickerRoot
+			// 不关浮层，而键盘处理不在事件路径上。此时按 Escape，document 级监听只
+			// setPane('root') 且不 preventDefault —— 设置页模态层（判据只有
+			// ev.defaultPrevented）随即把整个设置页关掉，未提交的数字输入、例外编辑态、
+			// 原因草稿随 Panel 卸载一起丢。
+			//
+			// 故两者都挂 pickerRoot：menu 是它的 React 子节点（portal 到 body，事件仍按
+			// React 树冒泡上来），覆盖范围与 onBlur 判「内部」的范围一致。官方的
+			// onKeyDown 同样挂在包含 trigger 的 root 上（ModelSelect）。
+			const onPickerBlur = (ev) => {
+				// 浮层没开时不接管失焦：否则焦点在 trigger 与背景之间移动会把
+				// skipRestoreRef 置脏，下一次关闭浮层就不再还焦点。
+				if (!open) return;
+				const t = ev.relatedTarget;
+				const inside = (el) => !!(el && typeof el.contains === 'function' && t && el.contains(t));
+				if (inside(menuRef.current) || inside(pickerRootRef.current)) return;
+				skipRestoreRef.current = true;
+				setPane('root');
+			};
+
+			// ── 浮层本体 ──────────────────────────────────────────────────────────────
+			// portal 到 document.body：设置面板是 overflow:auto 的窄栏，
+			// 浮层留在里面会被裁掉（也压不出阴影）。这与官方 createPortal 的理由相同。
+			//
+			// 搜索框留在滚动容器外（官方 .searchRow 是 .menu 的直接子项、flex-shrink:0），
+			// 列表单独包一层：`menuStyle` 的 overflow:hidden 只负责圆角裁剪，
+			// 滚动的责任在 listStyle 那一层。
+			// menuitemradio 的 required context 是 menu（或 menu 里的 group）。
+			// 这个 role 只能落在**列表**上：外层容器还装着搜索框，把搜索框塞进
+			// menu 会让读屏器把它当成一个无法归类的菜单子项。官方的层级同样是
+			// menuSurface[role=group] > [searchRow, groups[role=menu]]。
+			const list = React.createElement('div', {
+				ref: listRef, role: 'menu',
+				'aria-label': pane === 'model' ? T('panel.autoModel') : T('panel.autoEffort'),
+				style: listStyle,
+			}, pane === 'model' ? modelRows : effortRows);
+			const menu = React.createElement('div', {
+				ref: menuRef, role: 'group',
+				'aria-label': T('panel.autoPickerAria'), 'aria-busy': false,
+				// 兜底焦点目标（见上方「焦点进出浮层」）：目录为空时 navIndex 为 -1、
+				// 取不到任何行，焦点要落在这个容器上。没有 tabIndex 的 div 不可聚焦，
+				// `focus()` 静默无效 —— 焦点留在 trigger 上，而浮层是 portal 到 body 的
+				// 独立树，Tab 永远进不去，键盘用户只能在「打开—关闭」之间循环。
+				// tabIndex: -1 = 可编程聚焦但**不**进入 Tab 序列。
+				tabIndex: -1,
+				style: menuStyle,
+				// 键盘不挂在这里：menu 是 pickerRoot 的 React 子节点（portal 到 body，事件
+				// 仍按 React 树冒泡），两处都挂会让每个键跑两遍 —— Enter 提交两次、
+				// ↑↓ 走两格。只挂 pickerRoot 一处，见下方 onKeyDown。
+				// 兜底：鼠标移出**整个浮层**时也清空高亮。
+				// 行级的 onMouseLeave 已经覆盖了「行 → 行」与「行 → 空白」，
+				// 但万一某个子元素没挂（例如将来加的分隔线），这里保证不会残留。
+				onMouseLeave: () => { setHighlighted(null); },
+			}, pane === 'model' ? searchRow : null, list);
+
+			return React.createElement('div', {
+				// 撑满一行：两行 trigger 各自 width:100%，左边缘才能与卡片里其它行的
+				// 标签落在同一条竖线上（父级是卡片，没有 flex 收缩问题）。
+				ref: pickerRootRef, style: { position: 'relative', width: '100%', minWidth: 0 },
+				// 键盘与失焦都挂在这一层：它是 trigger 与浮层（React 子节点，portal 到 body）
+				// 的公共祖先，覆盖范围与 onBlur 判「内部」的范围一致。见 onPickerBlur。
+				onKeyDown: menuKeyDown,
+				onBlur: onPickerBlur,
+			},
+				// 两行常显（它们就是官方浮层里的根菜单，只是这里长在面板上）。
+				rootPane,
+				// 点开哪一行，浮层就锚在哪一行下方 —— anchorRefs 按 key 分开存。
+				open
+					? (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined'
+						? ReactDOM.createPortal(menu, document.body)
+						: menu)
+					: null,
+			);
+		}
+
+
 		function Panel(props) {
 			// settings.section 是 root 作用域槽：不直接给 sessionId，但注入 useSessions
 			// 标准 hook。用它订阅当前活动会话，会话切换时选择器变化触发重渲染 + 重新查询，
@@ -3434,10 +4494,10 @@ window.__ModuleLoader__.load({
 			// 面板上就是一个档一个下拉框。用一个值存八档会让「改 A 档」连带改掉 B 档。
 			const [subDestructive, setSubDestructive] = React.useState({ global: {}, project: {} });
 			// 子设置的拒绝原因草稿：**每层每档一个**（`{ global: { wide: '' }, project: {} }`）。
-			// per-tier reason（§7.1）：「删系统目录」与「别提权」是给 AI 的两种不同指令，
+			// 逐档理由：「删系统目录」与「别提权」是给 AI 的两种不同指令，
 			// 合成一句会让 AI 收到无关信息。
 			const [subReasons, setSubReasons] = React.useState({ global: {}, project: {} });
-			// 「破坏性命令」八档的展开态（§7.4 默认折叠）。
+			// 「破坏性命令」八档的展开态（默认折叠）。
 			//
 			// 折叠时**八档全收起**（不是只收起七档）：八个档在判定链上是**平级**的，
 			// 单留一档会让它看起来像「主设置 + 七个附属」，而它其实只是八分之一。
@@ -3476,10 +4536,8 @@ window.__ModuleLoader__.load({
 			const [reasonEditing, setReasonEditing] = React.useState(null);
 			// 焦点描述 → 稳定字符串键，用于比对「这一格是否在编辑 / 是否刚保存」。
 			//
-			// ── `sub` 的 key 必须带档位（§7.2d）──────────────────────────────────────
-			// 曾经恒为 `'command'`。八档之后那样会让八档共用一个编辑态：
-			// 「编辑 A 档的理由时 B 档的框也进入编辑态」（编辑态是按 key 比对的）。
-			// 现在子设置的 focus.key 就是**档位名**（`inside` / `wide` / `priv`…），
+			// ── `sub` 的 key 必须带档位 ───────────────────────────────────────────
+			// 八档各占一个编辑态：`focus.key` 就是**档位名**（`inside` / `wide` / `priv`…），
 			// 于是 key 天然唯一；调用方负责把档位传进 focus.key（见 commandSubRow）。
 			const reasonKeyOf = (f) => (f ? f.kind + ':' + f.tab + ':' + (f.key === null || f.key === undefined ? '' : f.key) : '');
 			// 对勾的写入单点。刻意定义在 reasonKeyOf 之后：它体内要调 reasonKeyOf，
@@ -3546,6 +4604,13 @@ window.__ModuleLoader__.load({
 			// （自动消失靠 effect 的对象身份，去重逻辑从未实现），属只写不读的死字段，故删掉。
 			// 与 msg（保存结果，蓝色）分开，提示用橙色以示「需要注意但不是错误」。
 			const [notice, setNotice] = React.useState(null);
+			// 模型目录（模型 / 推理等级选择器的数据源）。
+			//
+			// 形状见宿主 `/permgate/llm-models`：{ groups: [{id,name,models[]}], failures[] }。
+			// 只在面板打开时取一次 —— 目录与「用户配了什么」无关（见下面 effect 处的说明）。
+			// 不放进 statusView：那条路由会走网络（每个 provider 一次 listModels + 每个
+			// 模型一次 resolveModelInfo），不能挂在每次状态刷新上。
+			const [llmCat, setLlmCat] = React.useState({ data: null, loading: false });
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
 			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
@@ -3661,6 +4726,31 @@ window.__ModuleLoader__.load({
 			// 它按 id 定位，而 id 只在它所属的那一层里有意义，切层后必须丢弃
 			// （否则切到项目层时会看到一个 id 相同、内容却是另一条例外的行处于编辑态）。
 			React.useEffect(() => { setConfirm(null); setNotice(null); reasonFocus.current = null; setReasonEditing(null); setExEdit(null); loopThDirty.current = { global: false, project: false }; setRuleFilter({ global: '', project: '' }); }, [tab]);
+
+			// ── 模型目录的拉取（**必须在组件这一层**）──────────────────────────────────
+			// hook 不能出现在条件分支或按需调用的函数里：组件层的位置与 tab 无关，
+			// 否则切 tab 会改变 hook 数量，React 抛 #310，整个设置页白屏。
+			//
+			// 目录与「用户配了什么」无关：宿主一次拉全部 provider、失败按 provider 隔离，
+			// 故这里不传查询键、没有依赖项，只在面板打开时取一次。空配置恰恰是最需要目录的时候。
+			React.useEffect(() => {
+				let alive = true;
+				setLlmCat({ data: null, loading: true });
+				// 失败一律**按空目录处理**（宿主侧也这么降级）：面板于是只显示「跟随会话」，
+				// 不会出现「加载失败」这种用户无从处置的提示 —— 他能做的只有等或去改配置，
+				// 而两者都不需要这条错误信息。故这里**不保留 error 字段**（留一个只写不读的
+				// 字段，下一个人会以为它有用）。
+				call('permgate:llm-models', {})
+					.then((r) => {
+						if (!alive) return;
+						setLlmCat({ data: r || null, loading: false });
+					})
+					.catch(() => {
+						if (!alive) return;
+						setLlmCat({ data: null, loading: false });
+					});
+				return () => { alive = false; };
+			}, []);
 
 			const applyStatus = (s) => {
 				if (!s) return;
@@ -4197,13 +5287,13 @@ window.__ModuleLoader__.load({
 				const m = subTierList().filter((x) => x.t === tier)[0];
 				return m && m.label ? T(m.label) : tier;
 			};
-			// 改**大分类**时的判据：八档**逐档**各判一次（§7.4），不是只判 inside。
+			// 改**大分类**时的判据：八档**逐档**各判一次，不是只判 inside。
 			//
 			// 为什么不能只判 inside：八档之后「子设置的动作」不再是一个值 —— inside 只是八分之一，
 			// 而判定链上每一档都独立生效。用户显式把 `wide` 设成 allow 再改大分类为 deny 时，
 			// 只判 inside 会**一声不吭**，而命中 wide 档的破坏性命令确实被放行 ——
-			// 那正是这条提示存在的理由（§7.4：「折叠状态下也要提示：不协调是配置错误，
-			// 不该因为控件被收起就不告诉用户」）。
+			// 那正是这条提示存在的理由（折叠状态下也要提示：不协调是配置错误，
+			// 不该因为控件被收起就不告诉用户）。
 			//
 			// 逐档比的是**该档的显式配置**（explicitSubOf(tab, tier)，未配置即 undefined 不提示）——
 			// 不能用面板显示值，那含宿主下发的推导默认值，会产生假警告（见 changeCat 的说明）。
@@ -4238,18 +5328,13 @@ window.__ModuleLoader__.load({
 			// 子设置拒绝原因的保存单点。空串必须原样下发（宿主把空串定义为显式清除、
 			// undefined 定义为保留原值），与 commitCatReason 完全同口径。
 			//
-			// ── `tier` 必加（§7.2d，修一个既有缺陷）──────────────────────────────────
-			// 这里曾经硬编码 `action: 'deny'` 且**不带 tier**：
-			//     invoke('permgate:set-command-sub', { target: tab, action: 'deny', reason: v })
-			// 现在只有一档，所以看不出问题（能写 reason 就意味着当前是 deny）。
-			// 八档之后这个请求必须带 `tier`，否则它会写到**缺省档**（`inside`）——
-			// 即「用户改 `wide` 的理由，把 `inside` 的动作改成了 deny」。
+			// ── `tier` 必加 ───────────────────────────────────────────────────────────
+			// 不带 tier 会写到**缺省档**（`inside`）——「用户改 `wide` 的理由，把 `inside` 的动作
+			// 改成了 deny」。
 			//
 			// ── `action` 必须取该档**当前**动作，不能硬编码 'deny' ─────────────────────
-			// 理由框现在在 `auto + 回落 deny` 时也会渲染（判据 finalActionOf）。若这里仍写
-			// `action: 'deny'`，用户「在自动审批档上补一句拒绝理由」就会把该档的动作从 auto
-			// **静默改成 deny** —— 模型判断那一步被一次改理由抹掉。取当前动作则是一次纯
-			// 无副作用的理由写入（宿主的 setCommandSub 会按 action 走对应分支）。
+			// 理由框在 `auto + 回落 deny` 时也会渲染（判据 finalActionOf）。硬编码会把该档的动作
+			// 从 auto **静默改成 deny** —— 模型判断那一步被一次改理由抹掉。
 			const commitSubReason = (focus) => {
 				const tier = (focus && focus.key) || 'inside';
 				const v = (subReasons[tab] || {})[tier];
@@ -4569,9 +5654,8 @@ window.__ModuleLoader__.load({
 			// 面板根节点没有设 fontSize（只有 fontFamily），所以没有可继承的小字号，
 			// 漏写就等于要 16px。两处调用点都受影响，不是某一处的局部问题。
 			//
-			// 例外行**不再是**调用点之一：它已改用状态点 `pg-exc-dot`（:4748 / :4782），
-			// 与档位行统一（§7.5.1「同一概念不该有两种编码」），动作文字由下拉框显示。
-			// 于是调用点从三处降为两处 —— 上面那句「都受影响」只覆盖这两处。
+			// 例外行**不再是**调用点之一：它已改用状态点 `pg-exc-dot`，与档位行统一，
+			// 动作文字由下拉框显示。于是调用点从三处降为两处。
 			const badge = (action) => React.createElement('span', { style: { color: MODE_COLORS[action] || '#888', fontWeight: 600, marginRight: 6, fontSize: 12, whiteSpace: 'nowrap' } }, modeLabel(action));
 
 			// ── 值域外的当前值必须能显示出来 ───────────────────────────────────────
@@ -4865,17 +5949,15 @@ window.__ModuleLoader__.load({
 			// 由本行在分类内的位置间接表达（排在例外之后 = 判定链上晚于例外）。
 			// 代价是「生效值到底取自全局还是本项目」在项目 tab 上不再直说 —— 那一点改由
 			// 下拉框自身的取值表达（显示 inherit = 本层未表态、穿透全局）。
-			// 八档的**默认折叠**（§7.4）：用户明确偏好简洁，而八行下拉框会把面板撑长。
-			// 折叠态的信息由展开链接文字里的**动作计数摘要**承载（`拒绝 2 · 询问 5`，
-			// 见 subCollapsedSummary 与 PG_TIER_CSS 的说明）；展开才出现下拉框与逐档状态点。
-			// 折叠时八档全收起 —— 不留 inside 特例（理由见 commandSubRow 处）。
+			// 八档的**默认折叠**：用户明确偏好简洁，而八行下拉框会把面板撑长。
+			// 折叠态的信息由展开链接文字里的**动作计数摘要**承载（`拒绝 2 · 询问 5`），
+			// 展开才出现下拉框与逐档状态点。折叠时八档全收起 —— 不留 inside 特例。
 			//
 			// 分两组展示（按目标范围 / 按命令类别）是因为**判据不同** —— 用户需要知道
 			// 「这一档是按目标范围判的，还是按命令名判的」。这决定了它什么时候会生效。
 			//
-			// `hint` 是**行内标签之外**的完整判据，渲染成 title 悬浮。分两套的理由：
-			// 行内标签要短（八行对齐、扫得快），而判据要完整（用户得知道「怎么算盘根」）。
-			// 只留短的会让人猜，只留长的会把行撑歪 —— 上一版正是后者。
+			// `hint` 是**行内标签之外**的完整判据，渲染成 title 悬浮：行内标签要短（八行对齐、
+			// 扫得快），而判据要完整（用户得知道「怎么算盘根」）。
 			const SUB_TIER_META = [
 				// 半径组：按目标范围判
 				{ t: 'inside', g: 'radius', label: 'panel.tierInside', hint: 'panel.tierInsideHint' },
@@ -4928,7 +6010,7 @@ window.__ModuleLoader__.load({
 				invoke('permgate:set-command-sub', { target: tab, tier: tier, action: subActionOf(tier), autoFallback: v },
 					() => setMsg(tab === 'global' ? T('panel.savedToGlobal') : T('panel.savedToProject')));
 			};
-			// 折叠摘要**由实际生效值生成**，不能写死「均为询问」（§7.4）。
+			// 折叠摘要**由实际生效值生成**，不能写死「均为询问」。
 			//
 			// | 情形 | 摘要 |
 			// |---|---|
@@ -5044,8 +6126,7 @@ window.__ModuleLoader__.load({
 					React.createElement('div', { className: 'pg-tier-head' },
 						React.createElement('span', { className: 'pg-tier-title' }, T('panel.subDestructive')),
 					),
-					// 说明行：**独立一行**。上一版它拼在标题后面，与摘要、按钮三方抢一行，
-					// 结果是标题的说明文字折行后与摘要串在一起（截图里那两行糊成一团）。
+					// 说明行独立成行：与标题同排时说明文字会折行，并与摘要串在一起。
 					React.createElement('div', { className: 'pg-tier-hint' }, T('panel.subDestructiveHint')),
 					// 展开/折叠入口：**与上方例外列表同一套交互**（左对齐蓝字链接 + ▸/▾ 前缀）。
 					// 摘要放进链接文字里，与 `▸ 例外列表（18 条）` 同构 ——
@@ -5062,14 +6143,8 @@ window.__ModuleLoader__.load({
 					}, subExpanded
 						? '▾ ' + T('panel.tierCollapse')
 						: '> ' + T('panel.tierExpandAll').replace('{s}', summary)),
-					// **折叠时八档全收起**（不是只收起七档）。
-					//
-					// 曾经把「工作区内」单独留在外面，理由是「它是唯一跟随大分类的档、
-					// 也是最常调的」。实测反馈「为啥独留了一个工作区内的在那，很奇怪」——
-					// 那个理由站不住：八个档在判定链上是**平级**的，单留一个会让它看起来
-					// 像「主设置 + 七个附属」，而它其实只是八分之一；而且孤零零一行挂在
-					// 说明与脚注之间，更像漏渲染。
-					//
+					// **折叠时八档全收起**（不是只收起七档）：八个档在判定链上是**平级**的，
+					// 单留一档会让它看起来像「主设置 + 七个附属」，而它其实只是八分之一。
 					// 折叠态的信息由链接文字里的摘要承载（`▸ 展开（询问 3 · 拒绝 3）`），
 					// 要看具体哪一档就展开 —— 与例外列表的取舍完全一致。
 					subExpanded ? React.createElement('div', { className: 'pg-tier-box' },
@@ -5169,14 +6244,13 @@ window.__ModuleLoader__.load({
 			// 循环检测（doomloop）阈值行 + 状态提示。
 			// 与「破坏性命令」子设置的区别：那个是**动作**（三态），这个是**数字**，故不复用 sel()。
 			// 三个要点：
-			//   ① 阈值与动作分两处写：动作仍走上方分类下拉（走 set-categories），阈值走本行
-			//      （set-doomloop）。不做成一个「保存」同时提交两者 —— 两处的空值语义不同
-			//      （阈值空串 = 清除回落默认，动作没有「空」这一态），混在一起会出现
+			//   ① 阈值与动作分两处写：动作走 set-categories，阈值走 set-doomloop。两处的空值语义
+			//      不同（阈值空串 = 清除回落默认，动作没有「空」这一态），混在一起会出现
 			//      「只想改阈值却把动作也重写了一遍」的副作用。
 			//   ② 校验与宿主同口径（正整数、**无上限**）：不做上限钳制，否则会出现
 			//      「面板显示 999、实际按 100 跑」那类双份钳制。非法值只提示、不提交。
-			//   ③ 关闭提示（G2-3）与 deny 误判警告（L-5）都在这里给：动作本身在别的行，
-			//      但那两种状态下用户最需要知道的信息就在这一行旁边。
+			//   ③ 关闭提示与 deny 误判警告都在这里给：动作本身在别的行，但那两种状态下用户最需要
+			//      知道的信息就在这一行旁边。
 			const doomloopRow = () => {
 				const dl = (status && status.doomloop) || {};
 				// placeholder 显示「本层未配置时实际会用的值」，故按 tab 取不同的来源：
@@ -5250,10 +6324,10 @@ window.__ModuleLoader__.load({
 							React.createElement('button', { className: 'pg-btn', style: { padding: '2px 8px', fontSize: 12 }, disabled: busy, onClick: commitTh }, T('panel.loopThresholdSave')),
 						),
 					),
-					// G2-3：动作设为 allow = 知情关闭，但必须**说出来** —— 此前关掉后毫无提示，
-					// 用户不知道检测已经没了（面板上那一行看起来和别的分类没区别）。
+					// 动作设为 allow = 知情关闭，但必须**说出来** —— 否则用户不知道检测已经没了
+					// （面板上那一行看起来和别的分类没区别）。
 					catMode === 'allow' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopOff')) : null,
-					// L-5：deny 不弹窗、直接中断 AI，用户不容易察觉，故用面板提示补上这个信息缺口
+					// deny 不弹窗、直接中断 AI，用户不容易察觉，故用面板提示补上这个信息缺口
 					catMode === 'deny' ? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.loopDenyWarn')) : null,
 				);
 			};
@@ -5280,10 +6354,112 @@ window.__ModuleLoader__.load({
 				// 数字项的值域（宿主下发，见 AUTO_REVIEW_RANGES）：缺字段时按空表处理 ——
 				// 回退到写死的上下限就等于在客户端造第二份口径，正是本条要消掉的东西。
 				const ranges = ar.ranges && typeof ar.ranges === 'object' ? ar.ranges : {};
+				// ── 模型目录的形状 ────────────────────────────────────────────────────────
+				// 宿主 `/permgate/llm-models` 照抄官方 `buildModelCatalog` 的形状：
+				//   { groups: [{ id, name, models: [{ id, name, reasoning? }] }], failures }
+				// 每个模型自带它公布的推理档位（`reasoning.efforts`），故推理等级那一行
+				// 能显示**名称**（`Max`）而不是原始 id（`max`）。
+				// 扁平 `{ providers, models, efforts }` 的形状不能要：客户端得拿「已配置的
+				// provider」当查询键，而用户恰恰是在还没配过的时候打开面板 —— 于是永远空列表、
+				// 下拉里只剩「跟随会话」一项。按服务商分组下发则与「配没配过」无关。
+				const cat = llmCat.data || {};
+				const groups = Array.isArray(cat.groups) ? cat.groups : [];
+				// 扁平档位表：各模型公布档位的并集，仅作 `effortNameOf` 的兜底
+				// （模型不在目录里时仍能显示档位名）。
+				const efforts = [];
+				{
+					const seen = {};
+					for (const g of groups) for (const m of (Array.isArray(g.models) ? g.models : [])) {
+						const rs = m.reasoning && Array.isArray(m.reasoning.efforts) ? m.reasoning.efforts : [];
+						for (const e of rs) {
+							if (!e || seen[e.id]) continue;
+							seen[e.id] = true;
+							efforts.push({ id: String(e.id), name: String(e.name || e.id) });
+						}
+					}
+				}
+				// 实际生效的模型 / 档位（宿主下发的 target，绝不自己推）。
+				const tgt = ar.target && typeof ar.target === 'object' ? ar.target : null;
+				const tgtMod = tgt && tgt.model ? String(tgt.model) : '';
+				const tgtProv = tgt && tgt.provider ? String(tgt.provider) : '';
+				const tgtEffort = tgt && tgt.effort ? String(tgt.effort) : '';
+				// ── 「这个模型有没有公布档位」必须按**当前生效的那个模型**判 ──────────────
+				//
+				// 不能用上面那张 `efforts` 并集：它是**全部 provider 全部模型**档位的并集，只要目录里
+				// 有任意一个模型公布了档位就非空，于是「该模型不公布推理强度档位」这句提示几乎永远
+				// 不会出现，用户看到一个没有「指定」组的推理等级列表却没有任何解释。
+				//
+				// 判据：按「这次推理等级要作用的那个模型」去目录里查它自己的 efforts。哪个模型？
+				// 与组件内 `shownSel` 同一口径：配置了用配置的，没配置用生效的（跟随会话时就是
+				// 会话当前模型）。这里重算一次而不是从组件里取 —— 组件是纯展示件，不该为提示文案
+				// 反向暴露内部中间量。
+				const effortOwner = (function () {
+					const wantProv = eff.provider ? String(eff.provider) : '';
+					const wantMod = eff.model ? String(eff.model) : '';
+					if (wantMod) {
+						for (const g of groups) {
+							if (String(g.id) !== wantProv) continue;
+							return (Array.isArray(g.models) ? g.models : []).find((x) => String(x.id) === wantMod) || null;
+						}
+						return null;   // 配了但目录里没有 → 无依据，不提示（见下）
+					}
+					for (const g of groups) {
+						if (!tgtProv || String(g.id) !== tgtProv) continue;
+						return (Array.isArray(g.models) ? g.models : []).find((x) => String(x.id) === tgtMod) || null;
+					}
+					return null;
+				})();
+				// 三种情形要分开，不能混成一个布尔：
+				//   · 模型查不到（目录没取到 / 模型被删）→ **不提示**：没有依据时断言
+				//     「不公布档位」是编造，何况目录失败的面更大；
+				//   · 查得到且 reasoning.efforts 为空/缺省 → 提示「该模型不公布档位」；
+				//   · 查得到且有档位 → 提示常规说明。
+				const ownerEfforts = effortOwner && effortOwner.reasoning && Array.isArray(effortOwner.reasoning.efforts)
+					? effortOwner.reasoning.efforts : null;
+				const effortHintText = llmCat.loading
+					? T('panel.autoModelLoading')
+					: (effortOwner && (!ownerEfforts || ownerEfforts.length === 0)
+						? T('panel.autoEffortNone')
+						: T('panel.autoEffortHint'));
 				// 提交单个字段。null = 恢复默认（宿主 delete 该键）。
 				const setField = (key, value) => {
 					const args = value === null ? { clear: [key] } : { patch: { [key]: value } };
 					invoke('permgate:set-auto-review', args, () => setMsg(T('panel.autoSaved')));
+				};
+				// ── 一次提交**多个**字段（必须是一次请求，不能连着调 setField）──────────────
+				//
+				// 连着调 setField 会**一次用户操作发出 3 个并发 POST**：宿主每条路由都回整份 statusView，
+				// invoke 收到就 applyStatus —— 三次响应互相覆盖面板状态；invoke 内部的 setBusy 会被先返回
+				// 的那个提前置回 false，按钮提前可点；若其中一条落盘失败，配置停在半改状态。
+				// 宿主路由同时接受 `patch` 与 `clear`（见 /permgate/set-auto-review），故这里合成一次调用。
+				const setFields = (patch, clearKeys) => {
+					const args = {};
+					if (patch && Object.keys(patch).length) args.patch = patch;
+					if (Array.isArray(clearKeys) && clearKeys.length) args.clear = clearKeys;
+					if (!args.patch && !args.clear) return;
+					invoke('permgate:set-auto-review', args, () => setMsg(T('panel.autoSaved')));
+				};
+				// ── 「全部恢复默认」按钮（含二次确认）──────────────────────────────────
+				//
+				// 这是本卡片里唯一会**批量删除**用户配置的入口，且没有撤销，故必须有二次确认。
+				// 复用面板里已有的 confirmDelete（同一个 confirm 状态 + 4 秒自动取消）：另写一套
+				// 会让「两个确认同时亮着」成为可能，且超时逻辑要写两遍。
+				const resetAllButton = () => {
+					if (!explicit.length) return null;
+					const armed = confirm === 'auto-reset';
+					return React.createElement('div', { style: { marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+						React.createElement('button', {
+							className: 'pg-btn pg-btn-danger' + (armed ? ' pg-btn-confirm' : ''),
+							disabled: busy,
+							onClick: () => confirmDelete('auto-reset', () => invoke('permgate:set-auto-review', { clear: explicit }, () => setMsg(T('panel.autoResetDone')))),
+						}, armed ? T('panel.autoResetConfirm') : T('panel.autoReset')),
+						armed
+							? React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: () => setConfirm(null) }, T('panel.cancel'))
+							: null,
+						armed
+							? React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoResetWarn'))
+							: null,
+					);
 				};
 				// 数字输入：与宿主 normalizeAutoReview 同口径（非数字/超范围 → 拒绝，不静默回落）
 				//
@@ -5352,7 +6528,7 @@ window.__ModuleLoader__.load({
 								e.target.value = curText;
 								return;
 							}
-							// 生效值没变就不写盘：只是聚焦再离开不该把默认值物化成显式配置（§2.4）
+							// 生效值没变就不写盘：只是聚焦再离开不该把默认值物化成显式配置
 							// 但要把框里的文本归位成生效值：非受控框不会再被 React 自动还原，
 							// 否则「20000.7 / 020000」这类输入会留在框里、看起来与落盘值不一致。
 							if (v === cur) { e.target.value = curText; return; }
@@ -5385,38 +6561,112 @@ window.__ModuleLoader__.load({
 					row('panel.autoHistory', numInput('historyN', 70, T('panel.autoTimesUnit')), numInput('historyBudget', 90, T('panel.autoCharsUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoHistoryHint'))),
 					// 模型覆盖：留空 = 跟随会话当前模型（三级回落的第 ② 级）。
-					// 两个框必须**成对**才生效（reviewTarget 要求 provider 与 model 都在）——
+					// 两个下拉必须**成对**才生效（reviewTarget 要求 provider 与 model 都在）——
 					// 只填一个等于没填，故提示里写明。
-					row('panel.autoModel',
-						// 与数字框同一条纪律：非受控（只在 onBlur 提交）+ `key` 取**生效值**。
-						// 少了 key 时 defaultValue 只在首次挂载生效 —— 点「全部恢复默认」后
-						// 宿主删键、eff.provider 回到 ''，而框里的 DOM 值仍是旧文本（dirty 的
-						// 非受控输入不随 defaultValue 变更）⇒ 面板显示「模型覆盖 openai」而实际
-						// 已无覆盖；用户再点进框失焦时 onBlur 还会把旧文本当 patch 重新提交，
-						// 把刚恢复的默认静默撤销。宿主对这两个键做 slice 截断、以及「重新加载
-						// 配置文件」后外部改动，也都要靠它把新值反映到框里。
-						React.createElement('input', {
-							className: 'pg-field', style: { width: 140 }, placeholder: T('panel.autoProviderPh'),
-							key: 'provider:' + (eff.provider || ''),
-							defaultValue: eff.provider || '', disabled: busy,
-							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('provider', v === '' ? null : v); },
-						}),
-						React.createElement('input', {
-							className: 'pg-field', style: { width: 180 }, placeholder: T('panel.autoModelPh'),
-							key: 'model:' + (eff.model || ''),
-							defaultValue: eff.model || '', disabled: busy,
-							onBlur: (e) => { const v = String(e.target.value || '').trim(); setField('model', v === '' ? null : v); },
-						}),
-						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoModelHint')),
-					),
+					//
+					// ── 模型 / 推理等级：交给 ModelEffortPicker（复刻官方 ModelSelect）──────
+					// 为什么不是输入框、不是 <select>、也不是内联展开（三者都做过，都不对）：
+					//   · **输入框**：手填要求用户知道 provider 路由键与模型 id 的确切拼写，
+					//     写错后静默失效 —— reviewTarget 拿到不存在的 provider/model 只会在
+					//     llm.stream 里抛，用户看到的是「自动审批一直弹窗」，没有线索指向
+					//     「你名字打错了」。
+					//   · **<select>**：把「标签 + 当前值 + 进入下一级」挤成一个控件，当前值
+					//     只能塞进选项文字，且原生 select 表达不了「drill 进下一级」。
+					//   · **内联展开**：设置面板是窄栏 + 可滚动容器，列表一展开就把下面内容
+					//     顶下去，也没有浮层的边框/阴影 —— 观感与官方完全不同（用户说的「丑」）。
+					// 现在是官方那套：两行 cell（标签 …… 当前值 ›），点开是 **portal 到 body
+					// 的浮层菜单**，模型按服务商分组、推理等级显示档位名。
+					//
+					// 「当前值」是**你配了什么**：配置了就是配置的模型名与档位名，
+					// 没配置就写「跟随会话」。绝不显示会话当前用的是哪个模型/档位 ——
+					// 那些属于具体对话，切个对话就变，写进全局设置项里只会让人
+					// 以为「设置跟着对话漂」（见 ModelEffortPicker 里两行的说明）。
+					React.createElement(ModelEffortPicker, {
+						model: eff.model || '',
+						provider: eff.provider || '',
+						effort: eff.reasoningEffort || '',
+						// effective 仍然要传：跟着会话时，推理等级浮层要列**真正会用**的
+						// 那个模型公布的档位（列错模型的档位 → 选完派发给目标模型 → config-error）。
+						effective: { model: tgtMod, provider: tgtProv, effort: tgtEffort },
+						groups: groups,
+						efforts: efforts,
+						disabled: busy,
+						onPick: (patch) => {
+							// ── 推理等级单独一档 ──────────────────────────────────────────────
+							if (Object.prototype.hasOwnProperty.call(patch, 'reasoningEffort')) {
+								setField('reasoningEffort', patch.reasoningEffort || null);
+								return;
+							}
+							if (!Object.prototype.hasOwnProperty.call(patch, 'model')) return;
+							// ── 换模型：model / provider / reasoningEffort 必须**一次提交** ──────
+							//
+							// 为什么不能连着调三次 setField：那会发出 3 个并发 POST，而每条响应
+							// 都带整份 statusView、invoke 收到就 applyStatus 覆盖面板 —— 互相覆盖
+							// 会露出一帧不一致，busy 也会被先返回的那个提前置回 false。详见
+							// setFields 处的说明。
+							const nextModel = patch.model || '';
+							const nextProvider = patch.provider || '';
+							const wantPatch = {};
+							const wantClear = [];
+							// 模型与服务商**成对**提交（reviewTarget 要求两者都在）。
+							// 选「跟随会话」时两个都清掉，否则会留下「新 model + 旧 provider」。
+							if (nextModel) wantPatch.model = nextModel; else if (eff.model) wantClear.push('model');
+							if (nextProvider) wantPatch.provider = nextProvider; else if (eff.provider) wantClear.push('provider');
+							// 只改了 provider 的情况（不常见，但选择器允许）：不碰推理等级。
+							if (nextModel !== (eff.model || '')) {
+								// ── 换模型后的推理等级：符号档不动，钉住的档位要看新模型支不支持 ──
+								//
+								// 三种设置的处置**不一样**，不能一律清空：
+								//   · 未配置 / 跟随会话（''）→ 跟着走，不用动；
+								//   · 通用相对档（default / max / min）→ 相对值，换任何模型都成立，
+								//     **保留**。清空它等于替用户改成「跟随会话」，是没让他做的决定；
+								//   · 指定档（`@` + id）→ 钉住的是具体档位。新模型没这一档就必须处理，
+								//     否则宿主 resolveEffort 会报 config-error（表现为「自动审批一直弹窗，
+								//     面板上却看不出任何问题」）。回退目标是 **default**（模型默认），
+								//     不是「最高」或「最低」：后两者会替用户做「更慢更贵」或「判断更弱」
+								//     的选择，而「模型默认」是唯一不表态的选项。
+								const curEffort = String(eff.reasoningEffort || '');
+								// 相对档（'' / default / max / min）一律保留：它们对任何模型都成立。
+								// 判据用 PG_EFFORT_SYMBOLS（从 PG_EFFORT_SYMBOL_LABELS 派生），
+								// 与显示侧同源 —— 加符号档时不会漏掉这里。
+								const isRel = !curEffort || PG_EFFORT_SYMBOLS.indexOf(curEffort) !== -1;
+								if (!isRel && curEffort.charAt(0) === '@') {
+									if (!nextModel) {
+										// ── 切回「跟随会话」：钉住的档位必须清掉 ──────────────────────
+										// 跟随会话意味着「模型由每个对话各自决定」，而定住的 `@max` 只对
+										// **某一个**模型有意义。留在配置里，用户换到任何不公布 max 的对话
+										// 都会让宿主 resolveEffort 报 config-error —— 而那时面板显示的是
+										// 「跟随会话」，看不出任何异常（又一次面板说谎）。
+										// 清成空（= 跟随会话）而不是 'default'：模型已经跟着对话走了，
+										// 档位也应当跟着对话走，这才是「跟随会话」的完整语义。
+										wantClear.push('reasoningEffort');
+									} else {
+										// 新模型的档位表：从目录里按 (provider, model) 精确查 —— 查不到
+										// （目录没取到 / 模型不在目录里）就**不动**：没有依据时清空同样是
+										// 替用户做决定，而宿主那边会给出明确的 config-error。
+										const want = curEffort.slice(1);
+										let nextEfforts = null;
+										for (const g of groups) {
+											if (String(g.id) !== String(nextProvider)) continue;
+											const m = (Array.isArray(g.models) ? g.models : []).find((x) => String(x.id) === String(nextModel));
+											if (m && m.reasoning && Array.isArray(m.reasoning.efforts)) nextEfforts = m.reasoning.efforts;
+											break;
+										}
+										if (nextEfforts && !nextEfforts.some((x) => String(x.id) === want)) {
+											wantPatch.reasoningEffort = 'default';
+										}
+									}
+								}
+							}
+							setFields(wantPatch, wantClear);
+						},
+					}),
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } },
+						effortHintText),
 					// 恢复默认：一次性清掉本卡片所有显式配置（等价于「这块我没设过」）。
 					// 只在确实有显式配置时出现 —— 没有可恢复的东西时给个按钮是误导。
-					explicit.length ? React.createElement('div', { style: { marginTop: 8 } },
-						React.createElement('button', {
-							className: 'pg-btn', disabled: busy,
-							onClick: () => invoke('permgate:set-auto-review', { clear: explicit }, () => setMsg(T('panel.autoResetDone'))),
-						}, T('panel.autoReset')),
-					) : null,
+					// 会清掉全部显式配置且不可撤销，故必须有二次确认（复用 confirmDelete）。
+					resetAllButton(),
 				);
 			};
 
@@ -5540,13 +6790,7 @@ window.__ModuleLoader__.load({
 								// ── 动作在前，回落值在后（由共用组件保证）──────────────────────
 								// 读序必须是「**先选动作，再看它失败后怎么办**」：
 								//   读取文件   [自动审批 ▾]  失败后：[询问 ▾]
-								//
-								// 「失败后」这三个字本身是**从句**，它必须跟在它所修饰的主句之后。
-								// 曾经这里写反了（回落值排在动作左边），而同一处的注释却写着
-								// 「读序：动作 → 失败后怎么办」—— 注释与实现直接矛盾。排反后用户
-								// 从左往右读会先看到「失败后：询问」，误以为它是独立设置项。
-								//
-								// 现在读序由 actionFallbackCtl 的构造保证，不再靠每处手写顺序。
+								// 「失败后」是从句，必须跟在它所修饰的主句之后，否则用户会把它读成独立设置项。
 								actionFallbackCtl(mode, changeCat(c), tab === 'project' ? ALL_MODES : MODES,
 									catAutoFallbackOf(c), changeCatAutoFallback(c), busy),
 							),
@@ -5595,26 +6839,14 @@ window.__ModuleLoader__.load({
 										const pat = r.path || r.match || '';
 										const act = r.action;
 										// 原因 / 备注：**与分类默认值、档位、快捷工具、兜底同一个组件**
-										// （reasonInput：只读文字 + 编辑 / 保存 / 取消）。
-										//
-										// 曾经这里是一个常驻的输入框。那样确实「点开就能打字」，但它与
-										// 其余四处的样式**不一致**（别处是文字 + 编辑按钮），而且输入框
-										// 会占掉固定宽度，把匹配模式挤到只剩几十像素 ——
-										// 实测反馈「风格不统一，且如果例外过长就看不到了」。
-										// 换成同一个组件后，样式由构造保证一致，宽度也回到文字量级。
+										// （reasonInput：只读文字 + 编辑 / 保存 / 取消），样式由构造保证一致。
 										//
 										// 按**最终动作**二选一：会拒绝的显示「拒绝原因」、会询问的显示「备注」、
 										// 其余都不显示（放行的调用不再弹窗，写了也读不到，宿主会丢弃）。
 										// 判据是 finalActionOf（`auto + 回落 deny` 在执行侧就是拒绝）。
-										// 与下方「添加例外」那排输入框同规则。
 										//
-										// focus 里带 category / field / cur：
-										//   category —— 提交时要按分类定位；
-										//   field    —— 写进 reason 还是 note，由**渲染处的 act** 决定
-										//               （见 commitExReason：不在这里从 status 反查，
-										//                那会依赖「status 已刷新到最新动作」，
-										//                而改动作与改原因是两个独立请求）；
-										//   cur      —— 服务端当前值，「未改动不发请求」的比较基准。
+										// focus 里带 category / field / cur：category 提交时定位分类；field 由渲染处
+										// 的 act 决定写 reason 还是 note；cur 是「未改动不发请求」的比较基准。
 										const reasonSlot = (field) => reasonInput(
 											exReason[r.id] !== undefined ? exReason[r.id] : (r[field] || ''),
 											(e) => setExReason(Object.assign({}, exReason, { [r.id]: e.target.value })),
@@ -6179,8 +7411,8 @@ window.__ModuleLoader__.load({
 						// 故给这一格 minWidth:0 + 允许换行，让它在剩余宽度内折行。
 						React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.9)', minWidth: 0, flex: '1 1 100%', wordBreak: 'break-word', whiteSpace: 'pre-wrap' } }, d.reason || ''),
 						// 模型原话（auto 专有）：auto-deny 是**不弹窗**的路径，reason 只剩
-						// 「自动审批：模型拒绝」+ 段摘要，工具侧又已把 modelReason 剥掉（§4.5A），
-						// 于是这里是它唯一的展示位 —— 不画就等于模型原话三处出口全断。
+						// 「自动审批：模型拒绝」+ 段摘要，工具侧又已把 modelReason 剥掉，
+						// 于是这里是它唯一的展示位。
 						// 与弹窗同款样式类 + 前缀「模型判断：」：第三方文本必须与 permgate
 						// 自己的结论视觉可区分（单靠灰色斜体在深色主题下区分度不够）。
 						// 行内覆盖 marginBottom（决策行高紧凑）、flex 独占一行与 reason 同格折行。
@@ -6204,6 +7436,112 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		// ═══════════════════════════════════════════════════════════════════════════
+		// 会话流里的自动审批记录
+		// ═══════════════════════════════════════════════════════════════════════════
+		//
+		// 宿主把每次 auto 决策写成一条 `plugin:permgate/decision` 会话记录（不进模型上下文，
+		// 见 index.js 的 appendDecisionLog）。这里把它渲染成会话流里的一行。
+		//
+		// 为什么**四种 via 全都显示**（模型放行 / 模型拒绝 / 模型弃权 / 模型失败）：
+		// 用户对「AI 自己决定放行了一个删除操作」是有知情权的 —— 那一行就是唯一的知情渠道
+		// （审批弹窗根本不会出现）。只显示失败类会让「模型放行」变成一条**静默**路径。
+		// 代价是行数会变多，故默认**折叠成一行灰字**，点开才看详情。
+		//
+		// 为什么不复用「最近决策」面板：那是全局的、按时间倒序、且只在设置页里；
+		// 会话流里这一行要与**具体哪一步**对齐，才能回答「这次 AI 为什么这么干」。
+		const DECISION_KIND = 'permgate-auto';
+		const DECISION_RECORD = 'plugin:permgate/decision';
+		// via → 展示档位。四类在**颜色与措辞**上都要能分开：
+		// 放行是放宽（橙）、拒绝是收紧（灰蓝）、弃权与失败是「没问成模型」（红）。
+		function viaMeta(via) {
+			if (via === 'auto-allow') return { k: 'allow', color: '#bf8700', key: 'flow.viaAllow' };
+			if (via === 'auto-deny') return { k: 'deny', color: '#57606a', key: 'flow.viaDeny' };
+			if (via === 'auto-escalate') return { k: 'escalate', color: '#c62828', key: 'flow.viaEscalate' };
+			return { k: 'fallback', color: '#c62828', key: 'flow.viaFallback' };
+		}
+		function DecisionFlowRow(props) {
+			const node = (props && props.node) || {};
+			const d = node.data || {};
+			const meta = viaMeta(d.via);
+			const [open, setOpen] = React.useState(false);
+			const direct = d.direct === true;
+			// 折叠态一句话讲清「谁、对什么、做了什么」。
+			const head = T(meta.key)
+				.replace('{tool}', String(d.tool || '?'))
+				.replace('{action}', T('flow.action.' + String(d.action || 'ask')))
+				.replace('{direct}', direct ? T('flow.directTag') : '');
+			return React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, margin: '2px 0' } },
+				React.createElement('div', {
+					style: { display: 'flex', alignItems: 'baseline', gap: 6, cursor: 'pointer', color: meta.color },
+					onClick: () => setOpen(!open),
+				},
+					React.createElement('span', { style: { flex: '0 0 auto', opacity: 0.7 } }, open ? '▾' : '▸'),
+					React.createElement('span', null, head),
+					d.model ? React.createElement('span', { style: { color: 'rgba(128,128,128,0.85)', fontSize: 11 } }, d.model) : null,
+				),
+				open ? React.createElement('div', {
+					style: { marginLeft: 16, marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(128,128,128,0.08)', border: '1px solid rgba(128,128,128,0.2)', color: 'rgba(128,128,128,0.95)' },
+				},
+					d.fallbackReason ? React.createElement('div', null, T('flow.why') + d.fallbackReason) : null,
+					d.modelReason ? React.createElement('div', null, T('flow.modelReason') + d.modelReason) : null,
+					d.risk ? React.createElement('div', null, T('flow.risk') + d.risk) : null,
+					d.ruleId ? React.createElement('div', null, T('flow.rule') + d.ruleId) : null,
+					d.rawOutput ? React.createElement('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, margin: '4px 0 0', opacity: 0.85 } }, d.rawOutput) : null,
+				) : null,
+			);
+		}
+		// 注册 Definition + 渲染器。任何一个环节不可用都**静默跳过**（只是不显示，不影响审批）。
+		function pgRegisterDecisionFlow(ctx) {
+			try {
+				const uc = ctx && typeof ctx.get === 'function' ? ctx.get('uiConversation') : null;
+				const slots = ctx && ctx.slots;
+				if (!uc || !uc.events || typeof uc.events.register !== 'function') return;
+				if (!slots || typeof slots.inject !== 'function') return;
+				// ① Definition：认领记录事件。
+				//    `match` 只认这一个类型；`id` 用 seq —— 每条记录是独立的一行（不聚合），
+				//    因为「哪一步被自动放行」必须与步骤对齐，聚合就丢了这层信息。
+				//
+				//    `target: 'chat'` 是 Chat 视图的 target 名（见 chatNode 的 target 字段）。
+				//    `start` 保存原始 data；没有 `update`（记录是 append-only，不会被改写）。
+				uc.events.register({
+					kind: DECISION_KIND,
+					target: 'chat',
+					match: (event) => {
+						if (!event || event.type !== DECISION_RECORD) return null;
+						return { id: String(event.seq), role: 'start' };
+					},
+					start: (_context, match) => ({ data: (match && match.event && match.event.data) || {} }),
+					buildViewNode: (context) => {
+						const st = context.state;
+						if (!st || !st.data) return null;
+						const start = context.start;
+						const anchorSeq = start && start.event ? start.event.seq : 0;
+						return {
+							key: context.key,
+							kind: DECISION_KIND,
+							id: context.id,
+							target: 'chat',
+							anchorSeq,
+							// location 必须给：Chat 用它决定这一行落在哪个 turn/step 里。
+							// 取 start 的 location（记录是在 pre-execute 里写的，落在当前 step 内）。
+							location: (start && start.location) || { kind: 'unresolved' },
+							visibility: 'visible',
+							data: st.data,
+						};
+					},
+				});
+				// ② 渲染器：keyed slot，key 必须与上面 buildViewNode 的 kind 完全一致。
+				slots.inject('conversation.chat.node', () => slots.register(
+					{ name: 'conversation.chat.node', key: DECISION_KIND },
+					DecisionFlowRow,
+				));
+			} catch (e) {
+				// 注册失败不影响审批：这一行只是展示。
+				try { console.warn('[permgate] decision flow registration failed:', e && e.message ? e.message : e) } catch (e2) {}
+			}
+		}
+
 		function apply(ctx) {
 			LC = ctx;
 			// 中英文适配：注册 permgate 字典并绑定翻译函数（t 调用时读取当前语言）。
@@ -6219,30 +7557,28 @@ window.__ModuleLoader__.load({
 					T = ctx.locale.bind('permgate');
 				}
 			} catch (e) {}
-			if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="dsh-permgate"]') === null) {
-				const tag = document.createElement('style');
-				tag.dataset.plugin = 'dsh-permgate';
-				tag.dataset.pluginCss = 'dsh-permgate';
-				tag.textContent = CSS + RADIO_DISABLED_CSS + PG_CARD_CSS + PG_SORT_CSS + PG_BLAST_CSS + PG_TIER_CSS + PG_EXC_CSS;
-				document.head.appendChild(tag);
-				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
-			}
-			if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="dsh-permgate-diff"]') === null) {
-				const tag = document.createElement('style');
-				tag.dataset.plugin = 'dsh-permgate';
-				tag.dataset.pluginCss = 'dsh-permgate-diff';
-				tag.textContent = DIFF_CSS;
-				document.head.appendChild(tag);
-				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
-			}
-			if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="dsh-permgate-diff2"]') === null) {
-				const tag = document.createElement('style');
-				tag.dataset.plugin = 'dsh-permgate';
-				tag.dataset.pluginCss = 'dsh-permgate-diff2';
-				tag.textContent = DIFF2_CSS;
-				document.head.appendChild(tag);
-				ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
-			}
+			// ── 样式注入：**存在就更新，不存在才新建** ─────────────────────────────────
+			// 只在「没有标签」时写入的话，插件热重载（HMR）时旧的 <style> 还在，新增/修改过的
+			// CSS 永远进不了 DOM，表现为「改了 CSS 却毫无变化」。故无论标签在不在都重写
+			// textContent：HMR 后新 CSS 立刻生效，且不会叠加出多个 <style>。
+			//
+			// 抽成一个局部函数给三份样式表共用：逻辑完全一样，抄三遍迟早会漏改一处。
+			const injectCss = (pluginCss, text) => {
+				if (typeof document === 'undefined') return;
+				let tag = document.querySelector('style[data-plugin-css="' + pluginCss + '"]');
+				if (tag === null) {
+					tag = document.createElement('style');
+					tag.dataset.plugin = 'dsh-permgate';
+					tag.dataset.pluginCss = pluginCss;
+					document.head.appendChild(tag);
+					ctx.effect(() => () => { try { tag.remove(); } catch (e) {} });
+				}
+				tag.textContent = text;
+			};
+			injectCss('dsh-permgate', CSS + RADIO_DISABLED_CSS + PG_CARD_CSS + PG_SORT_CSS + PG_BLAST_CSS + PG_TIER_CSS + PG_EXC_CSS + PG_HOVER_CSS);
+			// 另外两份样式表同理（存在就更新，理由见上）。
+			injectCss('dsh-permgate-diff', DIFF_CSS);
+			injectCss('dsh-permgate-diff2', DIFF2_CSS);
 			// 权限选择器兼容层：图标徽标为纯 CSS（按 aria-label 选择器，零 JS 依赖，
 			// 跟随语言自动显示）；预设名文本交换由 MutationObserver 驱动（childList +
 			// characterData + attributes 全覆盖）+ locale 订阅，无定时器。安装仅在
@@ -6283,6 +7619,24 @@ window.__ModuleLoader__.load({
 				{ name: 'shell.overlay', id: 'permgate-approval', order: 100 },
 				OverlayRoot,
 			));
+			// ── 会话流里的自动审批记录（plugin:permgate/decision）────────────────────
+			// 这条链路分两半，缺一不可：
+			//   ① `uiConversation.events.register` 注册一个 Definition，认领 `plugin:permgate/decision`
+			//      事件并产出 `kind: 'permgate-auto'` 的 chat 节点；
+			//   ② 在 `conversation.chat.node` 这个 keyed slot 上注册同名 key 的渲染器。
+			// 只做 ② 不会有任何东西被渲染（节点根本不存在），只做 ① 会落到 Chat 的
+			// `unknown` fallback（一个 JSON 折叠块）—— 两者都必须做。
+			//
+			// 为什么用 `ctx.inject` 而不是 apply 期一次性 `ctx.get('uiConversation')`：
+			// 它是**可选**能力 —— 没有它时自动审批照常工作，只是会话流里不显示这一行，
+			// 故不能写进插件级 `inject`（那会让整个 UI 半边等这个服务出现，与本插件既有的
+			// 「可选依赖 + 能力探测」纪律冲突）。但「一次性探测」也不行：本插件的依赖集
+			// （slots + locale）是 ui-conversation 依赖集的**子集**，fiber 天然更早激活，
+			// 于是 apply 期 `ctx.get` 常常拿到 undefined，早退之后即使服务就绪也再无第二次
+			// 机会 —— 这条记录一条都不会出现在会话流里，且没有任何日志，与「压根没有 auto
+			// 决策」外部完全同形。`ctx.inject` 起的子 fiber 等到服务出现才执行，不阻塞主
+			// apply，服务消失时随子 fiber 一并清理。
+			if (ctx && typeof ctx.inject === 'function') ctx.inject(['uiConversation'], (c) => pgRegisterDecisionFlow(c));
 		}
 
 		exports.apply = apply;

@@ -2687,7 +2687,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       const badNotRoot = notRoot.filter((c) => blastOf(c, 'bash') === 'workspace-root')
       ok('★ 34g 过度收紧对照：区内普通路径与根之外写法（9 条）不得被判成 workspace-root',
         badNotRoot.length === 0, JSON.stringify(badNotRoot))
-      // ★★ 34h `../<rootName>` 的**通配形态**必须与**非通配形态同值**（本轮修复）。
+      // ★★ 34h `../<rootName>` 的**通配形态**必须与**非通配形态同值**。
       //    机制：外层那条「`..` 归约回根」的判据带 `!/[*?]/` 守卫（为保 34c 而设），
       //    于是**含通配的同族**被预筛挡在门外 → `isWorkspaceRoot` 钩子 0 次调用
       //    → 段级 blast 落 inside。实测（修复前，root=`X:/ws`、八档 inside=allow 其余 ask）：
@@ -2961,7 +2961,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   // 价值：日后给半径组**新增 label** 时，若它属于「参数非路径」那一类，断言立刻红灯 ——
   // 否则它会静默落 inside。
   //
-  // ── 遍历的组**必须来自生产导出**，不能就地手抄一份三元组（发现 3）──────────────────
+  // ── 遍历的组**必须来自生产导出**，不能就地手抄一份三元组 ─────────────────────
   // 这里曾经写 `const RADIUS_GROUPS = ['del','disk','perm']` —— 那是生产语义表
   // `shell-parse.js` 的 `RADIUS_GROUPS`（`{del,disk,perm,priv}`）与 `GROUP_TIER`
   // 的成员在测试侧的第二份拷贝，而两张生产表当时都没导出。后果：日后新增一个半径组时，
@@ -3134,7 +3134,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         suCWin: blastOf('su -c C:/Windows', 'bash', 'win32'),
         action: runPriv('su root rm -rf /data').action }))
   }
-  // ── 54d2：`privOperandSkip` **不得过度跨过**操作数（发现 4 的反方向）──────────────
+  // ── 54d2：`privOperandSkip` **不得过度跨过**操作数 ──────────────────────────
   // 54d 修的是「该跨没跨」（`su root rm -rf /data` 的操作数 `root` 挡住了真命令名），
   // 而同一函数曾有的另一支是「**不该跨却跨了**」：`isDestructiveLabel(afterName)` 之后
   // 紧跟一条 `if (WRAPPERS[afterName] === 1 || PRIV_PREFIXES[afterName] === 1) return k`
@@ -3249,7 +3249,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     // 档位集合也必须同值（blast 同值而 tiers 不同 = 仍在档位上分叉）
     const badTiers = cross.filter(([a, b]) => tiersOf(a, 'bash', 'win32').join(',') !== tiersOf(b, 'bash', 'win32').join(','))
-    // ── 54d3b：`-c` / `--command` / `--command=<值>` **值选项族**（上一轮的单点收敛盲区）──
+    // ── 54d3b：`-c` / `--command` / `--command=<值>` **值选项族** ──────────────────
     // 54d3 只钉了「提权前缀后的 `NAME=value` 赋值」这一支，对**值选项路径零断言** ——
     // 于是 `isPrivCommandValueFlag` 的单点收敛把「`--command=` 前缀匹配」这一支
     // 带进了 `isPrivOperandWord`（那是**操作数侧**，命中即返 false），
@@ -3304,7 +3304,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       //    吃目标的命令名时，命令头照旧停在值选项处、tiers 只剩 `priv`（值本身是目标时
       //    半径档由那个目标给出）。既有设计，本判据不得改坏它。
       //
-      //    ⚠️ 这里**不得**再写 `su root -c rm -rf /tmp` 的 `tiers === 'priv'`（本轮更正）：
+      //    ⚠️ 这里**不得**再写 `su root -c rm -rf /tmp` 的 `tiers === 'priv'`：
       //    那个期望值把「值即目标」的结论**错套到了「值是命令」的形态**上 —— 该形态里
       //    `rm` 明明是**裸命令名**、`-rf /tmp` 是它的参数，命令头理应从 `rm` 开始。
       //    按此钉住会让 `su root -c rm -rf /tmp` 与**同义**的 `su -c rm -rf /tmp` 分叉
@@ -3338,28 +3338,18 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         dashC: tiersOf('su root -c rm -rf /tmp', 'bash', 'win32'),
         longExact: tiersOf('su root --command rm -rf /tmp', 'bash', 'win32'),
         dashCNoOperand: tiersOf('su -c rm -rf /tmp', 'bash', 'win32') }))
-    // ── 54d3c：**值选项写在操作数之前**的畸形形态（上一轮的对称盲区）────────────────────
-    // 54d3b 钉的是「值选项在**操作数之后**」（`su root --command=x …`）那一支 —— 它修好了
-    // 操作数侧的 `joined=false`。而**门控侧**（`privValueFlagBetween`）当时仍传
-    // `joined = true`，于是同一个 `--command=` 前缀在**另一个位置**上成了放宽源：
+    // ── 54d3c：**值选项写在操作数之前**的畸形形态 ──────────────────────────────
+    // 54d3b 钉的是「值选项在操作数之后」（`su root --command=x …`）那一支 —— 它修好了
+    // 操作数侧的 `joined=false`。而门控侧（`privValueFlagBetween`）当时仍传
+    // `joined = true`，于是同一个 `--command=` 前缀在另一个位置上成了放宽源：
     //
     //   `privValueFlagBetween` 的扫描区间是「前缀名之后、`skipPrefixArgs` 返回值之前」的
-    //   **全部**词元；区间里一旦出现任何 `--command=` **前缀**词元就返 `true`
-    //   → `isPrivOperandToken` 返 `false` → `privOperandSkip` **立即返回 `at`、不再跨过
-    //   操作数** → 真命令与真目标一起被排除在命令头之外 → 段级 blast 归 `null`
+    //   全部词元；区间里一旦出现任何 `--command=` 前缀词元就返 `true`
+    //   → `isPrivOperandToken` 返 `false` → `privOperandSkip` 立即返回 `at`、不再跨过
+    //   操作数 → 真命令与真目标一起被排除在命令头之外 → 段级 blast 归 `null`
     //   → 半径档落 `inside`。
     //
-    // 插桩实测（`commandHeadEnd` / `privValueFlagBetween` 直接调用，修复前）：
-    //     `su --command=x root rm -rf /tmp`   flag=**true**  headEnd=**2** headName=`--command=x`
-    //                                         blast=`null`/tiers=`["priv"]`（priv=allow → **allow**）
-    //     对照 `su root rm -rf /tmp`           flag=false headEnd=3  headName=`rm`
-    //                                         blast=`outside|/tmp`/tiers=`["outside","priv"]`（**ask**）
-    // 同族（全部命中，`--command=` / `=x` / `=rm` / `==` 四种值写法一致）：
-    //     `sudo su --command=x root rm -rf /tmp`   headEnd **2 vs 4**、blast null vs outside
-    //     `su --command=x root diskpart`           tiers `["priv"]` vs `["unknown","priv"]`
-    //                                              （unknown=deny 下 **allow vs deny**）
-    //     `su --command=x root kill 1234`          **proc 档整个丢失**
-    //     `su --command=x root reg delete …`       **reg 档整个丢失**
+    // 同族的另外三种值写法（`=x` / `=rm` / `==`）表现一致。
     //
     // ── 为什么**不能**简单改回 `joined = false`（那是把闸开过头，实测有放宽）──────────────
     // 直接不认连写形态 ⇒ 操作数**无条件**被跨过 ⇒ 而那个位置可能正是**真路径目标**：
@@ -3376,13 +3366,13 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // **上界**判据，故「为假 ⇒ 该词元在判档循环里本来就不产半径档 ⇒ 跨不跨都不产生任何
     // 半径档」⇒ 本支只可能**收紧**，不可能放宽（见 `privValueFlagBetween` 的注释）。
     //
-    // ⚠️ 该判据**不能**只取 `mayNeedBlastCheck`（上一版如此，是**真实放宽**，已实测推翻）：
+    // ⚠️ 该判据**不能**只取 `mayNeedBlastCheck`（那是真实放宽，已实测推翻）：
     // 那条预筛在循环里**不是第一条产档路径**，它前面还有两条对「纯词元」形态照样产档的
     // 分支（`:4922-4963` 的引号递归支、`:4975-4986` 的 `NAME=value` 支），而
     // `mayNeedBlastCheck` 对它们返假。实测（win32、priv=allow）：
     //     `su --command=x "rm -rf Windows" rm`  PRE=`system|Windows`/ask → CUR=`null`/allow
     //     `su --command=x FOO=Windows rm`       同上
-    // 故下面 ⑤ 引号命令行族与 ⑥ `NAME=value` 族是**必需的**（上一版语料的盲区）。
+    // 故下面 ⑤ 引号命令行族与 ⑥ `NAME=value` 族是**必需的**。
     //
     // 本断言钉四件事：
     //   ① 畸形族与**不带该选项**的同形态 **blast + tiers 双口径同值**（根因判据，
@@ -3448,7 +3438,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       ['runas /user:a --command=x C:/Windows rm', 'system|C:/Windows', 'wide,priv'],
       // ── ⑤ 引号命令行词元族：`upto` 位置是**含空格的词元** ────────────────────────────
       //
-      // ⚠️ 这一族与下面 ⑥ 是**上一版守卫的盲区**（发现 1）：守卫当时只取
+      // ⚠️ 这一族与下面 ⑥ 是守卫的盲区：守卫当时只取
       // `mayNeedBlastCheck(w[upto], undefined)`，而 `blastRadiusOfSegment` 的判档循环在
       // 那条预筛**之前**还有两条产档路径，它们对「纯词元」形态照样成立、`mayNeedBlastCheck`
       // 却返假 —— 故「返假 ⇒ 跨过它不丢半径档」的论证不成立。
@@ -3519,7 +3509,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       && run('su --command=x root diskpart', dsDeny).action === 'deny'
       // ④ 防空转：区内目标**仍必须 allow**（若把整条闸开成「提权一律 ask」这条会红）
       && run('su --command=x root rm -rf ./build', dsPrivAllow).action === 'allow'
-      // ⑤⑥ 端到端（发现 1 的用户可见后果）：两族的 `upto` 位置是**真系统目标**，
+      // ⑤⑥ 端到端（用户可见后果）：两族的 `upto` 位置是**真系统目标**，
       // priv=allow 下修复前是 **allow**（半径档被整档绕过），必须恢复成 **ask**。
       && run('su --command=x "rm -rf Windows" rm', dsPrivAllow).action === 'ask'
       && run('su --command=x "cmd System32" rm', dsPrivAllow).action === 'ask'
@@ -3677,7 +3667,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         bareDeny: run6('sudo FOO=1 time diskpart', dsDeny6).action,
         buildStillAllow: run6('sudo FOO=1 time rm -rf ./build', dsPrivAllow6).action }))
   }
-  // ── 54d4：`su root -c <cmd>` —— **操作数之后的值选项**形态（本轮修复）──────────────
+  // ── 54d4：`su root -c <cmd>` —— **操作数之后的值选项**形态 ────────────────────
   // 54d3 / 54d3b / 54d3c 覆盖了「赋值词元」「连写值选项」「值选项在操作数之前」三支，
   // 唯独漏了最常规的一支：`su root -c <cmd>`（GNU getopt 参数置换下 `su` 指定用户后执行
   // 命令的标准写法）。`privOperandSkip` 在**操作数** `root` 上收束后，`at` 指向的是值选项
@@ -3739,14 +3729,14 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       ['su root -c x kill 1234', 'su -c x kill 1234'],
       ['su root -c x rm -rf /tmp', 'su -c x rm -rf /tmp'],
       ['su root -c x', 'su -c x'],
-      // ── 值即**语句关键字**（本轮修复；缺这一族会让整个子形态静默回归）──────────────
+      // ── 值即**语句关键字**（缺这一族会让整个子形态静默回归）──────────────────
       // `isTargetEatingNameIn` 的三个来源（破坏性名单 ∪ `PAYLOAD_CARRIERS` ∪ 两词 label）
       // 与 `STATEMENT_KEYWORDS` **交集为空**（`isPrivOperandWord` 显式把关键字排除在操作数
       // 之外），故关键字**结构性**不在原判据的覆盖范围内：`vn='time'` 判假 → 落到快速路径
       // （`afterName` 是 `-c`）→ 返回 `at`（不跨）→ 链停在 `su` 上、真命令名永不进 labels。
       // 实测（修复前）：`su -c time kill 1234` = T[proc,priv]、`su root -c time kill 1234`
       // = T[**priv**]（proc 档整个丢失）；端到端 例外 `kill *`=deny 时前者 deny、后者 **ask**。
-      // ⚠️ 这一族**必须显式钉住**：程序化核对过 54d4 的 `same` 列表在本轮之前**不含任何
+      // ⚠️ 这一族**必须显式钉住**：54d4 的 `same` 列表原不含任何
       // 关键字**，故原断言对该子形态零覆盖（下面 `badKw` 那一段按**全表**穷举补上）。
       ['su root -c time kill 1234', 'su -c time kill 1234'],
       ['su root -c ! kill 1234', 'su -c ! kill 1234'],
@@ -4014,7 +4004,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       ['su -c dd /dev/sda', 'outside|/dev/sda', 'outside,priv'],
       ['su -c dd of=/dev/sda', 'outside|/dev/sda', 'outside,priv'],
       ['su -c time parted /dev/sda', 'outside|/dev/sda', 'outside,priv'],
-      // 仲裁实测「逐字不变」的两条（本组复核，防本次修法波及）
+      // 逐字不变的两条（本组复核，防本次修法波及）
       ['parted /dev/sda', 'outside|/dev/sda', 'outside'],
     ]
     const badValue54d5 = valueIsTarget54d5.filter(([c, bl, ti]) => {
@@ -4508,7 +4498,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         suRoot: labelsOf54h3('su root'),
         suCWin: blastOf('su -c C:/Windows', 'bash', 'win32') }))
   }
-  // ── 54i：带值选项的**值恰是路由器名**时不得拼出假两词 label（发现 2）──────────────
+  // ── 54i：带值选项的**值恰是路由器名**时不得拼出假两词 label ──────────────────
   // `su` 的贪婪扫描一度**无上界**，于是 `kubectl` 与 `--namespace` 都被当成「操作数」
   // 跨了过去，扫描停在 `--namespace` 的**值** `reg` 上 —— 而 `reg` 恰好是路由器名，
   // `isTargetEatingNameIn(w, idx_of_reg)` 随即用 `routerSubLabelOf` 拼出 **`reg delete`**：
@@ -4579,59 +4569,29 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         sudoKubectlProd: labelsOf54i('sudo kubectl --namespace prod delete pod x'),
         suRegDelete: labelsOf54i('su root reg delete HKLM\\X /f') }))
   }
-  // ── 54j：`su` / `runas` 操作数之后的**路径目标**不得被当命令名吃掉（发现 1 的回归）────
-  // `privOperandSkip` 的扫描与跨越判据一度**只看 `commandNameOf` 的结果**，而它按 basename
-  // 取尾段 —— 于是 `/usr/bin/rm`、`C:/Windows/System32/taskkill.exe` 这类**路径目标**
+  // ── 54j：`su` / `runas` 操作数之后的**路径目标**不得被当命令名吃掉 ────────────
+  // `privOperandSkip` 的扫描与跨越判据一度只看 `commandNameOf` 的结果，而它按 basename
+  // 取尾段 —— 于是 `/usr/bin/rm`、`C:/Windows/System32/taskkill.exe` 这类路径目标
   // 解出 `rm` / `taskkill`（都在破坏性名单里）而被当成「操作数之后的命令名」：
-  // 扫描跨过去、命令头把整段跳空 → 段级 blast 归 **null** → 半径档 `inside` → 静默放行。
+  // 扫描跨过去、命令头把整段跳空 → 段级 blast 归 `null` → 半径档 `inside` → 静默放行。
   //
-  // 与 `git show HEAD:shell-parse.js` 三方差分（136412 条叉乘、逐条比段级 blast）：
-  // 这类形态 **1080 条**由 HEAD 的 system/outside 变 null，方向是 **fail-open**
+  // 与 HEAD 逐条比段级 blast：这类形态由 HEAD 的 system/outside 变 null，方向 fail-open
   // （`runas /user:a /usr/bin/rm`、`su root /usr/bin/find`、`su -c /usr/bin/find`…）。
-  //
-  // ⚠️ **归因更正（本节一度把上面那 1080 条整体归因为 `runas` 的操作数）** ────────────────
-  // 逐条打印 `blast.path` 复核后，那 1080 条（以及本轮复核语料的残余）必须按
-  // `HEAD blast.path` 一分为二，**不能只看计数**：
-  //   · `head.path` 是 **操作数自身**（`/user:a`、`/noprofile`）—— HEAD 的**假警告**：
-  //     HEAD 把 `runas` 的操作数当成了目标路径，警告指错对象。修复后仍有 18 条此类。
-  //   · `head.path` 是 **真实路径目标**（`/etc` `/tmp` `/root` `/opt` `/home` `/usr` `/var`
-  //     `/etc/hosts` `/data` `C:/data` `D:/data` `C:/Windows` `C:/Users/me`）—— **真漏报**，
-  //     方向 fail-open。修复后仍有 88 条此类。
-  // 上一轮修复者自述「残余 LOST 全部是 HEAD 的假警告」即由此误归因而来 —— 真实目标那一半
-  // 被计数掩盖。单段 POSIX 路径形态（`/etc`、`/tmp`）恰是其中一类，故由 54n 单独钉住
-  // （它们落在 54j/54k/54l 的用例之外：那三组的路径都含**第二个 `/`** 或 `:`）。
+  // 归因时必须按 `HEAD blast.path` 一分为二，不能只看计数：
+  //   · `head.path` 是操作数自身（`/user:a`、`/noprofile`）—— HEAD 的假警告；
+  //   · `head.path` 是真实路径目标（`/etc` `/tmp` `/root` `C:/Windows` …）—— 真漏报。
+  // 单段 POSIX 路径形态（`/etc`、`/tmp`）由 54n 单独钉住（它们落在 54j/54k/54l 的用例
+  // 之外：那三组的路径都含第二个 `/` 或 `:`）。
   //
   // 判据取「**与 HEAD 同值**」（HEAD 侧本就是 system/outside），而不只是「非 null」——
   // 后者会漏掉「判成了更轻的档」。故这里逐条钉住具体的 level。
   //
-  // ⚠️ **`want` 列此前从不被读取**（循环只解构 `c`，只判「非 null」）：上面那句「逐条钉住
-  // 具体的 level」与**实际覆盖不符** —— 13 条里只有下面手写的 5 条钉了 level，另 8 条只判
-  // 「非 null」，于是某条从 `system` 降为 `outside`（**更轻档**）时测试**不红**，而注释让人
-  // 相信有覆盖。
-  //
-  // ⚠️⚠️ **中途那一版 `got !== want && gotW !== want` 只补了一半，循环仍是空转**（本轮实测
-  // 复核）：`want` 列 13 条**恒为 `system`**，而每条**至少有一侧实测等于 `system`**
-  // （posix 10/13、win32 3/13，两侧都不等于的实测 **0/13**）。于是 `got !== want &&
-  // gotW !== want` **恒为 false** —— 13/13 条的**第二支 `push` 是结构性死分支**；第一支
-  // （`got === null || gotW === null`）实测同样从不触发（双侧 null 数 0/13）。**整个循环体
-  // 从不 push、`badPath` 恒空**，断言实际只由后面手写的对照撑着。
-  // 结论：**「未匹配的那一侧」完全未被钉住** —— 前 10 条的 win32 侧、后 3 条的 posix 侧从
-  // `outside` 降到 `inside`（`BLAST_ORDER` 6 → 7，**真实放宽**：工作区外 → 工作区内不警告）
-  // 时，测试**仍然全绿**。上一轮「把某条 `want` 改成 `'wide'` → FAIL(1)」只证明「`want` 被
-  // 读到」，**不证明「两侧都被钉住」**：那是「至少一侧相等」的语义。
-  //
+  // 注意 `want` 列必须被真正读取：循环只解构 `c`、只判「非 null」时，某条从 `system`
+  // 降为 `outside`（更轻档）测试不红，而注释让人相信有覆盖。
   // 判据形态：**两侧各自带自己的期望值**（`wantP` / `wantW`），逐侧独立严格相等。
-  // 为什么不能写单值 `want`：**单值无法同时表达两侧** —— 实测 posix 侧 `system` 10/13、
-  // win32 侧 `system` 3/13（`win32EqWant` 只有 3），写 `gotW === want` 会立刻假红 10 条
-  // （上一轮那条建议即因此被实测否决）；而 `&&` / `||` 任一形态都必然放掉一侧。
-  //
-  // 期望值**逐条实测**得到（不照抄旧的 `want` 列，也不凭猜测）：
-  //   · 前 10 条，目标 `/usr/bin/*`：posix 判 `system`（`/usr` 在系统目录名单内），
-  //     win32 判 `outside`（`/usr/bin/rm` 只是普通相对路径，落在工作区外）
-  //   · 后 3 条，目标 `C:/Windows/System32/*`：posix 判 `outside`（`C:/…` 在 posix 下是普通
-  //     相对路径），win32 判 `system`（`C:/Windows` 在系统目录名单内）
-  //   即 `[posix 期望, win32 期望]` 恰好**互为镜像**；双侧均非 null（实测 0/13 为 null），
-  //   故「不得归 null」由逐侧相等一并覆盖。双侧实测值见下面 `wantChecks`，
+  // 不能写单值 `want`：posix 侧与 win32 侧的期望互为镜像（`/usr/bin/*` 在 posix 下是
+  // system、在 win32 下是 outside；`C:/Windows/System32/*` 反之），单值无法同时表达两侧，
+  // 而 `&&` / `||` 任一形态都必然放掉一侧。
   //   `posixEqWant` / `win32EqWant` 均应等于 13。
   {
     const badPath = []
@@ -4686,7 +4646,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         suRmData: blastOf('su root rm -rf /data', 'bash', 'win32'),
         plainRmData: blastOf('rm -rf /data', 'bash', 'win32') }))
   }
-  // ── 54n：**单段**路径目标不得被当 Windows 开关跨过（发现 1 的 fail-open 回归）──────────
+  // ── 54n：**单段**路径目标不得被当 Windows 开关跨过 ──────────────────────────
   // `privOperandSkip` 的扫描上界 `isOperandShapedWord` 曾把 `/x` 一律当「Windows 风格开关」
   // （`/^\/[a-z]/i.test(t) && t.indexOf('/', 1) === -1`），**不看平台也不看 `:`** ——
   // 于是**单段** POSIX 绝对路径 `/etc`、`/tmp`、`/root`、`/opt`、`/home`、`/usr`、`/var`
@@ -4706,7 +4666,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   // 当 cmd 开关跳过**（那是平台感知的既有行为，HEAD 同样是 null），故 win32 侧测不出本回归。
   // 回归发生在 posix —— 那里 HEAD 侧本就是 system/outside，判据必须是「与 HEAD 同值」。
   //
-  // ⚠️ **本组只钉 `/x` 分支修好的形态**（发现 1 点名的四条端到端复现）。同一函数还有
+  // ⚠️ **本组只钉 `/x` 分支修好的形态**（四条端到端复现）。同一函数还有
   // 两处**独立于 `/x` 的残余**（`k === at` 无条件认第一个操作数、关键字链按 basename 认
   // 关键字 `data`），它们让 `su - /etc rm`、`su root /data rm`、`su root D:/data rm` 仍判
   // null/allow —— 见 `shell-parse.js` 里 `privOperandSkip` 的「已知残余」段。那两处不在
@@ -4751,7 +4711,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         runasNoprofile: blastOf('runas /noprofile /user:admin rm -rf /data', 'bash', 'win32'),
         plainRmData: blastOf('rm -rf /data', 'bash', 'win32') }))
   }
-  // ── 54o：`runas` **非首位**的不含 `:` 开关不得被当扫描终点（本轮修复的收窄倒退）──────────
+  // ── 54o：`runas` **非首位**的不含 `:` 开关不得被当扫描终点 ─────────────────────
   // 54n 给 `isOperandShapedWord` 加的「含 `:`」守卫是**为 `su` 立的**：`su` 是 POSIX 命令，
   // 其后的单段路径（`/etc`、`/tmp`）必须留在命令头之外。而该判据被**全局**套到了 `runas` 上，
   // 于是 `runas` 的开关里**除 `/user:` 之外全部不含 `:`**（`/noprofile` `/savecred` `/netonly`
@@ -4895,7 +4855,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         n54o, corpus: runasMulti.length,
         suEtc: blastOf('su root /etc rm', 'bash', 'posix') }))
   }
-  // ── 54q：`runas` 开关之后的**单段路径目标**不得被当开关跨过（发现 1 的守卫）─────────────
+  // ── 54q：`runas` 开关之后的**单段路径目标**不得被当开关跨过 ───────────────────
   // `isRunasSwitchShapedWord` 一度**放宽到「单段 `/x` 一律算开关候选」**，理由是「`runas` 的
   // 位置参数就是命令，`runas /profile /etc rm` 本就不是合法调用，且 blast 仍由真命令与真目标
   // 决定」。**实测该理由不成立 —— 真目标恰恰被跨过了**：单段 `/x` 这个形态里同时住着
@@ -4994,7 +4954,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     ok('★★ 54q `runas` 开关之后的单段路径目标不得被当开关跨过（`runas /noprofile /etc rm` 一族，两平台 × 全开关穷举）',
       badBlast.length === 0 && badTier.length === 0 && e2e54q.length === 0
       // 对照（防空转）：**实际比较条数**必须等于语料叉乘大小，且对照侧真的判出了值 ——
-      // 少了它，循环被 `continue` 掉或语料被置空时上面三个数组恒空、本组恒过（发现 2 同源）。
+      // 少了它，循环被 `continue` 掉或语料被置空时上面三个数组恒空、本组恒过。
       && compared === SWITCHES.length * PATHS.length * CMDS.length * 2
       && ctlNonNull === compared
       && SWITCHES.length >= 7 && PATHS.length >= 12 && CMDS.length >= 2
@@ -5016,7 +4976,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         win32Etc: blastOf('runas /noprofile /etc rm', 'bash', 'win32'),
         posixEtcCtl: blastOf('rm /etc', 'bash', 'posix') }))
   }
-  // ── 54r：`runas` 官方开关全表 × 非首位 —— 漏加一项是 **fail-open**（发现 1 的守护）─────────
+  // ── 54r：`runas` 官方开关全表 × 非首位 —— 漏加一项是 **fail-open** ─────────────
   // `RUNAS_SWITCHES` 是**枚举表**，而它漏项的方向此前被注释写反了（写成「漏加 = 该跨没跨 =
   // 偏保守，不会静默放行」）。**实测该归因不成立**：本表成员在命令头推进里是**必跨**项，
   // 漏掉一项**不是**「停在开关上」，而是让 `privOperandSkip` 的扫描在那一项上提前收束、
@@ -5306,7 +5266,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         kwChain,
         pathTargets }))
   }
-  // ── 54k：**操作数之后的非破坏性命令不得被吞**（发现 1 的核心回归，方向 fail-open）────
+  // ── 54k：**操作数之后的非破坏性命令不得被吞**（方向 fail-open）────────────────
   // `privOperandSkip` 的扫描一度**无上界**（`while (k < w.length && isPrivOperandWord(…)) k += 1`），
   // 而 `isPrivOperandWord` 对**任何不是「吃目标的命令名」的词元**都返回 true —— 于是扫描
   // 一路吞到段内那个恰好叫破坏性命令名的词元，把**真命令与真目标**一起吞进命令头：
@@ -5368,7 +5328,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         suRoot: blastOf('su root', 'bash', 'win32'),
         suRootLs: blastOf('su root ls', 'bash', 'win32') }))
   }
-  // ── 54l：`su` / `runas` 操作数 + 载荷族（`find`）必须可见（发现 1 同根的另一半）─────────
+  // ── 54l：`su` / `runas` 操作数 + 载荷族（`find`）必须可见 ─────────────────────
   // `commandHeadEnd` 的 ② 分支只认 `isDestructiveLabel` 时，`find` **不在**名单里
   // （它的破坏性来自后续 `-delete` / `-exec`），于是命令头停在操作数 `root` 上、
   // `headCommandNameOf` 取回 `root` → `isCmdStyleSwitch('/data', …, 'root')` 认不出命令域
@@ -5411,7 +5371,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         suFindRootDelete: blastOf('su root find / -delete', 'bash', 'win32'),
         suEnvFindRootDelete: blastOf('su root env find / -delete', 'bash', 'win32') }))
   }
-  // ── 54m：发现 3 的性能守卫 —— `su (reg --config)*n` 必须**线性**（照搬 54f 的范式）──────
+  // ── 54m：性能守卫 —— `su (reg --config)*n` 必须**线性**（照搬 54f 的范式）──────
   // `isPrivOperandWord` 每个词元都调一次 `isTargetEatingNameIn` → `routerSubLabelOf`，
   // 而后者从该下标**向后扫到段尾**；贪婪扫描本身 O(n)，两者相乘即 **O(n²)**。
   // 触发形态是「`su`/`runas` 后出现『路由器名 + `ROUTER_OPT_VALUE` 带值选项』的重复序列」，
@@ -5471,7 +5431,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     const s4000 = timeSlash(4000)
     const s8000 = timeSlash(8000)
     const slashRatio = s8000 / Math.max(s4000, 0.001)
-    ok('★★ 54m `su (reg --config)*8000` 的 label 判定必须线性（发现 3：`routerSubLabelOf` 的向后全扫导致 O(n²)）',
+    ok('★★ 54m `su (reg --config)*8000` 的 label 判定必须线性',
       p8000 < 300 && perfRatio < 3.0 && q8000 < 300
       // 路径形态路由器名（残余平方的真正触发路径）同样必须线性 + 绝对上限
       && s8000 < 300 && slashRatio < 3.0
@@ -5483,7 +5443,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         slash4000: +s4000.toFixed(3), slash8000: +s8000.toFixed(3), slashRatio: +slashRatio.toFixed(2),
         tokens8000: buildPerf(8000).length }))
   }
-  // ── 54m2：扫描上限的**计数口径**必须覆盖「同键重复」（发现 2）────────────────────────
+  // ── 54m2：扫描上限的**计数口径**必须覆盖「同键重复」────────────────────────
   // `routerSubLabelOf` 的向后扫描上限一度**只按词元数**计（`idx + 1 + 64`），而原注释用
   // 「13 个带值选项键 × 2 词元 = 26，64 留一倍余量」论证它不会误伤 —— 该论证**漏了
   // 同一个键重复出现**：13 是**去重后**的键数，重复不受它约束。
@@ -5533,7 +5493,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         dashSlash4000: +d4000.toFixed(3), dashSlash8000: +d8000.toFixed(3), dashRatio: +dashRatio.toFixed(2),
         tokens32: mkRepeat(32).length }))
   }
-  // ── 54v：多层前缀链的推进必须**线性**（发现 2 修法的性能守卫）────────────────────
+  // ── 54v：多层前缀链的推进必须**线性** ────────────────────────────────────
   // `pushHeadLabels` 的循环推进每轮只做 O(1) 的 `commandNameOf(w[i])` 查表，命令头 label
   // 只在链尾取**一次** `segmentLabel`。曾经写成「每轮取一次 `segmentLabel(w.slice(next))`」，
   // 于是 `sudo sudo … sudo kill 1234`（n 个前缀）退化成 **O(n²)** —— 实测 `segmentLabels`：
@@ -5555,7 +5515,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     const c4000 = timeChain(4000)
     const c8000 = timeChain(8000)
     const chainRatio = c8000 / Math.max(c4000, 0.001)
-    ok('★★ 54v 多层提权前缀链（`sudo`×n + `kill`）的 label 判定必须线性（发现 2 修法：每轮不得调 segmentLabel）',
+    ok('★★ 54v 多层提权前缀链（`sudo`×n + `kill`）的 label 判定必须线性',
       c8000 < 300 && chainRatio < 3.0
       // 对照（防空转）：链再长，真命令名也必须看得见（否则「线性」可能来自提前放弃）
       && segmentLabels(buildChain(8000)).indexOf('kill') !== -1
@@ -5565,7 +5525,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       JSON.stringify({ c4000: +c4000.toFixed(3), c8000: +c8000.toFixed(3), chainRatio: +chainRatio.toFixed(2),
         labels8000: segmentLabels(buildChain(8000)), tokens: buildChain(4000).length }))
   }
-  // ── 54F：pwsh 反引号续行守卫的**下标支**必须是线性（本轮修复：`\[[^\]]*\]$` 无左锚定）──
+  // ── 54F：pwsh 反引号续行守卫的**下标支**必须是线性（`\[[^\]]*\]$` 无左锚定）──
   // 判据本体是 `PWSH_ACCESSOR_TAIL` 里那条「下标访问」支（`(?<!\.)\[[^\]]*\]$`）。它**没有
   // 左锚定**，失配时对每个起始位置各回溯一遍 ⇒ O(n²)。触发形态是「长未闭合 `[` 词元 +
   // 反引号 + 换行」——`'"x"' + '['*n + '`\n'`。实测（本机 Node v24.19，取多次最小值）：
@@ -5589,7 +5549,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 对照（防空转）：构造的确实是「引号串 + n 个 `[` + 反引号 + 换行」的 n+3 长度形态
     // 对照（防过度收紧）：同一判据在**正常**下标访问形态上仍必须命中（不得为线性而丢功能）
     const normal = decomposeCommand('Remove-Item -Force $arr[0]' + BT + '\n-Confirm:$false', 'pwsh')
-    ok('★★ 54F 长未闭合 `[` 词元的续行判定必须线性（本轮：`\\[[^\\]]*\\]$` 无左锚定致 O(n²)）',
+    ok('★★ 54F 长未闭合 `[` 词元的续行判定必须线性',
       b32000 < 300 && bracketRatio < 3.0
       // 对照（防空转）：长度真的是 n+5（`"x"` + n 个 `[` + 反引号 + 换行），
       // 且该形态不返回 ok:false（走了判据才可能平方）
@@ -5602,7 +5562,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         ratio: +bracketRatio.toFixed(2), len: buildBracket(32000).length,
         normal: normal.ok ? normal.segments[0].words : normal.reason }))
   }
-  // ── 54G：`PWSH_QUOTED_TAIL` 的判定**不得读 `segText`**（本轮修复：rope 反复扁平化）──
+  // ── 54G：`PWSH_QUOTED_TAIL` 的判定**不得读 `segText`**（rope 反复扁平化）──
   // 判据本体是续行守卫里的「词元尾部是不是闭合引号」。它一度写成
   // `PWSH_QUOTED_TAIL.test(segText)`，而 `segText += s` 在 V8 里**只建 rope（O(1)）**，
   // 任何内容读取（含正则）都必须先把 rope 扁平化成连续串（**O(n) 拷贝**）——
@@ -5630,7 +5590,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 对照（防过度收紧）：该形态的判定结果必须仍然正确 —— 行尾是**变量**（裸词族）⇒ 粘住，
     // 故只应有 1 段、且最后那个 `-Name $nN` 与下一行同属一个词元。为线性而丢判定即失败。
     const dLines = decomposeCommand(buildLines(200), 'pwsh')
-    ok('★★ 54G `PWSH_QUOTED_TAIL` 判定不得读 `segText`（本轮：rope 扁平化致 O(n²)）',
+    ok('★★ 54G `PWSH_QUOTED_TAIL` 判定不得读 `segText`',
       l32000 < 300 && linesRatio < 3.0
       // 对照（防空转）：长度真的是 `20 + Σ(12 + i 的位数)`（`New-Item -Path $base` 20 字符 +
       // 每轮 12 字符固定开销 + 行号位数），N=32000 时为 532910（约 520 KB），
@@ -5644,7 +5604,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         ratio: +linesRatio.toFixed(2), len: buildLines(32000).length,
         segs: dLines.ok ? dLines.segments.length : dLines.reason }))
   }
-  // ── 54H：pwsh 词元形态判定**不得读 `wordText`**（本轮修复：rope 反复扁平化致 O(n²)）──
+  // ── 54H：pwsh 词元形态判定**不得读 `wordText`**（rope 反复扁平化致 O(n²)）──
   // 判据本体是 `pwshEscapeBoundaryAt` 的第一句 `PWSH_PARAMETER_TOKEN.test(word)`（含 `*`
   // 量词 + `$` 锚，命中时需扫完整个词元）。它此前对 `wordText` **直接跑正则**，而
   // `wordText += s` 在 V8 里只建 rope（O(1)），**任何内容读取**（正则、下标、`slice`）
@@ -5689,7 +5649,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 对照（防过度收紧）：同一判据在**正常**形态上仍必须正确 —— Parameter 词元内的反引号
     // 仍是字面字符（`;` 不吞、`a` 并进参数名），不得为线性而丢判定
     const dSem = decomposeCommand('cmd /c ver -x' + BT + 'a' + BT + ';' + BT + '\n' + 'RemoveXyz', 'pwsh')
-    ok('★★ 54H pwsh 词元形态判定不得读 `wordText`（本轮：rope 扁平化致 O(n²)）',
+    ok('★★ 54H pwsh 词元形态判定不得读 `wordText`',
       p32000 < 300 && paramRatio < 3.0 && p32000Path < 300 && pathRatio < 3.0
       // 对照（防空转）：长度真的是 `2 + 2n`，且不返回 ok:false
       && buildParam(32000, '-x').length === 32000 * 2 + 2
@@ -5703,7 +5663,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         len: buildParam(32000, '-x').length,
         sem: dSem.ok ? dSem.segments.map((s) => s.words) : dSem.reason }))
   }
-  // ── 54f：`find -exec` 一族的判定必须是**线性**的（发现 2 的性能守卫）──────────────
+  // ── 54f：`find -exec` 一族的判定必须是**线性**的 ──────────────────────────────
   // `isUnknownTierSegment` 曾在 **label 循环内**调 `hasNoOperand(w, opts)` 与 diskpart 的
   // `/s` 扫描 —— 而两者都只依赖 `(w, opts)`、与 label 完全无关；同时 `segmentLabels`
   // 对每个 `find -exec <cmd>` 各 push 一个 label 且**不去重**（去重只在 seg.opaque 分支做），
@@ -5738,14 +5698,14 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 修复前后都应是线性。它在这里的作用是证明「本组测的确实是那条判据」：
     // 若把 `rm` 也测出平方，说明平方来自别处（本组的归因就错了）。
     const r8000 = timeTierSet(8000, 'rm')
-    ok('★★ 54f `find -exec diskpart` 重复 8000 次的档位判定必须线性（发现 2：每个 label 一次 hasNoOperand 导致 O(n²)）',
+    ok('★★ 54f `find -exec diskpart` 重复 8000 次的档位判定必须线性',
       t8000 < 300 && ratio < 3.0 && r8000 < 300
       // 对照（防空转）：N 太小时本组无意义 —— 断言 4000 也真的做了工作（不是 0 词元）
       && build(4000, 'diskpart').length === 2 + 4000 * 4,
       JSON.stringify({ t4000: +t4000.toFixed(2), t8000: +t8000.toFixed(2), ratio: +ratio.toFixed(2),
         rm8000: +r8000.toFixed(2), labels: segmentLabels(build(8000, 'diskpart')).length }))
   }
-  // ── 54g：「哪些命令算提权前缀」只有**一份**（发现 3：两份表漂移方向 fail-open）─────
+  // ── 54g：「哪些命令算提权前缀」只有**一份**（两份表漂移方向 fail-open）─────────
   // `GROUP_MEMBERS.priv` 与 `PRIV_PREFIXES` 是同一语义规则。分组那份被测试 32 的
   // 「并集 = DESTRUCTIVE_LABELS」双向一致断言盯着，而 `PRIV_PREFIXES` 此前**没有任何断言
   // 要求两者相等** —— 于是「新增提权命令时只改了分组表」会静默漂移。漂移方向是 **fail-open**，
@@ -5842,7 +5802,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     && isDestructiveSegment(decomposeCommand('git status', 'bash').segments[0].words) === false
     && isDestructiveSegment(decomposeCommand('ls', 'bash').segments[0].words) === false)
 
-  // ── 54s：带提权前缀时 `find -exec` / `-delete` 的**组档**不得丢失（发现 1，修法 A'）────
+  // ── 54s：带提权前缀时 `find -exec` / `-delete` 的**组档**不得丢失 ──────────────
   // 根因：`segmentLabelsCore` 的 find 分支闸门原先写 `main !== 'find'`，而 `main` 是
   // `segmentLabel` 的结果 —— 段首是提权前缀时它就是**前缀名**，闸门随即早退，
   // `find -exec` / `-delete` 的载荷族 label 合成**整段被跳过** → `tierSetOf` 的组档
@@ -5899,7 +5859,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         sudoFindWmic: tiersOf('sudo find . -exec wmic x {} ;', 'bash', 'win32') }))
   }
 
-  // ── 54t：多层提权前缀链的组档不得丢失（发现 2，修法 B）──────────────────────────
+  // ── 54t：多层提权前缀链的组档不得丢失 ──────────────────────────────────────
   // 根因：`pushHeadLabels` 的前缀扩展只做**一层**。第一个提权前缀之后跟的又是提权前缀时，
   // `privOperandSkip` 停在第二个前缀名上、`segmentLabel` 返回该前缀名 → labels 收束成
   // 前缀名 → 组档整体丢失 + deny 例外被绕过。判档侧本来是对的
@@ -5913,7 +5873,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 链的第二层用**全部 6 个提权前缀**（含同名的 `sudo sudo` —— 那一支若把「已见过」
     // 当停止条件就会停在第一个 `sudo` 上，是本修法最容易写错的地方）。
     //
-    // ── ⚠️ 必须含**裸** `su ` / `runas `（发现 2：这一格此前是缺口）──────────────────
+    // ── ⚠️ 必须含**裸** `su ` / `runas `（这一格此前是缺口）──────────────────────
     // 原先只列了**带操作数**的 `'su root '` / `'runas /user:a '`，而 `su` / `runas` 的
     // 截断**恰好只发生在第二层不带操作数时**：
     //     sudo su root kill 1234   → 操作数 `root` 之后是命令头元素 → privOperandSkip 跨过 → 链继续 ✅
@@ -5971,7 +5931,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         sudoSuReg: tiersOf('sudo su root reg delete HKLM\\X /f', 'bash', 'win32') }))
   }
 
-  // ── 54t2：`su` / `runas` 之后**首个词元非操作数**时链不得被截断（发现 1 的另一半）──
+  // ── 54t2：`su` / `runas` 之后**首个词元非操作数**时链不得被截断 ────────────────
   // 根因：`pushHeadLabels` 的 `su` / `runas` 分支把「`privOperandSkip` 没跨过」当成
   // 「链到此为止」（`if (next <= at) return first`），而 `at` 位置**不是操作数**时它
   // 往往就是**命令头元素**本身（`su kill 1234` 的 `kill`、`su sudo kill 1234` 的 `sudo`、
@@ -6075,7 +6035,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         labelsSuRoot: segmentLabels(decomposeCommand('su root', 'bash').segments[0].words) }))
   }
 
-  // ── 54u：授权方向不认**前缀之后合成**的载荷族 label（发现 1 的修法 3，方向不变量）──
+  // ── 54u：授权方向不认**前缀之后合成**的载荷族 label（方向不变量）──────────────
   // 只放宽 find 闸门（不改 `widened`）会让 `sudo find / -delete` 得到
   // `['sudo','find','rm']`，而那个 `rm` 是**载荷族合成**的、不在 `widened` 里 →
   // 授权方向看得见它 → 用户为普通 `rm` 写下的 `rm *`=allow 被**提升**成
@@ -6107,7 +6067,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   // ── 54w：`su`/`runas` 链上的 `diskpart /s <脚本>` 必须与 sudo/裸形态**同值** ─────────
   // 本批的 label 修复（`pushHeadLabels` 的「`at` 位置确实是操作数才终止」）让 `diskpart`
   // 这类**真命令名首次进入 labels**，于是 `isUnknownTierSegment` 的 `diskpart` + `/s` 支
-  // **首次命中** —— posix 侧 74 条由 `outside` 改判 `unknown`（验证者语料 10560 段比较）。
+  // **首次命中** —— posix 侧 74 条由 `outside` 改判 `unknown`。
   //
   // ⚠️ **该变化本身是「与 sudo / 裸形态对齐」，不是新分叉**（三方差分实测）：
   //     CUR `su diskpart /s script.txt` == PRE `sudo diskpart /s script.txt`
@@ -6328,7 +6288,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       // 抛 `ReferenceError: ds is not defined`，而不是把断言标红。`badDir54w2` 为空（绿路径）
       // 时 `.map` 回调不执行，故三套件全绿照不出；一旦 54w2b 检测到任何一格不符，
       // 测试进程在 `ok(...)` 之前**崩溃** → `FAIL (…)` 汇总不打印、**54w2b 之后的全部断言
-      // （55 / 55b / 56a / 56b / 56c）整体不执行**（验证者实测变异 M3：`crashed:true`、
+      // （55 / 55b / 56a / 56b / 56c）整体不执行**（`crashed:true`、
       // `reportedFails:0`、`summaryPrinted:false`）。与 4488 行同形即为修法。
       .map(([plat, ds, name]) => plat + ' ' + name + ' ' + pair54w2([plat, ds]).join('→'))
     const forms54w2 = dirTable54w2.map(pair54w2)
@@ -6508,7 +6468,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       dOf('rm -rf ./build <<EOF\nbody\nEOF', mkDs({ inside: 'allow', wide: 'allow', unknown: 'allow' })).action === 'allow',
       dOf('rm -rf ./build <<EOF\nbody\nEOF', mkDs({ inside: 'allow', wide: 'allow', unknown: 'allow' })).action)
   }
-  // ── 54x：`commandHeadEndFull` 的早退判据必须是「**确实吃到命令名**」（发现 5）──────────
+  // ── 54x：`commandHeadEndFull` 的早退判据必须是「**确实吃到命令名**」──────────────
   // 根因：早退原写 `if (end > 0) return end`，假设「`commandHeadEnd` 返回 >0 ⇒ 它已吃掉
   // 前缀链 + 命令名」。该假设对 `su` / `runas`（`PRIV_VALUE_IS_COMMAND`）**不成立** ——
   // 它们只吃前缀名就停（`commandHeadEnd(['su','time','diskpart'])` = **1**，关键字 `time`
@@ -6594,7 +6554,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         }
       }
     }
-    ok('★★ 54x `<前缀><关键字><BARE>` 与 `<前缀><关键字><wrapper><BARE>` 必须与 `sudo <BARE>` 同值（发现 5：早退判据「返回 >0」不等于「吃到命令名」）',
+    ok('★★ 54x `<前缀><关键字><BARE>` 与 `<前缀><关键字><wrapper><BARE>` 必须与 `sudo <BARE>` 同值',
       bad54x.length === 0 && badBare54x.length === 0 && badRef54x.length === 0 && e2e54x.length === 0
       // 对照（防空转）：三档语料真的被遍历到了（族 ① + 族 ② 的叉乘）
       && n54x === (kwNames54x.length - LEX54x.length) * PRE54x.length * BARE54x.length * (1 + WR54x.length)
@@ -6615,7 +6575,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         target: [tiersOf('parted /dev/sda', 'bash', 'win32'), tiersOf('sudo time parted /dev/sda', 'bash', 'win32')] }))
   }
 
-  // ── 54z2：语句关键字**自身的选项**必须跨过再取命令名（发现 4）────────────────────
+  // ── 54z2：语句关键字**自身的选项**必须跨过再取命令名 ────────────────────────
   // 根因：`segmentLabelFrom` 的关键字循环里，跳过关键字后**就地取下一个有效词元**当命令名，
   // 而没有先跨过**关键字自己的选项**（`time -p` 的 `-p`）。于是 `time -p rm -rf /tmp` 的
   // label 变成 `-p`（既不是命令名、也不在破坏性名单里）→ 半径档与组档**全丢**、
@@ -6637,7 +6597,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   //      （F34–F37 已单独钉住动作，这里钉住退化信号本身）。
   //
   // ⚠️ **半径档（inside / outside / wide / unknown）不在判据内**，这是**刻意**的：
-  //   它已由 **54z3** 覆盖 —— 本轮 M1/M2/M3 修复后 `time -p X` 的 `blast` 已与 `X` 同值
+  //   它已由 **54z3** 覆盖 —— `time -p X` 的 `blast` 已与 `X` 同值
   //   （实测 POST `time -p rm -rf /tmp` = `outside|/tmp`，win32 与 posix 均非 null 且与
   //   `rm -rf /tmp` 逐字相同；修复前 win32 该格为 `null`），故本处只钉 label / 组档 /
   //   例外命中三项，半径档交给 54z3。
@@ -6955,7 +6915,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         sample: ['time -p rm -rf /tmp', 'time -p diskpart', 'su root time -p rm -rf /tmp'].map((c) => [c, tiersOf(c, 'bash', 'win32')]) }))
   }
 
-  // ── 54y：wrapper / 语句关键字夹在两层提权前缀之间时链不得截断（发现 6）─────────────
+  // ── 54y：wrapper / 语句关键字夹在两层提权前缀之间时链不得截断 ─────────────────
   // 根因：`pushHeadLabels` 的推进循环**只按 `PRIV_PREFIXES` 判「还要不要继续」**，
   // 遇到夹在两层提权前缀之间的 **wrapper** 直接 `break` —— 链被提前截断、真命令名永不进
   // labels → 组档（proc / power / reg）整体丢失、用户写的 deny 例外同样被绕过。
@@ -7030,7 +6990,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         if (assessCommand(cmd, 'bash', excHooks54y(pat)).action !== 'deny') bypassed54y.push([pat, cmd])
       }
     }
-    ok('★★ 54y wrapper / 语句关键字夹在两层提权前缀之间时链不得截断（发现 6：组档不得丢失；8 链首 × 15 夹层 × 5 第二层前缀 × 6 命令）',
+    ok('★★ 54y wrapper / 语句关键字夹在两层提权前缀之间时链不得截断',
       bad54y.length === 0 && badLabels54y.length === 0 && bypassed54y.length === 0
       // 对照（防空转）：语料真的被遍历到了
       && n54y === head54y.length * mid54y.length * 5 * cmds54y.length
@@ -7058,7 +7018,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         envDoasReg: tiersOf('sudo env FOO=1 doas reg delete HKLM\\X /f', 'bash', 'win32'),
         timeDoas: tiersOf('sudo time doas kill 1234', 'bash', 'win32') }))
   }
-  // ── 54z：`find -exec` 载荷族里的**提权前缀链**必须推进（发现 1）────────────────────
+  // ── 54z：`find -exec` 载荷族里的**提权前缀链**必须推进 ────────────────────────
   // 根因：`segmentLabelsCore` 的 `-exec` 载荷族**只取 `-exec` 之后的第一个词元**，
   // 不做前缀链推进 → 载荷里的**提权前缀**被当成命令名收下、真命令名永不进 labels：
   //     find . -exec kill {} ;          labels=['find','kill']  tiers=['proc']        → deny
@@ -7148,7 +7108,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         if (assessCommand(cmd, 'bash', excHooks54z(pat)).action !== 'deny') bypassed54z.push([pat, cmd])
       }
     }
-    // ⚠️ 授权方向不变量（发现 1 的修法 3，与 54u 同一件事）：载荷里**合成出的** label
+    // ⚠️ 授权方向不变量（与 54u 同一件事）：载荷里**合成出的** label
     // 若因「载荷内部有前缀」才可见，就**不得**进授权面 —— 否则用户为普通 `rm` 写下的
     // `rm *`=allow 被提升成「允许经 find -exec sudo 删任意路径」。
     // 实测（例外 `rm *`=allow、其余全 ask）：漏掉这一条时 `find . -exec sudo rm -rf {} +`
@@ -7158,7 +7118,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       'find . -execdir doas rm -rf {} +', 'find . -exec su root rm -rf {} +',
       'find . -exec timeout 5 sudo rm -rf {} +', 'find . -exec sudo rm -rf /etc {} +']
       .filter((c) => allowOf54z(c).action === 'allow')
-    ok('★★ 54z `find -exec` 载荷族里的提权前缀链必须推进（发现 1：组档不得丢失 + 授权方向不得认合成 label）',
+    ok('★★ 54z `find -exec` 载荷族里的提权前缀链必须推进',
       bad54z.length === 0 && badLabels54z.length === 0 && bypassed54z.length === 0 && badAllow54z.length === 0
       // 对照（防空转）：语料真的被遍历到了
       && n54z === flags54z.length * prefixes54z.length * 3 * payloads54z.length
@@ -7284,11 +7244,11 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     // 判据③：授权面**直接**探测 —— 例外取载荷族合成出的 label。
     // 它命中 allow 当且仅当该项存活在授权面里（形态分叉的直接观测，不经过主路径对照）。
     //
-    // ⚠️ **不得**再按「含不含空格」过滤（本轮 F4 的修法）：上一版写的是
+    // ⚠️ **不得**再按「含不含空格」过滤：过滤写法是
     //     `if (String(ls[i]).indexOf(' ') === -1) continue`
-    // 于是只探测**两词** label，而 F4 那一族的授权面项恰恰是**单词**提权前缀名
-    // （`sudo find . -exec doas rm …` 的 `doas`）—— 被这一行**整类跳过**，54D 因此全绿
-    // 却照不出 F4（实测：含过滤 60 格，去掉后 136 格，多出的 76 格正是单词那一族）。
+    // 于是只探测**两词** label，而该族的授权面项恰恰是**单词**提权前缀名
+    // （`sudo find . -exec doas rm …` 的 `doas`）—— 被这一行整类跳过，54D 因此全绿
+    // 却照不出该族（含过滤 60 格，去掉后 136 格，多出的 76 格正是单词那一族）。
     // 单词 label 的「无前缀对照」必须用 `plain`（不带提权前缀）那一侧：
     // `sudo find . -exec doas rm …` 的 `doas` 在无前缀时是**载荷首词**，被 `doas *`=allow
     // 授权是既有口径（用户写下 `doas *` 的真实意图）—— 正是「模式本身生效」的证明。
@@ -7368,7 +7328,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
             leaked54D4.push(['★授权面', pat4, cmd4, got4, 'headName=' + headName4])
           }
           // ④ `widened ⊆ labels` 不变量（授权面的**充要前提**，见 `segmentLabelsCore` 的导出说明）：
-          // 两个集合由 `segmentLabelsCore` 单点产出，叉乘语料是本轮 F4 的现场，必须专门覆盖。
+          // 两个集合由 `segmentLabelsCore` 单点产出，叉乘语料必须专门覆盖。
           // 违反有两种方向，两个方向都是缺陷：
           //   · `widened` 里有 `labels` 没有的名字 → 该名字从判档与 deny 例外面**同时消失**；
           //   · `labels` 里有 `widened` 没有的**扩展名** → 它留在授权面里（正是 F1/F3/F4 那一族）。
@@ -7407,7 +7367,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       // 即每格 2 个（下标 > 0）探测项，实测 17 × 4 = 68 格 → **136** 个探测。
       // 两个**路径形态**的载荷（`"/usr/bin/rm"`、`"C:\Windows\System32\rm.exe"`）经
       // `commandNameOf` 剥掉路径后合成的是**单词** `rm`，故它们的第 2 个探测项是单词
-      // —— 上一版正是被空格过滤整类跳过的那些（旧计数 60 = 136 − 76）。
+      // —— 正是被空格过滤整类跳过的那些（旧计数 60 = 136 − 76）。
       // ⚠️ 这里用**绝对值 136** 而不是 `payloads54D.length * flags54D.length * 2`：
       // 后者是「语料长度自洽式」，清空语料时两边同时变 0 而**恒真**（实测该变异未被捕获）。
       && n54D2 === 136
@@ -7769,7 +7729,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
   }
 
-  // ── 54A：`widened` 的**逐条不同名**形态必须线性（发现 2 的性能守卫）──────────────────
+  // ── 54A：`widened` 的**逐条不同名**形态必须线性 ─────────────────────────────
   // `segmentLabelsCore` 的 `widened` 数组用 `indexOf` 查重，而 `find -exec` 载荷族会为
   // **每个** `-exec` 各推一个名字 —— 逐条**不同名**时就是 O(n²)。本批改动**新引入**
   // `widened` 概念（HEAD 无它），故这是本批的退化。
@@ -7801,7 +7761,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     const d8000 = timeLabels(buildDistinct(8000))
     const ratioD = d8000 / Math.max(d4000, 0.001)
     const s8000 = timeLabels(buildSame(8000))
-    ok('★★ 54A `-exec c_i` 逐条不同名时 `segmentLabels` 必须线性（发现 2：`widened.indexOf` 的 O(n²)）',
+    ok('★★ 54A `-exec c_i` 逐条不同名时 `segmentLabels` 必须线性',
       d8000 < 300 && ratioD < 3.0 && s8000 < 300
       // 对照（防空转）：构造的确实是 n 组 `-exec`（4 词元一组 + 3 个前缀词元）
       && buildDistinct(4000).length === 3 + 4000 * 4
@@ -7984,7 +7944,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         labelsSame: segmentLabels(buildSame(8)) }))
   }
 
-  // ── 54C2：**载荷无命令名**的 `-exec` 族必须线性（发现 3 的守卫）───────────────────
+  // ── 54C2：**载荷无命令名**的 `-exec` 族必须线性 ─────────────────────────────
   // 54C 的语料全是**良构载荷**（`-exec sudo cmd_i {} +`：链立即终止在 `cmd_i` 上），
   // 结构上照不出本缺陷 —— 触发形态是**载荷里没有命令名**（`-exec sudo` 之后直接是
   // 下一个 `-exec`）：
@@ -8019,7 +7979,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     const s4000 = timeSeg54C2(buildNoName(4000, 'su -'))
     const s8000 = timeSeg54C2(buildNoName(8000, 'su -'))
     const ratioS = s8000 / Math.max(s4000, 0.001)
-    ok('★★ 54C2 **载荷无命令名**的 `-exec` 族必须线性（发现 3：`skipPrefixArgs` 把下一个 `-exec` 当选项吃掉）',
+    ok('★★ 54C2 **载荷无命令名**的 `-exec` 族必须线性',
       // 主形态：`find . (-exec sudo)*n`
       n8000 < 300 && ratioN < 3.0
       // 变体 ①：`find . (-exec sudo time)*n`（wrapper/关键字夹层）
@@ -8040,11 +8000,11 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   }
 
   // ═════════════════════════════════════════════════════════════════════════════
-  // ── 60：本轮审查修复的回归守卫（发现 1 / 2 / 3）──────────────────────────────
+  // ── 60：回归守卫 ──────────────────────────────────────────────────────────
   // 三条各自钉住一个方向的**行为**差异（不是源码文本断言），且都带防空转对照。
   // ═════════════════════════════════════════════════════════════════════════════
 
-  // ── 60a：`unknown` 与已知档**并列**取最严（发现 1，方向 = 修 fail-open）──────────
+  // ── 60a：`unknown` 与已知档**并列**取最严（方向 = 修 fail-open）──────────────
   // 根因：`blastRadiusOfSegment` 的段级汇总里，`sawUnjudgeable` 只在「**没有任何**可判
   // 目标」时兜底成 `unknown`（`return sawUnjudgeable ? {level:'unknown', path:''} : null`）；
   // 一旦同段里还有一个**读得出**的目标，`unknown` 结论就被**整条丢弃**（`return worst`）。
@@ -8097,7 +8057,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       if (!t || t.indexOf(known) === -1) bad60a.push(['tiers-missing-known', c, t && t.join(',')])
       if (b === 'unknown') bad60a.push(['blast-downgraded', c, b])
     }
-    ok('★★ 60a 段内「读不出的目标」与「已知目标」必须**并列**取最严（发现 1：unknown=deny 下 rm -rf /etc $TARGET 必须 deny，且 tiers 同时含 unknown 与 outside）',
+    ok('★★ 60a 段内「读不出的目标」与「已知目标」必须**并列**取最严',
       bad60a.length === 0
       // 对照（防空转）：**只有**读不出目标时本来就是 deny —— 说明上面那些格确实由本修法改动
       && dOf60a('rm -rf $TARGET', unkDeny).action === 'deny'
@@ -8123,7 +8083,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         allAllow: dOf60a('rm -rf /etc $TARGET', mkDs60a({ unknown: 'allow' })).action }))
   }
 
-  // ── 60b：递归引号分支也必须把内层的「读不出」带上来（发现 1 的同一族）──────────────
+  // ── 60b：递归引号分支也必须把内层的「读不出」带上来 ────────────────────────
   // `su -c "rm -rf $T" /` 的词元是 `['su','-c','rm -rf $T','/']`：含空格的词元走
   // `blastRadiusOfSegment` 的**递归引号分支**（`:4678`），内层得 `unknown`、外层 `/` 得
   // `drive-root`。修复前内层的 `unknown` 被外层更严重的已知档**整个顶替**（`worst = rs`
@@ -8153,7 +8113,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       const t = tiersOf(c, sh, 'win32')
       return !t || t.indexOf('unknown') === -1
     })
-    ok('★★ 60b 递归引号分支：内层「读不出」不得被外层更严重的已知档顶替（发现 1 同族：su -c "rm -rf $T" / 必须非 allow）',
+    ok('★★ 60b 递归引号分支：内层「读不出」不得被外层更严重的已知档顶替',
       bad60b.length === 0
       // 端到端：`unknown=deny` 下这四条都必须 deny（修复前前两条是 allow）
       && rec60b.every(([sh, c]) => dOf60b(c, unkDeny60b, sh).action === 'deny')
@@ -8170,7 +8130,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         allAllow: dOf60b('su -c "rm -rf $T" /', mkDs60b({ unknown: 'allow' })).action }))
   }
 
-  // ── 60c：普通命令的 allow 例外标注**恒为 null**（发现 2，方向 = 去假警告）──────────
+  // ── 60c：普通命令的 allow 例外标注**恒为 null**──────────
   // 根因：`blastRadiusOfCommandPattern` 的兜底原写 `return blastRadiusOfSegment(w, opts)`，
   // 而那条路会把 §5.5 新加的 `isWorkspaceRoot` 钩子接进来 —— `sudo ls *` / `env ls *` /
   // `nohup ls *` 的 `*` 经 `globRootOf` 归约为 `.`，宿主 `isWorkspaceRoot('.')` 恒真，
@@ -8194,7 +8154,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       'stdbuf -o0 ls *', 'sudo -u root ls *', 'doas cat *', 'pkexec echo *', 'git status *',
       'reg add *', 'reg query *', 'sc *', 'net *', 'schtasks *']
     const falseWarn60c = normal60c.filter((p) => cpLvl60c(p) !== null)
-    ok('★★ 60c 普通命令的 allow 例外标注**恒为 null**（发现 2：sudo ls * / env ls * / nohup ls * 不得被标成「删整个项目」）',
+    ok('★★ 60c 普通命令的 allow 例外标注**恒为 null**',
       falseWarn60c.length === 0
       // 正向对照：**破坏性 / 载荷 / 嵌套 shell 三类仍必须正常标注**（本修法不得误伤）
       && cpLvl60c('rm -rf *') === 'broad' && cpLvl60c('sudo rm -rf *') === 'broad'
@@ -8224,7 +8184,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
       JSON.stringify(['sudo cat /etc', 'sudo ls /etc', 'sudo ls /*', 'sudo ls C:\\Windows\\*'].map((p) => [p, cpLvl60c(p)])))
   }
 
-  // ── 60d：整行读不懂分支的 `tiers` 必须与 `TIER_ORDER` 同序（发现 3）──────────────
+  // ── 60d：整行读不懂分支的 `tiers` 必须与 `TIER_ORDER` 同序 ──────────────────
   // 根因：`assessCommand` 整行读不懂分支的 `tiers` 是**手工拼接**的
   // （`groupTiersOf(names)` → `push('priv')` → `push('wide')` → `push('unknown')` →
   // `push('inside')`），**未经 `TIER_ORDER` 排序**；而 `decisiveTierOf` 的注释声称
@@ -8309,7 +8269,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         }
       }
     }
-    ok('★★ 60d 整行读不懂分支的 tiers 必须与 TIER_ORDER 同序（发现 3：sudo kill 1234 <<EOF 与 sudo kill 1234 在 wide=deny+priv=deny 下理由必须一致）',
+    ok('★★ 60d 整行读不懂分支的 tiers 必须与 TIER_ORDER 同序',
       bad60d.length === 0 && bad60dOracle.length === 0
       // 对照（防空转）：语料真的被遍历到了
       && n60d === cfgs60d.length * bases60d.length * 6 && n60dOracle === 6 * bases60d.length * 6
@@ -8347,8 +8307,8 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
         order: TIER_ORDER }))
   }
 
-  // ── 60e：decisive 档无理由时，理由回落到**并列在最严档**的命中档（发现 6）─────────
-  // 根因：`tierSetOf` 在 `unjudgeable` 时**恒并** `unknown`（发现 1 的修法），而
+  // ── 60e：decisive 档无理由时，理由回落到**并列在最严档**的命中档 ─────────────
+  // 根因：`tierSetOf` 在 `unjudgeable` 时**恒并** `unknown`，而
   // `TIER_ORDER` 里 `unknown` 排第 1、`outside` 排第 3 —— 并列时 `decisiveTierOf` 取
   // **靠前者**，于是 decisive 档从 `outside` 变成 `unknown`。而 `unknown` 档常常
   // **没有**用户写下的理由（用户为 `outside` 写过、没为它写过）——
@@ -8415,7 +8375,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
     }
     const sudo60e = 'sudo rm -rf /etc $TARGET'
     const tSudo60e = tiersOf(sudo60e, 'bash', 'win32')
-    ok('★★ 60e decisive 档（unknown）无理由时，拒绝理由必须回落到**并列在最严档**的命中档（发现 6：rm -rf /etc $TARGET 必须带回 outside 档写下的理由）',
+    ok('★★ 60e decisive 档（unknown）无理由时，拒绝理由必须回落到**并列在最严档**的命中档',
       bad60e.length === 0
       // ⑥ 不凭空造理由：一个命中档都没写过理由 → 仍是 null
       && mixed60e.every((c) => v60e(c, allDeny60e, undefined).reason === null
@@ -8837,11 +8797,10 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
 
   // ── 60i：`pushHeadLabels` / `headLabelAt` 删掉两个死形参后**零行为变更** ──────────
   //
-  // 第 8 圈删掉了两条「缺省时退化成按数组查重」的三元兜底（改为直接
-  // `const widen = addWidened` / `const push = addLabel`），而那两条兜底正是
-  // `out` / `widened` 两个形参在体内的**唯一消费者**。删后签名与 4 个调用点仍原样传参
-  // → 形参在体内**一次都不再被读**（实测 CODE 命中数：`pushHeadLabels` = 1 即签名行，
-  // `headLabelAt` = 2 即签名 + 转发调用；`arguments` / `.apply(` / `.call(` 全 0，无动态逃逸）。
+  // 删掉「缺省时退化成按数组查重」的两条三元兜底（改为直接
+  // `const widen = addWidened` / `const push = addLabel`）后，那两条兜底正是
+  // `out` / `widened` 两个形参在体内的唯一消费者。删后签名与 4 个调用点仍原样传参
+  // → 形参在体内一次都不再被读（`arguments` / `.apply(` / `.call(` 全 0，无动态逃逸）。
   //
   // 本条的判据不是「形状」而是**行为**：`segmentLabelsCore` 的 `labels` / `widened` /
   // `widenedSet` 在整族语料上必须**逐字不变** —— 那才是「删形参」唯一可能影响的东西。
@@ -8925,7 +8884,7 @@ group('T. 破坏性命令八档体系（计划 blast-tier-plan.md）')
   // 修法：在 ③ 之前插一行 `if (LEAD_ASSIGN.test(String(w[start]))) { start += 1; continue }`
   // —— 复用模块级 `LEAD_ASSIGN` 单点，与 `headCommandNameOf` 的早退守卫同源。
   //
-  // ⚠️ 三支归属（仲裁裁决：本条只修**第三支**，前两支走不同代码路径、刻意不修）：
+  // ⚠️ 三支归属（本条只修第三支，前两支走不同代码路径、刻意不修）：
   //     `nohup FOO=1 rm -rf /tmp`  → label 侧（`segmentLabels` / `pushHeadLabels`），tiers `[]`
   //     `su root FOO=1 rm -rf /tmp` → `privOperandSkip` 操作数路径，tiers `['priv']`
   //     `sudo FOO=1 env diskpart`   → 本条（`hasNoOperand` 的 headFull 位置跳过），tiers `['inside','priv']`
@@ -9599,7 +9558,7 @@ group('Y. pwsh 数组运算符 `,`：词元必须切开（档位降级回归）'
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修法）')
+group('AA. opaque 段的两条路径必须同口径')
 {
   // ── 背景：本批新增的 `RADIUS_TIERS_WHEN_UNREADABLE` 声称让**段级 opaque 路径**与
   // 「整行读不懂」分支对「目标读不出」取同一口径。核实后它当时并**不**同口径，两处 fail-open：
@@ -9621,8 +9580,8 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
   //       echo a | Write-Output `rm -rf C:/Windows`    → **allow** tiers=['unknown'] ❌
   //
   // 判据（六条，缺一即为「只修一支」或「过度收紧」）：
-  //   ① 发现 1：`inside=deny` 下 opaque 段必须 deny，且 `tiers` 含 `inside`；
-  //   ② 发现 2：`wide=deny` 下**四种构造写法**必须逐字同值（同一构造不得因写法不同而分叉）；
+  //   ① `inside=deny` 下 opaque 段必须 deny，且 `tiers` 含 `inside`；
+  //   ② `wide=deny` 下**四种构造写法**必须逐字同值（同一构造不得因写法不同而分叉）；
   //   ③ 两路径同口径：段级 opaque 段的档位集合必须**含**整行分支并的那三档
   //      （`wide` / `unknown` / `inside` 一个不少）；
   //   ④ 反向核查（不得误伤）：`rm -rf ./tmp/{a,b,c}` / `rm -rf ./build $(date)` 这类
@@ -9647,7 +9606,7 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
     const bad = []
     const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
 
-    // ① 发现 1：`inside=deny` + 其余七档 allow —— opaque 段里的破坏性命令必须 deny 且含 inside
+    // ① `inside=deny` + 其余七档 allow —— opaque 段里的破坏性命令必须 deny 且含 inside
     //    ⚠️ 构造集**按方言取**（`OPAQUE_FORMS`，见文件头）：pwsh 的第四种构造是 `@( )`，
     //       不是反引号 —— 反引号在 pwsh 里是转义符，`` `rm `` 求值为 `<CR>m`、**不执行 rm**。
     //       另加一个方言中立的分组写法 `ForEach-Object { … }`（两侧都真会执行）。
@@ -9670,7 +9629,7 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
       }
     }
 
-    // ② 发现 2：`wide=deny` + 其余七档 allow —— 同一构造的四种写法必须逐字同值
+    // ② `wide=deny` + 其余七档 allow —— 同一构造的四种写法必须逐字同值
     //    ⚠️ 四种写法**按方言取**（`OPAQUE_FORMS`）：bash 的第四种是反引号命令替换，
     //       pwsh 的第四种是 `@( )` —— 拿反引号去测 pwsh 会因「`` `rm `` 不执行 rm」而假红。
     const dsWide = dsOnly('wide')
@@ -9775,13 +9734,13 @@ group('AA. opaque 段的两条路径必须同口径（发现 1 / 发现 2 的修
       }
     }
 
-    ok('★★ AA opaque 段两条路径同口径（发现 1：段级须并 inside；发现 2：反引号须并 wide）',
+    ok('★★ AA opaque 段两条路径同口径',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃（发现 1 的修法）')
+group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃')
 {
   // ── 为什么单开一组：AA 组语料**不含任何提权前缀**，故发现 1 的回归网有缺口 ──────
   // `destructiveHeadReadable` 的判据是「段首主 label 是否在 `DESTRUCTIVE_LABELS` 里」，
@@ -9920,9 +9879,9 @@ group('AB. 提权前缀 + opaque 构造：`wide`/`inside` 不得被静默丢弃�
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发现 3 的修法）')
+group('AC. 诱饵目标 + 纯组档段：门控的两个缺口')
 {
-  // ── 发现 2：**诱饵目标**使 `wide`/`inside` 静默消失 ──────────────────────────────
+  // ── 半径门控内那条守卫：**诱饵目标**使 `wide`/`inside` 静默消失 ──────────────
   // 半径门控内那条守卫的判据是「`blast` 空**或**为 `unknown`」。当 opaque 段里另有一个
   // **可读**目标、且其 blast 恰为 `outside`（`home` 同）时该式为假 → 落 `else` 支 →
   // 只并 `outside`，`wide` 与 `inside` 从 tiers **静默消失**。
@@ -9932,7 +9891,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
   // 修法：把 `opaqueHiddenPayload` 并进守卫判据，并在三档之后**显式保留**诱饵已判出的
   // 半径档（只并三档会丢掉用户可能显式配过的 `outside=deny`）。
   //
-  // ── 发现 3：**纯组档段**整段不进半径门控 ────────────────────────────────────────
+  // ── 纯组档段：整段不进半径门控 ─────────────────────────────────────────────
   // 门控 `hasPureRadius || (hasPrivGroup && seg.blast)` 只覆盖半径组 label，而
   // `kill` / `pkill` / `reboot` / `shutdown` / `taskkill` / `stop-computer` /
   // `reg delete` / `stop-process` 的组是 `proc`/`power`/`reg` —— 既非 pureRadius 也非
@@ -9950,7 +9909,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
     const SHP = [['bash', 'win32'], ['bash', 'posix'], ['pwsh', 'win32'], ['pwsh', 'posix']]
     const dsWide = dsOnly('wide'), dsInside = dsOnly('inside'), dsOutside = dsOnly('outside')
 
-    // ① 发现 2：诱饵目标（可读、且其自身半径档为 outside / wide） × 4 构造 × 7 分隔符
+    // ① 诱饵目标（可读、且其自身半径档为 outside / wide） × 4 构造 × 7 分隔符
     // ⚠️ 诱饵档位**按平台实测取值**，不写死：`/etc/hosts` 在 win32 下是普通外部路径
     //    （outside），在 posix 下是**系统目录**（system → wide）；`~/notes.txt` 两侧都是
     //    outside。断言「诱饵那一档必须保留」时要用实测值，否则会把平台差异误报成缺陷。
@@ -9997,7 +9956,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
       }
     }
 
-    // ③ 发现 3：8 个纯组档命令 × 4 构造 × 7 分隔符 —— `wide=deny` 下必须 deny 且含 wide
+    // ③ 8 个纯组档命令 × 4 构造 × 7 分隔符 —— `wide=deny` 下必须 deny 且含 wide
     //    ⚠️ 构造集按方言取（`OPAQUE_FORMS`），理由同 ①。
     const GROUP_CMDS = ['kill 1234', 'pkill', 'reboot', 'shutdown /s', 'taskkill /im x.exe',
       'stop-computer', 'reg delete HKCU\\X /f', 'stop-process -Id 1']
@@ -10031,7 +9990,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
         if (t.indexOf(want) === -1) bad.push(['承重格 del 族缺 ' + want, sh, pl, t.join('+')])
       }
     }
-    // ⑦ 合法常用命令仍恰好 `['unknown']`（发现 2/3 都不得误伤这一族）
+    // ⑦ 合法常用命令仍恰好 `['unknown']`（上面两族都不得误伤这一族）
     //    ⚠️ 反引号那格按方言分列，理由同 AA 组 ④（bash 是命令替换、pwsh 是转义）。
     for (const c of ['rm -rf ./tmp/{a,b,c}', 'rm -rf ./build $(date)', 'chmod 777 ./{a,b}.sh',
       'rm -rf $TARGET']) {
@@ -10058,7 +10017,7 @@ group('AC. 诱饵目标 + 纯组档段：门控的两个缺口（发现 2 / 发�
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AD. `&` 之前的重定向无目标：不得被 `&` 的豁免放行（发现 4 的修法）')
+group('AD. `&` 之前的重定向无目标：不得被 `&` 的豁免放行')
 {
   // ── 问题 ────────────────────────────────────────────────────────────────────
   // `ampNoTarget = pending !== undefined && !started` 只写进 `ampOk`，而 `ampOk` 仅在
@@ -10104,9 +10063,9 @@ group('AD. `&` 之前的重定向无目标：不得被 `&` 的豁免放行（发
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的修法）')
+group('AE. 排序键与整行分支的形态不变量')
 {
-  // ── 发现 5：`TIER_RANK` 的比较实现必须**只有一处** ──────────────────────────────
+  // ── `TIER_RANK` 的比较实现必须**只有一处** ──────────────────────────────
   // `tierVerdict` 里曾经手抄一份逐字相同的比较函数，而它直接决定**用户可见的拒绝理由**。
   // 修法：换成 `sortTiersByRank(same)`（`same` 是局部新数组，原地排序无副作用）。
   // 结构断言：源码里不得再出现手抄的那两行。
@@ -10114,7 +10073,7 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
     const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
     const bad = []
     const handCopy = (spSrc.match(/ra === undefined \? 99 : ra/g) || []).length
-    if (handCopy !== 1) bad.push(['`TIER_RANK` 比较实现不是恰好一处（发现 5 回退）', 'count=' + handCopy])
+    if (handCopy !== 1) bad.push(['`TIER_RANK` 比较实现不是恰好一处', 'count=' + handCopy])
     const consumers = (spSrc.match(/TIER_RANK\[/g) || []).length
     if (consumers !== 2) bad.push(['`TIER_RANK[...]` 消费点不是恰好两处（应只在 sortTiersByRank 内）', 'count=' + consumers])
     if (!spSrc.includes('sortTiersByRank(same)')) bad.push(['tierVerdict 未复用 sortTiersByRank'])
@@ -10126,10 +10085,10 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
     // 真正的判据是上面两条（`handCopy === 1` 且 `TIER_RANK[` 只在函数内出现）。
     const uses = (spSrc.match(/sortTiersByRank\(/g) || []).length
     if (uses !== 4) bad.push(['sortTiersByRank 的调用点不是 3 处 + 定义 1 处', 'count=' + uses])
-    ok('★ AE 排序键单一实现（发现 5）：TIER_RANK 比较只有一处、四处调用共用',
+    ok('★ AE 排序键单一实现：TIER_RANK 比较只有一处、四处调用共用',
       bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
-  // ── 发现 6：整行分支的三档并入不得退化成「条件恒真」的死守卫 ─────────────────────
+  // ── 整行分支的三档并入不得退化成「条件恒真」的死守卫 ────────────────────────
   // 修法：简化为裸 push，并订正与实测相反的注释。
   {
     const spSrc = readFileSync(pathJoin(ROOT, 'shell-parse.js'), 'utf8')
@@ -10141,7 +10100,7 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
     if (!spSrc.includes('for (const t of RADIUS_TIERS_WHEN_UNREADABLE) tiers.push(t)')) {
       bad.push(['整行分支未简化为裸 push'])
     }
-    ok('★ AE 整行分支三档并入：死守卫已移除（发现 6）', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+    ok('★ AE 整行分支三档并入：死守卫已移除', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
   // ── 行为核查：整行读不懂分支的 `tiers` 不得重复，且三档齐全（行为不得回退）─────
   {
@@ -10157,7 +10116,7 @@ group('AE. 排序键与整行分支的形态不变量（发现 5 / 发现 6 的�
         if (r.action !== 'deny') bad.push(['整行分支未 deny（wide=deny）', c, sh, pl, r.action])
       }
     }
-    ok('★ AE 整行读不懂分支：形态契约与动作不回退（发现 6）', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
+    ok('★ AE 整行读不懂分支：形态契约与动作不回退', bad.length === 0, JSON.stringify(bad.slice(0, 8)))
   }
 }
 
@@ -10637,7 +10596,7 @@ group('AG. 第四档 auto：段间合并与严格度表的接线（漏一处即 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AF. opaque 构造作重定向目标：不得被粘性标记误判为「无目标」（发现 4 粘性的回归）')
+group('AF. opaque 构造作重定向目标：不得被粘性标记误判为「无目标」')
 {
   // ── 问题 ────────────────────────────────────────────────────────────────────
   // 发现 4 的修法把 `ampNoTarget` 改成**粘性**（`ampTargetMissing = ampTargetMissing || ampNoTarget`），
@@ -10879,7 +10838,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
   // §6.1 默认八档（`inside` 跟随大分类 = allow，其余 ask）—— 与生产默认同形
   const DEFAULT8 = { inside: 'allow', outside: 'ask', wide: 'ask', unknown: 'ask', priv: 'ask', proc: 'ask', power: 'ask', reg: 'ask' }
 
-  // ── ① 发现 1：段首**本身**是破坏性命令、而构造里**另藏**一个真破坏性命令 ──────
+  // ── ① 段首**本身**是破坏性命令、而构造里**另藏**一个真破坏性命令 ──────
   // 判据必须问「构造**里**有没有第二个破坏性命令」，而不是「段首是不是破坏性命令」。
   // 靶格在 bash 里 `-n` = OK、可执行（`$(rm -rf /)` 真会跑），故这是真 fail-open。
   {
@@ -10893,7 +10852,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       const r = at(c, ONLY('wide'))
       if (r.action === 'allow') bad.push([c, r.action, r.code])
     }
-    ok('★ AH1 段首可读 + 构造内另藏破坏性命令：不得静默放行（发现 1）', bad.length === 0, JSON.stringify(bad))
+    ok('★ AH1 段首可读 + 构造内另藏破坏性命令：不得静默放行', bad.length === 0, JSON.stringify(bad))
   }
 
   // ── ② 发现 7 / 8：段首是提权前缀、紧跟**可读**的破坏性命令 → 命令**读得出** ────
@@ -10914,12 +10873,12 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
         if (r.action !== 'allow') bad.push([tier, c, r.action, r.code])
       }
     }
-    ok('★ AH2 提权前缀 + 可读破坏性命令 + opaque 参数：不得凭空收紧（发现 7/8 的有意放宽）',
+    ok('★ AH2 提权前缀 + 可读破坏性命令 + opaque 参数：不得凭空收紧',
       bad.length === 0, JSON.stringify(bad))
   }
 
   // ── ③ 保护格：提权前缀后面**没有**可读命令（真命令在构造里）→ 必须仍判读不出 ──
-  // `:4910` 的提权兜底承重，删掉它这一族会变 allow（发现 8 报告者的建议实测不可用）。
+  // `:4910` 的提权兜底承重，删掉它这一族会变 allow。
   // 档位逐格按实测填：`C:/Windows` 是**系统目录** → 命中 `wide`（不是 `outside`）；
   // 只有诱饵格 `cat /etc/hosts …` 才额外带 `outside`（`/etc/hosts` 是工作区外路径）。
   {
@@ -10950,7 +10909,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
     ok('★ AH4 承重格：命令可读、构造只是参数 → 恰好 `[\'unknown\']`', bad.length === 0, JSON.stringify(bad))
   }
 
-  // ── ⑤ 发现 9：`|&` 必须被 `|` 分支整体消费 ──────────────────────────────────
+  // ── ⑤ `|&` 必须被 `|` 分支整体消费 ──────────────────────────────────
   // 靶格在 bash 里 `-n` = OK、真实执行会写出 `log` 文件。此前 `|&` 的 `&` 落进后台分支
   // → 整行 `ok:false` → 只认 deny 例外 → 用户写的 **ask 例外整个失明**（fail-open）。
   {
@@ -10969,7 +10928,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
     // 对照：没有例外命中的那条仍按大分类 allow（不得凭空收紧）
     const re = assessCommand('echo a |&>& log & echo b', 'bash', h)
     if (re.action !== 'allow') bad.push(['凭空收紧', 'echo a …', re.action, re.code])
-    ok('★ AH5 `|&` 不得把整行推进 ok:false（发现 9：ask 例外失明）', bad.length === 0, JSON.stringify(bad))
+    ok('★ AH5 `|&` 不得把整行推进 ok:false', bad.length === 0, JSON.stringify(bad))
   }
   // `|&` 是**一个**管道操作符，不得凭空多切一段（`&` 不得再被当后台分隔符）
   {
@@ -10978,7 +10937,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       d.ok ? ('segments=' + d.segments.length + ' ops=' + d.segments.map((s) => s.op).join(',')) : d.reason)
   }
 
-  // ── ⑥ 发现 3：续行符劈开多字符操作符 → 必须与「不写续行符」的对照同结论 ──────
+  // ── ⑥ 续行符劈开多字符操作符 → 必须与「不写续行符」的对照同结论 ──────
   // ⚠️ 判据是「**与对照格同结论**」，不是「任何配置下都 deny」：靶格的目标 `/tmp/pgx`
   // 在工作区**外**，故 `inside=deny` / `wide=deny` / `unknown=deny` 下对照格本就是 allow
   // （用户没把 `outside` 设为 deny）。旧代码在这里 deny，是因为整行被推进 `ok:false`、
@@ -11001,7 +10960,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       const r = at(cmd, ONLY('outside'))
       if (r.action !== 'deny') bad.push(['outside=deny 未 deny', cmd, r.action, r.code])
     }
-    ok('★ AH6 续行符劈开 `>&`：与对照同结论，且 `outside=deny` 下 deny（发现 3）',
+    ok('★ AH6 续行符劈开 `>&`：与对照同结论，且 `outside=deny` 下 deny',
       bad.length === 0, JSON.stringify(bad))
   }
   // ⚠️ 反向：**注释内**的 `\`+换行**不是**续行符（bash 把下一行当新命令执行）——
@@ -11069,7 +11028,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       bad.length === 0, JSON.stringify(bad))
   }
 
-  // ── ⑦ 发现 4：花括号组的判据必须在**词法层面**做 ────────────────────────────
+  // ── ⑦ 花括号组的判据必须在**词法层面**做 ────────────────────────────
   // 引号内的换行、转义分号 `\;` 都是**字面字符**，`{…}` 只是一个词 → 可作重定向目标。
   {
     const bad = []
@@ -11088,7 +11047,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
       const r = at(cmd, ONLY('outside'))
       if (r.action !== 'deny') bad.push(['outside=deny 未 deny', cmd, r.action, r.code])
     }
-    ok('★ AH7 花括号内「引号内换行 / 转义分号」是字面词：与对照同结论，且 `outside=deny` 下 deny（发现 4）',
+    ok('★ AH7 花括号内「引号内换行 / 转义分号」是字面词：与对照同结论，且 `outside=deny` 下 deny',
       bad.length === 0, JSON.stringify(bad))
   }
   // ⚠️ 反向：真·命令组（末尾顶层 `;`）**必须仍然**判分组 → 整行 ok:false（不得放宽）
@@ -11137,7 +11096,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
   }
 
   // ── ⑨ 提权兜底（`destructiveHeadReadable` 里 `PRIV_PREFIXES[head] === 1` 那一行）──
-  // 这一行**承重、不可删**（发现 8 的报告者建议删掉它，实测不可用）：构造里那个命令
+  // 这一行**承重、不可删**：构造里那个命令
   // **不是**破坏性命令时（`sudo $(date)` / `su $(id)`），新的「构造内载荷」判据够不到它，
   // 只有这一行能判「命令读不出」。删掉它 ⇒ 用户显式配的 `wide=deny` / `inside=deny`
   // 被静默丢弃（实测 `wide=deny` 下由 deny 变 **allow**）。
@@ -11180,8 +11139,8 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
     //
     // 基座**必须含一个「带空格 + 引号」的目标**：粗分词元按空白切分，
     // `rm -rf "/data/my project"` 被切成两片而两片都不匹配整块引号正则 ⇒ 判不出目标。
-    // 仲裁实测：把基座换成含空格目标后，**原断言立刻产生 48 处 mismatch** ——
-    // 即原基座（全是无空格目标）对该族的采样过窄，修复 2 正是补这一族。
+    // 把基座换成含空格目标后，原断言立刻产生 48 处 mismatch ——
+    // 即原基座（全是无空格目标）对该族的采样过窄，本条正是补这一族。
     for (const base of ['rm -rf /etc', 'rm -rf /etc/x', 'chmod 777 /etc', 'rm -rf C:/Windows', 'rm -rf ./build',
       'rm -rf "/data/my project"', 'rm -rf "C:/Users/me/My Docs"']) {
       // opener 补 `<<\EOF`（反斜杠转义分隔符是**合法 heredoc**，见下面 AH10 ⑤）
@@ -11640,7 +11599,7 @@ group('AH. 本批修复的钉桩：发现 1/7/8（VX2）、发现 9（`|&`）、
   //   · 项 2：`unknown` 折 ask 的既有断言（AG2 ⑤ / AH 组）只覆盖**子设置档位**里的未知值
   //     （`wide='always'`），从未覆盖**例外动作**是未知值这一族 —— 而例外在整行分支里
   //     走的是另一条查表路径（`TIER_STRICTNESS[ex.action]`）。
-  // 删除修复后该断言变红的实测结果见交付报告（逐格列出）。
+  // 删除修复后该断言变红（逐格实测）。
   {
     const BT2 = String.fromCharCode(96)
     const H2 = '<<EOF\nx\nEOF'
@@ -12151,7 +12110,7 @@ group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假�
             JSON.stringify(d.ok ? d.segments.map((s) => s.words) : d.reason)])
         }
       }
-      // ── Parameter 词元的**字符类宽度**（本轮修复：旧字符类窄 17 格）─────────────────
+      // ── Parameter 词元的**字符类宽度**─────────────────
       // 判据「`-x<c>y` + 反引号 + 换行 是**语句边界**（`stmts=2`、第二行独立执行）」，由
       // `PWSH_PARAMETER_TOKEN` 的字符类决定。旧字符类 `[A-Za-z_]` / `[A-Za-z0-9_/-]`
       // 实测漏判 16 格词身 + 1 格首字符（`?`）、误判 0 格 —— 端到端是**真 fail-open**：
@@ -12534,7 +12493,7 @@ group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假�
     //    那条**不 trim** 的前导 `-` 守卫决定 —— 那是既有的另一处口径，与本轮修法无关，
     //    不要在这里钉它（实测该格在 HEAD / PRE / NOW 三态同值）。
     //    ⚠️ 第二条（`---编码…`，连字符串后**不跟空白**）钉的是适用范围**第二格**：
-    //    它在 HEAD 本为空、在本次修法**之前**变 `换行校验 ---`（本轮缺陷），故它同时是
+    //    它在 HEAD 本为空、在本次修法**之前**变 `换行校验 ---`，故它同时是
     //    「第二格没被回退」与「没有把 PRE 拦下的假候选放回来」两件事的承重语料。
     for (const c of ['"' + String.fromCharCode(96) + 'n--- 编码/换行校验 ---'
       + String.fromCharCode(96) + 'n"',
@@ -12713,7 +12672,7 @@ group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假�
       }
     }
 
-    // ── ⑤ 缺陷 A：`` ` `` + **CRLF** 在**未完结词元内**要切开（本轮修复）──────────────
+    // ── ⑤ 缺陷 A：`` ` `` + **CRLF** 在**未完结词元内**要切开──────────────
     // PS 真值（官方解析器 token 表 + `PipelineAst` 语句数，逐格实测）：
     //   `Write-Output abc` + `` ` `` + **LF**   → **一个** `Generic[abc`<LF>def]`、`stmts=1`（粘住）
     //   `Write-Output abc` + `` ` `` + **CRLF** → `Generic[abc`<CR>]` + `NewLine[<LF>]` + `…`、`stmts=2`（切开）
@@ -12761,7 +12720,7 @@ group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假�
       }
     }
 
-    // ── ⑥ 缺陷 B：Parameter 词元内的反引号是**字面字符**，不得吞掉后面的运算符（本轮修复）──
+    // ── ⑥ 缺陷 B：Parameter 词元内的反引号是**字面字符**，不得吞掉后面的运算符──
     // PS 真值（官方解析器 + `CommandParameterAst.Argument.Value`，逐格实测）：
     //   `cmd /c ver -x` + `` ` `` + `;` + `` ` `` + LF + `RemoveXyz`
     //     → `Parameter[-x`]` + **`Semi[;]`** + `LineContinuation` + `Identifier[RemoveXyz]`、`stmts=2`
@@ -12862,7 +12821,7 @@ group('AJ. 用户实测两个缺陷的钉桩：pwsh 反引号方言矩阵 + 假�
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-group('AJ2. pwsh `$NAME=` 赋值守卫的右半判据 + `rawCommandNames` 的方言维度（本轮两处缺陷的钉桩）')
+group('AJ2. pwsh `$NAME=` 赋值守卫的右半判据 + `rawCommandNames` 的方言维度')
 {
   // 本组钉的是**同一条失效链**的两处入口（均由独立验证发现，PRE 引入）：
   //   label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 破坏性子设置与**全部例外匹配**
@@ -13121,7 +13080,7 @@ group('AK. 语句边界处续行标记的归属 + 词元形态影子默认表的
 //   实测订正：带 `$` 前缀的形态在 bash 下是真命令，归 AJ2 的 ③′ 靶形态组。）
 // ⚠️ 语料刻意**最小**：只放「整体引号」与「无引号」的对照，不顺手扩充其他形态 ——
 //   引号/转义插入名字或 `=` 的那一族与本次是**同一条判据**，由下面第 ② 组顺带覆盖即可。
-group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（本轮缺陷的钉桩）')
+group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」')
 {
   // 档位取八档全 deny + 大分类 allow —— 这正是失效链暴露的那一格。
   const dsAllDeny = { inside: 'deny', outside: 'deny', wide: 'deny', unknown: 'deny', proc: 'deny', power: 'deny', priv: 'deny', reg: 'deny' }
@@ -13353,7 +13312,7 @@ group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（�
     //      改动这两处判据时必须手工复核上面两格（它们**不会**变红）。
     ['> $(mktemp) r"m" A=/bin/rm > out2', 'rm'],
     ['> $(true) X=/bin/marker', ''],
-    // ⑧ `NAME=path` 在**段首** + 重定向 + opaque 目标（本轮修法 Z 的靶，AL 组此前无语料守护）。
+    // ⑧ `NAME=path` 在**段首** + 重定向 + opaque 目标。
     //    与 ⑦ 是**同一判据**（`SEG_OPAQUE_TARGET`）但走**不同分支**：⑦ 里 `NAME=` 在段首
     //    **之后**（`at > 0`，前一非空白字符是操作符）；本格里 `NAME=` 就在段首（`at === 0`）
     //    ⇒ 上一批那个「位置比较」收窄在这里**恒假**（`oT < 0` 不可能成立）⇒ 判据**根本没被
@@ -13368,7 +13327,7 @@ group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（�
     //    ⚠️ 不按「重定向操作符 × opaque 类型 × 命令词形态」铺开成矩阵：同族判据相同、多钉无益。
     ['FOO=/usr/bin/rm 2> $(mktemp) marker', 'rm'],
     ['> $(mktemp) r"m" A=/bin/rm', 'rm'],
-    // ⑨ 占目标位的 opaque 构造**带内联程序**（本轮批次 A 的靶，AL 组此前无语料守护）。
+    // ⑨ 占目标位的 opaque 构造**带内联程序**。
     //    与 ⑦/⑧ 是**同一族形态**（opaque 占重定向目标位）但**判据不同**：⑦/⑧ 判「有没有
     //    占过目标位」（`SEG_OPAQUE_TARGET`），本族还要求判「那个构造里**装了什么**」——
     //    上面两条判据都**不过问构造内容**，故 `> $(sh -c "…") > out A=/bin/rm` 这一族
@@ -13392,8 +13351,8 @@ group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（�
     //    的候选守卫都在用）⇒ 记为已知残余，不为它再造语料。
     ["> $(sh -c 'marker') > out A=/bin/rm", 'rm'],
     ['> $(true) > out A=/bin/rm', ''],
-    // ⑩ 带内联程序的 opaque 构造，三个**入参构造维度**（第 10 圈修法 U 的靶，AL 组此前
-    //    无语料守护）。⑨ 钉的是「构造里装了什么」，本组钉的是**判据的入参怎么构造** ——
+    // ⑩ 带内联程序的 opaque 构造，三个**入参构造维度**。⑨ 钉的是「构造里装了什么」，
+    //    本组钉的是**判据的入参怎么构造** ——
     //    三处曾与既有调用点（`assessCommand` / index.js 候选守卫，拿到的是**词法器产出 +
     //    已剥引号 + 已归一化**的形态）**不同源**，各自漏掉一族：
     //      · 第 1 格 —— 守卫多了 `!started`（引号分支读到引号即置 `started = true`）
@@ -13419,7 +13378,7 @@ group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（�
     ['> $(sh "-c" "marker") > out A=/bin/rm', 'rm'],
     ['> $(/bin/sh -c "marker") > out A=/bin/rm', 'rm'],
     ['> "$(true)" > out A=/bin/rm', ''],
-    // ⑪ **遍历全部分段**（第 11 圈修法 W 的靶，AL 组此前无语料守护）。⑩ 钉的是「入参怎么
+    // ⑪ **遍历全部分段**。⑩ 钉的是「入参怎么
     //    构造」的前三维（守卫 / 切分 / 归一化），本组钉的是**第四维**：`segs[0]` 只取第一个
     //    操作符分段，而本文件既有的 opaque 载荷机制（`rawCommandNames`）扫的是**所有**分片
     //    —— 实测 `rawCommandNames('$(true; sh -c "x")')` = `["true","sh"]`，即**既有机制本来
@@ -13444,7 +13403,7 @@ group('AL. bash 赋值守卫必须区分「整体引号」与「无引号」（�
     const a = assessCommand(c, 'bash', hDeny()).action
     if (want === 'rm' && a === 'allow') bad.push(['opaque 占命令词位时落大分类（fail-open）', c, a])
   }
-  // ④ 引号内 `$()`（**引号内 `$()` 的 `noteOpaqueHead()` 调用**那条路径）：**只钉动作，不钉 label**（本轮补）。
+  // ④ 引号内 `$()`（**引号内 `$()` 的 `noteOpaqueHead()` 调用**那条路径）：**只钉动作，不钉 label**。
   //    ⚠️ 这一格刻意**不进**上面那个 `[c, want]` 循环：该族 label 的 HEAD 值 `"rm"` 是**误报**
   //    （bash 真值命令名是 `2`，见上方订正段），把它写成 `want` 等于**把误报钉进语料**；而
   //    `""` 又是 fail-open 的那一态。两态都不可钉 ⇒ 只能钉**动作**（钉的是哪一下，见下）。

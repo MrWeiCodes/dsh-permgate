@@ -103,15 +103,9 @@ export const DESTRUCTIVE_LABELS = new Set([
 // 提权前缀：在 DESTRUCTIVE_LABELS 里、但**不在 WRAPPERS 里**（它们改变权限，不是透明包装）。
 // 命令头解析必须能穿过它们，否则「提权 + 真命令」的组合会被当成「提权命令 + 目标实参」。
 //
-// ── 本表是「哪些命令算提权前缀」的**唯一来源**（计划 §5.3：「复用既有的 PRIV_PREFIXES，
-//    不新造表」）────────────────────────────────────────────────────────────────
-// `GROUP_MEMBERS.priv` 由它的键**派生**（见下），不再手写第二份。两份手写表的看守强度
-// 天然不对称：分组那份被测试 32 的「并集 = DESTRUCTIVE_LABELS」双向一致断言盯着，
-// 而第二份此前没有任何断言要求两者相等 —— 于是「新增提权命令时只改了分组表」会静默漂移。
-// 漂移方向是 **fail-open**，实测（以 `dzdo` 为例，只改分组表）：
-//     sudo kill 1234 → labels ['sudo','kill'] → tiers ['proc','priv'] → proc=deny 时 deny
-//     dzdo kill 1234 → labels ['dzdo']        → tiers ['priv']       → 同一配置下 **allow**
-// 即 proc 档整个不命中、`kill *`=deny 这类例外也被绕过。
+// 本表是「哪些命令算提权前缀」的唯一来源；`GROUP_MEMBERS.priv` 由它的键派生，不手写第二份。
+// 两份手写表会静默漂移，方向 fail-open：只改其中一份时，新提权命令缺档，
+// `kill *`=deny 这类例外也会被绕过。
 //
 // 位置在 GROUP_MEMBERS **之前**是必须的：后者要用 `Object.keys(PRIV_PREFIXES)` 派生 priv 组。
 const PRIV_PREFIXES = dict({ sudo: 1, doas: 1, su: 1, pkexec: 1, runas: 1, gsudo: 1 })
@@ -200,29 +194,15 @@ const GROUP_TIER = dict({ proc: 'proc', power: 'power', priv: 'priv', reg: 'reg'
 const RADIUS_GROUPS = dict({ del: 1, disk: 1, perm: 1, priv: 1 })
 
 /**
- * `PURE_RADIUS_GROUPS` —— **纯半径组**：走半径档、且**没有**自己的组档的那些组。
+ * `PURE_RADIUS_GROUPS` —— 纯半径组：走半径档、且没有自己的组档的那些组。
  *
  * 定义 = `RADIUS_GROUPS` 的键 − `GROUP_TIER` 的键（= `del` / `disk` / `perm`）。
  *
- * ── 为什么必须是**派生**而不是第三份手写清单 ────────────────────────────────────
- * 「哪些组是纯半径组」这件事此前只以**字面量数组**的形式活在 `test/shell-parse.mjs` 的
- * 测试 51 里（`const RADIUS_GROUPS = ['del','disk','perm']`），而生产侧那两张表
- * （`RADIUS_GROUPS` / `GROUP_TIER`）都没导出 —— 于是「哪几个组走半径档」在生产与守卫
- * 各有一份，日后新增一个半径组时测试 51 仍按旧三元组遍历，新组里「参数非路径」的 label
- * 会静默落 `inside`（fail-open）而断言照样全绿。这与 `GROUP_OF_LABEL` 由 `GROUP_MEMBERS`
- * 派生（测试 32b）、`GROUP_MEMBERS.priv` 由 `PRIV_PREFIXES` 派生（测试 54g）是同一条纪律：
- * **判据表只有一份，消费方引用它**。
+ * 必须是派生而不是第三份手写清单：两份清单漂移后，新增半径组会静默落 `inside`
+ * （fail-open），而测试仍按旧名单遍历、不会报错。
  *
- * ── 为什么 `priv` 被排除（这是本常量存在的另一半理由）────────────────────────────
- * `priv` 虽然在 `RADIUS_GROUPS` 里，但它**不是**纯半径组，两处判据都体现了这一点：
- *   · `tierSetOf` 的 ① 分支：`priv` 只在 `seg.blast` **非 null** 时才并半径档
- *     （`hasPrivGroup && seg.blast`），而纯半径组的 `null` 按 §5.1 归 `inside`；
- *     故 `sudo ls` 只命中 `priv`、**没有** `inside` 档 —— 若把 `priv` 当纯半径组遍历，
- *     它的 6 个成员（`sudo` / `doas` / `su` / `pkexec` / `runas` / `gsudo`）blast 恒 `null`
- *     （提权命令自己没有目标），探针表里一个都没有，测试 51 会立刻报「无探针」。
- *   · 设计文档 §2.2 / §5.6③ 的口径一致：`priv` 的判据是「提权档 + 内部命令半径档**两者并存**」，
- *     §9.8 的探针表也只按 20 + 2（纯半径组 + priv）计数。
- * 故「纯半径组」= `RADIUS_GROUPS` 键 − `GROUP_TIER` 键，正是下面这个派生式。
+ * `priv` 被排除：它虽然在 `RADIUS_GROUPS` 里，但只在 `seg.blast` 非 null 时才并半径档；
+ * 提权命令自己没有目标、blast 恒 null，故 `sudo ls` 只命中 `priv`、没有 `inside` 档。
  */
 export const PURE_RADIUS_GROUPS = Object.keys(RADIUS_GROUPS).filter((g) => GROUP_TIER[g] === undefined)
 
@@ -293,9 +273,7 @@ const PS_KEYWORDS = dict({ foreach: 1, if: 1, else: 1, elseif: 1, for: 1, while:
 const BASH_KEYWORDS = dict({ then: 1, elif: 1, fi: 1, done: 1, esac: 1, time: 1, '!': 1, case: 1, select: 1, coproc: 1, '{': 1, '}': 1 })
 const STATEMENT_KEYWORDS = dict(Object.assign({}, PS_KEYWORDS, BASH_KEYWORDS))
 
-// 导出仅供测试穷举（§残余 ② 的守卫：路径 basename 不得被当关键字，测试按**全表**逐条钉，
-// 抽样会让「日后往表里新增关键字」多出一条静默漏报 —— 与测试 34 里那条「关键字取全部而不是
-// 抽样」的纪律同源）。**判定逻辑不消费本导出**，模块内部照旧直接用上面的常量。
+// 导出仅供测试按全表穷举（路径 basename 不得被当关键字）；**判定逻辑不消费本导出**。
 export { STATEMENT_KEYWORDS }
 
 // 子命令路由器命令族：label 细化到「git status」这一粒度，而不是一放全放「git *」。
@@ -332,11 +310,11 @@ const ROUTER_SUB_SCAN_MAX = 64
 // 前缀包装器：它们不改变后面命令的语义，但会占住「命令名」的位置，
 // 使有效命令名判错 —— `env -u FOO rm -rf /` 剥之前有效命令名是 `FOO`，破坏性判定整个跳过。
 //
-// 除计划 §2.2 裁剪版列的 4 个之外，这里补了 4 个**同样常见且不改语义**的前缀：
+// 除常见的 4 个之外，这里补了 4 个同样常见且不改语义的前缀：
 //   command / builtin / exec —— shell 内建的前缀，后面跟的才是真命令
 //   nohup / setsid            —— 只改信号与会话，不改命令
 //   stdbuf / ionice           —— 只改缓冲与 IO 优先级
-// 不加它们的后果与「wrapper 漏剥」完全同类：实测（子设置 deny、大分类 allow）
+// 不加它们的后果与「wrapper 漏剥」完全同类（子设置 deny、大分类 allow）：
 //   `find . -delete` → deny，而 `nohup find . -delete` / `command find . -delete` → allow，
 //   `nohup rm -rf /x` 同样绕过破坏性判定。它们不是「罕见形态」，是日常写法。
 // 代价：这些名字若真被当作命令调用（例如某个叫 `time` 的可执行文件），会被跳过一层 ——
@@ -859,17 +837,14 @@ function paramTokenWithNext (s, code) {
  *   · `'none'`    —— 词元**还在写**（裸词 / 简单变量 / `abc]` / `a.b` / `x$y.y`）：反引号是
  *     **字面**字符，两行粘住。
  *
- * ⚠️ **两个消费方共用这一份判据**（本文件反复记录过「同一概念两处各写一份必然漂移」那类缺陷）：
+ * ⚠️ **两个消费方共用这一份判据**：
  *   ① 主循环的续行守卫 —— 据此决定「切段 / 切词 / 什么都不切」（用 `level`）；
  *   ② `readPwshEscape` 的 **CRLF 支** —— 据此决定 `` ` ``+`\r\n` 是**整体续行**还是
  *      「字面 CR + 真换行符」（用 `open`）。
  *   两个字段**同源同判据**（同一套正则），只是回答的问题不同：`level` 问「词元完结到什么
  *   级别」，`open` 问「反引号是否落在**未完结**词元内」（PS 只在前者成立时把 `` ` ``+`\r`
- *   当转义、把 `\n` 留给换行符）。实测两处**确实不同值**的两族（下面 `closedLoose` 那两种
- *   形态）：既有三段式对它们给 `'none'`（段级行为是既有的，不得改动），而它们其实是
- *   **已完结**词元 ⇒ `open` 必须为 false。
- *
- * 词法状态由调用方**显式传入**：`index` 是 `for` 循环内的绑定，而本函数定义在循环外
+ *   当转义、把 `\n` 留给换行符）。既有三段式对 `closedLoose` 两种形态给 `'none'`（段级
+ *   行为是既有的，不得改动），而它们其实是已完结词元 ⇒ `open` 必须为 false。
  * （为一次判定在每次迭代里新建闭包不值得），故不能靠闭包取用。
  *
  * ⚠️ 词元形态**不读 `wordText`**，只读调用方同步维护的**形态影子** `shape`（见
@@ -909,97 +884,33 @@ function pwshEscapeBoundaryAt(shape, typed, lastIsQuote, groupClose, at) {
  * 「这个词元是不是**引号包裹的字符串字面量**」—— label 提取的入口守卫之一。
  *
  * ── 判据：含空白 + 含路径分隔符 + 不以路径形态开头 + 剥路径后 basename 仍非命令名，
- *    且**适用范围**为「连字符串 + 空白开头 + 连字符串收尾」**或**「装饰性开栏 + 装饰性收栏」
- * 四格判据 + 两格适用范围（① 自带开栏/收栏两半），缺一不可，每一格都有实测反例：
- *   · 适用范围①「连字符串 + 空白开头」（`/^-+\s/`）**且「连字符串收尾」**—— 它是**守卫的
- *     适用范围**，不是判据的一部分：把守卫收窄到它本来要拦的那一族（`"--- 编码/换行校验 ---"`、
- *     `"-- 步骤 1/3 --"` 这类以连字符串开头、紧跟空白、**又以连字符串收尾**的分隔注释串），
- *     其余含空格的相对路径一律放行。故放最前。
- *     ⚠️ 收栏那一半是**本轮补的**（与②对齐）：此前①只要「连字符串 + 空白开头」，比②宽半格，
- *     于是「目录名本身就是连字符串 + 空格」的真实命令被整族判成引号串 —— `"--- x/My App"`、
- *     `"- x/My App"`、`"-- x/My App"`、`"---- x/My App"`、`"--- x/My Tool.exe"`、
- *     `"--- tools/My App"` 这六个词元 basename 都不以连字符串收尾，`fenced === false`，
- *     **只**被①拦下。实测两向（本机 pwsh，`& '--- x/My App'` 等经 PATHEXT 解析 rc=0）：
- *       大分类 allow + `my app *`=deny  → HEAD **deny**(exception) → PRE **allow**(category)
- *       大分类 ask  + `my app *`=allow → HEAD **allow**(exception) → PRE **ask**(category)
- *     两半必须**同时**成立才进判据：少了收栏那半是上面那个 fail-open，少了开栏那半则
- *     `"-x/rm ---"` 这类真实命令被误伤（见下②）。
- *     为什么**不是**「trim 后以 `-` 开头」（第三轮的写法）：后者漏掉「`-` 开头的**目录** +
- *     含空格 basename」整族（`"-x/My Tool.exe"`、`"-rf/My Tool.exe"`、`"-x/hello world"`、
- *     `"-x y/My App"`）—— 它们**确实**以 `-` 开头、`/\s/` 也确实为真，于是照样被判成引号串
- *     → label 变空 → `unparsable → destructive=false → 落大分类`。这一族与
- *     `"Program Files/My Tool.exe"` 是**同一个缺陷**（HEAD 都给得出 `my tool`），只是目录名
- *     以 `-` 开头才漏网。真实可执行性本机 pwsh 实测（rc=0，无害替代目标）：
- *     `-x/rm.cmd`、`-x/My Tool.cmd`、`.\-x\My Tool.cmd`、`-x y/rm`、`.\-x y\rm.cmd`
- *     都真的跑起来了；`"-x/My Tool.exe"` 形态由 PATHEXT 解析到 `-x\My Tool.cmd`。
- *     判别特征：真实目录名紧跟连字符串的必是字母/数字（`-x`、`-rf`、`-x y`），
- *     而分隔线的连字符串后面才是空白（`--- `）。
- *     ⚠️ 但**这条判别特征只对「连字符串后紧跟空白」的子族成立**，本轮补了适用范围②（见下）：
- *     该族里还有「连字符串后**不跟空白**、空白落在 basename 里」的子族（`---编码/换行校验 ---`），
- *     汉字/字母紧跟连字符串，`/^-+\s/` 原理上区分不了它。
- *     ⚠️ 不要退回「以 `-` 开头」，也不要换成「第一个分隔符之前就有空白」：后者对
- *     `"-x y/My Tool.exe"`（目录段与 basename 都含空格）仍判真，实测那一格在三态下
- *     HEAD=deny(exception) → PRE/NOW **allow(category)**（fail-open，两门方言各一格）。
- *     ⚠️ 判据用 `t.trim()` 而不是 `t`：词法器**保留**引号内的首尾空白
- *     （实测 `"  --- 编码/换行校验 ---"` → 词元 `  --- 编码/换行校验 ---`），
- *     不 trim 时前导空白让 `/^-+\s/` 失配 ⇒ 该形态 label 变 `换行校验 ---`（假候选复活）。
- *   · 适用范围②「装饰性开栏 + 装饰性收栏」（详见函数体末段）—— 开栏 = 连字符串后
- *     跟的不是 ASCII 字母/数字、也不是路径分隔符；收栏 = **剥路径后的 basename** 以
- *     连字符串收尾。它管① 漏掉的那个子族（连字符串后**不跟空白**、空白落在 basename 里，
- *     `---编码/换行校验 ---`），**不可省**：`"-x/rm ---"` 的 basename 同样
- *     以连字符串收尾，但它是真实可执行文件（实测 `-x/rm ---.cmd` rc=0），少了开栏那一格
- *     会把 A 族误判成引号串 ⇒ fail-open。
+ *    适用范围两格（满足其一）：「连字符串 + 空白开头 + 连字符串收尾」或「装饰性开栏 + 装饰性收栏」。
+ *   · 适用范围①（`/^-+\s/` 且连字符串收尾）只拦分隔注释串（`"--- 编码/换行校验 ---"`、
+ *     `"-- 步骤 1/3 --"`），其余含空格的相对路径一律放行。少了收栏那半会把「目录名本身
+ *     是连字符串 + 空格」的真实命令（`"--- x/My App"`）判成引号串；少了开栏那半则误伤
+ *     `"-x/rm ---"` 这类真实命令。
+ *   · 适用范围②（装饰性开栏 + 装饰性收栏）管①漏掉的子族：连字符串后不跟空白、空白落在
+ *     basename 里（`---编码/换行校验 ---`）。
  *   · 去掉「含空白」—— `a/b/c`（相对路径命令）被误伤；
- *   · 去掉「含分隔符」—— `"reg delete" HKLM\X /f` 的 `reg delete`（引号包裹的
- *     **两词命令名**，54D 语料钉着它）被误伤；
- *   · 去掉「不以路径形态开头」—— `"C:/Program Files/My Tool.exe"`（引号包裹的
- *     **路径形态命令名**，54D 同语料）被误伤；
- *   · 去掉「剥路径后仍非命令名」—— 只按「含空白 + 含分隔符 + 不以路径形态开头」判，
- *     会把 `"my tools/rm.exe" -rf /data`、`"Program Files/rm.exe" -rf /`、
- *     `"my dir/Remove-Item.exe" -Recurse -Force C:/Windows` 这类**含空格的相对路径
- *     命令**判成字符串字面量（`looksLikeExplicitPath` 不认相对路径开头）→ label 变空
- *     → 段级 `unparsable` → 破坏性子设置与全部例外匹配双双跳过 → 落大分类。
- *     实测（bash 与 pwsh 两门方言）HEAD 均为 ask/deny，只按前三格判时一律变 **allow**，
- *     用户显式 `rm *`=deny 例外同样被绕过；反向也误伤 `"my scripts/build.ps1" -Clean`
- *     （用户配 `build *`=allow 时由 allow 变 ask，例外失效、反复弹窗）。
- * 故最后一格按**剥路径后的 basename** 判，而非在原词元上做前置否决。
- * ⚠️ 上面列的四条是**判据说明用的反例**，它们本身**不在**测试语料里 —— 曾有一版注释
- *    声称「四条反例已钉进 AJ 组」，实测为假：把这最后一格整条删掉（判据退化成
- *    「含空白 + 含分隔符 + 非显式路径即引号串」）时，AJ 组**只有**本轮补的
- *    `"a b/reg delete" HKLM\X /f` 与 `"-x/reg delete" HKLM\X /f` 两格会红灯
- *    （见 `test/shell-parse.mjs` AJ 组「真命令名被守卫误伤」那一趟）。
- *    即上面那四条形态**确实没有**断言守护，不要按旧注释以为它们已被钉住。
+ *   · 去掉「含分隔符」—— `"reg delete" HKLM\X /f` 的两词命令名被误伤；
+ *   · 去掉「不以路径形态开头」—— `"C:/Program Files/My Tool.exe"` 被误伤；
+ *   · 去掉「剥路径后仍非命令名」—— `"my tools/rm.exe" -rf /data` 这类含空格的相对路径
+ *     命令会被判成字符串字面量 → label 变空 → 段级 `unparsable` → 破坏性子设置与全部
+ *     例外匹配双双跳过 → 落大分类。故最后一格按**剥路径后的 basename** 判。
  *
- * 命中形态就是用户实测的那一条：`"--- 编码/换行校验 ---"` —— 词法器剥掉引号后
- * 留下含空格与 `/` 的整串，`commandNameOf` 取最后一个 `/` 之后得到 `换行校验 ---`，
- * 弹窗据此给出「允许此项」按钮，而写进配置的例外**永不命中**。
+ * 命中形态：`"--- 编码/换行校验 ---"` —— 词法器剥掉引号后留下含空格与 `/` 的整串，
+ * `commandNameOf` 取最后一个 `/` 之后得到 `换行校验 ---`，弹窗据此给出「允许此项」按钮，
+ * 而写进配置的例外**永不命中**。
  *
- * ⚠️ **坏字符判据只落在剥路径之后的 basename 上，不落在原词元上**：若落在
- * **原始词元**上会误伤真实命令 —— `$x/rm -rf /etc`、`$env:TEMP/rm.exe -rf /etc`、
- * `C:/my=dir/rm.exe -rf /etc` 的 `$` 与 `=` 都在**路径前缀**里，那些是货真价实的命令
- * （实测：对原始词元跑 `BAD_LABEL_CHARS` 会让这一族在八档全 deny 下由 deny 变 **allow**，
- * 是新开的 fail-open）。`segmentLabelFrom` 里另有一句同口径的 `BAD_LABEL_CHARS.test(head)`。
+ * ⚠️ **坏字符判据只落在剥路径之后的 basename 上，不落在原词元上**：`$x/rm -rf /etc`、
+ * `$env:TEMP/rm.exe`、`C:/my=dir/rm.exe` 的 `$` 与 `=` 都在路径前缀里，是货真价实的命令；
+ * `segmentLabelFrom` 里另有一句同口径的 `BAD_LABEL_CHARS.test(head)`。
  *
- * 残余（有意保留，如实记录）。守卫的适用范围是上面那**两格**（连字符串 + 空白开头 +
- * 连字符串收尾 / 装饰性开栏 + 装饰性收栏），两格之外一律放行，故残余范围**比原先更大**，
- * 如实列出四类：
- *   ① **不含路径分隔符**的引号串 —— 在词元粒度上与真命令名不可区分：词法器剥引号后，
- *      `"hello"` 与 `hello`、`"--- encoding check ---"` 与同名可执行文件，交到这里的
- *      都是同一个字符串（后者由 `segmentLabelFrom` 的前导 `-` 守卫拦下）。
- *   ② **含分隔符但不以 `-` 开头**的引号串（`"a b/hello world"`）—— 与 A 族
- *      `"my tools/My App"`（真实可执行的含空格相对路径命令）**逐字同形**，词元粒度上
- *      无法区分，二者只能同判。这是**固有**的不可区分性，不是本守卫的疏漏：
- *      按「basename 含空白即引号串」判会误伤 A 族（fail-open，见上），
- *      按「放行」判则本形态多一个候选按钮 —— 两害相权取后者，且它与 HEAD 同值。
- *   ③ 含分隔符、以 `-` 开头，但剥路径后 basename 恰是**已知命令名 / 两词命令名**
- *      （`"a b/reg delete"`）—— 见下，那是有意的取舍（B 族不得回退）。
- *   ④ 含分隔符、以 `-` 开头，且空白落在**目录段**（`"-x/My App"`）—— 与 ② 同族、
- *      同为**固有**的不可区分性：它与真实可执行的 `"-x/My Tool.exe"` 在词元粒度上
- *      只差 basename 里那几个字符，而后者按 PATHEXT 真能解析到 `-x\My Tool.cmd`。
- *      本守卫对整族放行（判假），故这一形态多一个候选按钮 —— 与 HEAD 同值。
- * 要堵 ①②必须让词法器把「引号状态」随词元一起交回（`words` 是 `string[]`，改结构会波及
- * 全部消费方），代价与收益不成比例；且它们的危害只是弹窗多一个用户不会点的按钮，
- * 不构成授权面问题（写下的例外永不命中、命令照旧弹窗，用户看得见，不会被静默放行）。
+ * 残余（有意保留）：两格之外一律放行，共四类 —— ①不含路径分隔符的引号串（与真命令名在
+ * 词元粒度不可区分）；②含分隔符但不以 `-` 开头（与真实含空格相对路径命令逐字同形）；
+ * ③含分隔符、以 `-` 开头但 basename 恰是已知命令名（有意的取舍）；④空白落在目录段
+ * （与②同为固有的不可区分性）。要堵①②必须让词法器交回引号状态（`words` 是 `string[]`，
+ * 改结构会波及全部消费方），代价与收益不成比例，且危害只是多一个候选按钮，不构成授权面问题。
  *
  * @param {string} text 词元**原文**（未经 `commandNameOf` 剥离）
  * @returns {boolean} 为真表示该词元是引号包裹的字符串字面量
@@ -1014,10 +925,9 @@ function labelTokenIsQuotedLiteral(text) {
   // 其余按**剥路径后的 basename**判「是否仍是合法命令名」：`x/my tools` 剥完是
   // `my tools`（含空白、且不是已知命令名）→ 判真（引号串）；而 `my tools/rm.exe`
   // 这类**相对路径命令**剥完是 `rm.exe` → 合法命令名 → 判假（不是字符串字面量），守卫放行。
-  //   （上面第一例一度误写成 `my tools/rm.exe` —— 那个剥完是 `rm`，不是 `my tools`，
-  //    举错了例子；判据本身没变，这里只把例子改对。）
+
   //
-  // ⚠️ 「basename 含空白」**单独不足以判引号串**（本轮修复）：`DESTRUCTIVE_LABELS` 里
+  // ⚠️ 「basename 含空白」**单独不足以判引号串**：`DESTRUCTIVE_LABELS` 里
   //     有**两词命令名**（`reg delete`），路由器命令的 label 本来就拼成两词，含空白是
   //     **正常形态**而不是「引号串」的特征。于是「含空格的相对路径 + 两词命令名」被误判：
   //       `"a b/reg delete" HKLM\X /f`   → head = `reg delete` → 误判引号串 → label 变空
@@ -1032,59 +942,13 @@ function labelTokenIsQuotedLiteral(text) {
   //     不另写第二份两词表 —— 那正是本文件反复警告的漂移源）。
   //     ⚠️ 作者注释声明的残余范围（「**不含**路径分隔符的引号串」）并未覆盖此形态：
   //     它含分隔符，走的是本行而不是上面那条早退。
-  // ⚠️ **守卫只对「trim 后以连字符串 + 空白开头」（`/^-+\s/`）的词元成立**（该轮修复；
-  //    ⚠️ 后续又补了「且连字符串收尾」那一半，见下适用范围①——本段只记该轮收窄的来由）──
-  // 上面那格「剥路径后 basename 仍非命令名」此前对**所有**含空白 + 含分隔符的词元生效，
-  // 于是「含空格的相对路径 + basename 既非破坏性命令名、也非两词命令名」被整族误判成
-  // 字符串字面量：`"Program Files/My Tool.exe" -rf ./x` → head = `my tool` → 判真 → label 变空
-  // ⇒ 段级 `unparsable` ⇒ labels 为空 ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配
-  // 双双跳过 ⇒ 落大分类。实测（相对 HEAD 是本轮改动引入的**回归**，HEAD 该函数不存在、
-  // `segmentLabelFrom` 直接取 `commandNameOf` 得到 `my tool`）：
-  //     `"Program Files/My Tool.exe" -rf ./x`  → HEAD `my tool` / 只加引号守卫时 **`` 空串**
-  //     `"build tools/my script.ps1"`          → 同上
-  //     `"my tools/My App"`                    → 同上（本机 pwsh 真能执行：PATHEXT 解析到 `My App.cmd`）
-  // 危害**双向**，两向都实测（大分类 ask + 为该命令写的 allow 例外 / 大分类 allow + 显式 deny 例外）：
-  //     fail-closed：HEAD allow(source=exception) → 空 label 时 **ask(source=category)**
-  //                  —— 用户写的 allow 例外失明、不再产出候选按钮、反复弹窗；
-  //     fail-open  ：HEAD deny(source=exception)  → 空 label 时 **allow(source=category)**
-  //                  —— 用户显式写的拒绝规则被静默绕过（这一向是真正的授权面问题）。
-  // 故判据先收窄到「trim 后以 `-` 开头」—— 那正是本守卫本来要拦的假候选族
-  // （`"--- 编码/换行校验 ---"` / `"--- encoding check ---"`，以 `-` 开头的分隔注释串）。
-  // ⚠️ 但**只收窄到这一格并不够**（本轮修复）：该族里还有「`-` 开头的**目录** + 含空格的
-  //    basename」——`"-x/My Tool.exe"`、`"-rf/My Tool.exe"`、`"-x/hello world"`、
-  //    `"-x y/My App"` 同样以 `-` 开头、同样含空白，于是照样被判成引号串。它们与
-  //    `"Program Files/My Tool.exe"` 是**同一个缺陷**（HEAD 都给得出 `my tool`），只是
-  //    目录名以 `-` 开头才漏过了上一轮那格。实测（无害替代目标，两门方言）：
-  //      · 大分类 allow + 八档全 deny（无例外）：HEAD/PRE 由 `my tool` 变 `` 空串；
-  //      · 大分类 ask + allow 例外 `my tool *`：HEAD allow(source=exception) →
-  //        PRE **ask(source=category)**（fail-closed：例外失明、反复弹窗）；
-  //      · 大分类 allow + deny 例外 `my tool *`：HEAD deny(source=exception) →
-  //        PRE **allow(source=category)**（fail-open：用户显式写的拒绝被静默绕过）。
-  //    故本轮把适用范围换成**「连字符串 + 空白」开头**（`/^-+\s/`）—— 真实目录名紧跟
-  //    连字符串的必是字母/数字（`-x`、`-rf`、`-x y`），而分隔线的连字符串后面才是空白。
-  //    ⚠️ 中间试过一版「第一个分隔符之前就有空白」，它对 `"-x y/My Tool.exe"`（目录段与
-  //    basename 都含空格）仍判真，实测那格 HEAD=deny(exception) → PRE/NOW **allow**，
-  //    已否决并订正为现在这版。
-  // ⚠️ 四条**已被实测否决**的替代修法，不要采用：
-  //   ① 「带可执行扩展名即放行」只修 `.exe`/`.ps1`，修不了无扩展名形态（`"my tools/My App"`
-  //      仍为空，而它在本机 pwsh 下真能执行）；
-  //   ② 「让 `looksLikeExplicitPath` 认相对路径」会连带改动 blast / 命令头等分类器路径，扩散过大；
-  //   ③ 「改宽判据」会与 `"a b/reg delete"` 族冲突（上一轮刚修好）；
-  //   ④ 「适用范围再加『剥路径后 basename 不以 `-` 开头』」**修不了本族**（实测，机制与直觉
-  //      相反，如实记录）：该格对 `-x/rm` 与 `"-x/My Tool.exe"` 的判定**完全相同** ——
-  //      两者剥完都是 `rm` / `my tool`，**都不以 `-` 开头**，故这一格根本区分不了它们。
-  //      它真正排除的只有 basename 恰以 `-` 开头的极小一撮（`-x/-weird`），对本族零作用：
-  //      实测该方向下 A 族五格（`"-x/My Tool.exe"`、`"-x/My App"`、`"-rf/My Tool.exe"`、
-  //      `"-x/hello world"`、`"-x y/My App"`）**label 仍为空**，缺陷原样保留；
-  //      而 `-x/rm` / `-rf/rm` / `-x/reg delete` 也**没有**回退（它们走的是同一条放行路径）。
-  //      即该方向既没修好缺陷、也没破坏上一轮的修复，属**判据没对准缺陷**，不要采用。
-  //      真正的区分点见下：**收栏**（basename 是否以连字符串收尾）配**开栏**形态，
-  //      与 basename 是不是已知命令名无关。
-  //   ⑤ 单用「剥路径后 basename 以连字符串收尾」而**不带开栏那一格**（本轮实测否决）：
-  //      它对 `"-x/rm ---"` 与 `"---编码/换行校验 ---"` 的判定**完全相同**（两者剥完都收尾于
-  //      `---`），于是把 A 族同形的真实可执行文件一并判成引号串 —— 实测 `-x/rm ---.cmd`
-  //      在本机 pwsh 下真能执行（rc=0，无害替代目标），判真会让 label 变空 ⇒ fail-open
-  //      （大分类 allow + `rm *`=deny 时 HEAD/PRE 均为 deny → 该方向变 **allow**）。
+  // ⚠️ **守卫只对「trim 后以连字符串 + 空白开头」（`/^-+\s/`）的词元成立**：
+  // 该格此前对所有含空白 + 含分隔符的词元生效，于是「含空格的相对路径 + basename 既非
+  // 破坏性命令名、也非两词命令名」被整族误判成字符串字面量（`"Program Files/My Tool.exe"`
+  // → head `my tool` → 判真 → label 变空 ⇒ 段级 `unparsable` ⇒ 落大分类），
+  // 两个方向都会失明：allow 例外反复弹窗、显式 deny 例外被静默绕过。
+  // 收窄到 `/^-+\s/` 的依据：真实目录名紧跟连字符串的必是字母/数字（`-x`、`-rf`、`-x y`），
+  // 而分隔线的连字符串后面才是空白。
   // ⚠️ 判据用 `t.trim()`：词法器**保留**引号内的首尾空白（实测 `"  --- 编码/换行校验 ---"`
   //     → 词元 `  --- 编码/换行校验 ---`），不 trim 时前导空白让 `/^-+\s/` 失配、
   //     该形态 label 变 `换行校验 ---`（假候选复活，实测）。
@@ -1102,16 +966,10 @@ function labelTokenIsQuotedLiteral(text) {
   //      （`…换行校验 ---`、`…my check ---` 剥完是 `换行校验` / `my check`，都不是命令名；
   //      而 `--x/rm ---` 剥完是 `rm`，是 —— 故它不算收栏，见下）。
   //
-  // ⚠️ ② 是**本轮补的**，缺它则整族漏回假候选（本轮缺陷，实测）：① 只认「连字符串后
-  //     **紧跟空白**」，而这一族的空白落在 **basename 里**、连字符串后面紧跟的是字母或汉字
-  //     （`---编码/换行校验 ---`、`---encoding/my check ---`、`--note/my check ---`、
-  //     `-编码/换行校验 ---`，以及 pwsh 的 `` "`n---编码/换行校验 ---`n" ``），
-  //     于是① 失配、守卫整族放行 ⇒ label 非空 ⇒ 弹窗产出假候选（label 对真实命令
-  //     `matchCommand` 命中数 0 ⇒ 用户写的例外永不命中，而 `alreadyInProject` 已把它当
-  //     「用户已表态」⇒ 按钮消失、命令照旧弹窗，用户既没放行成功、也再没有按钮可点）。
-  //     真正的区分点是**收栏**（basename 自身以连字符串收尾），不是「连字符串后面跟什么」——
-  //     上一版注释自称「真实目录名紧跟连字符串的必是字母/数字」，但 `---编码` 恰恰就是
-  //     汉字紧跟连字符串，故 `/^-+\s/` 原理上区分不了这一子族。
+  // ⚠️ ② 是必需的：① 只认「连字符串后紧跟空白」，而这一族的空白落在 basename 里、
+  //     连字符串后面紧跟的是字母或汉字（`---编码/换行校验 ---`），于是① 失配、守卫整族放行
+  //     ⇒ label 非空 ⇒ 弹窗产出假候选（例外永不命中，按钮消失后命令照旧弹窗）。
+  //     真正的区分点是**收栏**（basename 自身以连字符串收尾）。
   //
   // ⚠️ 开栏那一格**不能省**（只按「basename 以连字符串收尾」判会 fail-open）：`"-x/rm ---"`
   //     的 basename 同样以连字符串收尾，而它剥路径后是**真实可执行文件** —— 实测（无害
@@ -1123,7 +981,7 @@ function labelTokenIsQuotedLiteral(text) {
   //     故开栏判据取「连字符串开头、后面不紧跟路径分隔符、且不是『`-` + 字母/数字』的
   //     真实目录名」：`-x`、`-rf`、`-x y` 这些真实目录名紧跟的是字母/数字，被排除；
   //     `---编码`、`--note`、`-编码` 才落入。
-  //     ⚠️ 这一格**只对 `dash === 1` 成立**（本轮修复）：`dash > 1` 时 `next` 必然是
+  //     ⚠️ 这一格**只对 `dash === 1` 成立**：`dash > 1` 时 `next` 必然是
   //     `-` 而不是目录名首字符，信息量为零。此前写作 `dash > 1 || !/[A-Za-z0-9]/.test(next)`，
   //     即 `dash > 1` 时**整格恒真**、把这一格短路掉 —— 于是「2+ 连字符开头的真实目录 +
   //     收栏 basename」（`"--x/rm ---"`、`"--tools/Remove-Item ---"`、`"--bin/del ---"`、
@@ -1148,27 +1006,12 @@ function labelTokenIsQuotedLiteral(text) {
   //     （无空白、无不可打印字符），不是「在不在某张表里」。
   // 为什么不是「以 `-` 开头」：后者会把「`-` 开头的目录」整族误伤（见上）。
   //
-  // ── ⚠️ 残余范围是**两类**（不要读成「只限非 ASCII 残名」—— 含空格的**纯 ASCII** 残名同样中招）──
-  //    剥掉收栏后的**残名**含空白**或**含非 ASCII，都过不了「是命令名」那一格，于是被判成
-  //    装饰性收栏 ⇒ 引号串 ⇒ label 变空：
-  //      · 残名**含空白**（纯 ASCII）：`"--x/my tool ---"`、`"--x/a b ---"`、`"--x/My Tool ---"`
-  //      · 残名**含非 ASCII**：`"--x/换行校验 ---"`、`"--x/工具 ---"`
-  //    两类都是**真实可执行文件**（与上面 `"--x/rm ---"` 同族，TEMP 内 PATHEXT 解析实测 rc=0），
-  //    危害同族：label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类，用户为该命令
-  //    写的 deny 例外随之失明。实测（最坏配置：大分类 allow + 八档全 allow + 该命令 deny 例外）：
-  //    上面五个形态 × bash/pwsh 两门方言共 10 格，**全部** HEAD=deny → NOW=allow（真 fail-open）。
-  //    ⚠️ 含空格的**纯 ASCII** 残名比非 ASCII 名**常见得多**（`"--x/my tool ---"` 与刚修好的
-  //    `"-x/my tool ---"` 只差一个连字符），故不要把残余读窄成「只限非 ASCII 名」。
-  //    ⚠️ 该残余**不是第六轮引入**：第五轮（`dash > 1` 短路那版）下残余族同样为空，第六轮
-  //    既未引入也未修复；但**相对 HEAD 属本次未提交改动引入**（HEAD 该格非空，
-  //    `"--x/my tool ---"` HEAD=`my tool ---`），且它**没有语料守护**。
-  //    ⚠️ **无任何词法判据能分开两族**：残余族与守卫要防的装饰串族在词元粒度上**逐字同形** ——
-  //    `dash` 数、`next` 字符、残名含空白三维全同（`"--x/my tool ---"` 真命令
-  //    vs `"--x/my check ---"` 装饰串，判据读到的每一维取值都相同）。六轮所加的每一格判据都在
-  //    这个**不含区分信息**的空间里搬动分界线，继续加格子只会修好一族又在同族另一格露口子 ——
-  //    故这里判定为「**不值得继续修补**」，**不是「待修」、不是 TODO**；要真正分开只能引入
-  //    「该路径在文件系统里是否真实存在」这类判据，而本文件是**纯函数**（不依赖 DSH 运行时），
-  //    代价远高于收益。
+  // ── ⚠️ 残余范围是两类（含空格的纯 ASCII 残名同样中招）──
+  // 剥掉收栏后的残名含空白或含非 ASCII，都过不了「是命令名」那一格，于是被判成
+  // 装饰性收栏 ⇒ 引号串 ⇒ label 变空（`"--x/my tool ---"`、`"--x/换行校验 ---"`），
+  // 用户为该命令写的 deny 例外随之失明。
+  // 无任何词法判据能分开两族：残余族与装饰串族在词元粒度上逐字同形。故判定为
+  // 「不值得继续修补」，不是 TO-DO；要真正分开只能引入文件系统存在性判断，而本文件是纯函数。
   //    ⚠️ 本条评述只针对 **`--` 开头目录**那一残余族（`--x/my tool ---`，`tailAt >= 0`、
   //    走 `fenced` / `bareIsCommand`）。「**目录名本身就是连字符串 + 空格**」那一族
   //    （`--- x/My App`）与它**路径分离**：那族 `tailAt < 0`、`fenced === false`，**只**被
@@ -1181,14 +1024,11 @@ function labelTokenIsQuotedLiteral(text) {
   while (dash < s.length && s.charCodeAt(dash) === 45) dash += 1   // 45 = '-'
   const next = s.charAt(dash)
   // 「真实目录名开栏」：`dash === 1` 且紧跟 ASCII 字母/数字（`-x`、`-rf`、`-x y`）。
-  // ⚠️ `dash === 1` 这一半**不能省**：上一版把它写成 `dash > 1 || !/[A-Za-z0-9]/.test(next)`，
-  //    即 `dash > 1` 时整格恒真、把这一格短路掉 —— 于是「2+ 连字符开头的真实目录 + 收栏
-  //    basename」（`"--x/rm ---"`、`"--tools/Remove-Item ---"`、`"--bin/del ---"`、
-  //    `"--x y/rm ---"`、`"--9/rm ---"`）整族被判成引号串（见上，本轮缺陷）。
-  // ⚠️ 反过来也不能**只**留 `!/[A-Za-z0-9]/.test(next)`：`dash > 1` 时 `next` 是目录名首字符，
-  //    `--note`、`--encoding` 这些**装饰性开栏**首字符同样是字母，一刀切会让
-  //    `"--note/my check ---"`、`"---encoding/my check ---"` 整族漏回假候选（实测）。
-  //    故 `dash > 1` 时不按首字符判，改由下面的**收栏 + 残名**判（那里才有区分力）。
+  // ⚠️ `dash === 1` 这一半不能省：`dash > 1` 时整格恒真会短路这一格，于是「2+ 连字符开头的
+  //    真实目录 + 收栏 basename」（`"--x/rm ---"` 等）整族被判成引号串（label 变空 ⇒ fail-open）。
+  // ⚠️ 反过来也不能只留 `!/[A-Za-z0-9]/.test(next)`：`--note`、`--encoding` 这些装饰性开栏
+  //    首字符同样是字母，一刀切会让它们漏回假候选。故 `dash > 1` 时不按首字符判，
+  //    改由下面的收栏 + 残名判（那里才有区分力）。
   const plainDirLead = dash === 1 && /[A-Za-z0-9]/.test(next)
   const decorLead = dash > 0 && next !== '/' && next !== '\\' && !plainDirLead
   // 装饰性收栏：basename 以连字符串收尾，**且剥掉收栏后剩下的不是命令名**。
@@ -1217,52 +1057,24 @@ function labelTokenIsQuotedLiteral(text) {
   // 适用范围两格（满足其一即进入判据）：
   //   ① 「**连字符串 + 空白**开头」**且**「**连字符串收尾**」**且**「**残名不是
   //      破坏性命令名**」—— 分隔注释串（`--- 标题 ---`）。
-  //      ⚠️ 收栏那一格是**本轮补的**：此前①只要求「连字符串 + 空白开头」，比②**宽半格**，
-  //      于是「目录名本身就是连字符串 + 空格」的真实命令被整族判成引号串：
-  //      `"--- x/My App"`、`"- x/My App"`、`"-- x/My App"`、`"---- x/My App"`、
-  //      `"--- x/My Tool.exe"`、`"--- tools/My App"` —— 这些词元 `tailAt < 0`
-  //      （basename 不以连字符串收尾）、`fenced === false`，**只**被①这一格拦下。
-  //      实测（本机 pwsh，PATHEXT 解析，`& '--- x/My App'` 等 rc=0，真能执行）：
-  //        大分类 allow + `my app *`=deny  → HEAD=**deny** → PRE=**allow**（真 fail-open）
-  //        大分类 ask  + `my app *`=allow → HEAD=**allow** → PRE=**ask**（例外失明、反复弹窗）
-  //      故①与②本就该是**同一语义**（装饰性开栏 + 装饰性收栏），这里是与②**对齐**，
-  //      不是新增一格。实测对拍（60984 格判据面笛卡尔积，变体 = ①不带收栏的修改前语义）：
-  //      「放宽 3744 格 / 收紧 0 格」，放宽格去重后 624 个形态、**全部** basename 不以
-  //      连字符串收尾（即真命令族）；放宽格中端到端动作比修改前更宽的 320 格，
-  //      **全部** HEAD=allow（= 恢复 HEAD 语义，相对 HEAD 的新放宽为 0）。
-  //      ⚠️ 第三格（残名不是破坏性命令名）是**本轮补的**：只补收栏那一格是「只补了一半」——
+  //      ⚠️ 收栏那一格是必需的：此前①只要求「连字符串 + 空白开头」，比②宽半格，
+  //      于是「目录名本身就是连字符串 + 空格」的真实命令被整族判成引号串
+  //      （`"--- x/My App"` 等）：它们 `tailAt < 0`、`fenced === false`，只被①拦下。
+  //      故①与②是同一语义（装饰性开栏 + 装饰性收栏），这里是与②对齐，不是新增一格。
+  //      ⚠️ 第三格（残名不是破坏性命令名）同样必需：只补收栏那一格是「只补了一半」——
   //      「目录名＝连字符串+空格 + basename 以连字符串收尾 + 残名 ∈ `DESTRUCTIVE_LABELS`」
-  //      这一子族（`"--- x/rm ---"`、`"- x/del ---"`、`"---- x/rmdir ---"`、`"--- x/format ---"`）
-  //      仍被①整族判成引号串 ⇒ label 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
-  //      破坏性判定与用户例外双双失效。它与②**未对齐**：② 对同一残名走 `fenced`
-  //      （`bareIsCommand` 为真 ⇒ `fenced === false`）判「是命令名」放行，① 却判「是装饰性
-  //      收栏」拦下 —— 同一残名两条路径判定相反（实测 `"--- x/rm ---"` 与 `"--x/rm ---"`）。
-  //      补的正是②**已经用了七轮**的那个判据（`DESTRUCTIVE_LABELS.has(bare)`，即
-  //      `bareIsCommand` 内部那一半），不新增格子、不新增表、不新增分支，与本轮「①与②对齐」
-  //      是同一意图的补完。实测对拍（7123 格语料，三态 HEAD/PRE/NOW）：①-a 族
-  //      「PRE=""→NOW≠"" 1342 格、非空→空 0 格、值变 0 格」，且这 1342 格**全部**与 HEAD 同值。
+  //      这一子族（`"--- x/rm ---"` 等）仍被①判成引号串 ⇒ label 变空 ⇒ 破坏性判定与用户例外双双失效。
   //      ⚠️ **不要**改用 `!bareIsCommand`（候选A）：那会复活装饰串假候选 —— `"-- 步骤 1/3 --"`、
   //      `"-- 1/3 --"`、`"--- a/b ---"`、`"-- x/3 --"` 等**13 格**装饰串的残名 `3`/`b`/`1`
   //      同样是单 ASCII 词，`bareIsCommand` 为真、被放行（实测候选A 13 格 / 候选B 0 格）。
   //      ⚠️ 已知残余（**不要试图一并修**）：残名 ∉ `DESTRUCTIVE_LABELS` 且为单 ASCII 词的
   //      子族（`"--- x/git ---"`、`"--- x/tool ---"`、`"--- x/3 ---"`）与装饰串残名**逐字同形**，
   //      词法上不可区分，已判定并入已忽略族，保持现状不动。
-  //      ⚠️ 相邻子族「**单连字符收栏**」（`"--- x/rm -"`、`"--- x/del -"`、`"--- x/rmdir -"`、
-  //      `"--- x/format -"`、`"--- tools/rm -"`、`"--- x y/rm -"`，即 basename 以**单个**
-  //      连字符收尾、剥掉后残名 ∈ `DESTRUCTIVE_LABELS`）：它**与 ①-a 同族、同一条 fail-open
-  //      链**，只是 min 值不同 —— **不是**「候选B 覆盖面之外的相邻子族」那种一直如此的边界。
-  //      它是**守卫第一版引入**、**第八轮未覆盖**、**相对 HEAD 的真回归**：HEAD 认得出命令名
-  //      （`"--- x/rm -"` HEAD=`rm -`），PRE 起为空（⇒ 段级 `unparsable` ⇒ `destructive=false`
-  //      ⇒ 用户例外失明）。成因是**①的收栏判据用 min=1，而 `bare` 取自 `trailingDashRunAt(head, 2)`
-  //      （min=2）**：单连字符收栏时后者返回 -1 ⇒ `bare === ''` ⇒ `DESTRUCTIVE_LABELS.has('')`
-  //      为 false ⇒ 第八轮补的第三个合取项在该子族是**重言式**（恒真、等于没补）—— 同一个
-  //      条件的两半用了两把尺子。故这里另算一个 **min=1 的残名**（`bareAt1`）与①的收栏对齐；
-  //      实测该子族 label 恢复非空且与 HEAD 同值（放宽格中与 HEAD 不同值者 0 格）。
-  //      ⚠️ 成因②（**basename 整个是连字符串**，如 `"--- x/--"`、`"--- x y/---"`）**无需处理**：
-  //      那族 `tailAt = 0` ⇒ `bare === ''` ⇒ `bareIsCommand === false` ⇒ `fenced === true`，
-  //      本格不被拦下；**且** `bareAt1` 同样为 `''`、不在 `DESTRUCTIVE_LABELS` 里 ⇒ ① 的
-  //      第三个合取项也为真 ⇒ 同样不被拦下。即它被 `fenced` 与 ①第三格**双路径冗余覆盖**，
-  //      实测三态（HEAD/PRE/NOW）逐格同值、零变化，故本次不必也不该为它加任何判据。
+  //      ⚠️ 相邻子族「单连字符收栏」（`"--- x/rm -"`）：收栏判据用 min=1，而 `bare` 取自
+  //      `trailingDashRunAt(head, 2)`（min=2）—— 单连字符收栏时后者返回 -1 ⇒ `bare === ''`
+  //      ⇒ 第三个合取项恒真（等于没补）。故这里另算一个 min=1 的残名（`bareAt1`）与①对齐。
+  //      ⚠️ 成因②（basename 整个是连字符串，如 `"--- x/--"`）无需处理：`tailAt = 0`
+  //      ⇒ `bare === ''` ⇒ `fenced === true`，已被双路径冗余覆盖。
   //      ⚠️ 举例只用**含空白**的形态：`"--x/--"`、`"-x/---"` 这类**不含空白**的形态在守卫
   //      第一格（`!/\s/.test(t) || !/[\\/]/.test(t)` 即早退）就返回 false 了，**根本走不到**
   //      本格，拿它们当「成因②」的例子会把下一个读者引到错误的位置。
@@ -1290,7 +1102,7 @@ function labelTokenIsQuotedLiteral(text) {
  * `=/bin/rm`，是真命令）。bash 分支已改用 `LEAD_ASSIGN`（见 `bashLeftIsAssign` 的
  * 缺陷 3 实测表）。保留常量只是不扩大本次改动面，**不要**再把它接回 label 判据。
  *
- * ── ⚠️ 这条判据**必须带方言维度**（本轮修法的核心）────────────────────────────────
+ * ── ⚠️ 这条判据**必须带方言维度**────────────────────────────────
  * 同一个形态在两门方言里**语义相反**，故**不存在**一个不分方言的正确判据：
  *
  *   · **bash**：`NAME=value` 是赋值（`LEAD_ASSIGN` 的口径，值可含 `/`）⇒ 不执行任何命令。
@@ -1316,26 +1128,17 @@ function labelTokenIsQuotedLiteral(text) {
 const LABEL_ASSIGN = /^\$?[A-Za-z_][A-Za-z0-9_]*=/
 // pwsh 侧同一判据的**左半**：赋值必须带 `$`（见上「PS 5.1 实测」）。不带 `$` 的
 // `NAME=…` 在 pwsh 里是命令名的一部分，交给下面的 `commandNameOf` 正常剥路径取 label。
-// ⚠️ 只认左半**不够**（本轮修法）：右侧是裸词/路径时它仍是**真命令**，见下。
+// ⚠️ 只认左半**不够**：右侧是裸词/路径时它仍是**真命令**，见下。
 const LABEL_ASSIGN_PWSH = /^\$[A-Za-z_][A-Za-z0-9_]*=/
 
 /**
  * pwsh 侧「`$NAME=右侧` 到底是不是**真赋值**」的判据（`LABEL_ASSIGN_PWSH` 的**右半**）。
  *
- * ── 为什么只看左半不够（本轮缺陷 1，相对 HEAD 的真回归）─────────────────────────
- * 本机 PS 5.1 官方解析器实测（`[Parser]::ParseInput` + `FindAll(CommandAst)`，逐条跑过）：
- *     `$A=/bin/rm`              → PipelineAst、**cmdAst=1**、命令名 `/bin/rm`
- *     `$A=C:\Windows\System32\rm.exe` → cmdAst=1
- *     `$A=./rm` / `$A=/bin/dd`  → cmdAst=1
- *     `$A=rm` / `$A=abc`        → cmdAst=1
- *     `$A=$env:TEMP/x`          → cmdAst=1、命令名 `x`
- *     `$A=1/rm`                 → cmdAst=1、命令名 `rm`
- *   即 `$NAME=` 的右侧是**裸词 / 路径**时，PS 把它当**命令**执行，不是赋值。
- *   只按左半判 ⇒ 整段判「没有命令要执行」⇒ label 空 ⇒ 段级 `unparsable` ⇒
- *   `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
- *   实测（大分类 allow + 八档全 deny，无用户例外）：8 格 HEAD=deny → NOW=allow；
- *   例外 `rm *`=deny 时同 8 格 HEAD=deny → NOW=allow。
- *   ⚠️ HEAD **没有**这道守卫（`segmentLabel(['$A=/bin/rm'])` = `'rm'`），是 PRE 引入的回归。
+ * ── 为什么只看左半不够 ──────────────────────────────────────────────────────
+ * `$NAME=` 的右侧是**裸词 / 路径**时，PS 把它当**命令**执行，不是赋值
+ * （`$A=/bin/rm`、`$A=rm`、`$A=1/rm` 的 cmdAst 均为 1）。
+ * 只按左半判 ⇒ 整段判「没有命令要执行」⇒ label 空 ⇒ 段级 `unparsable` ⇒
+ * `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
  *
  * ── 判据（右侧形态白名单，方向 fail-closed）──────────────────────────────────
  * 只有右侧**确实是值**时才判赋值；其余一律不拦，交给 `commandNameOf` 剥路径取 label。
@@ -1375,7 +1178,7 @@ function pwshRightIsValue(words, token) {
   // `$` 变量 / `(` 子表达式 / `@` 数组与哈希 / `[` 类型字面量 / `!` 非 / `,` 一元逗号 / `.5`
   if ('$(@[!,.'.indexOf(c) !== -1) return true
   // `-1` / `+1` / `~1` / `--1` / `-$A` 是值；而 `-abc` / `+abc` 实测 cmdAst=1（命令）。
-  // ⚠️ 本格**恒真**（本轮缺陷 4：代码真值缺陷、非行为缺陷）：外层守卫已保证
+  // ⚠️ 本格**恒真**：外层守卫已保证
   //    `c ∈ {-,+,~}`，而 `right[0]` 就是 `c` 本身、必然命中紧随其后的必选字符类
   //    `[-+~$(@[!,.0-9]`（可选组 `[-+~]?` 的字符集是它的**真子集**，恒可省略）。
   //    故下面的 `return false` 在本分支**永不进入**，等价于直接 `return true`。
@@ -1388,22 +1191,12 @@ function pwshRightIsValue(words, token) {
 /**
  * bash 侧「`NAME=右侧` 到底是不是**真赋值**」的判据（`LEAD_ASSIGN` 的补充条件）。
  *
- * ── 为什么只看词元不够（本轮缺陷，相对 HEAD 的真 fail-open）────────────────────────
+ * ── 为什么只看词元不够 ──────────────────────────────────────────────────────
  * 词法器**剥引号**后，`'A=/bin/rm'`（整体引号）与 `A=/bin/rm`（无引号）的词元**逐字相同**
- * （实测都是 `A=/bin/rm`）—— 词元粒度上不可区分，原文里那对引号是唯一判据。
- *
- * bash 实测（Git Bash 5.3.15，临时目录内建 `A=/bin/rm` 可执行文件，整行**写进文件再
- * source**（故赋值语义与真跑一致），RAN 证据写进独立日志（不受该行自身重定向影响））：
- *     `A=/bin/rm`     → **不执行任何命令**，`A` 被设为 `/bin/rm`      ⇒ 真赋值
- *     `'A=/bin/rm'`   → **真的执行了**该路径文件（rc=0），`A` 仍 unset ⇒ 真命令
- *     `"A=/bin/rm"`   → 同上（**引号改变语义**：`NAME=` 不再被识别为赋值前缀）
- *     `A='/bin/rm'`   → 真赋值（引号只包住**值**，名字与 `=` 仍是字面量）
- *     `'A'=/bin/rm` / `A'='/bin/rm` / `A''=/bin/rm` / `''A=/bin/rm`
- *     / `\A=/bin/rm` / `A\=/bin/rm` / `'A='/bin/rm` / `'A=''/bin/rm'` → **全是真命令**
- *   即：**`NAME=` 整段必须是字面量（未加引号、未转义）才算赋值前缀**。
+ * —— 词元粒度上不可区分，原文里那对引号是唯一判据。bash 下 `NAME=` 整段必须是字面量
+ * （未加引号、未转义）才算赋值前缀；`"A=/bin/rm"` 与 `'A=/bin/rm'` 都是**真命令**。
  * 只按词元判 ⇒ 引号形态被判成赋值 ⇒ label 空 ⇒ 段级 `unparsable` ⇒ `destructive=false`
  * ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（**fail-open**）。
- * 实测三态（大分类 allow + 八档全 deny）：HEAD=deny → PRE=allow → 未修时 **allow**。
  *
  * ── 判据（段原文里存在**词首且非重定向目标位**的字面 `NAME=`）─────────────────────
  * 取词元上 `LEAD_ASSIGN` 已匹配出的字面前缀（如 `A=`），在**段原文**里逐处 `indexOf`，
@@ -1433,7 +1226,7 @@ function pwshRightIsValue(words, token) {
  * @returns {boolean} 为真表示这是真赋值（没有命令要执行）
  */
 function bashLeftIsAssign(words, token) {
-  // ⚠️ 判据对象是 `LEAD_ASSIGN`（**不认 `$` 前缀**），不是 `LABEL_ASSIGN`（本轮缺陷 3 的修法）。
+  // ⚠️ 判据对象是 `LEAD_ASSIGN`（**不认 `$` 前缀**），不是 `LABEL_ASSIGN`。
   //    bash 的赋值前缀不允许 `$`：`$A=/bin/rm` 会先把 `$A` 展开成**空串**，词成了
   //    `=/bin/rm` —— 那是一次**真命令**执行。Git Bash 5.3.15 实测（`mktemp -d` 内建
   //    `=/bin/rm` / `X=/bin/rm` 可执行文件，整行**写进文件再 source**，故赋值语义与真跑
@@ -1477,7 +1270,7 @@ function bashLeftIsAssign(words, token) {
   const nameEq = m[0]
   for (let at = raw.indexOf(nameEq); at !== -1; at = raw.indexOf(nameEq, at + nameEq.length)) {
     if (at === 0 || /\s/.test(raw.charAt(at - 1))) {
-      // ── 词首命中还不够：**重定向目标位**的 `NAME=` 不是赋值前缀（本轮缺陷 1 的修法）───
+      // ── 词首命中还不够：**重定向目标位**的 `NAME=` 不是赋值前缀───
       // 判据原先只问「段原文里**任何位置**有没有前一字符是空白的字面 `NAME=`」，而重定向
       // 目标位恰好就是这个位置 ⇒ `'A=/bin/rm' > A=x` 这类**真命令**被整段判成赋值。
       // Git Bash 实测（同上手法；`A=x` 等目标文件已在 cwd 内建好，故重定向本身会成功）：
@@ -1504,7 +1297,7 @@ function bashLeftIsAssign(words, token) {
       // 真赋值正例**必须**保持判赋值（实测真值都是赋值，RAN=<none>）：
       //     `> /tmp/x A=1` / `2>/dev/null A=1` / `> '/tmp/z z' A=1` / `A=1 > /tmp/x`
       //     / `A=/bin/rm > A=x`（`A=` 在段首、`A=x` 在 `>` 之后 —— 前者命中即返回真）
-      // ── 前提：命中处**之前**不能已有 opaque 构造占住命令词位（本轮缺陷 4 的修法）────
+      // ── 前提：命中处**之前**不能已有 opaque 构造占住命令词位────
       // 上面那两格判据（词首 + 非重定向目标位）对**带具名目标的重定向**仍不够：`> out A=x`
       // 里 `A=` 的前一非空白字符是目标词 `out` 的 `t`，**不是**操作符 ⇒ 判「是赋值」。
       // 单看这一格是对的（`> out A=x` 在 bash 下确是真赋值，实测 `A` 被设为 `x`）；
@@ -1528,51 +1321,17 @@ function bashLeftIsAssign(words, token) {
       // deny 例外照常命中，绝不放宽任何东西。
       const opaqueHeadAt = words[SEG_OPAQUE_AT]
       if (typeof opaqueHeadAt === 'number' && opaqueHeadAt < at) return false
-      // ── 前提 ②：命中处**之前**不能已有 opaque 构造占过**重定向目标位**（本轮缺陷 1 的修法）──
-      // 上面那条只覆盖「opaque 在**命令词位**」，而本缺陷的形态里 opaque 落在**重定向目标位**
-      // （`pending !== undefined`）⇒ 按设计**不记** `SEG_OPAQUE_AT`。可是这种构造**不产出词元**，
-      // 于是 `flushWord` 的 `pending = undefined` 复位被跳过：命令词被**吞进 `writeTargets`**、
-      // `words` 里只剩 `A=/bin/rm` 一个词元 ⇒ 进得了 `segmentLabelFrom` 的 `w.length === 1`
-      // 守卫 ⇒ 上面两条判据（词首 + 非操作符位）**双双成立**（`A=` 前是真空白、前驱非空白
-      // 字符是目标词的末字符）⇒ 判「是赋值」⇒ label 空 ⇒ 段级 `unparsable` ⇒
-      // `destructive=false` ⇒ 破坏性子设置与全部例外失配 ⇒ 落大分类（**fail-open**）。
-      // Git Bash 5.3.15 实测（`mktemp -d` 内建 stub、整行写文件再 source、stub 写独立日志）：
-      //     `> $(mktemp) r"m" A=/bin/rm` → **RAN[rm]**、`A` 仍 unset ⇒ 真命令
-      //     `> out A=/bin/rm`            → 无 RAN、`A=/bin/rm`        ⇒ 真赋值（对照）
-      // ⚠️ 对照例子取 `> out A=/bin/rm`（**无 opaque 构造**）：两者 `words` **逐字相同**
-      //    （都是 `["A=/bin/rm"]`），差别只在词法器戳下的 `SEG_OPAQUE_TARGET` 有没有
-      //    （前者 =2、后者缺席）⇒ label 相反（`rm` vs `""`）—— 这正是本判据要区分的对照。
-      //    ⚠️ 这句原先点名的对照是 `> $(true) X=/bin/marker`，**与实测不符**：那一格
-      //    `words` 是**空数组**（`X=/bin/marker` 被吞进 `writeTargets`），与上面那条
-      //    `["A=/bin/rm"]` **不同形** ⇒ 拿它当对照会让人误以为「words 相同」这个前提不成立。
-      //    （该格本身仍是有用的真赋值样本，见 `test/shell-parse.mjs` AL 组，只是不适合当
-      //    「words 逐字相同」的对照。）
-      // ⚠️ 判据**只看 `SEG_OPAQUE_TARGET` 是否存在**，**不做位置比较**（本轮修法 Z：
-      //    上一批写的 `&& opaqueTargetAt < at` 已撤回）。撤回的理由是**实测**的，不是取舍：
-      //    加位置比较会与下面那条 `k < 0` 判据**交互**出一个 48 格的 fail-open 族 ——
-      //    `NAME=path` 在**段首**（`at === 0`）时 `k = at - 1 = -1`，于是：
-      //        `FOO=/usr/bin/rm 2> $(mktemp) marker`  → at=0、OT=19
-      //        ⇒ 「19 < 0」**恒假** ⇒ 本判据**根本没被咨询** ⇒ 落到 `k < 0` ⇒ `return true`
-      //        ⇒ 判赋值 ⇒ label 空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒
-      //          破坏性子设置与全部例外失配 ⇒ 落大分类（**fail-open**）。
-      //    Git Bash 5.3.15 实测（只 stub 破坏性命令、**不** stub `mktemp`/`true`；整行在
-      //    子 shell 里 eval、stub 写独立日志）：该族 **48 格真值全部 COMMAND**（`ran=Y`），
-      //    而带位置比较时 NOW 全部 `allow`、纯布尔时全部 `deny`（与 HEAD 一致）。
-      //    ⚠️ 任何「在 `OT` 判据**内部**再加条件」的收窄都救不了这一族 —— 根因是它
-      //    **没被咨询**（`oT < at` 为假），不在判据内部。实测两个变体均失败：
-      //      · 变体 X（记 tail 词元数）：`> $(mktemp) r"m" A=/bin/rm` 被误伤（`"rm"` → `""`）；
-      //      · 变体 Y（记 swallowedIsFirst）：48 格族**完全没修好**（label 仍 `""`）。
-      //    ⚠️ 那么「位置比较」当初想挡的 `A=/bin/marker > $(true)`（真值 ASSIGN）呢？
-      //    实测该行整行 `ok:false`（reason: `a redirection has no target`）⇒ `OT` 恒
-      //    `undefined` ⇒ **根本不走这条路径** ⇒ 那条收窄**从来没挡住过它**，只带来了
-      //    上面那 48 格 fail-open。故撤回它**不引入任何新过收**（实测 Z 更松 = 0 格）。
-      //    ⚠️ 与 `opaqueHeadAt` 那条判据的**差别在此**：`SEG_OPAQUE_AT` 记的是「命令词位的
-      //    opaque」，判定侧要问「命中处**之前**有没有」⇒ 必须带 `< at`；而本戳记的是
-      //    「opaque 占过**重定向目标位**」这一**段级事实**（见 `SEG_OPAQUE_TARGET` 的说明），
-      //    它一旦成立就说明本段的命令词位已被顶掉，与 `NAME=` 落在哪个下标无关。
+      // ── 前提 ②：命中处**之前**不能已有 opaque 构造占过**重定向目标位** ──────────────
+      // 这种构造不产出词元，`flushWord` 的 `pending = undefined` 复位被跳过：命令词被吞进
+      // `writeTargets`、`words` 里只剩 `A=/bin/rm` ⇒ 进得了 `segmentLabelFrom` 的
+      // `w.length === 1` 守卫 ⇒ 判「是赋值」⇒ label 空 ⇒ 落大分类（fail-open）。
+      // 判据**只看 `SEG_OPAQUE_TARGET` 是否存在**，**不做位置比较**：`NAME=path` 在段首时
+      // `at === 0`、`k = -1`，位置比较会因「OT < 0」恒假而**根本没被咨询**，落到
+      // `k < 0` 无条件判赋值，反而新开一族 fail-open。与 `SEG_OPAQUE_AT` 的差别见该常量的
+      // 注释：那个要问「命中处之前有没有」，本戳是段级事实、与下标无关。
       const opaqueTargetAt = words[SEG_OPAQUE_TARGET]
       if (typeof opaqueTargetAt === 'number') return false
-      // ── 前提 ③：占目标位的 opaque 构造**带内联程序**时同样不是赋值（本轮批次 A 的修法）──
+      // ── 前提 ③：占目标位的 opaque 构造**带内联程序**时同样不是赋值──
       // 上面两条判据都**不过问构造里装了什么**，而下面这一族里装的是**真会执行的载荷**：
       //     `> $(sh -c "rm -rf /tmp/zzz") > out A=/bin/rm`
       // Git Bash 5.3.15 实测（载荷无害化为 stub，只写独立日志）：**stub 被调用**、`A` 仍
@@ -1612,7 +1371,7 @@ function bashLeftIsAssign(words, token) {
 const SEG_SHELL = Symbol('dshSegmentShell')
 
 // ── 段词元数组上的**原文戳** ─────────────────────────────────────────────────────
-// 存在的理由（本轮缺陷 1 的右半）：pwsh 侧 `$NAME=右侧` 的**引号**是「真赋值 vs 真命令」
+// 存在的理由：pwsh 侧 `$NAME=右侧` 的**引号**是「真赋值 vs 真命令」
 // 的唯一判据，而词法器剥引号后两者的词元**逐字相同**（实测 `$d='X:/ws/x'` 与
 // `$d=X:/ws/x` 的词元都是 `$d=X:/ws/x`）—— 词元粒度上不可区分，只有段原文还留着引号。
 // 与 `SEG_SHELL` 同一手法（Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 /
@@ -1650,40 +1409,18 @@ const SEG_OPAQUE_AT = Symbol('dshSegmentOpaqueAt')
 // 与 `SEG_SHELL` / `SEG_TEXT` / `SEG_OPAQUE_AT` 同一手法（Symbol 键对 `Object.keys` /
 // `JSON.stringify` / 展开 / `for…in` / 深比较全部不可见）。
 //
-// 存在的理由（本轮缺陷 1 的修法）：`SEG_OPAQUE_AT` 只记「**命令词位**的 opaque 构造」，
-// 而本缺陷的形态里 opaque 构造落在**重定向目标位**（`pending !== undefined`）⇒ 按设计
-// **不记** `SEG_OPAQUE_AT`。可是这种构造**不产出词元**（`$( )` / 反引号 / 分组块都只
-// `pushText`），于是 `flushWord` 的 `pending = undefined` 复位被**跳过**：命令词被
-// **吞进 `writeTargets`**，`words` 里只剩 `A=/bin/rm` 一个词元 ⇒ 进得了
-// `segmentLabelFrom` 的 `w.length === 1` 守卫 ⇒ `bashLeftIsAssign` 判「是赋值」。
-// Git Bash 5.3.15 实测（`mktemp -d` 内建 stub、整行写文件再 source、stub 写独立日志）：
-//     `> $(mktemp) r"m" A=/bin/rm`  → **RAN[rm]**、`A` 仍 unset ⇒ 真命令
-//     `> out A=/bin/rm`             → 无 RAN、`A=/bin/rm`        ⇒ 真赋值（对照）
-// 两者 `words` **逐字相同**（都是 `["A=/bin/rm"]`；`writeTargets` 分别是 `["rm"]` 与
-// `["out"]`），差别只在**本戳有没有**（前者 =2、后者缺席）⇒ label 相反（`rm` vs `""`），
-// 故判据必须落在「本段有没有 opaque 构造占过重定向目标位」这条**只有词法器知道**的信息上。
-// ⚠️ 对照原先写的是 `> $(true) X=/bin/marker`，**与实测不符**：那一格 `words` 是**空数组**
-//    （`X=/bin/marker` 被吞进 `writeTargets`）⇒ 与上面那条不同形，当「words 逐字相同」的
-//    对照会误导（详见 `bashLeftIsAssign` 里同一论证处的说明）。
+// 存在的理由：`SEG_OPAQUE_AT` 只记「**命令词位**的 opaque 构造」，而这里 opaque 落在
+// **重定向目标位**（`pending !== undefined`），按设计不记 `SEG_OPAQUE_AT`。这种构造不产出
+// 词元（`$( )` / 反引号 / 分组块都只 `pushText`），命令词被吞进 `writeTargets`，
+// `words` 里只剩 `A=/bin/rm` ⇒ 进得了 `segmentLabelFrom` 的 `w.length === 1` 守卫 ⇒
+// `bashLeftIsAssign` 会判「是赋值」。`> $(mktemp) r"m" A=/bin/rm` 与 `> out A=/bin/rm`
+// 的 `words` 逐字相同，差别只在本戳有没有（前者 =2、后者缺席）⇒ 判据必须落在
+// 「本段有没有 opaque 构造占过重定向目标位」这条只有词法器知道的信息上。
 //
-// ⚠️ 必须是**粘性**的（不在遇到新重定向时复位，见 `noteOpaqueTarget`）：
-//    形如 `> $(mktemp) r"m" A=/bin/rm > out2` 的尾部还有重定向，复位式标记会漏掉它们
-//    （实测：复位式只修好 57/169，粘性修好 169/169）。
-// ⚠️ 与 `SEG_OPAQUE_AT` 的**一处关键差别**：那个戳的判据带位置比较（`< at`），本戳**不带**
-//    —— 判定侧只问「有没有」（`typeof … === 'number'`）。理由是**实测**的：
-//      · `SEG_OPAQUE_AT` 记的是「**命令词位**的 opaque」，判定侧要问「命中处**之前**有没有」
-//        ⇒ 必须比较位置；
-//      · 本戳记的是「本段有 opaque 构造**占过重定向目标位**」这一**段级事实**，它一旦成立
-//        就说明命令词位已被顶掉，与 `NAME=` 落在哪个下标**无关**。
-//    上一批曾给它加过位置比较（动机是挡 `A=/bin/marker > $(true)`，真值 ASSIGN），
-//    **该收窄已撤回**，两条实测理由：
-//      ① 它**从来没挡住过**那个形态 —— 该行整行 `ok:false`（`a redirection has no target`）
-//         ⇒ 本戳恒 `undefined` ⇒ 根本不走这条路径；
-//      ② 它自己引入 **48 格 fail-open**（`NAME=path` 在段首时 `at === 0`、`k === -1`，
-//         「OT < 0」恒假 ⇒ 本判据没被咨询 ⇒ 落到 `k < 0` 无条件判赋值）。详见
-//         `bashLeftIsAssign` 里那段说明。
-//    故本戳虽仍记**下标**（词法器本就持有该位置，记下来比布尔更省一次判断，且日后若真需要
-//    位置信息不必再改词法器），但**判定侧当前不做位置比较**。
+// ⚠️ 必须是**粘性**的（不在遇到新重定向时复位，见 `noteOpaqueTarget`）：形如
+// `> $(mktemp) r"m" A=/bin/rm > out2` 的尾部还有重定向，复位式标记会漏掉它们。
+// ⚠️ 与 `SEG_OPAQUE_AT` 的关键差别：那个要比较位置（`< at`，问「命中处之前有没有」），
+// 本戳记的是段级事实，判定侧只问「有没有」（`typeof … === 'number'`），与下标无关。
 const SEG_OPAQUE_TARGET = Symbol('dshSegmentOpaqueTarget')
 
 // ── 段词元数组上的 **占目标位的 opaque 构造带内联程序** 戳 ─────────────────────────
@@ -1691,11 +1428,10 @@ const SEG_OPAQUE_TARGET = Symbol('dshSegmentOpaqueTarget')
 // `SEG_OPAQUE_TARGET` 同一手法（Symbol 键对 `Object.keys` / `JSON.stringify` / 展开 /
 // `for…in` / 深比较全部不可见，故 `seg.words` 对既有消费方逐字不变）。
 //
-// 存在的理由（本轮批次 A 的修法）：`SEG_OPAQUE_TARGET` 只回答「opaque 构造**占过**重定向
-// 目标位」，而它**从不过问那个构造里装了什么** —— 于是下面这一族被静默放行：
+// 存在的理由（批次 A 的修法）：`SEG_OPAQUE_TARGET` 只回答「opaque 构造占过重定向
+// 目标位」，而它从不过问那个构造里装了什么 —— 于是下面这一族被静默放行：
 //     `> $(sh -c "rm -rf /tmp/zzz") > out A=/bin/rm`
-// 该行 bash 真值是**真命令**且**载荷真的执行**（Git Bash 5.3.15 实测：无害 stub 被调用、
-// `A` 仍 unset）；HEAD 给 `deny`，而第 7/8 圈的标记链给 `allow`（**fail-open**）。
+// 该行 bash 真值是**真命令**且**载荷真的执行**；HEAD 给 `deny`，而标记链给 `allow`（fail-open）。
 //
 // ⚠️ 为什么不能「在**定案**时加一问」（这是本缺陷最容易走错的地方）：
 //    定案发生在 `flushWord`，而「新重定向作废未定案候选」那处（`>` 分支里
@@ -1711,22 +1447,13 @@ const SEG_OPAQUE_TARGET = Symbol('dshSegmentOpaqueTarget')
 //    本文件反复记录的那类缺陷正是「同一份知识写两遍必然漂移」。
 //
 // ⚠️ **已知边界（刻意不扩，勿为它叠第二层判据）**：**首词认不出解释器的族** ——
-//    ① 管道 `… | sh`：`> $(base64 -d x | sh) > out A=/bin/rm` 本戳**不覆盖**。剥定界符后
-//       分段是 `[["base64","-d","x"],["sh"]]`，第二段只有 `["sh"]` 一个词元、
-//       `nestedInlineProgram('sh', ['sh'])` = **false**（`-c` 缺席），第一段首词是 `base64`
-//       ⇒ 两段都不命中。Git Bash 5.3.15 实测该形态**载荷确实执行**
-//       （`> $(echo bWFya2Vy | base64 -d | sh) > out A=/bin/rm` → stub 被调用、`A` 仍 unset）。
-//    ② 变量头 `$SHELL -c` / `${SHELL} -c`：`headCommandNameOf` 取到的是**变量名**而非
-//       解释器名 ⇒ 同根因（首词认不出）。
-//    ③ 分段里**只有单名、没有 `-c`** 的形态（`$(true; sh)` 这类）：`nestedInlineProgram`
-//       要求内联程序标志在场，故同样不命中。
-//    ⇒ 三族**同一个根因**：判据以「首词是解释器名」为前提，而这三族里首词要么是别的命令、
-//      要么是变量、要么解释器名根本没带程序标志。
-//    ⚠️ 要覆盖它们得动 `nestedInlineProgram` 的语义（那是**承重函数**，`assessCommand` 的
-//      `unparsable` 判定与 index.js 的候选守卫都在用），收益（多覆盖几族）与风险
-//      （改语义影响既有 5000+ 格对拍面）不成比例 ⇒ 记为已知残余。
-//      ⚠️ 本标注已**扩写**为「首词认不出解释器的族」（第 11 圈），以免下次复审把
-//      ②③ 两族当新发现重复上报。
+//    ① 管道 `… | sh`：分段后第二段只有 `["sh"]` 一个词元、`nestedInlineProgram` 为 false
+//       （`-c` 缺席），第一段首词是 `base64` ⇒ 两段都不命中。
+//    ② 变量头 `$SHELL -c` / `${SHELL} -c`：`headCommandNameOf` 取到的是变量名而非解释器名。
+//    ③ 分段里只有单名、没有 `-c` 的形态（`$(true; sh)` 这类）：同样不命中。
+//    ⇒ 三族同一个根因：判据以「首词是解释器名」为前提。
+//    ⚠️ 要覆盖它们得动 `nestedInlineProgram` 的语义（承重函数，`assessCommand` 的
+//      `unparsable` 判定与 index.js 的候选守卫都在用），收益与风险不成比例 ⇒ 记为已知残余。
 const SEG_OPAQUE_PAYLOAD = Symbol('dshSegmentOpaquePayload')
 
 /**
@@ -2025,7 +1752,7 @@ export function unwrapWords(words) {
 }
 
 /**
- * `unwrapWords` 的**纯下标**内核（本轮 F2 的修法）—— 全程按下标推进，不复制任何数组。
+ * `unwrapWords` 的**纯下标**内核—— 全程按下标推进，不复制任何数组。
  *
  * 存在的理由：`pushHeadLabels` 的链尾要问「从下标 `i` 起这条链的命令头 label 是什么」，
  * 而它此前写 `segmentLabel(w.slice(i))` —— 切片是 O(剩余词元数)，而 `segmentLabelsCore`
@@ -2120,7 +1847,7 @@ export function segmentLabel(words, shell) {
 /**
  * `segmentLabel` 的**唯一下标入口**（`segmentLabel(words)` 就是 `segmentLabelFrom(words, 0)`）。
  *
- * 存在的理由（本轮 F2）：`pushHeadLabels` 的链尾要问「从下标 `i` 起这条链的命令头 label 是
+ * 存在的理由：`pushHeadLabels` 的链尾要问「从下标 `i` 起这条链的命令头 label 是
  * 什么」，而它此前写 `segmentLabel(w.slice(i))`。改成下标入口后**一次拷贝都不做** ——
  * 语义与 `segmentLabel(words.slice(start))` **逐字等价**（本函数体就是原 `segmentLabel` 的
  * 函数体，只是把内部的相对下标 `w[k]` 一律换成绝对下标 `w[base + k]`，把内部的
@@ -2141,38 +1868,27 @@ function segmentLabelFrom(words, start, shell) {
   const w = u.words
   let idx = u.base
   if (idx >= w.length) return ''
-  // ── 入口守卫：引号字符串字面量 / 纯赋值段，都不是命令（本轮修复）────────────────
-  // 判据必须落在**原始词元**上、且在 `commandNameOf` **剥路径之前** —— 后者的剥离是
-  // 无条件的（取最后一个分隔符之后的部分），于是 `"--- 编码/换行校验 ---"` 的引号与
-  // `$d='X:/ws/demo/_tmp/file-test'` 的 `$` `=` 都被连路径前缀一起切掉了。
-  // 实测（用户真实弹窗，三个都产出了「允许此项」按钮，而写下的例外**永不命中**；
-  // 路径已脱敏，结构逐字保留）：
-  //     `$d='X:/ws/demo/_tmp/file-test'` → label `file-test`      （真值：赋值，无命令）
-  //     `FOO=/usr/local/bin/myapp`       → label `myapp`          （真值：**bash** 赋值，无命令）
-  //     `"--- 编码/换行校验 ---"`         → label `换行校验 ---`   （真值：字符串字面量）
-  // 危害不止「多一个按钮」：`alreadyInProject` 会把写下的例外当作「用户已表态」，
-  // 于是按钮消失、命令照旧弹窗 —— 用户既没放行成功、也再没有按钮可点。
+  // ── 入口守卫：引号字符串字面量 / 纯赋值段，都不是命令 ────────────────────────
+  // 判据必须落在**原始词元**上、且在 `commandNameOf` **剥路径之前** —— 后者的剥离是无条件
+  // 的（取最后一个分隔符之后的部分），于是 `"--- 编码/换行校验 ---"` 的引号与
+  // `$d='X:/ws/demo/_tmp/file-test'` 的 `$` `=` 都被连路径前缀一起切掉了。这类假 label
+  // 会产出「允许此项」按钮，而写下的例外**永不命中**。
   //
-  // ⚠️ **赋值那一条必须带方言维度**（本轮修法）：`FOO=/usr/local/bin/myapp` 只在 **bash**
-  // 下是赋值；**pwsh 下它是真命令**（赋值必须写 `$FOO=…`）。本机 PS 5.1 实测
-  // `[Parser]::ParseInput('FOO=/usr/local/bin/myapp')` → `cmdAst=1`、`assignAst=0`，
-  // 且建好 `FOO=\usr\local\bin\myapp.cmd` 后 `& 'FOO=/usr/local/bin/myapp'` **RAN=True**。
-  // 故按方言取判据；不分方言一刀切会让 pwsh 侧真命令的 label 变空 ⇒ 段级 `unparsable`
-  // ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（fail-open）。
+  // ⚠️ **赋值那一条必须带方言维度**：`FOO=/usr/local/bin/myapp` 只在 **bash** 下是赋值；
+  // pwsh 下它是真命令（赋值必须写 `$FOO=…`）。不分方言一刀切会让 pwsh 侧真命令的 label
+  // 变空 ⇒ 段级 `unparsable` ⇒ `destructive=false` ⇒ 落大分类（fail-open）。
   //
   // ⚠️ 两条判据的位置**不同**，不能混成一条：
   //   · 引号字面量是**词元级**（`labelTokenIsQuotedLiteral`）—— 只看当前这个词元；
-  //   · 赋值是**段级** —— `sudo A=/bin/rm` 的 `A=/bin/rm` 是赋值词元，但它**不是**
-  //     命令头（命令头是 `sudo`），故不能按词元拒绝；而 `$d='…'` / `FOO=/…` 那两条
-  //     是**整个段只有一个赋值词元**（没有任何命令要执行），这才该判「认不出」。
-  //     60j5 把 `sudo A=/bin/rm` 的 tiers 钉成与 `sudo rm` 同值，正是这条边界的守卫。
-  //     ⚠️ 「没有任何命令要执行」只在 **bash** 成立：pwsh 下 `FOO=/…` 有命令要执行。
+  //   · 赋值是**段级** —— `sudo A=/bin/rm` 的 `A=/bin/rm` 是赋值词元，但它不是命令头
+  //     （命令头是 `sudo`），故不能按词元拒绝；只有整个段只有一个赋值词元时才判「认不出」。
+  //     「没有任何命令要执行」只在 **bash** 成立：pwsh 下 `FOO=/…` 有命令要执行。
   if (labelTokenIsQuotedLiteral(w[idx])) return ''
   // ⚠️ pwsh 侧必须走**两侧**判据（`LABEL_ASSIGN_PWSH` 的左半 + `pwshRightIsValue` 的右半）：
   //    只看左半会把 `$A=/bin/rm` 这类**真命令**判成赋值 ⇒ label 空 ⇒ 段级 `unparsable`
   //    ⇒ `destructive=false` ⇒ 破坏性子设置与全部例外匹配双双跳过 ⇒ 落大分类（fail-open）。
   //    见 `pwshRightIsValue` 里 PS 5.1 官方解析器的实测表。
-  // ⚠️ bash 侧同样**不能只看词元**（本轮修复）：`'A=/bin/rm'`（整体引号）的词元与无引号的
+  // ⚠️ bash 侧同样**不能只看词元**：`'A=/bin/rm'`（整体引号）的词元与无引号的
   //    `A=/bin/rm` 逐字相同，而 bash 真值前者是**真命令**（实测真的执行了该路径文件、
   //    `A` 仍 unset）。故 bash 分支也必须带原文维度，见 `bashLeftIsAssign` 的实测表。
   //    ⚠️ 两个分支的判据对象**相反**（pwsh 读原文是找「引号在」，bash 读原文是找
@@ -2191,7 +1907,7 @@ function segmentLabelFrom(words, start, shell) {
   //     正确写法），不能因为剥完以 `-` 开头就拒掉；只有用户**裸写** `-…` 时，
   //     shell 才把它当选项而不是命令名。
   //
-  // ⚠️ 判据还必须**同时要求不含路径分隔符**（本轮修复）：「`-` 开头 **且含分隔符**」的
+  // ⚠️ 判据还必须**同时要求不含路径分隔符**：「`-` 开头 **且含分隔符**」的
   //     `-x/rm`、`-rf/rm`、`--force/rm` 是**真实可执行的相对路径命令**（目录名以 `-`
   //     开头），不是选项。实测（无害替代目标，临时目录内）：
   //       pwsh：`-x/Remove-Item -Recurse -Force C:/Windows` → 真的执行了
@@ -2233,7 +1949,7 @@ function segmentLabelFrom(words, start, shell) {
       if (!t || BAD_LABEL_CHARS.test(t)) continue
       // 关键字继续跳过（`case x in` 的 `in`、`for i in` 的 `in`）
       //
-      // ── ⚠️ 但「继续跳过」**必须同时跨过该关键字自身的选项**（本轮 F5 的修法）──────────
+      // ── ⚠️ 但「继续跳过」**必须同时跨过该关键字自身的选项**──────────
       // 上面 `:775` 那一轮已经用 `skipPrefixArgs` 跨过**段首关键字**的选项，而本分支此前
       // 只写 `idx = j` —— 于是**第 2 轮起** `head` 由内层 `found` 循环重新赋值时**不再**跨过
       // 新关键字的选项：`! time -p rm -rf ~/.dsh` 的 `-p` 占掉下一轮的位置，
@@ -2308,10 +2024,9 @@ const FIND_DELETE_FLAG = '-delete'
  * 提权前缀，各自用 `skipPrefixArgs` / `privOperandSkip` 跳过选项与操作数），
  * 只做**纯下标推进 + 链尾一次 `segmentLabel`**，故是 O(链长) 而不是 O(剩余词元数)²。
  *
- * 存在的理由（发现 1）：`segmentLabelsCore` 的 `find -exec` 载荷族此前**只取 `-exec` 之后
- * 的第一个词元**，于是载荷里的提权前缀被当成命令名收下、真命令名永不进 labels ——
- * `find . -exec sudo kill {} ;` 的 tiers 只剩 `['priv']`、动作 **allow**
- * （对照 `sudo find . -exec kill {} ;` 是 `['proc','priv']`/deny，54s 已修）。
+ * 存在的理由：`segmentLabelsCore` 的 `find -exec` 载荷族此前只取 `-exec` 之后
+ * 的第一个词元，于是载荷里的提权前缀被当成命令名收下、真命令名永不进 labels ——
+ * `find . -exec sudo kill {} ;` 的 tiers 只剩 `['priv']`、动作 allow。
  * 修法就是复用主路径那套推进，而不是在这里另写一份「什么算前缀」。
  *
  * ⚠️ 与 `pushHeadLabels` 的分工：那个负责**链上每一层的名字**都进 labels（收紧方向），
@@ -2350,7 +2065,7 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix, shell) {
   // 是 `['find','kill']`（无 priv 组成员）→ **不并半径档** → 档集 `['proc','priv']`，
   // 而对照 `sudo find . -exec kill {} ;` 是 `['sudo','find','kill']` → 并半径档
   // → `['outside','proc','priv']`。实测两者**不同值**，正是本函数要避免的分叉。
-  // ── 链尾 label 的**单词化**由 `pushHeadLabels` 单点完成（本轮 F1 的修法）──────────────
+  // ── 链尾 label 的**单词化**由 `pushHeadLabels` 单点完成──────────────
   // `pushHeadLabels` 的链尾走 `segmentLabel`，对路由器命令会给**两词** label
   // （`sudo reg delete …` → `reg delete`），而载荷族的既有口径是**单词** label
   // （54s 原文：`find . -exec reg delete …` 只得 `reg`）。故写入时统一取**首词**：
@@ -2359,7 +2074,7 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix, shell) {
   // ⚠️ 首词化由 `pushHeadLabels` 的第 7 个形参 `headWordOnly` 在**返回之前**完成
   // （见那里的 `:1265`）—— 本函数**不再**参与首词化，也**不把结果交回调用方**（无返回值）。
   //
-  // ⚠️ **首词化必须发生在 `out` 与 `widened` 的同一个写入点上**（本轮 F1）：此前只有
+  // ⚠️ **首词化必须发生在 `out` 与 `widened` 的同一个写入点上**：此前只有
   // `addLabel` 被包了一层首词化、`addWidened` 没有，于是 `labels=['find','sudo','git']`
   // 而 `widened=['git status']` —— 授权面（`assessCommand` 的
   // `labels.filter(l => !widenedSet.has(l))`）里 `git` **不在** `widenedSet` 中，存活下来
@@ -2447,28 +2162,11 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix, shell) {
   //     `find . -exec rm -rf {} +`      → 无前缀 → 不补（`rm` 可被 `rm *`=allow 授权，HEAD 亦然）✅
   //     `sudo find / -exec rm -rf {} +` → 有前缀 → 补（不得被 `rm *`=allow 授权）✅
   //
-  // ── ⚠️ 登记的值必须是**实际写进 `out` 的那个形态**，不是它的首词（本轮 F3）────────────
-  // 上一轮 F1 的修法把首词化放在**链尾返回值**上（`pushHeadLabels` 的 `:1127`），而那只覆盖
-  // 「链尾」这一个写点。`pushHeadLabels` 的 `:954` `push(first)` 早于它，且 `:955` 的
-  // `PRIV_PREFIXES[first] !== 1` 早退让链尾截断**根本走不到** —— 于是当载荷首词元**本身含空格**
-  // （引号包住的多词词元）时，两个集合的形态再次分叉：
-  //     `out` 拿到 `push(first)` 的**原值** `reg delete`
-  //     而这里登记的 `word` 是它的**首词** `reg`
-  // → 授权面（`assessCommand` 的 `labels.filter(l => !widenedSet.has(l))`）里两词项 `reg delete`
-  // **不在** `widenedSet` 中、存活下来，被用户为普通 `reg` 写下的 `reg *`=allow 命中。
-  // 实测（例外 `<首词> *`=allow、其余 ask，修复前）：
-  //     sudo find . -exec "reg delete" HKLM\X /f {} ;  labels=['sudo','find','reg delete']
-  //                                                    widened=['find','reg'] → 授权面=['sudo','reg delete'] → **allow**
-  //     sudo find . -exec "git status" {} ;            → **allow**
-  //     doas find . -exec "docker rm -f x" {} ;        → **allow**
-  //     sudo find . -execdir "rm -rf" {} ;             → **allow**
-  //     pkexec find . -ok "kill -9" {} ;               → **allow**
-  // 而**同一条命令**的两个对照都是 ask，即这一格是纯粹的不变量分叉：
-  //     无引号载荷 `sudo find . -exec reg delete …` → labels=['sudo','find','reg'] → ask ✅
-  //     主路径     `sudo reg delete …`             → labels=['sudo','reg delete']  → ask ✅
-  // 触发条件：载荷首词元含空格 + 该段命令头带提权前缀 + 用户写过 `<首词> *`=allow。
-  // ⚠️ 54B 的语料结构性照不出这一格 —— 它用的是**无空格**的两词路由器（`reg delete HKLM\X /f`
-  // 作为三个独立词元），`first` 因此恒为单词、首词化是恒等变换。
+  // ── ⚠️ 登记的值必须是**实际写进 `out` 的那个形态**，不是它的首词 ─────────────
+  // 若登记首词而 `out` 拿原值（`reg delete` vs `reg`），授权面里 `reg delete` 就不在
+  // `widenedSet` 中，被用户为普通 `reg` 写下的 `reg *`=allow 命中（例外 `<首词> *`=allow 时
+  // 整族由 ask 变 allow）。修法：登记 `head` 本身 —— `pushHeadLabels` 的返回值恒等于它写进
+  // `out` 的那个形态，于是两个集合不可能再分叉，`widened ⊆ labels` 恒成立。
   //
   // 修法：**登记 `head` 本身**（`pushHeadLabels` 的返回值恒等于它写进 `out` 的那个形态 ——
   // 早退三处返回的都是 `push` 过的 `first`，链尾那一支返回的是已按 `headWordOnly` 截断、
@@ -2522,7 +2220,7 @@ function headLabelAt(w, start, addWidened, addLabel, headPrefix, shell) {
  *   ⚠️ 主路径不传是**刻意**的：`sudo rm -rf /etc` 必须继续被 `sudo *`=allow 授权
  *   （既有行为，54c2 的对照就钉在这一点上）。
  *
- * ⚠️ 形参 `out` / `widened` 已删（第 8 圈删掉两条兜底后的收尾）────────────────────────
+ * ⚠️ 形参 `out` / `widened` 已删────────────────────────
  * 那两个形参在本函数体内**唯一的消费者**是「缺省时退化成按数组查重」的三元兜底
  * （`out.indexOf(x)` / `widened.indexOf(x)`）。第 8 圈把两条兜底都删了（改为直接
  * `const widen = addWidened` / `const push = addLabel`），而签名与 4 个调用点仍原样传参 ——
@@ -2541,7 +2239,7 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
   // 删掉它反而 **fail-fast**：漏传实参时立刻 `TypeError`，而不是静默退化到本批刚消除的
   // O(len) `indexOf` 路径。
   const widen = addWidened
-  // `out` 的写入同样必须走 O(1) 单点（发现 2 的同类退化）—— 理由同上，同样是删兜底。
+  // `out` 的写入同样必须走 O(1) 单点—— 理由同上，同样是删兜底。
   // `out.indexOf(x)` 是 O(len)，而**载荷族对每个 `-exec` 都调一次本函数**
   // （`find . (-exec sudo c_i {} +)×n`）—— 逐条不同名时就是 O(n²)。
   // 实测（`sudo find . (-exec sudo cmd_i {} +)×n`、`segmentLabels` 单次）：
@@ -2550,7 +2248,7 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
   const push = addLabel
   const first = commandNameOf(w[start])
   if (!first) return ''
-  // ⚠️ `push(first)` 写的是**未截断**的 `commandNameOf(w[start])`（本轮 F3 的现场）——
+  // ⚠️ `push(first)` 写的是**未截断**的 `commandNameOf(w[start])`——
   // 当 `w[start]` 本身含空格（引号包住的多词词元，如 `-exec "reg delete" …`）时它是两词。
   // **不得**在这里补一层首词化：`out` 是破坏性判定与组档的判据（`reg delete` 在
   // `DESTRUCTIVE_LABELS` 里、是 `GROUP_OF_LABEL` 的键），截成 `reg` 会让
@@ -2558,104 +2256,48 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
   // （实测：`reg=deny` + 大分类 allow 时由 ask 变 **allow**）—— 那是把漏判换成放宽。
   // 两个集合的**形态一致**由 `headLabelAt` 在 `widened` 那一侧对齐（见那里的说明）。
   push(first)
-  // ── ⚠️ **链首那一层也必须进 `widened`**（发现 1 的修法，本轮 F4）────────────────────────
-  // 下面 `:1101` 的 `if (cur !== first) { push(cur); widen(cur) }` 把**链上第一层**排除在
-  // `widen` 之外 —— 那对**主路径**是对的（`sudo rm -rf /etc` 的 `sudo` 就是段首那个前缀，
-  // 用户写 `sudo *`=allow 正是要授权它，54c2 的对照钉在这一点上），但**载荷族不是**：
-  // 载荷族的 `w[start]` 是 `-exec` 之后的**载荷首词元**，不是段首。
-  // 于是当载荷首词元恰是一个提权前缀名、而段首是**另一个**提权前缀时，该名字只进 `out`
-  // 不进 `widened` → 留在授权面 → 被用户为**普通**该前缀写下的 `<前缀名> *`=allow 命中。
-  // 实测（例外 `doas *`=allow、其余 ask，修复前）：
-  //     sudo find . -exec doas rm -rf /etc {} ;      HEAD=ask  **allow**  labels=['sudo','find','doas','rm']
-  //     sudo find . -execdir doas rm -rf / {} ;      HEAD=ask  **allow**
-  //     sudo find . -ok doas kill -9 {} ;            HEAD=ask  **allow**
-  //     sudo find . -exec pkexec rm -rf /etc {} ;（例外 `pkexec *`）  HEAD=ask  **allow**
-  //     doas find . -exec sudo rm -rf /etc {} ;（例外 `sudo *`）      HEAD=ask  **allow**
-  // 而**同一条提权语义**的主路径 `sudo doas rm -rf /etc` 是 ask（`doas` 在 `widened` 里）
-  // —— 不变量分叉。`:992` 的 `addWidened(head)` 只对齐了**链尾**，堵不住这一层。
-  // 覆盖面：`-exec/-execdir/-ok/-okdir` × 6 载荷前缀名 × 6 外层前缀，CUR 相对 HEAD 放宽 1696 格。
+  // ── ⚠️ **链首那一层也必须进 `widened`** ───────────────────────────────────
+  // 下面 `if (cur !== first) { push(cur); widen(cur) }` 把链上第一层排除在 `widen` 之外 ——
+  // 那对主路径是对的（`sudo rm -rf /etc` 的 `sudo` 就是段首前缀，`sudo *`=allow 要授权它），
+  // 但载荷族的 `w[start]` 是 `-exec` 之后的载荷首词元，不是段首。载荷首词元恰是提权前缀名、
+  // 而段首是另一个提权前缀时，该名字只进 `out` 不进 `widened` → 留在授权面 → 被用户为
+  // 普通该前缀写下的 `<前缀名> *`=allow 命中（`sudo find . -exec doas rm -rf /etc {} ;` 变 allow）。
+  // 判据必须是显式的 `headPrefix`（命令头那个提权前缀叫什么名字），不能用局部条件区分。
+  // 主路径的调用点刻意不传这个参数，故 `sudo rm -rf /etc` 的既有行为逐字不变。
   //
-  // ⚠️ 判据必须是**显式的 `headPrefix`**（=「本段命令头那个提权前缀**叫什么名字**」，由载荷族经
-  // `headLabelAt` 透传），**不能**用「`w[start]` 是不是段首」之类的局部条件 —— 载荷族的
-  // `start` 恒不是段首，而主路径的 `start` 恒是段首，两者只能由调用方区分。
-  // ⚠️ 主路径的调用点（`segmentLabelsCore` 的 `:1310`）**刻意不传**这个参数，故
-  // `sudo rm -rf /etc` 被 `sudo *`=allow 授权的**既有行为逐字不变**。
-  // 带引号的多词形态（`-exec "doas kill -9"`）不受影响：`first` 含空格、查表不中。
-  //
-  // ── ⚠️ 还必须排除「**同名**」那一格（`first === headPrefix`）─────────────────────────
-  // `widened` 是**按名字**判定的集合，而命令头的那个前缀名**本来就该留在授权面里**
-  // （`env sudo find . -exec sudo rm …` 的 `sudo` 就是命令头前缀，用户写 `sudo *`=allow
-  // 正是要授权它）。当载荷首层与命令头前缀**同名**时，`widen(first)` 会把**命令头那个名字**
-  // 一并挪出授权面 —— 那是**过度收紧**，且与主路径分叉（实测 `env sudo find . -exec sudo rm -rf /etc {} ;`
-  // 由 **allow → ask**，而主路径 `env sudo sudo rm -rf /etc` 仍是 allow；HEAD 亦为 allow）。
-  // 同名时 F4 的放宽**本来就不存在**：授权面里的 `sudo` 是命令头前缀，不是载荷首层 ——
-  // 两者在 `widened` 里是同一个字符串，无法区分，故这一格**保持既有行为**。
-  // 判据因此是「命令头**有**提权前缀」且「载荷首层名字与它**不同名**」。
+  // ⚠️ 还必须排除「同名」那一格（`first === headPrefix`）：`widened` 按名字判定，
+  // 命令头那个前缀名本来就该留在授权面里，同名时 `widen(first)` 会把命令头那个名字一并
+  // 挪出授权面 —— 过度收紧（`env sudo find . -exec sudo rm -rf /etc {} ;` 由 allow 变 ask）。
+  // 同名时放宽本来就不存在：两者在 `widened` 里是同一个字符串，无法区分。
   if (headPrefix && first !== headPrefix && PRIV_PREFIXES[first] === 1) widen(first)
   if (PRIV_PREFIXES[first] !== 1) return first
   // 命令头推进下标：从段首（或语句关键字之后）的提权前缀开始。
   let i = start
-  // ── 推进必须**循环**，不能只做一层（发现 2）────────────────────────────────────
-  // 一层提权前缀之后**可能又是一层提权前缀**：`sudo su root kill 1234`、`sudo doas kill 1234`、
-  // `sudo sudo kill 1234`。单步推进时 `privOperandSkip` 停在第二个前缀名上、`segmentLabel`
-  // 随即把它当作命令头 label 返回，于是 labels 收束成前缀名 —— 组档（proc / power / reg）
-  // **整体丢失**、用户显式写的 `kill *`=deny 例外同样被绕过。方向是 **fail-open**。
-  // 实测（八档、proc/power/reg=deny、priv=allow，修复前）：
-  //     kill 1234 / sudo kill 1234 / su root kill 1234   → deny（tiers 含 proc）
-  //     sudo su root kill 1234                           → **allow** tiers=['priv']
-  //     sudo doas kill 1234 / sudo pkexec kill 1234 / sudo sudo kill 1234 /
-  //     doas su root kill 1234                           → 同上
-  //     sudo su root reg delete HKLM\X /f（reg=deny）     → **ask**（组档丢失）
-  // 判档侧本来是**对的**（`commandHeadEnd(['sudo','su','root','kill','1234'])` 正确推进到
-  // `kill`），分叉只出在 label 侧 —— 故修法就是复用同一批推进步（`skipPrefixArgs` +
-  // `privOperandSkip`，与 `headCommandNameOf` 交替推进同源）**循环**推进到真命令名。
+  // ── 推进必须**循环**，不能只做一层 ──────────────────────────────────────────
+  // 一层提权前缀之后可能又是一层（`sudo su root kill 1234`、`sudo doas kill 1234`）。
+  // 单步推进时 `privOperandSkip` 停在第二个前缀名上、`segmentLabel` 把它当作命令头 label
+  // 返回，labels 收束成前缀名 —— 组档（proc / power / reg）整体丢失、用户显式写的
+  // `kill *`=deny 例外同样被绕过。方向是 fail-open。故复用同一批推进步
+  // （`skipPrefixArgs` + `privOperandSkip`）循环推进到真命令名。
   //
-  // 收敛性：每轮至少推进一个词元（`skipPrefixArgs` 的返回值恒 ≥ `i + 1`，`privOperandSkip`
-  // 只在前进时才被采纳），故 `guard <= w.length` 不可能漏判。
+  // 收敛性：每轮至少推进一个词元，故 `guard <= w.length` 不可能漏判。
   //
-  // ── ⚠️ 每轮**不得**调 `segmentLabel`（性能：那是 O(剩余词元数) 的切片，链长 n 时整体 O(n²)）──
-  // 上一版在这里每轮取一次 `segmentLabel(w.slice(next))` 只为判断「这个名字是不是提权前缀」，
-  // 于是 `sudo sudo … sudo kill 1234`（n 个 `sudo`）退化成平方 —— 实测 `segmentLabel`：
-  // n=4000 → 4.69 ms、8000 → **16.91 ms**（倍率 3.6，标准平方），而修复前是 0.01 ms。
-  // 触发形态是「提权前缀重复」这一族（AI 生成的命令里并非构造输入），且它在 `segmentLabels`
-  // 热路径上（`isDestructiveSegment` 由 index.js 对每一段调用一次，同步早于弹窗）。
-  // 故循环内只做 **O(1)** 的判据：`commandNameOf(w[i])` 查 `PRIV_PREFIXES`（与
-  // `headCommandNameOf` 的前缀分支同表同判据）—— 它回答的正是「还要不要继续推进」，
-  // 而命令头 label 只在链尾取**一次** `segmentLabel`（与修复前同一次数）。
+  // ── ⚠️ 每轮**不得**调 `segmentLabel`（那是 O(剩余词元数) 的切片，链长 n 时整体 O(n²)）──
+  // 循环内只做 O(1) 判据：`commandNameOf(w[i])` 查 `PRIV_PREFIXES`；命令头 label 只在链尾
+  // 取一次 `segmentLabel`。该函数在 `segmentLabels` 热路径上，会被逐段调用、同步早于弹窗。
   for (let guard = 0; guard <= w.length && i < w.length; guard += 1) {
     const cur = commandNameOf(w[i])
-    // ── 推进判据：**提权前缀与 wrapper 都要继续**（发现 6 的修法）──────────────────────
-    // 此前这里只认 `PRIV_PREFIXES`，遇到夹在两层提权前缀之间的 **wrapper** 直接 break，
-    // 链被提前截断 → 真命令名永不进 labels → 组档（proc / power / reg）整体丢失、
-    // 用户写的 deny 例外同样被绕过。方向是 **fail-open**。
+    // ── 推进判据：**提权前缀与 wrapper 都要继续** ──────────────────────────────
+    // 只认 `PRIV_PREFIXES` 时，夹在两层提权前缀之间的 wrapper 会让链提前截断 → 真命令名
+    // 永不进 labels → 组档（proc / power / reg）整体丢失、用户写的 deny 例外同样被绕过。
+    // 方向是 fail-open。判档侧（`commandHeadEnd` 的 ① 分支）本来就把 wrapper 与提权前缀
+    // 同处置，故这是「label 侧与判档侧各持一份口径」的分叉，修法是让两侧同源。
     //
-    // 判档侧（`commandHeadEnd` 的 ① 分支）本来就把 wrapper 与提权前缀**同处置**、照常推进
-    // （`:2032` 的 `WRAPPERS[base] === 1 || PRIV_PREFIXES[base] === 1`），故这是
-    // 「label 侧与判档侧各持一份口径」的分叉 —— 与发现 1/2 同族，修法就是让两侧同源。
+    // ⚠️ 边界：`time` 是语句关键字（不在 WRAPPERS 里）、`timeout` 的时长位置参数由
+    // `skipPrefixArgs` 自己处理，两者都要覆盖。
     //
-    // ⚠️ 这是设计文档 §5.3 的 `byHeadChain` 伪码原文（`blast-tier-plan.md:403-411`）：
-    //     「是 WRAPPERS → 跳过它与其选项，**继续**」—— 实现只在 `commandHeadEnd` 一侧落实了。
-    //
-    // 实测（win32、`proc/power/reg=deny` + `priv=allow`，修复前）：
-    //     sudo kill 1234                    → deny   labels=['sudo','kill']
-    //     sudo time kill 1234               → deny   labels=['sudo','kill']
-    //     sudo time sudo kill 1234          → **allow** labels=['sudo']       ← 链被截断
-    //     sudo nohup sudo kill 1234         → **allow** labels=['sudo']
-    //     sudo timeout 5 sudo kill 1234     → **allow** labels=['sudo']
-    //     sudo env FOO=1 doas reg delete HKLM\X /f → **allow** labels=['sudo','doas']
-    //     sudo time doas kill 1234          → **allow** labels=['sudo','doas']
-    // 且 deny 例外同样被绕过：例外 `kill *`=deny 时 `sudo time sudo kill 1234` 是 allow。
-    // 覆盖面：8 链首 × 12 夹层 × 5 第二层前缀 = 480 组合中 **360~420 条**丢失真命令名。
-    //
-    // ⚠️ 与 54t / 54t2 不重复（结构性照不出）：54t 的语料 48 组合里含 wrapper 者 **0**、
-    // 54t2 的 54 组合里「wrapper 之后又是提权前缀」者 **0** —— 两族都只覆盖「第二层直接
-    // 是前缀」，夹一层 wrapper 的形态无人覆盖。故本修法同时补 54y 那组断言。
-    //
-    // ⚠️ 边界：`time` 是**语句关键字**（不在 WRAPPERS 里）、`timeout` 的**时长位置参数**
-    // 由 `skipPrefixArgs` 自己处理（`:1184`），两者都要覆盖 —— 见 54y 的语料。
-    //
-    // ⚠️ 性能纪律：**不得**在循环内调 `segmentLabel`（`:789-797` 的 O(n²) 教训）。
-    // 本判据只有 `commandNameOf` + 两次查表，全是 O(1)，命令头 label 仍只在链尾取一次。
+    // ⚠️ 性能纪律：不得在循环内调 `segmentLabel`。本判据只有 `commandNameOf` + 两次查表，
+    // 全是 O(1)，命令头 label 仍只在链尾取一次。
     // ── 前导 `NAME=value`：**不是**命令名，跳过后继续（E2 判据族第 7 个成员）────────────
     // 上面那个 break 判据只认三类（提权前缀 / wrapper / 语句关键字），而赋值词元三类都
     // 不是 ⇒ 循环**立即 break**、前缀链被截断、真命令名永不进 labels。
@@ -2679,7 +2321,7 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
     // ⚠️ 本行**必须放在 break 判据之前**：放在之后完全无效（labels 仍 `['sudo','su']`）——
     // 那时 `cur` 已经是赋值词元、break 先命中。
     //
-    // ── ⚠️ 守卫 `i + 1 < w.length`：赋值词元**恰在链尾**时必须放行（本轮补）─────────────
+    // ── ⚠️ 守卫 `i + 1 < w.length`：赋值词元**恰在链尾**时必须放行─────────────
     // 少了这个守卫，`<前缀链> <尾随赋值词元>`（`sudo A=/bin/rm`、`su A=/bin/rm`、
     // `sudo timeout 5 PATH=/usr/bin/rm` …）会跨过**最后一个**词元：循环因 `i >= w.length`
     // 退出、链尾那次 `segmentLabelFrom` 落空 ⇒ `return first` ⇒ 第二个 label **整体丢掉**。
@@ -2736,32 +2378,14 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
     // 链上**每一层**前缀名都进 labels（不只是第一层）：这是**收紧**方向 ——
     // 用户写的 `su *`=deny 在 `sudo su root kill 1234` 上照旧命中。第一层已由上面推过。
     //
-    // ── ⚠️ 但**同名**那一层**不得**进 `widened`（本轮 F5 的补完）────────────────────────
-    // `push(cur)` **不动**：链上每一层名字都进 labels 是**收紧**方向（deny 例外要看得见
-    // `su` / `doas`），本修法一个字都不改它。
-    //
-    // `widen(cur)` 则必须与 `:992`（链尾）和 `:1063`（链首）**同一条判据**：`widened` 是
-    // **按名字**判定的集合，而命令头那个前缀名**本来就该留在授权面里**（用户写 `sudo *`=allow
-    // 正是要授权它）。当链上某一层的名字与命令头前缀**同名**时，`widen` 挪出授权面的其实是
-    // **命令头那个名字** —— 过度收紧，且与主路径分叉。
-    //
-    // ⚠️ 上一版这里写的是**纯位置**判据 `cur !== first`，它只排除链首那一层，且方向是**反**的：
-    // `cur === first` 时跳过 `widen`（该层是链首、恰是命令头前缀），而 `cur !== first` 的
-    // **链中层**一律 `widen` —— 于是同名链中层（`env sudo find . -exec doas sudo {} ;` 的
-    // 第二个 `sudo`）被挪出授权面，而它**就是**命令头前缀本身。实测（例外 `sudo *`=allow）：
-    //     env sudo find . -exec doas sudo {} ;   HEAD=allow  **ask**  widened=['find','doas','sudo']
-    //     env sudo find . -exec doas sudo rm -rf /etc {} ;     HEAD=allow  **ask**
-    //     timeout 5 sudo find . -exec doas sudo {} ;           HEAD=allow  **ask**
-    //     env doas find . -exec sudo doas {} ;   HEAD=allow  **ask**  widened=['find','sudo','doas']
-    // 而**同一条提权链**的主路径 `env sudo doas sudo rm -rf /etc` 是 allow（授权面里 `sudo` 存活）
-    // —— 同一条语义两个结论（不变量分叉），方向是**过度收紧**（非 fail-open）。
-    // 覆盖面：4 flag × 6 链首 × 6 链中 × 4 外层 × 4 tail = 2304 格中 1440 格分叉
-    // （本轮 F1 族语料实测：1920 格中 1440 格）。
-    //
-    // 判据是**名字比较**（`cur !== headPrefix`），与 `:992` / `:1063` 逐字同源 ——
-    // 「同名时必须比名字，否则过度收紧」那条原则此前只落到了链首与链尾，链中层漏了。
-    // ⚠️ 主路径的调用点（`segmentLabelsCore`）**刻意不传** `headPrefix`，故为 `undefined`，
-    // `cur !== undefined` 恒真 → `sudo rm -rf /etc` 的既有行为**逐字不变**（54c2 的对照）。
+    // ── ⚠️ 但**同名**那一层**不得**进 `widened` ────────────────────────────────
+    // `push(cur)` 不动：链上每一层名字都进 labels 是收紧方向（deny 例外要看得见 `su` / `doas`）。
+    // `widen(cur)` 则必须与链尾、链首**同一条判据**：`widened` 按名字判定，而命令头那个
+    // 前缀名本来就该留在授权面里（用户写 `sudo *`=allow 正是要授权它）。当链上某一层的名字
+    // 与命令头前缀同名时，`widen` 挪出授权面的其实是命令头那个名字 —— 过度收紧、与主路径分叉。
+    // 故判据是名字比较（`cur !== headPrefix`）。
+    // ⚠️ 主路径的调用点**刻意不传** `headPrefix`，故为 `undefined`，
+    // `cur !== undefined` 恒真 → `sudo rm -rf /etc` 的既有行为逐字不变。
     if (cur !== first) {
       push(cur)
       if (cur !== headPrefix) widen(cur)
@@ -2770,49 +2394,25 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
     let next = at
   // ── `su` / `runas`：**操作数不是命令名**，推进步必须与命令头解析同源 ────────────────
   // 这两个前缀的带值选项表刻意留空（值本身可能是命令也可能是目标），故 `skipPrefixArgs`
-  // 停在**操作数**上（`su root kill 1234` 的 `root`、`runas /user:admin kill 1234` 的
-  // `/user:admin`），而真命令名还在它之后。此前这里只调 `skipPrefixArgs`，于是同一件
-  // 提权语义**因前缀不同而分叉**：`sudo kill 1234` 能扩展出 `kill`，`su root kill 1234`
-  // 不能 —— 方向是 **fail-open**。实测（八档、proc/power/reg=deny、priv=allow）：
-  //     kill 1234               → deny   tiers=['proc']
-  //     sudo kill 1234          → deny   tiers=['proc','priv']
-  //     su root kill 1234       → **allow** tiers=['priv']  ← proc 档整个丢失
-  //     runas /user:admin kill 1234 → **allow** tiers=['priv']
-  // 三个组档（proc/power/reg）全部如此，且用户写的 deny 例外同样被绕过：
-  // 例外 `kill *`=deny 时 `kill 1234`/`sudo kill 1234` 是 deny，`su root kill 1234` 是 allow。
-  // 修法是复用 `commandHeadEnd` / `headCommandNameOf` 共用的那个推进步 `privOperandSkip`
-  // —— 两处若各写一份，「命令头到哪儿」与「labels 有哪些」必然再次分叉（见该函数注释）。
+  // 停在**操作数**上（`su root kill 1234` 的 `root`、`runas /user:admin …` 的 `/user:admin`），
+  // 而真命令名还在它之后。只调 `skipPrefixArgs` 会让同一件提权语义因前缀不同而分叉
+  // （`sudo kill 1234` 能扩展出 `kill`、`su root kill 1234` 不能）—— 方向 fail-open。
+  // 修法是复用 `commandHeadEnd` / `headCommandNameOf` 共用的 `privOperandSkip`。
   //
   // **只在确实跨过操作数时才扩展**：`privOperandSkip` 仅在「操作数之后确实是命令头元素」
-  // 时才跨（`su root` / `su root ls` / `su -c C:/Windows` 一律不跨），故未跨过时保持原行为
-  // —— 否则 `segmentLabel(['root'])` 会把操作数本身当成 label 加进来，正是 54b 钉住的反例。
+  // 时才跨（`su root` / `su root ls` / `su -c C:/Windows` 一律不跨），未跨过时保持原行为
+  // —— 否则 `segmentLabel(['root'])` 会把操作数本身当成 label 加进来。
   //
-  // ── ⚠️ 但「没跨过」**不等于**「链到此为止」（发现 1 的另一半）────────────────────────
+  // ── ⚠️ 但「没跨过」**不等于**「链到此为止」────────────────────────────────────
   // `privOperandSkip` 返回 `at` 有两种成因，此前被当成了同一种：
-  //   ① `at` 位置**确实是操作数**，只是它后面没有命令头元素（`su root` / `su root ls` /
-  //      `su -c C:/Windows`）→ 链到此为止，不把操作数/值当 label（54b 钉的反例）；
-  //   ② `at` 位置**根本不是操作数**，它本身就是**命令头元素**（`su kill 1234` 的 `kill`、
-  //      `su sudo kill 1234` 的 `sudo`、`su env kill 1234` 的 `env`、`su doas kill 1234`、
-  //      `su time kill 1234`、`sudo su kill 1234`、`runas sudo kill 1234`）—— `isPrivOperandWord`
-  //      对前缀 / wrapper / 语句关键字 / 吃目标的命令名一律返回 false，正是这一支。
-  // ② 被误读成 ① 的后果是**整条链被提前截断、真命令名永不进 labels → 组档整体丢失**。
-  // 方向是 **fail-open**。实测（八档、proc/power/reg=deny、priv=allow）：
-  //     sudo kill 1234        → deny  tiers=['proc','priv']   labels=['sudo','kill']
-  //     sudo su root kill 1234→ deny  tiers=['proc','priv']   labels=['sudo','su','kill']
-  //     sudo su kill 1234     → **allow** tiers=['priv']      labels=['sudo','su']   ← proc 档整个丢失
-  //     su sudo kill 1234 / su env kill 1234 / runas sudo kill 1234 → 同上
-  // 且用户显式写的 deny 例外同样被绕过：例外 `kill *`=deny 时 `sudo kill 1234` 是 deny，
-  // `sudo su kill 1234` 是 **allow**。
+  //   ① `at` 位置**确实是操作数**，只是它后面没有命令头元素 → 链到此为止，不把操作数/值当 label；
+  //   ② `at` 位置**根本不是操作数**，它本身就是命令头元素（`su kill 1234` 的 `kill`、
+  //      `su sudo kill 1234` 的 `sudo`、`su env kill 1234` 的 `env`）—— 这一支必须**继续推进**，
+  //      否则整条链被提前截断、真命令名永不进 labels → 组档整体丢失（fail-open）。
   //
-  // 判档侧在同形态下本来是对的（`commandHeadEnd(['su','sudo','kill','1234'])` = 3、
-  // `headCommandNameOf` = `kill`），分叉只出在 label 侧 —— 故修法是**继续推进**：
-  // 只有「`at` 位置确实是操作数」才终止。
-  //
-  // 判据复用 `isPrivOperandWord` 单点（与 `privOperandSkip` 的入口判据同源，故两处不可能
-  // 再分叉），且它是 **O(1)**（内部只做一次 `commandNameOf` + 常数上界的
-  // `isTargetEatingNameIn`），不在循环内按剩余词元数计费 —— 见上面那段性能纪律。
+  // 判据复用 `isPrivOperandWord` 单点（与 `privOperandSkip` 的入口判据同源），且它是 O(1)。
   // **必须用 `isPrivOperandWord` 而不是 `isPrivOperandToken`**：后者会因 `-c` 而返回 false，
-  // 于是 `su -c C:/Windows` 的值会被当成命令名加进 labels（`windows`）—— 那是 54b 防的误命中。
+  // 于是 `su -c C:/Windows` 的值会被当成命令名加进 labels（`windows`）。
   // 推进的收敛性不变：`at >= i + 1 > i`，故 `i` 每轮至少推进一个词元。
     if (PRIV_VALUE_IS_COMMAND[cur] === 1) {
       if (next < w.length) { try { const s = privOperandSkip(w, cur, i + 1, next); if (s > next) next = s } catch (e) {} }
@@ -2830,7 +2430,7 @@ function pushHeadLabels(w, start, addWidened, addLabel, headWordOnly, headPrefix
   }
   // ── 链尾取**一次**命令头 label（`i` 已推进到「不再是提权前缀」的位置）───────────────
   //
-  // ── ⚠️ 必须走**下标入口**，不得写 `segmentLabel(w.slice(i))`（本轮 F2 的修法）──────────
+  // ── ⚠️ 必须走**下标入口**，不得写 `segmentLabel(w.slice(i))`──────────
   // 切片是 O(剩余词元数)，而 `segmentLabelsCore` 对**每个** `-exec` 都调一次本函数 ——
   // 段内 n 个 `-exec sudo cmd_i {} +` 累计 Σ(n−j) = **O(n²)**。实测 `isDestructiveSegment`
   // （index.js 的 buildCandidates 对每段调一次、同步早于弹窗）：
@@ -2921,7 +2521,7 @@ export function segmentLabelsCore(words, shell) {
   const out = main ? [main] : []
   // 仅由「提权前缀之后」得来的名字。**与 out 分开维护**：见上面那段 allow 方向的安全说明。
   const widened = []
-  // ── `widened` 的**并行 Set**（发现 2 的修法）────────────────────────────────────
+  // ── `widened` 的**并行 Set**────────────────────────────────────
   // `widened.indexOf(x)` 是 O(len)，而 `find -exec` 载荷族会为**每个** `-exec` 各推一个
   // 名字 —— 逐条**不同名**时段内 n 个 `-exec` 就是 O(n²)。实测（`sudo find . (-exec c_i {} +)×n`、
   // 逐条不同名、`segmentLabels` 单次）：n=1000 → 0.52 ms、2000 → 1.62、4000 → 5.50、
@@ -3002,23 +2602,12 @@ export function segmentLabelsCore(words, shell) {
       if (at >= 0) headLabel = pushHeadLabels(w, at, addWidened, addLabel, undefined, undefined, sh)
     }
   }
-  // ── find 分支的闸门必须看**命令头 label**，不是段首 label（发现 1）────────────────
+  // ── find 分支的闸门必须看**命令头 label**，不是段首 label ──────────────────────
   // 闸门原先写 `main !== 'find'`，而 `main` 是 `segmentLabel` 的结果 —— 段首是提权前缀时
-  // 它就是**前缀名**（`sudo` / `su` / `runas` / `doas` / `pkexec` / `gsudo`），于是这里立刻
-  // 早退，下面 `find -exec` / `-delete` 的**载荷族 label 合成整段被跳过**。
-  // 而 `tierSetOf` 的组档（proc / power / reg）判据完全依赖这份 label（`GROUP_OF_LABEL`
-  // 查表），于是这三档在带前缀时**静默消失**。方向是 **fail-open**。
-  // 实测（八档钩子、win32、proc=deny + priv=allow，修复前）：
-  //     find . -exec kill {} ;          labels=['find','kill']  tiers=['proc']         → deny
-  //     sudo find . -exec kill {} ;     labels=['sudo','find']  tiers=['priv']         → **allow**
-  //     su root find . -exec kill {} ;  labels=['su','find']    tiers=['priv']         → **allow**
-  //     runas /user:a find . -exec …    labels=['runas','find'] tiers=['priv']         → **allow**
-  //     doas find . -exec kill {} ;     labels=['doas','find']  tiers=['priv']         → **allow**
-  // 同一份丢失还绕过 `inside=deny`（`sudo find ./build -delete` 在 `priv=allow` 下 allow）
-  // 与用户显式 deny 例外（例外 `kill *`=deny 时无前缀是 deny、带前缀变 ask）。
-  // 故闸门改用 `headLabel`（`pushHeadLabels` 的返回值）—— **不新增调用**，不额外遍历
-  // （曾经试过「无条件先调 `headCommandNameOf(w)` 判闸门」，那会给每个段加一次前缀链遍历，
-  // 54m 的线性断言随即抖动）。
+  // 它就是前缀名，于是这里立刻早退，下面 `find -exec` / `-delete` 的载荷族 label 合成整段
+  // 被跳过。而 `tierSetOf` 的组档（proc / power / reg）判据完全依赖这份 label，于是这三档
+  // 在带前缀时静默消失（fail-open）。故闸门改用 `headLabel`（`pushHeadLabels` 的返回值）——
+  // 不新增调用、不额外遍历（无条件先调 `headCommandNameOf(w)` 会给每段加一次前缀链遍历）。
   //
   // ⚠️ 放宽闸门**必须**同时把下面合成的 label 计入 `widened`（见那里的说明），否则
   // `sudo find / -delete` 会拿到 `['sudo','find','rm']` 而 `rm` 不在 `widened` 里 ——
@@ -3046,7 +2635,7 @@ export function segmentLabelsCore(words, shell) {
     if (tk === FIND_DELETE_FLAG || FIND_EXEC_FLAGS[tk]) { hasFindAction = true; break }
   }
   if (!hasFindAction) return { labels: out, widened, widenedSet }
-  // ── 前缀之后合成的载荷族 label 必须计入 `widened`（发现 1 的修法 3）──────────────
+  // ── 前缀之后合成的载荷族 label 必须计入 `widened`──────────────
   // 上面那一段把闸门放宽到「命令头 label 是 find」之后，`sudo find / -delete` 会得到
   // `['sudo','find','rm']`，而这个 `rm` 是**载荷族合成**出来的（原词元里根本没有 `rm`）。
   // 若它不进 `widened`，授权方向（`resolveException` 的 allow 分支用 `labels` 滤掉 `widened`）
@@ -3085,7 +2674,7 @@ export function segmentLabelsCore(words, shell) {
     // （实测：`find . -exec rm` 是 deny，而 `-exec env rm` / `timeout 5 rm` / `nice rm` → allow）。
     // 这与主 label 路径（segmentLabel 靠 unwrapWords 剥前缀）口径一致。
     //
-    // ── ⚠️ 但只剥 wrapper 是**不够**的：提权前缀链也必须推进（发现 1）─────────────────
+    // ── ⚠️ 但只剥 wrapper 是**不够**的：提权前缀链也必须推进─────────────────
     // 原实现只取「`-exec` 之后的第一个命令名」，于是 `-exec` 载荷里的**提权前缀**被当成
     // 命令名收下、真命令名永不进 labels：
     //     find . -exec kill {} ;          labels=['find','kill']  tiers=['proc']        → deny
@@ -3140,7 +2729,7 @@ export function segmentLabelsCore(words, shell) {
       // 慢路径：首个词元是赋值前缀或 wrapper，必须先剥掉它们（`-exec env sudo kill`、
       // `-exec timeout 5 sudo kill`）再推进前缀链。
       //
-      // ── ⚠️ 走**下标内核**，不得写 `w.slice(j + 1)` 再 `unwrapWords(...)`（本轮 F2 的修法）──
+      // ── ⚠️ 走**下标内核**，不得写 `w.slice(j + 1)` 再 `unwrapWords(...)`──
       // 那两处切片各是 O(剩余词元数)，段内 n 个 `-exec env sudo cmd_i {} +` 累计 **O(n²)**。
       // 实测 `isDestructiveSegment`（`-exec env sudo cmd_i {} +`×n）：
       //   n=1000 → 8.5 ms、2000 → 31.3、4000 → 350.2、**8000 → 1925 ms**（倍率 3.7/11.2/5.5）；
@@ -3402,65 +2991,29 @@ function privValueFlagBetween(w, from, upto) {
   // 本函数返 `true` ⇒ `isPrivOperandToken` 返 `false` ⇒ `privOperandSkip` **不跨**操作数
   // ⇒ 命令头停在 `at` ⇒ `at` 及其后词元留在命令头**之外**参与判档。
   //
-  // 原实现无条件认连写形态（那时 `isPrivCommandValueFlag` 还有一个 `joined` 形参、这里传
-  // `true`），于是**值选项写在操作数
-  // 之前**的畸形形态把操作数一起挡在命令头外，而 `commandHeadEnd` 停在 `2`、
-  // `headCommandNameOf` 取回那个**值选项词元本身**（`--command=x`）→ 下游
-  // `isCmdStyleSwitch` 认不出这个命令名 ⇒ 走「不消费半径」兜底 ⇒ 真目标（`/tmp`）
-  // 被当 cmd 开关跳过 ⇒ 段级 blast 归 `null` ⇒ 半径档落 `inside` ⇒ `priv=allow` 时
-  // **静默放行**。实测（win32、插桩 `commandHeadEnd` / `privValueFlagBetween`）：
-  //     `su --command=x root rm -rf /tmp`   flag=true  headEnd=**2** headName=`--command=x`
-  //                                        blast=null|priv（priv=allow → **allow**）
-  //     对照 `su root rm -rf /tmp`           flag=false headEnd=3  headName=`rm`
-  //                                        blast=outside|/tmp（**ask**）
-  // 同族：`sudo su --command=x root rm -rf /tmp`（headEnd 2 vs 4）、
-  //       `su --command=x root diskpart`（tiers `priv` vs `unknown,priv`，unknown=deny 下
-  //       **allow vs deny**）、`su --command=x root kill 1234`（**proc 档整个丢失**）、
-  //       `su --command=x root reg delete …`（**reg 档整个丢失**）；
-  //       `--command=` / `=x` / `=rm` / `==` 全部同样命中。
+  // 无条件认连写形态时，`commandHeadEnd` 会停在 `2`、`headCommandNameOf` 取回那个值选项
+  // 词元本身（`--command=x`）→ `isCmdStyleSwitch` 认不出命令名 ⇒ 真目标（`/tmp`）被当
+  // cmd 开关跳过 ⇒ 段级 blast 归 null ⇒ 半径档落 `inside` ⇒ `priv=allow` 时静默放行。
   //
-  // ── 但**不能**简单地改回 `joined = false`（那是把这条闸开过头，实测有放宽）────────────
+  // ── 但**不能**简单地改回 `joined = false`（那是把这条闸开过头）──────────────────
   // 直接不认连写形态 ⇒ 操作数无条件被跨过 ⇒ 而 `upto` 位置可能正是**真路径目标**：
   //     `su --command=x C:/Windows rm`  连写不认 ⇒ 跨过 `C:/Windows` ⇒ 它落进命令头、
-  //     不再判档 ⇒ blast 由 `system|C:/Windows`（wide=ask → **ask**）变 `null|inside`
-  //     （priv=allow → **allow**）—— 方向 fail-open，正是本文件反复要堵的那类漏报。
-  //     同族：`su --command=x /etc rm`、`su --command=x ~ rm -rf /tmp`、
-  //     `su --command=x C:/Windows diskpart`、`sudo su --command=x …` 全套。
-  // 实测（语料 95,640 条 × 31 档位配置 × 2 平台 = **3,347,400 格/变体**，逐格比
-  // blast / tiers / 端到端 action）：无条件不认连写形态 ⇒ **放宽 21,018 格**、收紧 45,966 格。
+  //     不再判档 ⇒ blast 由 `system|C:/Windows` 变 `null|inside` —— 方向 fail-open。
+  // 故判据取「该位置本来会不会被判档」，给出「放宽 = 0」的结构性保证。
   //
   // ── 故判据是「**该位置本来会不会被判档**」——它给出「放宽 = 0」的**结构性**保证 ─────────
   // 守卫取 `mayYieldRadiusTier(w[upto], undefined)`（判据本身在 `mayNeedBlastCheck` 旁边，
   // 与判档循环的三条产档路径同源）。
   //
-  // ── ⚠️ 本守卫**不能**只取 `mayNeedBlastCheck`（曾如此，是**真实放宽**，实测已推翻）──────
-  // 上一版守卫只问 `mayNeedBlastCheck(w[upto], undefined)`，理由是「它是判档循环的
-  // **必要条件**（`if (!mayNeedBlastCheck(token, opts && opts.platform)) continue`），
-  // 故返假 ⇒ `upto` 本来就被 `continue` 跳过 ⇒ 跨不跨都不产生半径档」。
-  // **该论证不成立**：那条 `continue` 在循环里**不是第一条产档路径**，它前面还有两条
-  // 同样会产出半径档的分支，而它们对「纯词元」形态照样成立、`mayNeedBlastCheck` 却返假：
-  //   · 含空格词元的**引号命令行递归支**（`:4922-4963`）——`token.indexOf(' ') !== -1`
-  //     且切分后首词是破坏性命令名或解释器（`NESTED_SHELLS`）时，递归判档并 `continue`；
-  //   · **`NAME=value` 支**（`:4975-4986`）—— 取 `=` **右侧值**再判档并 `continue`。
-  // 于是「`mayNeedBlastCheck` 返假」**推不出**「跨过它不丢半径档」，守卫返假 ⇒
-  // `privOperandSkip` 跨过 `upto` ⇒ 该词元落进命令头、**不再判档**。
+  // ── ⚠️ 本守卫**不能**只取 `mayNeedBlastCheck`（那是真实放宽）────────────────────
+  // `mayNeedBlastCheck` 返假**推不出**「跨过它不丢半径档」：判档循环里 `continue` 不是第一条
+  // 产档路径，它前面还有「含空格词元的引号命令行递归支」与「`NAME=value` 取右侧值再判档」两条，
+  // 它们对纯词元形态照样成立。守卫返假 ⇒ `privOperandSkip` 跨过 `upto` ⇒ 该词元落进命令头、
+  // 不再判档（`su --command=x "rm -rf Windows" rm` 由 ask 变 allow）。
   //
-  // 实测（win32、priv=allow，CUR = 本文件，PRE = `mayNeedBlastCheck` 版守卫）：
-  //     su --command=x "rm -rf Windows" rm   PRE=`system|Windows`+`wide,priv`（**ask**）
-  //                                          CUR=`null`+`inside,priv`（**allow**）
-  //     su --command=x FOO=Windows rm        同上（`system|Windows`/ask → `null`/allow）
-  //     su --command=x "cmd System32" rm     同上（`system|System32`/ask → `null`/allow）
-  // 插桩：`mayNeedBlastCheck('rm -rf Windows', undefined)` = **false**、
-  //       `mayNeedBlastCheck('FOO=Windows', undefined)` = **false**，
-  //       而 `blastRadiusOfSegment(['su','--command=x','rm -rf Windows','rm'])` PRE 有值、
-  //       CUR 为 null。覆盖全部 BARE 系统目录名 × {引号命令行、`cmd <BARE>`、`NAME=<BARE>`}
-  //       × 前缀链（`su`/`sudo su`/`doas su`/`pkexec su`）。
-  //
-  // 修法是**补上那两条产档路径**（而不是把守卫改回无条件 `joined = false`，那条已实测
-  // 放宽 21,018 格）：`mayYieldRadiusTier` 把三条路径合并成一条**上界**判据 ——
-  // 含空格词元一律视为「会判档」（引号支的收窄需要 split + 逐词查表，与 O(1) 纪律冲突，
-  // 且收窄方向是放宽）、`NAME=value` 形态取右侧值再问同一个预筛、其余照旧走预筛。
-  // 上界判据返真 ⇒ 更少跨越 ⇒ 只会收紧。
+  // 修法是补上那两条产档路径：`mayYieldRadiusTier` 把三条路径合并成一条**上界**判据 ——
+  // 含空格词元一律视为「会判档」（引号支收窄需要 split + 逐词查表，与 O(1) 纪律冲突）、
+  // `NAME=value` 取右侧值再问同一个预筛、其余照旧走预筛。上界判据返真 ⇒ 更少跨越 ⇒ 只会收紧。
   //
   // `platform` 传 `undefined` 是**有意的 fail-safe 方向**：`privValueFlagBetween` 拿不到
   // `opts`（签名与调用链 `privOperandSkip` ← `commandHeadEnd` ← `blastRadiusOfSegment`
@@ -3518,7 +3071,7 @@ function privValueFlagBetween(w, from, upto) {
  * 成本：首行即有 `ROUTER_CMDS` 守卫（非路由器命令立即返回空串），
  * 且下面的扫描有**常数上限**（见 `ROUTER_SUB_SCAN_MAX`）—— 故调用方在任何输入下都是 O(1)。
  *
- * ── 为什么必须加上限：调用方是**逐词元**的贪婪扫描（发现 3）────────────────────────
+ * ── 为什么必须加上限：调用方是**逐词元**的贪婪扫描────────────────────────
  * `isTargetEatingNameIn` 由 `isPrivOperandWord` 对**每一个**词元各调一次，而本函数此前
  * 从该下标**向后扫到段尾**（`for (let t = idx + 1; t < w.length; …)`）—— 两者相乘即 O(n²)。
  * 触发形态是「`su` 后跟『路由器名 + `ROUTER_OPT_VALUE` 带值选项』的重复序列」，
@@ -3807,28 +3360,17 @@ function isPrivOperandToken(w, prefix, from, next) {
 function privOperandSkip(w, prefix, from, at) {
   if (at >= w.length || !isPrivOperandToken(w, prefix, from, at)) return at
   // 操作数**可能不止一个**：`runas /noprofile /user:admin rm -rf /data` 里
-  // `/noprofile` 与 `/user:admin` 都是操作数，真命令名在第三个词元上。只跨一个词元
-  // 仍会漏（实测该形态段级 blast = null、priv=allow 时 allow）—— 故连续扫完操作数，
-  // 再判断它后面跟的是不是命令头元素。
+  // `/noprofile` 与 `/user:admin` 都是操作数，真命令名在第三个词元上。只跨一个词元仍会漏，
+  // 故连续扫完操作数，再判断它后面跟的是不是命令头元素。
   //
   // 这一段用 **O(1)** 的 `isPrivOperandWord`（而不是 `isPrivOperandToken`）：后者要扫
-  // 「前缀选项里有没有 `-c`」，若每轮都重扫区间，`su u1 u2 … un` 就是 O(n²) ——
-  // 实测 n=16000 时单次判定 3028 ms（倍率≈4.0/倍）。`-c` 那件事在进入本循环前
-  // 已由上面那次 `isPrivOperandToken` 判过，且循环内的词元都不是值选项
-  // （`isPrivOperandWord` 对 `-c` 本身返回 false，循环即停），故无需每轮重扫。
+  // 「前缀选项里有没有 `-c`」，若每轮都重扫区间，`su u1 u2 … un` 就是 O(n²)。`-c` 那件事
+  // 在进入本循环前已由上面那次 `isPrivOperandToken` 判过，循环内的词元都不是值选项。
   //
   // ── 扫描**必须有上界**：只有「第一个词元」与「选项形态的词元」才可能是操作数 ────────
-  // 这里曾经是无条件贪婪（`while (k < w.length && isPrivOperandWord(w, prefix, k)) k += 1`），
-  // 而 `isPrivOperandWord` 对**任何不是「吃目标的命令名」的词元**都返回 true —— 于是扫描会
-  // 一路吞到段内那个恰好叫破坏性命令名的词元，把**真命令与真目标**一起吞进命令头：
-  //     su root ls C:/Windows kill
-  //       → 扫描跨过 `ls`、`C:/Windows`，停在末尾的 `kill` → `commandHeadEnd` 返回 **5**
-  //       → `blastRadiusOfSegment` 的 `i < headEnd` 把整段跳空 → 段级 blast 归 **null**
-  //       → 半径档落 `inside` → 实测 HEAD 判 `system`/ask，贪婪扫描下判 **null/allow**。
-  // 与 `git show HEAD:shell-parse.js` 对拍（1320 条叉乘、逐条比段级 blast）：HEAD 有值而
-  // 贪婪扫描下为 null 的形态 **88 条**，全部是 `su`/`runas` 操作数 + **非破坏性命令** +
-  // 系统路径 + 末尾破坏性名（`su root ls /usr/bin/rm`、`su root cat C:/Windows/System32/taskkill.exe`
-  // …）—— 方向是 **fail-open**，且 HEAD 侧本就正确，故这是本批改动引入的回归。
+  // 无条件贪婪会让扫描一路吞到段内那个恰好叫破坏性命令名的词元，把真命令与真目标一起吞进
+  // 命令头（`su root ls C:/Windows kill` 使 `commandHeadEnd` 返回 5、段级 blast 归 null、
+  // 半径档落 `inside`），方向是 fail-open。
   //
   // 上界的两条判据都是「操作数**形态**」，与 `skipPrefixArgs` 停在哪儿同源：
   //   ① `k === at` —— `skipPrefixArgs` 停下的那个词元就是第一个操作数
@@ -3859,28 +3401,17 @@ function privOperandSkip(w, prefix, from, at) {
   // 覆盖面：win32「非首位不含 `:` 开关」形态里 **45 条动作相对修复前改变**。
   // 故 ② 分派到 `isRunasSwitchShapedWord`（`runas`）与 `isOperandShapedWord`（其余）。
   //
-  // ── ⚠️ 已知残余（**不是「与 HEAD 逐字一致」** —— 此处注释一度如此自称，实测为误）──────
-  // `su root <路径> <破坏性名>`（`su root /data kill`）仍会跨过那个路径词元。此处注释
-  // 一度写「它在 HEAD 下同样是 null」，逐条比段级 blast 后**不成立**：HEAD 判
-  // `outside|/data`（有值），本版为 null —— 方向是 fail-open，属**本批改动引入**的残余。
-  // 触发它的**不是** `isOperandShapedWord` 的 `/x` 分支（`/data` 不含 `:`，已不被当开关），
-  // 而是本函数下面另两处判据，两者都独立于 `/x`：
+  // ── ⚠️ 已知残余 ─────────────────────────────────────────────────────────
+  // `su root <路径> <破坏性名>`（`su root /data kill`）仍会跨过那个路径词元（HEAD 判
+  // `outside|/data`，本版为 null —— 方向 fail-open）。触发它的不是 `isOperandShapedWord`
+  // 的 `/x` 分支，而是本函数下面另两处判据，两者都独立于 `/x`：
   //   ① `k === at` 那一支**无条件**认第一个操作数 —— `su - /etc rm` 的 `skipPrefixArgs`
-  //      已把 `-` 吃掉，`at` 指向的是**目标** `/etc`，却被当操作数跨过；
-  //   ② 关键字链（③ 分支）按 `commandNameOf` 的 **basename** 认关键字 —— **33/33** 个
-  //      `STATEMENT_KEYWORDS` 名全部可被路径形态触发（`/data` `/in` `/for` `/do` `/end`
-  //      `/try` `/switch` `/class` `/begin` `/process` `/not` `/if` `/else` `/then`
-  //      `/exit` `/return` `/function` `/catch` `/finally` `/and` `/or` `/while` `/foreach`
-  //      … 每一个 `/<关键字>` 与 `C:/<关键字>`、`D:/<关键字>` 都命中），不止注释最初举的
-  //      `data` 一族 —— 于是**目标词元被当关键字跳过**，链一直推进到末尾的破坏性名。
-  // 本批修复只覆盖 `/x` 分支（发现 1 点名的四条端到端复现已全部修好）。
-  // ── 残余 ② 的修法与范围（原注释给的方向**不可行**，已更正）────────────────────────
-  // 原注释写「要修需给 `k === at` 加『路径形态』守卫」—— 实测按此变异**6 条断言变红**
-  // （54d / 54h / 54h2 / 54h3 / 54n / 54l）：`runas` 的**首位**开关 `/noprofile` 本身就是
-  // 路径形态，加守卫会把它挡在门外、退回「该跨没跨」。
-  // **可行修法是只给关键字链（③ 分支）加「路径形态不当关键字」守卫**（单独变异实测
-  // **0 断言失败**；全语料 273420 条**段级 blast** **LOST=0、GAIN=290**，290 条全部与
-  // HEAD 同值，即纯回归基线、不引入新结论）。见下面 `isKeywordWord` 那一处。
+  //      已把 `-` 吃掉，`at` 指向的是目标 `/etc`，却被当操作数跨过；
+  //   ② 关键字链（③ 分支）按 `commandNameOf` 的 basename 认关键字 —— 全部
+  //      `STATEMENT_KEYWORDS` 名都可被路径形态触发（`/data` `/in` `/for` …），于是目标
+  //      词元被当关键字跳过，链一直推进到末尾的破坏性名。
+  // 只给关键字链（③ 分支）加「路径形态不当关键字」守卫是可行修法（已落地）；给 `k === at`
+  // 加路径形态守卫不行：`runas` 的首位开关 `/noprofile` 本身就是路径形态，会被挡在门外。
   //
   // ── ⚠️ 上面那个「LOST=0」只是 **blast 口径**；**tiers 口径并非 0**（措辞已按实测更正）──
   // 本批的 label 修复（`pushHeadLabels` 的「`at` 位置确实是操作数才终止」，它复用了本函数
@@ -4106,7 +3637,7 @@ function privOperandSkip(w, prefix, from, at) {
   //     不含它）。
   //   · 值本身是**语句关键字**（`su root -c time kill 1234`）时必须跨过它，理由见下。
   //
-  // ── ⚠️ 值即**语句关键字**是一整个独立子形态（本轮修复）────────────────────────────
+  // ── ⚠️ 值即**语句关键字**是一整个独立子形态────────────────────────────
   // `isTargetEatingNameIn` 的三个来源 = 破坏性名单 ∪ `PAYLOAD_CARRIERS` ∪ 两词 label，
   // 而 `isPrivOperandWord`（`:2091`）**显式把关键字排除在操作数之外** —— 于是
   // `STATEMENT_KEYWORDS` 与 `isTargetEatingNameIn` 的**交集结构性为空**：关键字既不是
@@ -4246,7 +3777,7 @@ function privOperandSkip(w, prefix, from, at) {
  * 修复前 **1161/1215 allow**，而三组对照（仅关键字 / 仅 wrapper / 裸跑）各 **0/1215**。
  * 生产形态同样命中：`if true; then env diskpart; fi`、`while true; do env parted; done`。
  *
- * ── 判据：只在 `commandHeadEnd` **确实吃到命令名**时早退（发现 5 的修法）──────────────
+ * ── 判据：只在 `commandHeadEnd` **确实吃到命令名**时早退──────────────
  * 此前早退写的是 `if (end > 0) return end`，理由（已实测推翻）是「返回 >0 ⇒ 它已吃掉前缀链
  * + 命令名，关键字不可能出现在那个位置之前」。反例有两族（`PRIV_VALUE_IS_COMMAND` 的前缀
  * 只吃前缀名就停、`sudo` 会把关键字当命令名吃掉），详见函数体内那段注释。
@@ -4270,93 +3801,53 @@ function commandHeadEndFull(words) {
   const n = w.length
   let end = 0
   try { end = commandHeadEnd(w) } catch (e) { end = 0 }
-  // ── 早退：只在 `commandHeadEnd` **确实吃到了命令名**时（发现 5 的修法）──────────────
-  // ⚠️ 「返回 >0」**不等于**「吃到了命令名」，此前把两者当成同一件事是 fail-open 的根因：
-  //   · `su` / `runas`（`PRIV_VALUE_IS_COMMAND`）**只吃前缀名就停** ——
-  //     `commandHeadEnd(['su','time','diskpart'])` = **1**（`privOperandSkip` 在关键字
-  //     `time` 上收束，② 分支又因 `PRIV_VALUE_IS_COMMAND['su']` 不吃那个词元）；
-  //   · `sudo time X` 走 ② 的 `sawPrefix && !PRIV_VALUE_IS_COMMAND['sudo']`，把**语句
-  //     关键字** `time` 当命令名吃掉 —— `commandHeadEnd(['sudo','time','diskpart'])` = **2**。
-  // 两种情形下真命令名都还在 `end` 之后，早退让下面的循环拿不到机会，于是
-  // `<前缀><关键字><BARE>`（`su time diskpart`）与 `<前缀><关键字><wrapper><BARE>`
-  // （`sudo time env diskpart`）里的关键字/wrapper/真命令名全部落进 `hasNoOperand`
-  // 的词元循环被当成**非选项实参** → 该段不归 `unknown` → 落半径档 `inside`
-  // → 大分类 mode=allow 时**静默放行**（而 `diskpart` 裸跑会阻塞等 stdin）。
-  // 实测（真实档位表、`unknown=deny`、其余 allow）：`diskpart` / `time diskpart` /
-  // `sudo time diskpart` 是 deny，`sudo time env diskpart` 是 **allow**；
-  // `hasNoOperand` 差异 **4788/7920** 条（发现 5 的语料叉乘）。
-  // 判据与 `headCommandNameOf`（:3750）**同源**：末个被吃掉的词元既不是语句关键字、  // 也不是前缀时，它才是命令名。两个否分支都落回下面的循环，由它按同一张转移表续判。
+  // ── 早退：只在 `commandHeadEnd` **确实吃到了命令名**时 ──────────────────────
+  // ⚠️ 「返回 >0」**不等于**「吃到了命令名」，把两者当成同一件事是 fail-open 的根因：
+  //   · `su` / `runas`（`PRIV_VALUE_IS_COMMAND`）只吃前缀名就停 ——
+  //     `commandHeadEnd(['su','time','diskpart'])` = 1（`privOperandSkip` 在关键字 `time` 上
+  //     收束，② 分支又因 `PRIV_VALUE_IS_COMMAND['su']` 不吃那个词元）；
+  //   · `sudo time X` 走 ② 的 `sawPrefix && !PRIV_VALUE_IS_COMMAND['sudo']`，把语句关键字
+  //     `time` 当命令名吃掉 —— `commandHeadEnd(['sudo','time','diskpart'])` = 2。
+  // 两种情形下真命令名都还在 `end` 之后，早退让下面的循环拿不到机会，于是关键字/wrapper/
+  // 真命令名全部落进 `hasNoOperand` 的词元循环被当成非选项实参 → 该段不归 `unknown` →
+  // 落半径档 `inside` → 大分类 mode=allow 时静默放行（`diskpart` 裸跑会阻塞等 stdin）。
+  // 判据与 `headCommandNameOf` 同源：末个被吃掉的词元既不是语句关键字、也不是前缀时，
+  // 它才是命令名。两个否分支都落回下面的循环，由它按同一张转移表续判。
   //
-  // ── ⚠️ 判据必须与 `headCommandNameOf` **逐字同源**（发现 8 的修法）────────────────
-  // 此前这里少一项 `!LEAD_ASSIGN.test(...)`，而 `headCommandNameOf` 有它 ——
-  // 两份守卫**已经漂移**，于是同一个 `NAME=value` 词元在两侧结论相反：
-  //   · `commandHeadEnd` 的 ② 里 `sawPrefix && !PRIV_VALUE_IS_COMMAND[prevPrefix]` 对
-  //     `sudo` / `doas` / `pkexec` / `gsudo` **恒真**且**先于** `isTargetEatingNameIn` 命中
-  //     → 它把前缀之后的**第一个**词元无条件当命令名吃掉，而那个词元可能正是 `FOO=1`；
-  //   · 这里缺守卫 → 把 `FOO=1` 当「真命令名」→ **提前 return**，不再走下面的推进循环。
-  // 后果：真命令名（`diskpart`）落进 `hasNoOperand` 的实参循环被当成**非选项实参**
-  // → 该段不归 `unknown` → 落半径档 `inside` → 大分类 mode=allow 时**静默放行**。
-  // 实测（默认配置 category=allow → inside=allow、其余七档 ask）：
-  //     time env diskpart        → ask  `['unknown']`  ✅
-  //     FOO=1 time env diskpart  → **allow** `['inside']` ❌（多写一个赋值前缀）
-  //     LANG=C LC_ALL=C time diskpart / FOO=1 then env diskpart / FOO=1 time nohup diskpart 同 ❌
-  // 插桩：`commandHeadEndFull(['A=1','B=2','time','diskpart'])` = **2**、`w[1]="B=2"`
-  // → 三项全过 → 早退；正确值是 4（吃到 `diskpart`）。
+  // ── ⚠️ 判据必须与 `headCommandNameOf` **逐字同源** ──────────────────────────
+  // 此前这里少一项 `!LEAD_ASSIGN.test(...)`，而 `headCommandNameOf` 有它 —— 两份守卫漂移后，
+  // 同一个 `NAME=value` 词元在两侧结论相反：`commandHeadEnd` 的 ② 里
+  // `sawPrefix && !PRIV_VALUE_IS_COMMAND[prevPrefix]` 对 `sudo` / `doas` / `pkexec` / `gsudo`
+  // 恒真且先于 `isTargetEatingNameIn` 命中，会把前缀之后的第一个词元无条件当命令名吃掉，
+  // 而那个词元可能正是 `FOO=1`；这里缺守卫就会把 `FOO=1` 当「真命令名」提前 return，
+  // 真命令名（`diskpart`）落进 `hasNoOperand` 的实参循环 → 该段不归 `unknown` → 静默放行。
   //
-  // ⚠️ 严重度**不在「权限宽松」而在硬故障**：`diskpart` 裸跑会**阻塞等 stdin**，
-  // 而 DSH 是非交互执行环境 —— 工具调用直接挂住。加一个环境变量赋值即可触发。
+  // ⚠️ 严重度**不在「权限宽松」而在硬故障**：`diskpart` 裸跑会阻塞等 stdin，而 DSH 是非交互
+  // 执行环境 —— 工具调用直接挂住。加一个环境变量赋值即可触发。
+  // 判据复用模块级 `LEAD_ASSIGN` 单点（与 `headCommandNameOf`、`unwrapWordsFrom`、
+  // `commandHeadEnd` 的前导赋值剥离同源），不新造正则 —— 四处若各写一份「什么算赋值」必然漂移。
   //
-  // ⚠️ 判据复用模块级 `LEAD_ASSIGN` **单点**（与 `headCommandNameOf`、`unwrapWordsFrom`、
-  // `commandHeadEnd` 的前导赋值剥离同源），**不新造正则** —— 四处若各写一份「什么算赋值」
-  // 必然漂移，而漂移方向正是本条缺陷。
-  //
-  // ── ⚠️ 同一漂移的**第二项**：值选项词元（发现 11 的修法）──────────────────────────
-  // 与 `LEAD_ASSIGN` 那次是同一族：`privOperandSkip` 的 ④ 支在「值选项的值是语句关键字」
-  // 时返回 `k + 1`（**值选项自身**的下标），而这个返回值**同时是 `commandHeadEnd` 的推进
-  // 结果** ⇒ `commandHeadEnd` 停在值选项上、`w[end - 1]` 就是 `-c` / `--command`。
-  // 早退判据此前只拒收「关键字 / wrapper / 提权前缀 / `LEAD_ASSIGN`」四类，**不含值选项**
-  // ⇒ 命中早退 `return end` ⇒ 下面的推进循环拿不到机会 ⇒ 真命令名（`diskpart`）落进
-  // `hasNoOperand` 的实参循环被当成**非选项实参** ⇒ 该段不归 `unknown` ⇒ 落半径档 `inside`
-  // ⇒ `priv=allow` 时**静默放行**（`diskpart` 裸跑会阻塞等 stdin，DSH 非交互环境下该次
-  // 工具调用直接挂住 —— 是硬故障，不是「少一次弹窗」）。
-  // 插桩（修复前）：`commandHeadEnd(['su','-c','time','diskpart'])` = **2**、
-  // `commandHeadEndFull` = **2**、`headCommandNameOf` = **`'-c'`**、`hasNoOperand` = false；
-  // 正确值 **4** / `'diskpart'` / true。`su --command time diskpart` 同（headName `'--command'`）。
-  // ⚠️ 本项**是本处新增的**，`headCommandNameOf`（`:3931`）**尚未**有它 —— 不要读成
-  // 「两处已同源」。实测：`headCommandNameOf(['su','-c','time','diskpart'])` = **`'-c'`**、
-  // `['su','root','-c','time','diskpart']` = `'-c'`、`['su','--command','time','diskpart']`
-  // = `'--command'`、`['runas','/user:a','-c','time','diskpart']` = `'-c'`
-  // —— 它的早退（`:3981`）仍只拒收「关键字 / wrapper / 提权前缀 / `LEAD_ASSIGN`」**四类**，
-  // 值选项词元一概放行。两处问的是同一件事（`w[end-1]` 是不是真命令名），
-  // 若确实要求逐字同源，应作为**独立动作**去补 `headCommandNameOf` 那一项
-  // （实测补上后 698 条 × 三函数 **0 差异** —— 行为上冗余：守卫命中后 `headEnd -= 1`，
-  // 下面的推进循环最终仍返回同一个 `'-c'`。故**不为让注释成真而加死代码**），
-  // 而不是在注释里宣告已完成。
+  // ── ⚠️ 同一漂移的**第二项**：值选项词元 ─────────────────────────────────────
+  // `privOperandSkip` 的 ④ 支在「值选项的值是语句关键字」时返回 `k + 1`（值选项自身的下标），
+  // 而这个返回值同时是 `commandHeadEnd` 的推进结果 ⇒ `commandHeadEnd` 停在值选项上、
+  // `w[end - 1]` 就是 `-c` / `--command`。早退判据只拒收「关键字 / wrapper / 提权前缀 /
+  // `LEAD_ASSIGN`」四类、不含值选项时，同样会提前 `return end`，后果与上一条相同。
+  // 故复用 `isPrivCommandValueFlag` 单点（O(1) 查表）。
   // 复用 `isPrivCommandValueFlag` **单点**（`:1769`，O(1) 查表，在 `:2725` 之前，无 TDZ）。
   if (end > 0) {
     const last = commandNameOf(w[end - 1])
-    // ── ⚠️ 同一漂移的**第三项**：前缀自身的**普通选项**词元（发现 12 的修法）────────────
-    // 与上面「值选项」那一项同族，但**不是同一个形态**：`commandHeadEnd` 的 ① 分支经
-    // `skipPrefixArgs` 会把 `-l` 这类普通选项吃掉并**停在其上** ⇒ `w[end - 1]` 是 `-l`
-    // 而非命令名 ⇒ 下面五项全过 ⇒ 提前 `return end` ⇒ 推进循环拿不到机会。
-    // `-l` **确不在**上面任何一类判据内：`STATEMENT_KEYWORDS` false、非 `WRAPPERS`、
-    // 非 `PRIV_PREFIXES`、`isPrivCommandValueFlag('-l')` false（表里只有 `-c`/`--command`）、
-    // 不匹配 `LEAD_ASSIGN`。
-    // 插桩（修复前）：`commandHeadEndFull(['su','-l','time','diskpart'])` = **2**、
-    // he=2、hn=`'-l'`、`hasNoOperand`=false；正确值 hf=**4** / hn=`'diskpart'` / ho=true。
-    // 对照 `su time diskpart` = he1/hf3/true。
-    // 后果：该段不归 `unknown` ⇒ 落半径档 `inside` ⇒ `priv=allow` 下静默 allow；
-    // `diskpart` 裸跑阻塞 stdin ⇒ **硬故障**（DSH 非交互环境下工具调用直接挂住）。
-    // 触发条件：**需 `priv=allow`** —— 三种真实派生默认（mode=allow/ask/deny）下两侧
-    // action **loosen=0 / tighten=0**（本行的可见面只在 `priv=allow` 一族）。
+    // ── ⚠️ 同一漂移的**第三项**：前缀自身的**普通选项**词元 ────────────────────
+    // 与「值选项」同族但不同形态：`commandHeadEnd` 的 ① 分支经 `skipPrefixArgs` 会把 `-l`
+    // 这类普通选项吃掉并**停在其上** ⇒ `w[end - 1]` 是 `-l` 而非命令名 ⇒ 五项判据全过 ⇒
+    // 提前 `return end`。`-l` 确不在任何一类里：`STATEMENT_KEYWORDS` false、非 `WRAPPERS`、
+    // 非 `PRIV_PREFIXES`、`isPrivCommandValueFlag('-l')` false、不匹配 `LEAD_ASSIGN`。
+    // 后果：该段不归 `unknown` ⇒ 落半径档 `inside` ⇒ `priv=allow` 下静默 allow（`diskpart`
+    // 裸跑阻塞 stdin，是硬故障）。可见面只在 `priv=allow` 一族。
     //
-    // ⚠️ **只补这一处，不要同步补 `headCommandNameOf`**：实测两处都补会让它在
-    // 335,340 格中 **420 格**由 `'--command=x'` 退成 `'su'`，且引入 **77 格新 blast 假警告**
-    // （`su --command=x /user:a …` 的 `/user:a` 被判 outside —— 正是 `:2511-2524` 自己
-    // 记为「HEAD 的假警告」那一族）。判据同源，但**后果不同**，故不同步。
+    // ⚠️ **只补这一处，不要同步补 `headCommandNameOf`**：两处都补会让它在
+    // `su --command=x /user:a …` 形态上退成 `'su'` 并引入新的 blast 假警告。判据同源但后果不同。
     //
-    // 判据复用 `skipPrefixArgs:1710` 的同一判据（`token.charCodeAt(0) !== 45`）：
-    // O(1)、无正则、无分配。
+    // 判据复用 `skipPrefixArgs` 的同一判据（`token.charCodeAt(0) !== 45`）：O(1)、无正则、无分配。
     if (last && !STATEMENT_KEYWORDS[last] && WRAPPERS[last] !== 1 && PRIV_PREFIXES[last] !== 1
       && !isPrivCommandValueFlag(String(w[end - 1]))
       && !(String(w[end - 1]).charCodeAt(0) === 45)
@@ -4400,7 +3891,7 @@ function commandHeadEndFull(words) {
       start = next
       continue
     }
-    // ── 进入 ③ 之前：前导 `NAME=value` **不是命令名**，跳过后继续（发现 9 的修法）──────
+    // ── 进入 ③ 之前：前导 `NAME=value` **不是命令名**，跳过后继续──────
     // 上面那个早退守卫（`:2681`）只盖住「`commandHeadEnd` 已把赋值当命令名吃掉」的形态；
     // 这一支走的是**推进循环**，守卫够不到 —— 同一个 `NAME=value` 词元在两处结论相反：
     //   · `commandHeadEnd(['sudo','FOO=1','env','diskpart'])` = **2**：② 分支的
@@ -4715,8 +4206,7 @@ export function segmentPrivilege(words) {
 // allow）。`find *` 正是 HEAD 对 `find . -delete` 弹窗给出的候选，属必然存在的存量配置，
 // 而例外列表自陈是「唯一能让人事后发现『我什么时候放行了删盘根』的地方」。
 //
-// 判据只收「载荷可能变成破坏性」的族，不含普通命令：`git status *` 不在此列 ——
-// 标注它只会制造噪音，而噪音会让真正的警告被忽略（狼来了）。
+// 判据只收「载荷可能变成破坏性」的族，不含普通命令：`git status *` 不在此列。
 const PAYLOAD_CARRIERS = dict(Object.assign({ find: 1 }, WRAPPERS))
 
 /**
@@ -5099,9 +4589,8 @@ function maskFakeHeredocOpeners(src) {
  * （正文范围不确定时宁可少扫，方向仍是「命令部分照常查」，不会因此放行真命令）。
  *
  * **提成单点**：`rawCommandNames` 与 `outsideTargetInUnparsable` 都要问「命令部分到哪为止」。
- * 两处各写一份正则必然漂移，而漂移的后果是把 heredoc 正文（**数据**，不是命令）
- * 当成命令扫 —— `cat > doc.txt <<EOF\nrm -rf is dangerous\nEOF` 会因为正文里出现
- * `rm` 而被判成破坏性命令。单点化与 `CMD_VARIABLE` / `TIER_RANK` 是同一条纪律。
+ * 判据分叉的后果是把 heredoc 正文（**数据**，不是命令）当成命令扫 ——
+ * `cat > doc.txt <<EOF\nrm -rf is dangerous\nEOF` 会因为正文里出现 `rm` 而被判成破坏性命令。
  *
  * @param {string} source 原始文本
  * @returns {string} 已丢掉 heredoc 正文的文本
@@ -5127,7 +4616,7 @@ function stripHeredocBody(source) {
   //    标签由 `heredoc[1]` 剥掉引号得到（bash 语义：引号只影响是否做参数展开，不属分隔符本身）。
   let out = ''
   let rest = source
-  // ── 循环剥离**每一个** heredoc（发现 2）──────────────────────────────────────
+  // ── 循环剥离**每一个** heredoc──────────────────────────────────────
   // 只处理第一个 opener 时，`slice(0, heredoc.index)` 把第一个 opener 之后的**一切**丢掉 ——
   // 第二个 heredoc 的正文被顺带丢掉（错误理由下的正确结果）。新写法把终止符之后的整段接回，
   // 于是第二个 heredoc 的头与正文重新进入被扫文本。
@@ -5307,7 +4796,7 @@ export function rawCommandNames(text) {
 }
 
 /**
- * `rawCommandNames` 的**带方言姊妹出口**（本轮缺陷 2 的修法）。
+ * `rawCommandNames` 的**带方言姊妹出口**。
  *
  * 保留 `rawCommandNames(text)` 的单参签名与调用点字面形态不变（`test/regressions.mjs`
  * 有三条结构断言把签名行与「opaque 段并集那一行」逐字锁定），方言维度由本出口承担。
@@ -5389,7 +4878,7 @@ function rawCommandNamesInto(text, shell, out, seen) {
     // 注意**不要**按 heredoc 标签过滤名字：标签与真命令同名是合法的
     //（`rm -rf /x <<rm` 的标签就叫 rm），过滤会把真命令一起丢掉（漏判方向是放行）。
     // 正文与终止符已经在上面按位置切掉了，标签本身不会作为片段出现。
-    // ⚠️ 方言**必须显式传**（本轮缺陷 2 的修法）：`tokens` 是本函数自己 `split` 出来的
+    // ⚠️ 方言**必须显式传**：`tokens` 是本函数自己 `split` 出来的
     //    新数组，上面没有词法器的方言戳（`SEG_SHELL`），不传就退回 `'bash'` ——
     //    而 pwsh 侧藏在 opaque 构造里的靶形态（`echo $(A=/bin/rm)` / `(A=/bin/rm)` /
     //    `` echo `A=/bin/rm` ``）在 bash 判据下是**赋值** ⇒ 认不出命令名 ⇒ 破坏性判定
@@ -5465,7 +4954,7 @@ function readExpansion(input, index, shell) {
  *    不再单独判档 —— 实测（大分类 allow + `wide`=deny + 用户 deny 例外 `remove-item *`）
  *    由 `deny` 变 **`allow`**（fail-open）。
  *
- * ── Parameter 词元内：反引号是**字面字符**，不是转义符（本轮修复）──────────────────
+ * ── Parameter 词元内：反引号是**字面字符**，不是转义符──────────────────
  * `ctx === 'parameter'` 时直接返回字面反引号（`value` 也是反引号）。官方解析器实测
  * （AST 的 `CommandParameterAst.Argument.Value` 是求值后的真值，token 表看不出差别）：
  *      `Write-Output -xz` + `` ` `` + `n` + `zd` → 参数名 `-xz`nzd`（反引号与 `n` **都原样保留**）
@@ -5473,7 +4962,7 @@ function readExpansion(input, index, shell) {
  * 即**表内字符在 Parameter 词元内同样不转义**，故本支必须排在查表之前，且不能按
  * 「表内 / 表外」分（那会漏掉 `` `n `` 这一族）。判据 `PWSH_PARAMETER_TOKEN` 由调用方算好传入。
  *
- * ── 行尾反引号：**紧贴词元是字面字符，另起词元才是语法错误**（本轮修复）──────────
+ * ── 行尾反引号：**紧贴词元是字面字符，另起词元才是语法错误**──────────
  * 这里此前一律返回 `null`（当语法错误），**过严** —— 于是「反引号在行尾」的合法命令
  * 整行 `ok:false`，而 `ok:false` 路径只认 deny 例外，用户配的 allow/ask 例外集体失明
  * （与本轮修的那个缺陷同一种失效模式，只是触发条件换成了行尾）。
@@ -5506,7 +4995,7 @@ function readExpansion(input, index, shell) {
 function readPwshEscape(input, index, inQuote, boundary, shape) {
   const next = input[index + 1]
   const open = boundary !== undefined && boundary !== null && boundary.open === true
-  // ⚠️ `next !== undefined` **必须**在条件里（本轮修复）：行尾反引号（`next === undefined`）
+  // ⚠️ `next !== undefined` **必须**在条件里：行尾反引号（`next === undefined`）
   //    走下面那条**行尾分支**（按 `PWSH_TOKEN_BREAK` 判「紧贴词元 ⇒ 字面反引号 / 否则语法错误」），
   //    不能落进本支。缺这一格时下面 `paramTokenWithNext` 会拿到 `undefined` —— 那时旧实现
   //    求值的是 `PWSH_PARAMETER_TOKEN.test(word + undefined)`（**字符串拼接**），
@@ -5593,61 +5082,36 @@ function skipBalanced(input, start, open, close) {
 }
 
 /**
- * 删掉 bash 的**续行符**（`\` + 换行）—— 必须在**分词之前**做（发现 3 的修法）。
+ * 删掉 bash 的**续行符**（`\` + 换行）—— 必须在**分词之前**做。
  *
  * 为什么必须在分词之前：bash 在词法阶段就删掉续行符，**早于**识别多字符操作符。于是
- * `>\<NL>&2` 在 bash 里就是 `>&2`（描述符复制，不需要目标），而本文件的词法器是**边扫
- * 边匹配**操作符的：它先看到 `>`、把 `REDIRECT_OPERATOR` 匹配成**单字符** `>`（下一个字符
- * 是 `\` 而不是 `&`）→ `pending = 'write'`；随后 `\`+换行 被转义分支吃掉；再随后那个 `&`
- * 落进 `&` 分支 → `ampNoTarget` 置位（重定向无目标）→ 整行 `ok:false`。
+ * `>\<NL>&2` 在 bash 里就是 `>&2`（描述符复制，不需要目标），而本文件的词法器是边扫
+ * 边匹配操作符的：它先看到 `>`、把 `REDIRECT_OPERATOR` 匹配成单字符 `>`，随后 `\`+换行
+ * 被转义分支吃掉，再随后那个 `&` 落进 `&` 分支 → `ampNoTarget` 置位 → 整行 `ok:false`。
  *
  * 后果不是「少分一段」而是**整条命令的判定路径被换掉**：`ok:false` 路径的档位集合不含
- * `outside`、且**只认 deny 例外** —— 用户显式配的 `outside=deny` 与**全部 ask 例外**在这条
- * 路径上整个失明（fail-open，本项目最高风险方向）。实测（`outside=deny`、其余七档 allow，
- * 四条 `bash -n` 全 OK、真实执行会跑）：
- *     rm -rf /tmp/pgx >&2          → deny ✅
- *     rm -rf /tmp/pgx >\<NL>&2     → **allow** ❌
- *     rm -rf /tmp/pgx >\<NL>& /tmp/log → **allow** ❌
- *     rm -rf /tmp/pgx <\<NL>&2     → **allow** ❌
+ * `outside`、且只认 deny 例外 —— 用户显式配的 `outside=deny` 与全部 ask 例外在这条路径上
+ * 整个失明（fail-open）。`rm -rf /tmp/pgx >\<NL>&2` 会由 deny 变 allow。
  *
- * 对照实验确认根因是「**续行符把多字符操作符劈开**」，而不是「扫描 `&` 时没跳续行符」：
- *     echo a >& /tmp/log       → 正常（无续行符）
- *     echo a >\<NL>> log       → 正常（`>>` 能拼回来：`>` 分支会把下一个 `>` 再匹配一次）
- *     echo a >\<NL>& /tmp/log  → **失败**（`>` 与 `&` 被劈开，`&` 走了后台分支）
- *
- * ── 为什么不写成「无条件 `input.replace(/\\\n/g, '')`」（3 行版）───────────────────
- * 那个版本**有真实副作用**，会**新开一条 fail-open**（已用真 bash 复核）：bash 的续行符
- * **不是**在任何位置都生效，本函数必须与 bash 的边界一致：
- *   · **注释内不生效** —— 注释在换行处结束，`\` **不延长**它。实测
- *     `echo hi # c\` + NL + `rm -rf victim` 里 **victim 真的被删**（bash 把第二行当新命令
- *     执行）。无条件剥离会把两行粘成**一条注释**、把 `rm` 藏进注释里 ——
- *     实测该形态由 `deny` 变 **`allow`**，是修法自己引入的放宽。
- *   · **单引号内不生效** —— 那里 `\` 是字面量（实测 `'a\<NL>b'` 的输出是 `a\`+NL+`b`）。
- *   · **双引号内生效** —— 实测 `"a\<NL>b"` 输出 `ab`。
- * 故本函数做一次**轻量词法扫描**：单引号块 / 双引号块 / 注释块原样搬运，只删**块外**的
- * 续行符。扫描只认「块」，不解析命令 —— 与 `decomposeCommand` 本体保持同一粒度。
+ * ── 为什么不写成「无条件 `input.replace(/\\\n/g, '')`」───────────────────────────
+ * bash 的续行符**不是**在任何位置都生效，本函数必须与 bash 的边界一致：
+ *   · **注释内不生效** —— 注释在换行处结束，`\` 不延长它。无条件剥离会把两行粘成一条注释、
+ *     把 `rm` 藏进注释里（`echo hi # c\` + NL + `rm -rf victim` 里 victim 真的被删）。
+ *   · **单引号内不生效** —— 那里 `\` 是字面量。
+ *   · **双引号内生效** —— `"a\<NL>b"` 输出 `ab`。
+ * 故本函数做一次**轻量词法扫描**：单引号块 / 双引号块 / 注释块原样搬运，只删块外的续行符。
+ * 扫描只认「块」，不解析命令 —— 与 `decomposeCommand` 本体保持同一粒度。
  *
  * ── ⚠️ 唯一一处**不删**的续行符：夹在两个 `<` 之间的那一个 ─────────────────────────
- * bash 的词法真值确实是 `<\<NL><` ≡ `<<`（heredoc 操作符），但**本文件的词法器认出 heredoc
- * 就整行 `ok:false`**（见 `decomposeCommand` 里的 heredoc 检查），而 `ok:false` 路径的档位
- * 集合**不含 `outside`**、且**只认 deny 例外** ⇒ 用户显式配的 `outside=deny` 在这条路径上
- * 整个失明（fail-open）。实测（`outside=deny`、其余七档 allow，真 bash 下 `bash -n` = OK
- * 且**真的执行**）：
- *     rm -rf /tmp/x <\<NL>< EOF + NL + x + NL + EOF
- *       → 不剥离（= HEAD 行为）：**deny** ✅（`ok:true`，`outside` 档命中）
- *       → 剥离：**allow** ❌（`ok:false` / `code=unparsable`，档位集合里没有 `outside`）
- * 即「按 bash 语义把它粘成 heredoc」这一步**本身**就是本轮新开的放宽面 —— 它把一条 HEAD 上
- * `ok:true` 且判 deny 的命令推进了 `ok:false`。故这里取「与 HEAD 相同」：**不删**这个续行符，
- * 词法器的转义分支会原样跳掉 `\`+换行、把两个 `<` 当**独立**重定向 —— 与 HEAD 逐格相同。
- *
- * 为什么不改成「认 heredoc 但保留档位」：那要动 `ok:false` 路径的档位集合，是**另一件事**
- * （忽略清单里既有任务），超出本函数范围；本函数只负责不让自己的剥离**新开**放宽面。
- * 判据只排除**两侧都是 `<`** 的那一种：其余形态（`>\<NL>&` / `>\<NL>>` / `<\<NL>&` …）的
+ * bash 的词法真值确实是 `<\<NL><` ≡ `<<`（heredoc 操作符），但本文件的词法器认出 heredoc
+ * 就整行 `ok:false`，而 `ok:false` 路径的档位集合不含 `outside`、且只认 deny 例外 ⇒
+ * 用户显式配的 `outside=deny` 在这条路径上整个失明（fail-open）。故这里取「与 HEAD 相同」：
+ * 不删这个续行符，词法器的转义分支会原样跳掉 `\`+换行、把两个 `<` 当独立重定向。
+ * 判据只排除两侧都是 `<` 的那一种：其余形态（`>\<NL>&` / `>\<NL>>` / `<\<NL>&` …）的
  * 剥离是本函数存在的理由，一格都不能退。
  *
- * ⚠️ 方向：本函数只**删**字符、不新增任何段边界；它把「被劈开的操作符」拼回去，而拼回去
- * 的形态在 bash 里**本来就合法**（`bash -n` = OK）。故它只会让判定从「读不懂」回到
- * 「读得懂」，不会把合法命令判成非法，也不会放宽任何东西。
+ * ⚠️ 方向：本函数只删字符、不新增任何段边界；它把「被劈开的操作符」拼回去，而拼回去的形态
+ * 在 bash 里本来就合法（`bash -n` = OK）。故只会让判定从「读不懂」回到「读得懂」。
  *
  * @param {string} src 原始命令行
  * @param {'bash'|'pwsh'} sh 方言（pwsh 的续行是反引号，由词法器自身处理，本函数不介入）
@@ -5840,7 +5304,7 @@ export function decomposeCommand(source, shell) {
   // `> & { b; }` / `> & )` / `echo a > & b` 在 bash 里都是
   // `syntax error near unexpected token '&'`（`&` 不是 `>` 的目标）。
   //
-  // ⚠️ **不能复用 `ampNoTarget`**（发现 4 的修法）：那个是**局部 const**、只在 `&` 分支里
+  // ⚠️ **不能复用 `ampNoTarget`**：那个是**局部 const**、只在 `&` 分支里
   // 活着，而 `&` 分支的 `flushSegment()` 会把 `pending` 复位 —— 行尾那条保留的词元级判据
   // `pending !== undefined && !started`（约 `:3987`）于是看不到 `&` **之前**的那个 `>`。
   // 且 `ampNoTarget` 只写进 `ampOk`，而 `ampOk` 仅在「段无内容」时才决定是否报错：
@@ -5932,7 +5396,7 @@ export function decomposeCommand(source, shell) {
     // `started`，若只在正常路径复位，`tokenTyped` 会跨过空白泄漏到下一个词元上。
     if (!started) { tokenTyped = false; return }
     const w = wordText
-    // ── opaque 占目标位的**定案**（本轮缺陷 1 的修法）────────────────────────────────
+    // ── opaque 占目标位的**定案**────────────────────────────────
     // opaque 构造**不产出词元**，故「占住重定向目标位」之后产出的**第一个真词元**就是
     // 它顶掉的那个位置上的词。只有该词**不是赋值词**时，命令词位才真的被它顶掉。
     // 反例（Git Bash 5.3.15 实测真值 **ASSIGN**，`A`/`B` 都被设上、无 RAN、rc=0）：
@@ -6055,69 +5519,42 @@ export function decomposeCommand(source, shell) {
   // 记下 opaque 构造的原文（见 `segOpaqueTexts` 的说明）。与 `markOpaque` **分开**：
   // 前者只认第一个原因（段级语义），本函数每个构造都要记（判定侧要逐块查载荷）。
   //
-  // ── 顺带判「占目标位的构造是不是嵌套解释器带内联程序」（第 9 圈批次 A 的修法）──────────
-  // ⚠️ 守卫**只**要 `pending !== undefined`（此刻有等着目标的重定向），**不能**再要求
-  //    `!started` —— 这条与 `noteOpaqueHead` 处（见那条的说明）**同一个理由、同一个失效链**，
-  //    而本判据第 9 圈初版**又犯了同一个错**（该警告当时只被 `noteOpaqueHead` 遵守）。
-  //    引号分支（`'` / `"`）在读到引号时就置 `started = true`，而引号里的 opaque 构造
-  //    仍占着**重定向目标位**。加上 `!started` 会让下面这一族**永远进不了判据**：
+  // ── 顺带判「占目标位的构造是不是嵌套解释器带内联程序」────────────────────────
+  // ⚠️ 守卫**只**要 `pending !== undefined`（此刻有等着目标的重定向），不能再要求
+  //    `!started` —— 引号分支（`'` / `"`）在读到引号时就置 `started = true`，而引号里的
+  //    opaque 构造仍占着**重定向目标位**。加上 `!started` 会让下面这一族永远进不了判据：
   //      `> "$(sh -c "…")" > out A=/bin/rm`（`$()` 落在引号内、仍在目标位上）
-  //    Git Bash 5.3.15 实测（载荷无害化为 stub）：**载荷真的执行**（RAN[marker]）、
-  //    `A` 仍 unset ⇒ 真命令，而加 `!started` 时判 `allow`（fail-open）。
-  // ⚠️ 本判据**不复用 `noteOpaqueTarget`**：它要的只是「此刻构造在目标位上」这个**瞬时**
-  //    事实，而 `noteOpaqueTarget` 会**顺带置位** `segOpaqueTargetCand` / `opaqueTargetSwallow`
-  //    （那是 `SEG_OPAQUE_TARGET` 的候选机制，语义是「被吞的词不是赋值词 ⇒ 命令词位被顶掉」）
-  //    —— 反引号构造**产出词元**（`addWord(raw)` + `started = true`），不是「吞掉词元」
-  //    那一族，套用会让 `> \`true\` > out A=/bin/rm`（真值 **ASSIGN**）被定案成真命令
-  //    （**新过收**，实测）。故这里只借**同一个条件**、不借副作用。
-  // ⚠️ 必须在本函数里判、**不能**挪到 `flushWord` 的定案处：`opaqueTargetSwallow` 此刻
-  //    仍为 true，而「新重定向作废未定案候选」那处会在此**之后**把它置 false ——
-  //    `> $(sh -c "…") > out A=/bin/rm` 里构造后紧跟 `>`，定案分支**根本不会执行**。
-  //    见 `SEG_OPAQUE_PAYLOAD` 的说明（那里有时序推演）。
-  // ⚠️ 判据复用 `nestedInlineProgram` **单点**，且**入参构造与既有调用点同源**（第 10 圈
-  //    修法 U 订正了三处不同源、第 11 圈修法 W 订正了第四处，见下）—— 既有调用点
-  //    （`assessCommand` 与 index.js 候选守卫）拿到的 `label` 与 `words` 是
+  //    该形态载荷真的执行、`A` 仍 unset ⇒ 真命令，而加 `!started` 时判 allow（fail-open）。
+  // ⚠️ 本判据**不复用 `noteOpaqueTarget`**：它要的只是「此刻构造在目标位上」这个瞬时事实，
+  //    而 `noteOpaqueTarget` 会顺带置位 `segOpaqueTargetCand` / `opaqueTargetSwallow`
+  //    （那是 `SEG_OPAQUE_TARGET` 的候选机制）—— 反引号构造**产出词元**，不是「吞掉词元」
+  //    那一族，套用会让 `> \`true\` > out A=/bin/rm`（真值 ASSIGN）被定案成真命令（新过收）。
+  // ⚠️ 必须在本函数里判、不能挪到 `flushWord` 的定案处：`opaqueTargetSwallow` 此刻仍为 true，
+  //    而「新重定向作废未定案候选」那处会在此之后把它置 false —— 构造后紧跟 `>` 时定案分支
+  //    根本不会执行。见 `SEG_OPAQUE_PAYLOAD` 的说明（那里有时序推演）。
+  // ⚠️ 判据复用 `nestedInlineProgram` **单点**，且**入参构造与既有调用点同源** ——
+  //    既有调用点（`assessCommand` 与 index.js 候选守卫）拿到的 `label` 与 `words` 是
   //    **词法器产出 + 已剥引号 + 已归一化**的形态：
   //      · **切分**必须走 `splitQuotedTokens`（引号感知），不能 `split(/\s+/)`：
-  //        朴素切分**不剥引号** ⇒ 当**标志词元自身**被引号包裹时（`sh "-c" x` /
-  //        `"sh" -c x`）`INLINE_PROGRAM_FLAG` 不命中。⚠️ 注意**只有那一族**失效 ——
-  //        朴素切分对 `sh -c x`（标志不带引号）**同样命中**，且它的首词仍是 `sh`
-  //        （带引号的是**第二**个词元）⇒ 不是「首词错」，是「标志词元没剥引号」。
-  //        变异实测：`splitQuotedTokens → split(/\s+/)` 在 420 条定向语料上 **9 格 label 翻转**。
-  //      · **首词**必须归一化（剥路径/后缀 + 小写），**承重的是 `headCommandNameOf`**
-  //        （穿过 wrapper / 提权前缀取真命令头）：`/bin/sh` / `env sh` / `nohup sh` 这些
-  //        拼写由它单独处理正确。⚠️ 反向对照实测：只留 `commandNameOf(rawHead)` 会
-  //        在 244 格定向语料上让 **28 格** label 由 `rm` 掉成 `""` ⇒ 它是承重项。
-  //      · **兜底 `|| commandNameOf(rawHead)`** 是**防御性对齐**，不是必要项：
-  //        `headCommandNameOf` 的两条返回路径都返回 `commandNameOf` 派生的名字 ⇒
-  //        「主路径为空 ⇒ 兜底必空」在当前实现下成立（实测 V1 留兜底 vs V2 删兜底在
-  //        764 条语料 × 2 方言 = 1528 格上**同值 0 分歧**）。保留它的理由是「删的收益是 0
-  //        （只少 1 行）而留的风险也不是 0（两条路径取值实测有 120/1528 的差异面、
-  //        今天仅因主路径恒非空而被掩盖）」。
-  //      · `rawHead` 的**剥外层引号正则**同样保留、但**既非「恒 no-op」也非必要**：
-  //        穷举段首词元（字符集含引号、长度 ≤4）实测 **2640 个中 366 个被它改变**
-  //        （故不是恒 no-op），但其中导致 `nestedInlineProgram` **判定不同的 = 0**。
-  //        保留它是因为方向正确（把 `"sh"` 归一成 `sh`）。
-  //      · **必须遍历 `segs` 的**全部分段****（第 11 圈修法 W）：本文件既有的 opaque 载荷
-  //        机制（`rawCommandNames`）扫的就是**所有**分片 —— 实测 `rawCommandNames('$(true; sh -c "x")')`
-  //        = `["true","sh"]`，即**既有机制本来就看得到 `sh`**。只取 `segs[0]` 会让
-  //        `> $(true; sh -c "…") > out A=/bin/rm` 这一族漏判（真值 **COMMAND**、载荷真执行，
-  //        Git Bash 5.3.15 实测 `RAN[marker]`、`A` 仍 unset），而 HEAD 给 `deny`
-  //        ⇒ 那是**真 fail-open**、不是「不可区分边界」。
+  //        朴素切分不剥引号 ⇒ 当标志词元自身被引号包裹时（`sh "-c" x` / `"sh" -c x`）
+  //        `INLINE_PROGRAM_FLAG` 不命中。
+  //      · **首词**必须归一化（剥路径/后缀 + 小写），承重的是 `headCommandNameOf`
+  //        （穿过 wrapper / 提权前缀取真命令头）：`/bin/sh` / `env sh` / `nohup sh` 由它处理正确。
+  //      · **兜底 `|| commandNameOf(rawHead)`** 是防御性对齐，不是必要项（主路径为空 ⇒ 兜底必空）；
+  //        保留它是因为删的收益是 0、留的风险不是 0。
+  //      · `rawHead` 的**剥外层引号正则**同样保留：方向正确（把 `"sh"` 归一成 `sh`）。
+  //      · **必须遍历 `segs` 的全部分段**：既有的 opaque 载荷机制（`rawCommandNames`）扫的就是
+  //        所有分片，只取 `segs[0]` 会让 `> $(true; sh -c "…") > out A=/bin/rm` 这一族漏判
+  //        （真值 COMMAND、载荷真执行，而 HEAD 给 deny ⇒ 真 fail-open）。
   //      ⚠️ **已知边界（如实记录，勿为它加判据）**：遍历分段后仍有两族认不出 ——
-  //        ① **首词认不出解释器**：管道 `… | sh`（分段是 `[["base64","-d","x"],["sh"]]`，
-  //           第二段只有 `["sh"]` 一个词元、`nestedInlineProgram('sh',['sh'])` = false
-  //           —— `-c` 缺席）、变量头 `$SHELL -c` / `${SHELL} -c`（`headCommandNameOf`
-  //           取到的是变量名而非解释器名）；真值这两族**载荷会执行**。
-  //        ② **短路族会过收**：`$(true || sh -c …)` / `$(false && sh -c …)` 真值 **ASSIGN**
-  //           （短路）却判 deny —— **但 HEAD 也是 deny**（逐格同值）⇒ 恢复的是 HEAD 既有
-  //           行为、非新引入的过收，方向 fail-closed。
+  //        ① **首词认不出解释器**：管道 `… | sh`（第二段只有 `["sh"]`、`nestedInlineProgram`
+  //           为 false，`-c` 缺席）、变量头 `$SHELL -c` / `${SHELL} -c`（取到的是变量名）。
+  //        ② **短路族会过收**：`$(true || sh -c …)` / `$(false && sh -c …)` 真值 ASSIGN 却判 deny
+  //           —— 但 HEAD 也是 deny ⇒ 恢复的是既有行为，方向 fail-closed。
   //           ⚠️ **不要试图按连接符区分**：`splitQuotedTokens` 丢掉了连接符信息，而
-  //           `cd /tmp && sh -c …` 这类 `&&` 形态真值是 **COMMAND**（`cd` 成功时）⇒
-  //           按连接符一刀切会把它一起漏掉 —— 那是在**没有区分信息的空间里继续加格子**。
-  //      ⚠️ **不改 `nestedInlineProgram` 的语义**（承重函数：`assessCommand` 的
-  //        `unparsable` 与 index.js 候选守卫都在用；`SEG_OPAQUE_PAYLOAD` 的说明里有
-  //        同一族的边界记录）—— 只在**调用处**归一化入参。
+  //           `cd /tmp && sh -c …` 这类 `&&` 形态真值是 COMMAND ⇒ 一刀切会把它一起漏掉。
+  //      ⚠️ **不改 `nestedInlineProgram` 的语义**（承重函数：`assessCommand` 的 `unparsable`
+  //        与 index.js 候选守卫都在用）—— 只在调用处归一化入参。
   const noteOpaqueText = (raw) => {
     if (!raw) return
     const s = String(raw)
@@ -6152,7 +5589,7 @@ export function decomposeCommand(source, shell) {
   // ⚠️ 本函数**只**在 `pending !== undefined && !started` 时写入：`started` 为真意味着
   // 重定向目标已经产出（或该构造是命令参数），与「无目标」无关，不得参与。
   //
-  // ── 顺带记下**粘性**位置戳 `segOpaqueTargetAt`（本轮缺陷 1 的修法）────────────────
+  // ── 顺带记下**粘性**位置戳 `segOpaqueTargetAt`────────────────
   // 判据与 `redirectOpaqueTarget` 完全同源（同一次调用、同一个守卫），故在同一处写，
   // 不另开一份「什么算占了目标位」的判据（本文件反复记录的那类缺陷正是两处各写一份）。
   // 与那个三态的**唯一差别**是**粘性**：三态会在遇到新重定向时被复位（`>` 分支），
@@ -6189,50 +5626,19 @@ export function decomposeCommand(source, shell) {
   //     `> { b; c } & …` OK ← 注意：**只有末尾**的 `;` 才定分组，中间的 `;` 不定
   // 故判据是「**最后一个**分隔符之后只剩空白」，不是「内容里有 `;`」。
   //
-  // ── ⚠️ 判据必须在**词法层面**做，不能直接在原始文本上跑正则（发现 4 的修法）──────────
-  // 旧实现是 `/;[\s]*$/.test(content) || /[\n\r]/.test(content)` —— 它问的是「**文本里**
-  // 有没有换行 / 结尾有没有分号」，而 bash 问的是「**词法上**有没有一个未转义、未被引号
-  // 包裹的分隔符」。两者在下面两族上分叉（都实测过：`bash -n` = OK、真实执行会跑）：
+  // ── ⚠️ 判据必须在**词法层面**做，不能直接在原始文本上跑正则 ────────────────────
+  // 旧实现是 `/;[\s]*$/.test(content) || /[\n\r]/.test(content)` —— 它问的是「文本里有没有
+  // 换行 / 结尾有没有分号」，而 bash 问的是「词法上有没有一个未转义、未被引号包裹的分隔符」。
+  // 两者在两族上分叉（`bash -n` = OK、真实执行会跑）：
+  //   ① **引号内的换行**：`{ "a` NL `b" }` 里的换行在双引号内，是字面字符 —— 整个 `{…}`
+  //      只是一个词。旧判据看到 NL 就判成分组 → `&` 触发 → 整行 `ok:false` → 丢 `outside` 档。
+  //   ② **转义分号 `\;`**：`{ a\; }` 里的 `;` 被转义，是字面字符，同样只是一个词。
+  // 误判的后果：整行 `ok:false` 路径的档位集合不含 `outside`、且只认 deny 例外，于是用户
+  // 显式配的 `outside=deny` 与全部 ask 例外在这条路径上整个失明（fail-open）。
+  // 故扫描把引号与转义一并跳过，只认**顶层**分隔符。
   //
-  //   ① **引号内的换行**：`{ "a` NL `b" }` 里的换行在双引号内，是**字面字符** ——
-  //      整个 `{…}` 只是一个词（bash 会创建字面名为 `{` 的文件、exit=0）。
-  //      旧判据看到文本里有 NL → 判成分组 → `noteOpaqueTarget(false)` →
-  //      `redirectOpaqueTarget = 'not-word'` → `&` 触发 → 整行 `ok:false` → 丢 `outside` 档。
-  //   ② **转义分号 `\;`**：`{ a\; }` 里的 `;` 被转义，是**字面字符**，同样只是一个词。
-  //
-  // 误判的后果与 `redirectOpaqueTarget` 那条注释同源：整行 `ok:false` 路径的档位集合
-  // **不含 `outside`**、且**只认 deny 例外**，于是用户显式配的 `outside=deny` 与全部 ask
-  // 例外在这条路径上整个失明（fail-open）。实测（`outside=deny`、其余七档 allow）：
-  //     rm -rf /tmp/pgx > { a b } & echo done   → deny ✅（对照格）
-  //     rm -rf /tmp/pgx > { a NL b } & echo done    → **allow** ❌
-  //     rm -rf /tmp/pgx > { "a NL b" } & echo done  → **allow** ❌
-  //     rm -rf /tmp/pgx > { a\; } & echo done       → **allow** ❌
-  //
-  // ⚠️ 三支都要修：仲裁的 V4 修法修好了靶 1/靶 2，**靶 3（`\;`）仍漏** ——
-  // 因为它的扫描没有把 `\` 转义算进「跳过」。故本实现把**引号与转义一并跳过**。
-  //
-  // ⚠️ 本判据的两半**承重程度不同**（变异测试实测，供日后维护参考）：
-  //   · 「**最后一个**顶层分隔符之后只剩空白」是**靶 1/靶 2 的承重项**。旧实现的错在于
-  //     它问「文本里**有没有**换行」（`/[\n\r]/.test`）而不是「**末尾**有没有分隔符」，
-  //     故引号内的换行被误判成分组。改成「取最后一个分隔符、看其后是否只剩空白」之后，
-  //     引号内换行**自然**不再命中（它后面还有收尾引号，非空白）。
-  //   · `\` 转义分支是**靶 3 的承重项**：`{ a\; }` 里那个 `;` 正是**最后一个**顶层候选、
-  //     其后恰好只剩空白 —— 不跳过它就必然误判分组（实测停用该分支 ⇒ 断言 AH7 红灯）。
-  //   · 引号分支（单/双）在现有语料上**不承重**（停用后判别格差异 = 0）：被引号包住的
-  //     分隔符后面总跟着收尾引号，永远不可能满足「其后只剩空白」。保留它是为了与上面
-  //     「跳过引号内内容」的判据描述一致、并对未来改动留一道防御，**不是**靶 1/靶 2 依赖它。
-  //
-  // ⚠️ 判据方向是 **fail-closed 优先**：本扫描只在「确实读到一个**顶层**分隔符、且其后
-  // 只剩空白」时才判分组。**顶层** = 未被单/双引号包裹、未被 `\` 转义。与 `bash -n` 的
-  // 56 格交叉语料对拍：**「bash 判 OK 而本判据判分组」= 0 格**（即不产生新的 fail-open），
-  // 另 47/56 逐格一致；余下 9 格是「bash 判 ERR 而本判据说词」（`{a&&}` / `{a|}` 这类
-  // 内容自身就非法的形态，命令在 bash 里根本不会执行），且这 9 格在旧判据下**同样是词**，
-  // 不构成回归。
-  //
-  // ⚠️ **不额外要求「`{` 之后必须有空白」**：bash 里 `{ b; }` 与 `{b;}` **都是** SYNTAX-ERR、
-  // `{ b }` 与 `{b}` **都是** OK（实测），即「`{` 后有没有空白」在本判据要回答的问题
-  // （这个 `{…}` 能不能当重定向目标）上**不构成区分**。反过来加这条要求会把 `{b;}` 判成
-  // 词（bash 判 ERR），是往 fail-open 方向走，故不加。
+  // ⚠️ 判据方向是 **fail-closed 优先**：只在「确实读到一个顶层分隔符、且其后只剩空白」时
+  // 才判分组（`{a&&}` / `{a|}` 这类内容自身非法的形态判词，与 bash 的窄偏差方向安全）。
   const braceIsCommandGroup = (content) => {
     let quote
     let last = -1
@@ -6494,78 +5900,35 @@ export function decomposeCommand(source, shell) {
       if (esc === null) return { ok: false, reason: 'the command line ends inside an escape' }
       // 续行（`` ` `` + 换行）：本分支**一律**把它当续行消费（`pushText(esc.raw)`，两行接成
       // 一条命令），差别只在「要不要在这里切一刀」—— 这一刀由下面的守卫决定。
-      // 官方解析器实测：`Get-ChildItem `+NL+`  -LiteralPath .` 的 token 里有一个
-      // `LineContinuation`，且反引号前面是**空白**（前一个词元早已完结）⇒ 真续行、不切。
       //
-      // ⚠️ 但「前一个词元**已经完结**」时，反引号是**字面**字符，这一刀必须切 —— 判据的
-      //    维度是**词元**（`wordText` / `tokenTyped`），**不是**「反引号前一个字符是不是
-      //    分隔符」（那是本轮订正的错误判据，见下）。注意 `readPwshEscape` 判「行尾反引号是
-      //    字面字符还是语法错误」用的是 `PWSH_TOKEN_BREAK`（**字符**维度）—— 那处是对的
-      //    （行尾没有「下一个词元」可言），**两处判据不同维度，不得互相套用**。
-      //    官方解析器实测（无 CR，逐条看过 token 表）：
-      //      `Remove-Item -Force "C:/Windows"` + `` ` `` + NL + `-Confirm:$false`
-      //        → `StringExpandable["C:/Windows"]` **`LineContinuation`** `Parameter[-Confirm:]` …
-      //          ⇒ 两行是**两个**词元（`-Confirm:` 是新词元的开头）
-      //      `Remove-Item -Force C:/Windows` + `` ` `` + NL + `-Confirm:$false`
-      //        → **一个** `Generic[C:/Windows`+NL+`-Confirm:$false]`（裸词后是**字面**反引号）
-      //    缺这一格时引号串与下一行被粘成一个词元 `C:/Windows-Confirm:$false`，`blast` 由
-      //    `system` 掉成 `unknown`、档位由 `wide` 掉成 `unknown` ⇒ 破坏性子设置与 deny
-      //    例外双双失明。实测（本机三态对拍，bash/pwsh 各格）：
-      //      大分类 allow + `wide`=deny                 → HEAD `deny` → PRE **`ask`**（降级）
-      //      大分类 allow + `wide`=deny + `unknown`=allow → HEAD `deny` → PRE **`allow`**（静默放行）
-      //      对照（无反引号）：HEAD / PRE / NOW 均 `deny`；修复后两条 fail-open 均回到 `deny`
-      //      （blast 回到 `system`、档位回到 `wide`）。
-      //    ⚠️ **判据的维度是「前一个词元是否已完结的完整词元」，不是「前一个字符是不是分隔符」**
-      //    （本轮订正）。旧判据用 `PWSH_TOKEN_BREAK.test(input[index - 1])`（前**一字符**），
-      //    而该集合只含 `\s;|&(){},'"` —— 字母 / 数字 / `]` / `.` 都不在里面，于是下列形态
-      //    被误判成续行、两行粘成一个词元。官方解析器 + 实参绑定逐格实测（无 CR）：
+      // ⚠️ 判据的维度是**词元**（`wordText` / `tokenTyped`），不是「反引号前一个字符是不是
+      // 分隔符」。`readPwshEscape` 判「行尾反引号是字面字符还是语法错误」用的是
+      // `PWSH_TOKEN_BREAK`（**字符**维度）—— 那处是对的（行尾没有「下一个词元」可言），
+      // 两处判据不同维度，不得互相套用。
       //
-      //      ── A. 已完结的完整词元 ⇒ **必须切**（旧判据全部漏判，是真 fail-open）──
-      //      · **Parameter 词元**（`-NoNewline` / `-Recurse` / `-NoEnumerate` / `-Verbose`）：
-      //        token 是 `Parameter[-NoNewline`]`（反引号**并进参数名**）、**没有** LineContinuation，
-      //        但 `[Parser]` 报 **2 条 PipelineAst** = **语句边界**。实参绑定是决定性证据：
-      //        `& probe.ps1 -NoNewline` + `` ` `` + NL + `C:/Windows2` → `N=1`、
-      //        `A[0]=[-NoNewline`]`，随后 `C:/Windows2` 被当作**新命令**执行
-      //        （`The term 'C:/Windows2' is not recognized…`）。⇒ 用 `flushSegment()`。
-      //        ⚠️ 这里**只能**是 `flushSegment()`：改用 `flushWord()` 实测端到端**仍然 `allow`**
-      //        （两行同段 ⇒ 第二行的破坏性命令与第一行同判），等于没修。
-      //      · **成员 / 下标 / 静态成员访问**（`$x.Name` / `$a[0]` / `$h["k"]` / `$env:TEMP.Length`
-      //        / `"abc".Length` / `(Get-Item x).Name` / `$x[0].Name` / `(gci x)[0]`）：
-      //        官方解析器实测是 `LineContinuation`，与空格形**逐字同值**（同一条语句）。
-      //        ⇒ 用 `flushWord()`，且判据必须与 `tokenTyped` **合取**（见 `PWSH_ACCESSOR_TAIL`）。
-      //      · `-Confirm:` 这类**带冒号收尾**的 Parameter：同样是 `LineContinuation`、
-      //        **同一条语句** ⇒ `flushWord()`。它与整词 Parameter 的差别正是本修法的核心：
-      //        **Parameter 族是语句边界，`-Confirm:` 是词元边界**，两者不同级。
-      //      · **分组块**（`( … )` / `{ … }`，含 `@( … )` / `@{ … }` 前缀形：`@(x)` / `@(1)` /
-      //        `@($x)` / `@("a")` / `@(Get-Item x)` / `@()` / `@{a=1}` / `@{}` / `@{a=1;b=2}` /
-      //        `a(x)` / `a{b}` / `x{y}` / `x(y)` / `a(1)` / `a(Get-Item x)` / `(x)` / `{x}` /
-      //        `Get-Item(x)` / `((x))` / `$(x)` / `a{}{}` …，**含段首无前缀形态**）：
-      //        官方解析器实测 token 表是 `… RParen[)] LineContinuation[`<NL>] Generic[C:/Windows]`、
-      //        `stmts=1`；实参绑定 `& probe @(1)` + `` ` `` + NL + `ZZZ` → **N=2**（`A[1]=ZZZ`），
-      //        与空格形 `@(1) ZZZ` 的 N=2 **同值** ⇒ 同样是 `LineContinuation`（词元边界、同一条语句），
-      //        而不是 Parameter 族那样的语句边界。⇒ 用 `flushWord()`。
-      //        ⚠️ 判据必须是**位置**（`lastGroupClose === index - 1`），不能对 `segText` 裸判
-      //        `/[)}]$/`：后者会命中 `${x}` / `${a}${b}`（PS 实测**粘住**，见 B 族），
-      //        而位置判据自动排除它们（`${…}` 走变量分支、不写 `lastGroupClose`），
-      //        也自动排除 `(x)y` / `@(x)z` / `(x)${y}`（PS 实测粘住 —— 收尾符之后还有字符）。
+      //   ── A. 已完结的完整词元 ⇒ **必须切**（旧字符判据全部漏判，是真 fail-open）──
+      //   · **Parameter 词元**（`-NoNewline` / `-Recurse` / …）：token 是
+      //     `Parameter[-NoNewline`]`（反引号并进参数名）、没有 LineContinuation，但
+      //     `[Parser]` 报 2 条 PipelineAst = **语句边界** ⇒ 用 `flushSegment()`。
+      //     只能用它：改用 `flushWord()` 两行同段，第二行的破坏性命令与第一行同判。
+      //   · **成员 / 下标 / 静态成员访问**（`$x.Name` / `$a[0]` / `$env:TEMP.Length` …）：
+      //     官方解析器判 `LineContinuation`（同一条语句）⇒ `flushWord()`，且判据必须与
+      //     `tokenTyped` 合取（见 `PWSH_ACCESSOR_TAIL`）。
+      //   · `-Confirm:` 这类**带冒号收尾**的 Parameter：同样是 `LineContinuation`、同一条语句
+      //     ⇒ `flushWord()`。**Parameter 族是语句边界，`-Confirm:` 是词元边界**。
+      //   · **分组块**（`( … )` / `{ … }` / `@( … )` / `@{ … }`）：`stmts=1`、词元边界 ⇒
+      //     `flushWord()`。判据必须是**位置**（`lastGroupClose === index - 1`），不能对
+      //     `segText` 裸判 `/[)}]$/`：后者会命中 `${x}` / `${a}${b}`（PS 实测粘住），也会
+      //     命中 `(x)y` / `@(x)z` 这类收尾符之后还有字符的形态。
       //
-      //      ── B. 首字符是普通字符 ⇒ **必须粘住**（旧判据此处本就正确，不得改动）──
-      //      裸词 `C:/Windows`、简单变量 `$TARGET` / `$x` / `${x}` / `$env:TEMP`、`abc]`、`a.b`、
-      //      `x$y.y`：官方解析器实测都是**一个** `Generic` 词元（反引号是**字面**字符）。
-      //      ⚠️ 尤其不得把 `$TARGET` 这类**简单变量**切开 —— 那是把方向从 fail-open 翻成误报。
-      //      `x$y.y` 同理：`$y` 不在词元首，故 `tokenTyped` 不置位（PS 实测粘住）。
-      //      分组块的**粘住**子族同理（PS 实测 `Generic[y`+NL+`…]`，反引号是字面字符）：
-      //      `(x)y` / `a(x)y` / `a{b}y` / `@(x)z` / `(x)${y`+`}` / `(x)$y` / `x )y` ——
-      //      它们的收尾符**不紧贴**反引号，故位置判据不命中。
+      //   ── B. 首字符是普通字符 ⇒ **必须粘住**（旧判据此处本就正确，不得改动）──
+      //   裸词 `C:/Windows`、简单变量 `$TARGET` / `${x}` / `$env:TEMP`、`abc]`、`a.b`、
+      //   `x$y.y`：都是**一个** `Generic` 词元（反引号是字面字符）。尤其不得把 `$TARGET`
+      //   这类简单变量切开 —— 那是把方向从 fail-open 翻成误报。
       //
-      //    ⚠️ **残余（本轮未修，见下方各自条目）**：`${x}` / `${a}${b}` / `(x)${y}` 单独出现时
-      //    PS 粘住而本实现切开（**既有反向误差**，非本次引入）；`${x}` + `::y` 是上一轮修法
-      //    **新引入**的 1 格反向误差；「引号串 + `:y` / `-y` / `]` / `[` / `::`」族 PS 判
-      //    `LineContinuation`（词元边界），而本实现按语句切分 —— 那是另一套机制，不在本次范围。
-      //    ⚠️ 重定向目标处的续行（`"5">out.txt` + `` ` `` + NL + `…`）PS 判**粘住**，
-      //    本实现（改前改后）判词元边界 —— 同属**既有反向误差**（见 fd 号分支的说明）。
-      //    ⚠️ 引号**内**的那处（`readPwshEscape(input, index, true)` 的调用点）**不要动**：
-      //    引号内 PS 判据不同，且文件里已论证过（`"a`"b"` 是一个 `StringExpandable` 词元）。
+      //   ⚠️ 已知反向误差（既有，不在本次范围）：`${x}` / `${a}${b}` / `(x)${y}` 单独出现时
+      //   PS 粘住而本实现切开；重定向目标处的续行同样判词元边界。
+      //   ⚠️ 引号**内**的那处（`readPwshEscape(input, index, true)` 的调用点）判据不同，不要动。
       if (esc.continuation) {
         // 前一个词元的**整词文本**（`wordText`，不是 `input[index - 1]`）—— 判据取词元维度。
         // 三段式：语句边界 → 词元边界 → 真续行（什么都不切）。判据本体是
@@ -6730,7 +6093,7 @@ export function decomposeCommand(source, shell) {
       continue
     }
     if (char === '|') {
-      // ── `|&`（管道 + stderr）必须被本分支**整体消费**（发现 9 的修法）────────────────
+      // ── `|&`（管道 + stderr）必须被本分支**整体消费**────────────────
       // bash 里 `|&` 是**一个**操作符（`cmd 2>&1 | cmd` 的简写），与 `|` 同为管道分隔符。
       // 本分支此前只看 `||`，于是 `|&` 的 `|` 被当分隔符、`&` 落到下面的 `&` 分支 ——
       // 而那个分支按「异步列表的 `&`」处理，于是 `echo a |&>& log & echo b` 走
@@ -6798,7 +6161,7 @@ export function decomposeCommand(source, shell) {
       pending = char === '>' ? 'write' : 'read'
       // 新开一个待读目标 ⇒ 上一个重定向的 opaque 结论作废（见 `redirectOpaqueTarget` 的注释）
       redirectOpaqueTarget = 'none'
-      // ⚠️ 同上，但只作废**尚未定案**的候选（本轮缺陷 1 的修法）：`opaqueTargetSwallow`
+      // ⚠️ 同上，但只作废**尚未定案**的候选：`opaqueTargetSwallow`
       //    仍为真意味着上一个 opaque 构造占的那个目标位**还没被任何词元消费**就被本次
       //    新重定向取代了 ⇒ 它没有顶掉任何词元，命令词位自然也未被它占据。
       //    实测（Git Bash 5.3.15，真 `mktemp`）：`> $(true) > out A=/bin/rm` → `A` 被设为
@@ -6897,7 +6260,7 @@ export function decomposeCommand(source, shell) {
   //   · 本行整体仍受上面的 `nextOp !== 'start'` 约束（空命令行早由 `EMPTY_COMMAND_REASON` 拦下）。
   // 这三条守卫使 `&` 的豁免面**恰好**等于 bash 真正接受的形态。
   const ampOk = nextOp === '&' && sh === 'bash' && ampAfterContent
-  // ── `&` 之前那个 `>` 没有目标：`&` 的豁免**不得**把它一起放行（发现 4 的修法）─────────
+  // ── `&` 之前那个 `>` 没有目标：`&` 的豁免**不得**把它一起放行─────────
   // 上面那条 `pending !== undefined && !started` 是**保留的**词元级判据，但它读的是**当前**
   // 的 `pending` —— `&` 分支的 `flushSegment()` 已经把它复位，故 `&` **之前**的那个 `>`
   // 它看不到。本行补的正是这个盲区，两者**互补而非重复**（去掉上面那条会让 `echo a > &`
@@ -6972,8 +6335,7 @@ function writeOutsideOf(seg, shell, h) {
 // 这类合法操作一并堵死，且盘根判定必然有边界情形（junction/挂载点）。显示警告让**人**
 // 来判断，与「审批」这件事的定位一致：机器负责把信息摆全，人负责决定。
 //
-// 系统目录名单刻意只收「删了必然出大事且几乎不可能是本意」的路径，不追求穷尽：
-// 名单越长，误报越多，而误报会让真正的警告被忽略（狼来了）。
+// 系统目录名单刻意只收「删了必然出大事且几乎不可能是本意」的路径，不追求穷尽（名单越长，误报越多）。
 //
 // **必须锚定到根**（盘符 `C:` 或前导分隔符），不能匹配相对路径：`lib`、`bin`、`etc`、
 // `var`、`opt`、`dev`、`sys` 在工作区里是极常见的目录名（前端项目几乎必有 `lib`/`bin`），
@@ -6996,7 +6358,7 @@ function writeOutsideOf(seg, shell, h) {
 //     它们在 POSIX 上只是「名字里带反斜杠和冒号」的普通相对路径，根本不是系统目录（误报）。
 //   · Windows 上 `/etc`、`/usr` 被判 system —— 它们在 Windows 上是「当前盘根下的 etc」，
 //     同样不是系统目录（误报）。
-// 混装的代价是双向误报，而误报会让真正的警告被忽略（狼来了）。
+// 混装的代价是双向误报。
 //
 // 平台由调用方通过 `opts.platform` 传入（'win32' | 'posix'）。**这是必须显式传的信息**：
 // 本模块是纯解析器（不访问 process），且**方言不等于平台** —— Linux 上跑 PowerShell Core
@@ -7175,7 +6537,7 @@ function headCommandNameOf(words, headEndHint) {
       // 推进方式复用 `skipPrefixArgs` —— 与 `segmentLabelFrom` 的关键字分支（`:775`）
       // 和 `pushHeadLabels`（`:1149`）**同源**。三处若各写一份「什么算关键字自己的选项」，
       // 「命令头到哪儿」「命令名是谁」「label 是谁」必然再次分叉，那正是本文件反复要修的
-      // 那类缺陷（本轮 F2/F4 的根因同此）。
+      // 那类缺陷。
       //
       // 只在「关键字紧跟 `-` 开头词元」时才推进：`skipPrefixArgs` 遇到第一个非选项词元
       // 即停，故 `time rm …` / `then nohup rm …` 一族逐字不变（`nx === start + 1`）。
@@ -7193,60 +6555,35 @@ function headCommandNameOf(words, headEndHint) {
       continue
     }
     // ── 进入下一轮之前：前导 `NAME=value` **不是命令名**，跳过后继续 ─────────────────
-    // 上面那个交替循环只在「关键字 / wrapper / 提权前缀」三类上推进，赋值词元一概落到
-    // 本行 —— 而本行此前直接 `break`，于是 `start` 停在赋值词元上，下面 `tailEnd` 那一支
-    // 取到的是**赋值**而不是真命令名。
+    // 上面那个交替循环只在「关键字 / wrapper / 提权前缀」三类上推进，赋值词元一概落到本行
+    // —— 若本行直接 `break`，`start` 就停在赋值词元上，下面 `tailEnd` 那一支取到的是赋值
+    // 而不是真命令名。
     //
-    // 两个入口都命中同一行（故是**一条**缺陷、不是两条）：
-    //   · 前缀之后（【1】）：`commandHeadEnd(['sudo','FOO=1','time','rm','-rf','/tmp'])` = **2**
-    //     —— ② 分支的 `sawPrefix && !PRIV_VALUE_IS_COMMAND['sudo']` 恒真且先于
-    //     `isTargetEatingNameIn` 命中，把 `FOO=1` 当命令名吃掉；早退又被 `:3981` 的
-    //     `!LEAD_ASSIGN` 挡住 → `headEnd -= 1` → `start = 1` 正是那个赋值词元；
-    //   · 段首前导（【2】）：`['FOO=1','B=2','time','rm','-rf','/tmp']` 同理由 `:2898`
-    //     剥掉后 `headEnd = 2`，`start` 落在 `B=2` 上。
-    // 实测两条都返回 `'foo=1'` / `'b=2'`（正确值 `'rm'`）。
+    // 两个入口都命中同一行（故是一条缺陷、不是两条）：
+    //   · 前缀之后：`commandHeadEnd(['sudo','FOO=1','time','rm','-rf','/tmp'])` = 2 ——
+    //     ② 分支的 `sawPrefix && !PRIV_VALUE_IS_COMMAND['sudo']` 恒真且先于
+    //     `isTargetEatingNameIn` 命中，把 `FOO=1` 当命令名吃掉；早退又被 `!LEAD_ASSIGN` 挡住
+    //     → `headEnd -= 1` → `start` 正是那个赋值词元；
+    //   · 段首前导：`['FOO=1','B=2','time','rm','-rf','/tmp']` 剥掉后 `headEnd = 2`，
+    //     `start` 落在 `B=2` 上。两条都返回 `'foo=1'` / `'b=2'`（正确值 `'rm'`）。
     //
     // 下游后果按形态分两半，两半都由本行从根归位：
-    //   · `hasNoOperand` 的 BARE 那一半 —— `:2865`（`commandHeadEndFull` 推进循环）已修，
-    //     但那条路径只服务 `unknown` 档，故 `sudo FOO=1 time diskpart` 此前靠 headFull
-    //     位置跳过兜住（**闸门有效**，实测基线 `ask|null|unknown,priv`，不是硬故障）；
-    //   · **半径档那一半此前无人修**：`blastRadiusOfSegment:5246` 把
-    //     `headCommandNameOf` 的结果当 `cmdName` 交给 `isCmdStyleSwitch:5280`，
-    //     而 `'foo=1'` 在 `GROUP_OF_LABEL` 里查不到 → 走「认不出命令名 ⇒ 不消费半径」
-    //     兜底 → `/tmp` 被当 cmd 开关跳过 → 段级 blast 归 null → 档落 `inside`。
-    //     headFull 兜不住这一半（它只服务 `hasNoOperand`），故这是**同一缺陷的新后果**。
+    //   · `hasNoOperand` 的 BARE 那一半由 `commandHeadEndFull` 的推进循环兜住（闸门有效）；
+    //   · **半径档那一半此前无人修**：`blastRadiusOfSegment` 把 `headCommandNameOf` 的结果当
+    //     `cmdName` 交给 `isCmdStyleSwitch`，而 `'foo=1'` 在 `GROUP_OF_LABEL` 里查不到 →
+    //     走「认不出命令名 ⇒ 不消费半径」兜底 → `/tmp` 被当 cmd 开关跳过 → 段级 blast 归 null。
     //
-    // 判据复用模块级 `LEAD_ASSIGN` **单点**、与 `commandHeadEndFull:2865` 那行**逐字同源**
-    // （查表 + `test`，无正则新建、无分配）：四处若各写一份「什么算赋值」必然漂移，
-    // 而漂移方向正是本条缺陷（`commandHeadEndFull` 上一轮刚因同一漂移补过这一项）。
+    // 判据复用模块级 `LEAD_ASSIGN` 单点、与 `commandHeadEndFull` 那行逐字同源
+    // （查表 + `test`，无正则新建、无分配）：四处若各写一份「什么算赋值」必然漂移。
     //
-    // ⚠️ 修法范围**按实测分两半**（此处曾写作「两族零影响」，其中 wrapper 那一半不成立）：
-    //   · `su root FOO=1 …` / `runas /user:a FOO=1 …` 走 `privOperandSkip` 操作数路径
-    //     —— 本行对它们**确实零影响**（45 关键字 × 4 目标 × 2 平台 = 360 格/族，
-    //     段级 blast / labels / tiers / action 全 0 变化）。
-    //   · **wrapper 一族（`nohup`/`nice`/`timeout 5`/`xargs`/`setsid`/`stdbuf`/`ionice`/
-    //     `command`/`builtin`/`exec`）的半径档恰是被本行修好的**，且它**不走 label 侧**
-    //     —— 本行所在的 `headCommandNameOf` 正是 `blastRadiusOfSegment` 取 `cmdName`
-    //     交给 `isCmdStyleSwitch` 的那一处（**半径档侧**）。插桩实测：
-    //     `headCommandNameOf(['nohup','FOO=1','time','rm','-rf','/tmp'])` 由 `"foo=1"` 变
-    //     `"rm"`，而同一形态的 `segmentLabels` 两侧**都是 `[]`**。
-    //     后果（win32）：`cmdName` 认不出时 `isCmdStyleSwitch` 把 `/tmp` 当 cmd 开关跳过、
-    //     段级 blast 归 `null`；修好后**命令文本口径**下 45 个语句关键字里 **43 个**由 `null` 变 `outside`，
-    //     另 2 个例外**仅存在于该口径**：`}` 两侧同为 `outside`；`{` 两侧同为**解析失败**（`ok=false`、无段，不是 `null`）
-    //     —— 而 `:4105` 的**词元级**口径下 `{` 同其余关键字一样由 `null` 变 `outside`（45/45）；与同形无赋值
-    //     对照 `nohup time rm -rf /tmp` 的 `outside` **一致** ⇒ 消除异类判决、方向收紧，非 fail-open（posix 侧同为 outside、0 变化）。
-    //   · 但该族 `segmentLabels` 恒空 ⇒ `tierSetOf` ① 的门控（段内无 del/disk/perm/priv
-    //     组 label）不放开 ⇒ `tiers` 仍为空、`action` 不变（4320 格 action 变化 0）
-    //     ⇒ `ignored.md:115` 记录的「wrapper 侧 allow」缺陷**本身仍未修**。可见面只有
-    //     半径档：例外模式面板（`index.js` 的 `blastRadiusOfCommandPattern`）实测
-    //     `nohup FOO=1 time rm -rf /tmp` 由 null 变 outside；弹窗侧（`worstBlast`）只在
-    //     **该段仍被判破坏性**时才看得到（`assessCommand` 的 `destructive` 门控）——纯形态
-    //     `labels` 为空故 `blast` 仍为 `null`，opaque 形态 `nohup FOO=1 time } rm -rf /tmp`
-    //     （`label='rm'` ⇒ `destructive` 为真）则 `null → outside` —— 实测 10 族 ×
-    //     3 赋值形态（`FOO=1` / `FOO=1 BAR=2` / `A=1`）× 2 目标（`/tmp` `/data`）× 2 方言 = **120 格半径档可见变化**；
-    //     `action` 在**八档同动作**配置下不变，而在 **per-tier 配置**（如 `outside=deny`）下**由 `allow` 收紧为 `deny`**（120/120，fail-closed）。
+    // ⚠️ 修法范围：`su root FOO=1 …` / `runas /user:a FOO=1 …` 走 `privOperandSkip` 操作数
+    // 路径，本行对它们零影响；**wrapper 一族**（`nohup`/`nice`/`timeout 5`/`xargs`/`setsid`/
+    // `stdbuf`/`ionice`/`command`/`builtin`/`exec`）的半径档恰是被本行修好的，且它不走 label 侧
+    // （本行所在的 `headCommandNameOf` 正是 `blastRadiusOfSegment` 取 `cmdName` 的那一处）。
+    // 但该族 `segmentLabels` 恒空 ⇒ `tierSetOf` ① 的门控不放开 ⇒ `tiers` 仍为空、`action` 不变。
+    // 可见面只有半径档：例外模式面板与弹窗侧（后者只在段仍被判破坏性时才看得到）。
     //
-    // 收敛性：每轮 `start += 1` 至少推进一个词元，`guard <= w.length` 不可能死循环（与其余分支同）。
+    // 收敛性：每轮 `start += 1` 至少推进一个词元，`guard <= w.length` 不可能死循环。
     if (LEAD_ASSIGN.test(String(w[start]))) { start += 1; continue }
     if (WRAPPERS[head] !== 1 && PRIV_PREFIXES[head] !== 1) break
     let next = start + 1
@@ -7363,69 +6700,21 @@ export const WIN_SLASH_SWITCH_CMDS = dict({
 /**
  * 该词元是否为 cmd 风格的 `/x` 开关（`/s` `/q` `/grant` `/pid`）。
  *
- * **只在 Windows 上成立**：POSIX 上 `/etc`、`/usr/bin` 是路径，不是开关。
- * 这一条是 Linux 上 pwsh 工具漏报系统目录的根因 —— 当时按方言（pwsh）判开关，
- * 而 Linux 上跑 PowerShell Core 时方言是 pwsh、路径却是 POSIX 的，于是 `/etc`
- * 被当开关跳过、段级 blast 静默（实测 `rm -rf /etc` 在 Linux+pwsh 下为 null，
- * 而同机 bash 下正确判 system）。
+ * **只在 Windows 上成立**：POSIX 上 `/etc`、`/usr/bin` 是路径，不是开关。按方言判会让
+ * Linux 上跑 PowerShell Core 时的 `/etc` 被当开关跳过、段级 blast 静默。
  *
- * 平台未知时**不跳**（返回 false）：方向必须 fail-safe —— 把路径当开关会**漏掉**警告
- * （静默），把开关当路径最多多一条警告。两者代价不对称，故未知时选后者。
- * 代价：旧调用方（不传 platform）在 Windows 上会为 `/s` `/q` 这类开关多出一条假警告，
- * 但那只影响尚未接线 platform 的调用方，且是可见的噪音而非静默的漏报。
+ * 平台未知时**不跳**（返回 false）：把路径当开关会漏掉警告（静默），把开关当路径最多
+ * 多一条警告 —— 两者代价不对称，故未知时选后者。
  *
- * ── 但「Windows 上 `/` + 字母 ⇒ 开关」这条推论**本身也是错的** ──────────────────
- * Windows 上 `/Windows`、`/ProgramData`、`/Users` 是**当前盘根的绝对路径**
- * （`C:\Windows` 的另一种合法拼写），与 cmd 开关在语法上完全同形 —— 唯一的区别是名字。
- * 无条件按开关跳过，就在**出货平台**上把最该警告的目标整个吃掉：实测
- * `blastRadiusOf('/Windows', win32)` = system，而 `blastRadiusOfSegment(['rm','-rf','/Windows'], win32)`
- * = null；`/ProgramData` 同样（`Remove-Item -Recurse -Force /Windows` 零警告）。
+ * Windows 上 `/Windows`、`/ProgramData`、`/Users` 是当前盘根的绝对路径，与 cmd 开关
+ * 在语法上完全同形 —— 无条件按开关跳过会把最该警告的目标整个吃掉。故判据收窄为四道：
+ *   ① POSIX 系统目录名单里的项不是开关（`/etc`、`/usr`…），复用 `POSIX_SYSTEM_ROOT_RE`；
+ *   ② 含第二段的 `/a/b` 不是开关（cmd 开关是单段词）；只把 `/` 算分段符，
+ *      `/user:DOMAIN\admin` 是 runas 的真开关；
+ *   ③ 1–2 字母的短开关（`/s` `/q` `/f` `/im`）与命令无关，是保住既有断言的取舍；
+ *   ④ 3+ 字母的 `/x` 取决于**这条命令吃不吃 `/x`**（见 `WIN_SLASH_SWITCH_CMDS`）。
  *
- * 判据因此收窄为：**只有不落在系统目录名单里的 `/x` 才是开关**。
- * 方向仍是 fail-safe —— 停跳的恰好是「漏掉它代价最大」的那一批（系统目录），
- * 其余（`/s` `/q` `/grant` `/pid`）照旧跳过，不制造噪音。
- *
- * ── 但「Windows 上 `/` + 字母 + 不是 Windows 系统目录 ⇒ 开关」仍然漏掉一整类 ──────
- * `isSystemDir` 在 win32 下**只查 Windows 名单**，于是 POSIX 系统路径全被判成开关。
- * 实测（真实宿主、`platform: 'win32'`、默认配置 mode=allow）：
- *     rm -rf /etc | rm -rf /tmp/x | rm -rf /usr/bin | rm -rf /var/log | rm -rf /home/u/data
- *     chmod 777 /etc/passwd | truncate -s 0 /etc/passwd | shred /etc/passwd
- * 段级 blast 全部为 null → 档位 `inside` → **allow**；而对照的 `rm -rf C:/Windows`
- * 正确判 `wide`。宿主的 `isOutside('/etc')` 实际返回 true（解析为 `G:\etc`，在工作区外）
- * —— 解析器压根没走到那一步。**Windows 是出货平台**，这条路径上的静默代价最大。
- *
- * 故在「不是 Windows 系统目录」之后再收两道：
- *   ① **POSIX 系统目录名单**里的项同样不是开关（`/etc`、`/usr`、`/var`、`/opt`…）——
- *      这些名字在「当前盘根」下也完全可能是真实目录（`G:\etc`），按开关跳过它们的
- *      代价恰好最大（静默）。判据复用 `POSIX_SYSTEM_ROOT_RE`，不另写一份名单。
- *   ② **含第二段的 `/a/b` 不是开关**：cmd 开关是**单段**词（`/s` `/q` `/f` `/im`
- *      `/pid` `/grant` `/mir` `/delete`），没有 `/a/b` 形态。`/etc/passwd`、`/tmp/x`、
- *      `/home/u/data` 都是路径 —— 它们不在 POSIX 名单里，① 拦不住。
- *      只把 `/` 算作分段符（`\` 不算）：`/user:DOMAIN\admin` 是 runas 的**真开关**，
- *      把 `\` 也算进去会让它被当路径判档、凭空造出一条「目标在工作区外」的假警告。
- *      含 `\` 的 POSIX 写法（`/etc\passwd`）由 ① 兜住（判据前先归一成 `/`）。
- *
- * ── 但 ①② 只堵住了「多段」与「两张名单里的名字」，单段的其余全部仍然漏 ──────────
- * 范围比原先认为的大得多：不是 `/tmp` `/home` 几个名字，而是**任意 `/` + 字母的单段词**。
- * 实测（`platform: 'win32'`、默认配置 mode=allow，`blastRadiusOfSegment` 返回 null）：
- *     rm -rf /tmp | /home | /data | /app | /backup | /foo | /myapp | /logs | /zzz | /notaswitch
- * 而 `/etc` `/usr` 一族（已由 ① 堵住）判 outside。**同一类操作只因名字不同，一个静默一个询问**。
- * 放大形态：`rm` / `Remove-Item` / `del` / `rmdir` / `rd` / `erase` / `shred` / `chmod` /
- * `chown` / `truncate` / `find -delete` / `mkfs.ext4` / `wipefs` 对 `/tmp` **全部** blast=null。
- * 引号不救（`rm -rf "/tmp"` 仍 null）、大小写不救（`/TMP` 仍 null）；
- * **尾斜杠会救**（`/tmp/` 判 outside）—— 同一目标写 `/tmp` 静默、写 `/tmp/` 弹窗。
- *
- * `blastRadiusOfSegment` **只在破坏性段上被调用**，故这里的判据只需要覆盖破坏性命令。
- *
- * 故再收两道：
- *   ③ **1–2 字母的短开关与命令无关**：`/s` `/q` `/f` `/im` 在 `rmdir` 上是开关，在 `rm` 上
- *      虽不是开关，但单个字母的 POSIX 根目录实践中不存在 —— 这条兜底保住既有断言
- *      `seg(['rm','-rf','/s']) === null`（L43），是**有意**的取舍。
- *   ④ **命令域判据**：3+ 字母的 `/x` 是不是开关，取决于**这条命令吃不吃 `/x`** ——
- *      见 `WIN_SLASH_SWITCH_CMDS`。它只在半径判据真正被消费的命令上生效，
- *      故「假警告的宇宙」= 破坏性名单 ∩ 吃 `/x` 的命令，是个固定的小集合（有界）。
- *
- * 已知残余：`/x` 单字母形态（③ 的取舍，见上）。`/tmp` 这类 3+ 字母的单段词已由 ④ 覆盖。
+ * 已知残余：`/x` 单字母形态（③ 的取舍）。
  *
  * @param {string} token 待判词元
  * @param {object} [opts] 判档选项（只读 `platform`）
@@ -7578,33 +6867,23 @@ export function groupTiersOf(labels) {
 /**
  * 「**半径侧读不出**」时该并入的档位集合 —— **单一实现**，两个调用方共用：
  *
- *   · `assessCommand` 的整行读不懂分支 —— 连段边界都定不了、**根本没有词元**；
- *   · `tierSetOf` ① 里「**破坏性命令本身藏在 opaque 构造里**」那一族
+ *   · `assessCommand` 的整行读不懂分支 —— 连段边界都定不了、根本没有词元；
+ *   · `tierSetOf` ① 里「破坏性命令本身藏在 opaque 构造里」那一族
  *     （守卫是 `destructiveHeadReadable`）。
  *
  * 两处的处境相同：**半径侧没有任何结论**。而「读不出」既可能落在工作区内、也可能落在
- * 盘根，故 `inside` / `wide` / `unknown` **同时**参与「取最严」—— 读不出半径**不等于**
- * 半径安全（见整行分支处 §7.2 的完整论证）。
+ * 盘根，故 `inside` / `wide` / `unknown` **同时**参与「取最严」—— 读不出半径不等于半径安全。
  *
- * ⚠️ `inside` **必须在集合里**（发现 1 的修法）：整行分支早已并它（那处 `tiers.push('inside')`
- * 是本批**未改动**的上下文，注释明写「丢掉它就等于丢掉一条显式表态」），而段级 opaque 支
- * 只并 `wide ∪ unknown` —— 于是同一个「目标读不出」在两条路径上给出两个答案：用户显式配的
- * `inside=deny` 在段级路径上被静默丢弃。实测（`inside=deny`、其余七档 allow，
- * win32/posix × bash/pwsh 四格同值）：
- *     rm -rf ./build              → deny（tiers=['inside']）
- *     echo a | rm -rf ./build     → deny（tiers=['inside']）
- *     echo a | (rm -rf ./build)   → **allow**（tiers=['wide','unknown']）← inside 档丢失
- * 且这一格是**本批改动新打开**的：HEAD 上 `echo a | (rm -rf ./build)` 因悬空检查返回
- * ok:false、走整行分支 → deny；本批放宽悬空检查后它走段级路径 → allow。
+ * ⚠️ `inside` **必须在集合里**：整行分支早已并它，而段级 opaque 支一度只并 `wide ∪ unknown`
+ * —— 于是同一个「目标读不出」在两条路径上给出两个答案：用户显式配的 `inside=deny`
+ * 在段级路径上被静默丢弃（`echo a | (rm -rf ./build)` 由 deny 变 allow）。
  *
- * ⚠️ 提成单点是为了消除**同一句「读不出」在两个路径上给出两个答案**的分叉：整行分支并的
- * 是这三档，而段级 opaque 支一度只 `add('unknown')` —— 于是用户显式配的 `wide=deny`
- * 在段级路径上被静默丢弃（fail-open，实测见 `tierSetOf` ① 的说明）。
+ * ⚠️ 提成单点是为了消除**同一句「读不出」在两个路径上给出两个答案**的分叉：否则用户显式配的
+ * `wide=deny` 会在段级路径上被静默丢弃（fail-open）。
  *
- * ⚠️ **不是「凡 opaque 段都并这三档」**：命令可读、构造只是**参数**的那一族
+ * ⚠️ **不是「凡 opaque 段都并这三档」**：命令可读、构造只是参数的那一族
  * （`rm -rf ./tmp/{a,b,c}`：段首 label 是 `rm`）半径判据已按可读前缀判过档，
- * 并 `wide` 等于把已知结论抬成「可能很大」，是凭空收紧 —— `test/shell-parse.mjs` 的
- * 60g ④b/⑤b 把这一族（合法常用命令）钉死为「恰好 `['unknown']`」。
+ * 并 `wide` 等于把已知结论抬成「可能很大」，是凭空收紧。
  */
 const RADIUS_TIERS_WHEN_UNREADABLE = ['wide', 'unknown', 'inside']
 
@@ -7623,7 +6902,7 @@ const RADIUS_TIERS_WHEN_UNREADABLE = ['wide', 'unknown', 'inside']
  * `find -exec rm {} +` 合成 `rm` 这种**间接** label，而那一族的词元齐全、半径判据正常
  * 工作（`find` 的路径目标可判），不属于本判据要覆盖的形态。
  *
- * ⚠️ **提权前缀必须单独排除**（发现 1 的修法）：`sudo` / `doas` / `su` / `pkexec` /
+ * ⚠️ **提权前缀必须单独排除**：`sudo` / `doas` / `su` / `pkexec` /
  * `runas` / `gsudo` **六个名字全部在 `DESTRUCTIVE_LABELS` 里**（那一行的注释明禁把它们
  * 移出名单，见 `assessCommand` 的 `priv` 分支），于是「提权前缀 + 真命令藏在 opaque 构造里」
  * 会被本判据误判成「命令可读」→ 走 `else` 支只并 `unknown` → 用户显式配的
@@ -7642,7 +6921,7 @@ const RADIUS_TIERS_WHEN_UNREADABLE = ['wide', 'unknown', 'inside']
  * `sudo $(rm -rf C:/Windows)` 由 deny 变 **allow**）：`sudo` 本身就在 `DESTRUCTIVE_LABELS`
  * 里，故「段首是提权前缀、真命令在构造里」这一格只有它能挡住。它承重，不是冗余。
  *
- * ── 判据问的是「**opaque 构造自己有没有藏一个破坏性命令**」（发现 1 的修法）─────────────
+ * ── 判据问的是「**opaque 构造自己有没有藏一个破坏性命令**」─────────────
  * 本函数此前问的是「**段首**是不是破坏性命令」，于是「段首本身是破坏性命令、而构造里
  * **另有一个**真破坏性命令」这一族判错：`echo a | rm -rf /tmp/x $(rm -rf /)` 的段首 label
  * 确实是 `rm`，判据说「命令可读」→ 走 `else` 支只并 `unknown` → 用户显式配的 `wide=deny`
@@ -7667,7 +6946,7 @@ function destructiveHeadReadable(seg) {
   const w = seg && Array.isArray(seg.words) ? seg.words : []
   let head = ''
   // 判据用 `headCommandNameOf`（穿过提权前缀 / wrapper / 语句关键字取**真命令头**），
-  // 不用 `segmentLabel`（发现 8）：后者不跳提权前缀，`segmentLabel(['sudo','rm',…])` = `'sudo'`
+  // 不用 `segmentLabel`：后者不跳提权前缀，`segmentLabel(['sudo','rm',…])` = `'sudo'`
   // —— 于是「段首是 `sudo`」被无条件判成「命令读不出」，**即使紧跟其后的就是可读的 `rm`**：
   // `sudo rm -rf ./build $(date)` 由 allow 变 deny（tiers=`['wide','unknown','inside','priv']`），
   // 形态极常见，属误拦。`headCommandNameOf` 是文件里已有的单一来源（它的注释明写必须穿过
@@ -7716,7 +6995,7 @@ function destructiveHeadReadable(seg) {
  * 以及 `tierVerdict` 里「并列在最严档上的其余命中档」那一次排序。
  * 后两处曾经各自**手抄**了一份逐字相同的比较函数 —— 而 `decisiveTierOf` 的稳定性论证
  * 依赖「`tiers` 已按 `TIER_RANK` 排过」，抄漏一处的后果是**动作不变、拒绝理由随书写
- * 形态漂移**（发现 3）；`tierVerdict` 那一份更直接：它就是用户看到的拒绝理由。
+ * 形态漂移**；`tierVerdict` 那一份更直接：它就是用户看到的拒绝理由。
  * 三处现在只剩这一个比较实现（发现 5 的修法：把 `tierVerdict` 的副本也换成本函数）。
  *
  * 原地排序并返回同一数组（调用方都要的就是排好序的那一份）。
@@ -7795,7 +7074,7 @@ export function tierSetOf(seg, labels, opts) {
     if (g === 'priv') hasPrivGroup = true
     else hasPureRadius = true
   }
-  // ── 门控的第三个合取项：**破坏性命令藏在 opaque 构造里**（发现 3 的修法）──────────────
+  // ── 门控的第三个合取项：**破坏性命令藏在 opaque 构造里**──────────────
   // 前两项都只覆盖「半径组 label」：`hasPureRadius` 要求段内有 del/disk/perm 组的 label，
   // `hasPrivGroup` 要求有 priv 组。而**纯组档段**（`kill` / `pkill` / `reboot` / `shutdown` /
   // `taskkill` / `stop-computer` / `reg delete` / `stop-process`）的 `GROUP_OF_LABEL` 是
@@ -7841,84 +7120,29 @@ export function tierSetOf(seg, labels, opts) {
     // `diskpart /s a.txt` 走的就是这一支（`isUnknownTierSegment` 为真 → 只给 `unknown`，
     // 半径档 `outside` 被替换掉），改成叠加会白送一个半径档，而 `:4207-4208` 明禁。
     const opaqueUnjudgeable = !!(seg && seg.opaque && !seg.blast)
-    // ── 门控修正（发现 2 的修法）：`!seg.blast` **不是**「半径侧读不出」的完整判据 ──────────
-    // `blast` 非空也可能是 `{level:'unknown'}` —— 那同样是「半径侧没有结论」，只是
-    // `blastRadiusOfSegment` 走的是**另一条**产出路径：词法器**不吞**反引号，命令替换
-    // 作为一个字面词元留在 `words` 里（`Write-Output \`rm -rf C:/Windows\`` 的
-    // `words` 是 `['Write-Output','`rm -rf C:/Windows`']`），该词元被判为「读不出」
+    // ── 门控修正：`!seg.blast` **不是**「半径侧读不出」的完整判据 ─────────────────
+    // `blast` 非空也可能是 `{level:'unknown'}` —— 那同样是「半径侧没有结论」，只是走另一条
+    // 产出路径：词法器不吞反引号，命令替换作为字面词元留在 `words` 里，该词元被判为「读不出」
     // → `sawUnjudgeable` 置位 → 段级 blast 是 `{level:'unknown'}` 而非 `null`。
-    //
-    // 于是旧门控 `seg.opaque && !seg.blast` 对反引号形态**恒假**，本守卫整个不被求值，
-    // 落到 `else` 支的 `radiusTierOf({level:'unknown'})` —— **只**并 `unknown`，
-    // `wide` 被静默丢弃。同一构造的四种写法里只有反引号漏网，方向 fail-open：
-    //     echo a | Write-Output $(rm -rf C:/Windows)   → deny  tiers=['wide','unknown']
-    //     echo a | Write-Output (rm -rf C:/Windows)    → deny  tiers=['wide','unknown']
-    //     echo a | Write-Output {rm -rf C:/Windows}    → deny  tiers=['wide','unknown']
-    //     echo a | Write-Output `rm -rf C:/Windows`    → **allow** tiers=['unknown'] ❌
-    // （实测 `wide=deny` + 其余七档 allow。）
+    // 于是旧门控 `seg.opaque && !seg.blast` 对反引号形态恒假，本守卫整个不被求值，落到
+    // `else` 支只并 `unknown`、`wide` 被静默丢弃（同一构造的四种写法里只有反引号漏网）。
     //
     // ⚠️ 两条守卫**缺一不可**，且都不可放宽：
-    //   · `!destructiveHeadReadable(seg)` —— 命令可读、构造只是**参数**的那一族
-    //     （`rm -rf ./build $(date)`、`rm -rf ./tmp/{a,b,c}`）**必须**留在 `else` 支，
-    //     60g ④b/⑤b 把它们钉死为「恰好 `['unknown']`」。它们的段首 label 是 `rm`，
-    //     故被本条排除；`rm -rf $TARGET` 同理（且它 `opaque` 为空，双重排除）。
+    //   · `!destructiveHeadReadable(seg)` —— 命令可读、构造只是参数的那一族
+    //     （`rm -rf ./build $(date)`）必须留在 `else` 支，否则会凭空收紧；
     //   · `seg.opaque` —— 没有 opaque 构造的段不参与（`kill 1234` 那族不得凭空多档）。
     //
     // ⚠️ 只把「半径侧读不出」的判据补齐，**不动** `else` 支的「替换」语义：
-    // `diskpart /s a.txt`（`opaque` 为空、`isUnknownTierSegment` 为真）照旧恰好
-    // `['unknown']` —— 它不满足 `seg.opaque`，走不进本支。
-    // ── 「半径侧读不出」这个判据**已被下面的守卫完全吸收**，故不再单列变量（发现 10）──────
-    // 曾写作 `const opaqueRadiusUnreadable = !!(seg.opaque && (!seg.blast || seg.blast.level === 'unknown'))`
-    // 并作为**第一个析取项**参与守卫：`(opaqueRadiusUnreadable || opaqueHiddenPayload) && !destructiveHeadReadable(seg)`。
-    // 那个写法里的第一个析取项是**冗余**的，且是**代数上恒等**的冗余（不依赖
-    // `destructiveHeadReadable` 怎么定义，故修复 A 改动它不影响本结论）。记 `O = seg.opaque`、
-    // `D = destructiveHeadReadable(seg)`、`B = seg.blast`：
-    //     opaqueHiddenPayload    = O && !D
-    //     opaqueRadiusUnreadable = O && (!B || B.level === 'unknown')
-    //     守卫 = (opaqueRadiusUnreadable || opaqueHiddenPayload) && !D
-    //          = O && ((!B || …) || !D) && !D
-    //          = O && !D && ((!B || …) || !D)      ← 已有 `!D`，故括号内恒真
-    //          = O && !D
-    //          = opaqueHiddenPayload                ∎
-    // 直白地说：`opaqueRadiusUnreadable` 蕴含 `O`，而 `opaqueHiddenPayload` 也蕴含 `O`；
-    // 一旦 `!D` 成立，两个析取项**都不可能**提供 `opaqueHiddenPayload` 之外的信息 ——
-    // 「半径侧读不出」从来不是与「载荷藏在构造里」并列的第二个结论。
-    // 实测（950 条语料 × 11 配置 × 2 方言 = 20900 次判定，守卫被求值 17424 次）：
-    // 化简前后**真值不一致 0 次**，两侧同为真 13178 次。
+    // `diskpart /s a.txt`（`opaque` 为空、`isUnknownTierSegment` 为真）照旧恰好 `['unknown']`。
     //
-    // ⚠️ 化简**不改变语义**，只去掉冗余；下面 `if` 的判据仍是「opaque 且段首命令读不出」，
-    // 故 `!destructiveHeadReadable(seg)` 与 `seg.opaque` **两个条件照旧都在承重**
-    // （它们现在由 `opaqueHiddenPayload` 一并表达，见 `:5259` 的门控第三项，同一个布尔）。
+    // ⚠️ 判据是「命令读不出」，而**不是**「`blast` 空或为 `unknown`」—— 后者在 opaque 段里
+    // 另有一个可读目标、且其 blast 恰为 `outside` 时（`cat /etc/hosts $(rm -rf C:/Windows)`）
+    // 会落进 `else` 支只并 `outside`，`wide` 与 `inside` 从 `tiers` 静默消失（诱饵把判据骗开）。
+    // 故用 `opaqueHiddenPayload`（= `seg.opaque && !destructiveHeadReadable(seg)`）作为唯一判据：
+    // 真命令藏在构造里这件事与诱饵目标无关，诱饵档由下面 `add(radiusTierOf(seg.blast))` 显式保留。
     //
-    // ⚠️ 只把「半径侧读不出」的判据补齐，**不动** `else` 支的「替换」语义：
-    // `diskpart /s a.txt`（`opaque` 为空、`isUnknownTierSegment` 为真）照旧恰好
-    // `['unknown']` —— 它不满足 `seg.opaque`，走不进本支。
-    // ── 发现 2 的修法：**诱饵目标**使 `wide`/`inside` 静默消失 ────────────────────────
-    // 本守卫的判据是「命令读不出」，而**不是**「`blast` 空**或**为 `unknown`」——
-    // 后者是初版写法，当 opaque 段里另有一个**可读**目标、且其 blast 恰为 `outside`
-    // （`home` 同）时，该式为假 → 落进 `else` 支 → 只并 `outside`，`wide` 与 `inside`
-    // 从 `tiers` **静默消失**。
-    //
-    // 实测（`wide=deny` + 其余七档 allow，修复前）：
-    //     cat /etc/hosts $(rm -rf C:/Windows)  → **allow** tiers=['unknown','outside']
-    //                                            blast=outside:/etc/hosts ← 诱饵把判据骗开
-    //     echo $(rm -rf C:/Windows)            → deny      tiers=['wide','unknown','inside'] ✅
-    // 诱饵档位逐条实测：`/etc/hosts`、`~/notes.txt` 触发（outside）；`C:/Windows/x`（system）、
-    // `B:/`（drive-root）、`$T`（unknown）、`./build`（null）**都不触发** —— 前三者自身就
-    // 归 `wide`/`unknown`（已有更严结论），后者 blast 为 null 时仍走上面那条 `!seg.blast` 判据。
-    // 其中**尾随 `&` 一格是本批新引入的 deny→allow**（`&` 的悬空检查放宽后走段级路径），
-    // 其余分隔符是既有缺口。
-    //
-    // 故把 `opaqueHiddenPayload`（= `seg.opaque && !destructiveHeadReadable(seg)`，
-    // 与门控第三项**同一个布尔**）作为本守卫的**唯一**判据：真命令藏在构造里这件事与
-    // 诱饵目标无关，诱饵档由下面那句 `add(radiusTierOf(seg.blast))` **显式保留**。
-    //
-    // ⚠️ 两个方向都不能少（这一句指的是**支内**那两条语句，与上面的守卫判据无关）：
-    //   · 只并三档、**不**保留诱饵档 —— 会把已判出的 `outside` 丢掉，而用户可能显式配了
-    //     `outside=deny`（丢掉它就是丢掉一条显式表态）；
-    //   · 只保留诱饵档、**不**并三档 —— 就是修复前那个 fail-open（`wide=deny` 被静默丢弃）。
-    // 故下面在三档之后**显式**补 `add(radiusTierOf(seg.blast))`（`add` 自带去重，
-    // `blast` 为 `null` / `unknown` 时它落在三档之内，是空操作）。
+    // ⚠️ 两个方向都不能少：只并三档、不保留诱饵档会丢掉用户可能显式配过的 `outside=deny`；
+    // 只保留诱饵档、不并三档则是原来的 fail-open（`wide=deny` 被静默丢弃）。
     if (opaqueHiddenPayload) {
       // ── 「**破坏性命令本身藏在 opaque 构造里**」：与「整行读不懂」分支取同一口径 ──────
       // 判据 = 段首读出来的命令名**不是**破坏性命令（空 label 也算读不出），而这一段却被
@@ -7948,27 +7172,21 @@ export function tierSetOf(seg, labels, opts) {
       for (const t of RADIUS_TIERS_WHEN_UNREADABLE) add(t)
       // 诱饵目标已判出的半径档（`outside` / `home` 那一族）**显式保留**，见本支开头。
       add(radiusTierOf(seg && seg.blast))
-      // ── 构造里**读得出的区外目标** → 并入 `outside` 档（本发现的修法）────────────────────
-      // 上面那三档（`wide ∪ unknown ∪ inside`）是「半径侧读不出」的**通用**口径，**不含
+      // ── 构造里**读得出的区外目标** → 并入 `outside` 档 ─────────────────────────
+      // 上面那三档（`wide ∪ unknown ∪ inside`）是「半径侧读不出」的通用口径，**不含
       // `outside`**（该常量也不能加 `outside`：整行分支同样消费它，加了会把
       // `rm -rf ./build <<EOF` 那一族从 allow 变 deny —— 过度收紧）。于是用户显式配的
       // `outside=deny`（「工作区外的破坏性操作一律拒绝」）在这条路径上整个失明：
       //     rm -rf /data     → deny（段级 `outside` 档）
       //     (rm -rf /data)   → allow ← 同一命令，只因整个包进了 opaque 构造
-      // 判据与整行读不懂分支（`:9763`）**同一个函数**：只有构造原文里真的读得出区外目标时
-      // 才并入，不是「凡 opaque 就并 `outside`」—— 后者会给八档全 allow 的用户凭空多一档。
+      // 判据与整行读不懂分支**同一个函数**：只有构造原文里真的读得出区外目标时才并入，
+      // 不是「凡 opaque 就并 `outside`」—— 后者会给八档全 allow 的用户凭空多一档。
       //
       // ⚠️ 取 `seg.opaqueTexts` 而**不是** `seg.text`：`tierSetOf` 的入参只有
-      // `{words, blast, opaque, opaqueTexts}`（见 `assessCommand` 的调用点），**没有 `text`**
-      // —— 用 `seg.text` 会恒 `undefined`、本行改动 0 格。
+      // `{words, blast, opaque, opaqueTexts}`，没有 `text` —— 用 `seg.text` 会恒 `undefined`。
       // ⚠️ 反引号由 `outsideTargetInUnparsable` **内部**统一处置（当段分隔符，与 `$( )` 的
-      // `(` `)` 同待遇，见该函数的说明）—— 调用处**不再**自己剥一遍。
-      // 这里曾写着 `String(t).replace(/`/g, '')`，那是上一轮只修段级分支时留下的**第二份判据**：
-      // 逐词元剥掉反引号会把 `echo `rm -rf /data`` 变成 `echo rm -rf /data`，段首仍是
-      // `echo` ⇒ `/data` 只是它的实参 ⇒ 判不出目标（实测保留剥离时，那一族的整行形态
-      // 仍 allow）。单点化之后两种形态走同一条判据，实测段级 6 种构造 × 2 方言、
-      // 以及「反引号 × 7 构造 × 7 目标 × 4 包装 × 3 配置」共 1176 格，**保留 vs 删除剥离
-      // 零差异**；四套测试亦全绿。
+      // `(` `)` 同待遇）—— 调用处**不再**自己剥一遍：逐词元剥反引号会把
+      // `echo `rm -rf /data`` 变成 `echo rm -rf /data`，段首仍是 `echo` ⇒ 判不出目标。
       for (const t of (seg && Array.isArray(seg.opaqueTexts) ? seg.opaqueTexts : [])) {
         if (outsideTargetInUnparsable(String(t), opts)) { add('outside'); break }
       }
@@ -7980,66 +7198,32 @@ export function tierSetOf(seg, labels, opts) {
   }
   // ── 并列补档行：`unknown` 侧的三条产出判据（**移出门控**，见 `tierSetOf` 的 ① 说明）──
   // 上面那一支是「半径档 / unknown **二选一**」的替换语义，而它整个被门控包着 —— 于是
-  // **纯组档段**（proc / power / reg，段内无 del/disk/perm/priv 组 label）整段跳过，
-  // 同一条「目标读不出」的结论只因命令属组档就静默 allow（fail-open，实测见函数头注释）。
+  // **纯组档段**（proc / power / reg）整段跳过，同一条「目标读不出」的结论只因命令属组档
+  // 就静默 allow（fail-open）。
   //
-  // 门控存在的**唯一**正当理由是「不给 `kill 1234` 白送 inside 档」（`radiusTierOf(null)`
-  // 会把「没判过」当成「判过且在区内」）。它**不该**连带挡住 `unknown` 的产出判据 ——
-  // 三条判据都自带「确实读不出」的守卫，不会凭空产档：
+  // 门控存在的唯一正当理由是「不给 `kill 1234` 白送 inside 档」（`radiusTierOf(null)` 会把
+  // 「没判过」当成「判过且在区内」）。它不该连带挡住 `unknown` 的产出判据 —— 三条判据都自带
+  // 「确实读不出」的守卫，不会凭空产档：
   //   ① `blast.level === 'unknown'`  —— `blastRadiusOfSegment` 判过、结论就是读不出；
-  //   ② `blast.unjudgeable`          —— 已知目标 + 读不出目标同段共存（`:5126` 一族）：
-  //      `blastRadiusOfSegment` 对「读得出的目标 + 读不出的目标」同段共存的情形会返回
-  //      **带 `unjudgeable` 标志的已知档**（`worst` 仍用于 `blast` 显示），两个结论是
-  //      **并列**关系而非二选一，故这一支是**补**（`unknown` 与半径档并列进入取最严）。
-  //      实测（`unknown=deny`、`outside=allow`、`wide=allow`，修复前 → 修复后）：
-  //          rm -rf /etc $TARGET     allow/['outside'] → **deny**/['unknown','outside']
-  //          rm -rf $TARGET /etc     allow/['outside'] → **deny**/['unknown','outside']（顺序无关）
-  //          dd of=$DEV of=/dev/sda  allow/['outside'] → **deny**/['unknown','outside']
-  //      而 `blast` 仍显示 `outside:/etc`（已知最严重的那一档），弹窗文案不变。
+  //   ② `blast.unjudgeable`          —— 已知目标 + 读不出目标同段共存：
+  //      `blastRadiusOfSegment` 会返回**带 `unjudgeable` 标志的已知档**（`worst` 仍用于
+  //      `blast` 显示），两个结论是并列关系而非二选一，故这一支是补（与半径档并列取最严）。
   //   ③ `seg.opaque`                  —— 目标被 opaque 构造吞掉（`(kill 1234)` /
-  //      `kill $(cat p)` / `shutdown $(date)`：`words` 里一个目标词元都没留下，故
-  //      `sawUnjudgeable` 与 `isUnknownTierSegment` 双双够不到）。
+  //      `kill $(cat p)`：`words` 里一个目标词元都没留下，另两条判据够不到）。
   //
-  // ── ⚠️ 判据 ③ 是 `seg.opaque`，**不带** `&& !seg.blast` 守卫（发现 7 的修法）──────
-  // 初版写作 `seg.opaque && !seg.blast`，把「opaque」与「有半径档」当成**二选一**：
-  // 有 `blast` 就不补 `unknown`。但 `$(...)` / 反引号形态下词法器把构造**整块吞掉**、
-  // 目标词元不进 `words`（`rm -rf /etc $(rm -rf /)` 的 `words` 只有 `['rm','-rf','/etc']`），
-  // 于是三条判据对「**有**半径档的 opaque 段」全部够不到：
-  //     · `blast.level === 'unknown'`  为假（blast 是 `outside` —— 判据①够不到）
-  //     · `blast.unjudgeable`          为假（构造里那个目标连词元都没进，没有「读不出的词元」
-  //                                    可置位 —— 判据②够不到）
-  //     · `seg.opaque && !seg.blast`   为假（blast 非空 —— 判据③被守卫挡住）
-  // 实测（`unknown=deny`、其余七档 allow、category=allow）：
-  //     rm -rf /etc $(rm -rf /)   → **allow** `['outside']` ❌
-  //     rm -rf /etc `rm -rf /`    → deny `['unknown','outside']` ✅（**同义，仅引号形态不同**）
-  // 方向 fail-open，且是「同一语义两个结论」的不变量分叉 —— 与 ① ② 要堵的是同一类。
-  // 反引号形态之所以躲过，只因词法器在那一支保留了字面词元（`\`rm -rf /\`` 进了 `words`）
-  // → `sawUnjudgeable` 置位 → 判据②命中。两条路径的差别是词法细节，不是语义差别。
+  // ── ⚠️ 判据 ③ 是 `seg.opaque`，**不带** `&& !seg.blast` 守卫 ─────────────────
+  // 初版写作 `seg.opaque && !seg.blast`，把「opaque」与「有半径档」当成二选一。但
+  // `$(...)` / 反引号形态下词法器把构造整块吞掉、目标词元不进 `words`，于是三条判据对
+  // 「有半径档的 opaque 段」全部够不到：`rm -rf /etc $(rm -rf /)` 只剩 `['outside']` 而
+  // 同义的反引号写法是 `['unknown','outside']` —— 同一语义两个结论，方向 fail-open。
   //
-  // ⚠️ **代价只在「外层目标可判出半径档 + opaque」这一族**，且方向是收紧：
-  //     rm -rf /etc $(date) / taskkill /im x.exe $(date) → 多并 `unknown` 档（原只有半径/组档）
-  // 而 `rm -rf ./build $(date)`（blast=null）在**修复前就已经**是 `['unknown']`（判据③命中），
-  // 本修法对它**零差异** —— 故「`$(date)` 会多问」不是本修法的代价（那是既有行为）。
+  // ⚠️ 代价只在「外层目标可判出半径档 + opaque」这一族，且方向是收紧：`rm -rf /etc $(date)`
+  // 多并 `unknown` 档；`rm -rf ./build $(date)`（blast=null）本来就是 `['unknown']`，零差异。
+  // `rm -rf ./{dist,build}` 在带 `isWorkspaceRoot` 钩子时多并一个 `unknown`（默认配置下
+  // wide=ask 与 unknown=ask 同值，action 不变）。
   //
-  // ⚠️ **花括号展开族不是「全部零差异」**（此处一度如此自称，实测更正）：
-  // 花括号同样标 opaque（`:3575`），但差异与否取决于**前缀词元能否判出半径档**：
-  //   · `rm -rf ./tmp/{a,b,c}` / `chmod 777 ./{a,b}.sh` / `rm -rf ./{a,b}/x` / `rm -rf {a,b}`
-  //     —— 前缀词元（`./tmp/`、`./.sh`、`.//x`）判 `inside` → blast=null → 修复前已是
-  //     `['unknown']`，本修法**零差异** ✅
-  //   · `rm -rf ./{dist,build}` —— 前缀词元是 `./`，**带 `isWorkspaceRoot` 钩子**（生产口径）
-  //     时 blast=`workspace-root` → `wide` 档，故本修法给它多并一个 `unknown`
-  //     （`['wide']` → `['wide','unknown']`）。⚠️ 这一格**不是零差异**，但方向与性质都安全：
-  //     默认配置下 `wide=ask` 与 `unknown=ask` **同值**，action 不变（ask）；只有
-  //     `unknown=deny` 那类配置下才由 allow 变 deny（收紧）。不带该钩子时它 blast=null，
-  //     回到上一档（零差异）—— 即差异**只在该钩子存在时出现**。
-  //   · `rm -rf /etc {a,b}` / `rm -rf C:/Windows/{a,b}` —— 外层目标已越界（wide/outside），
-  //     多并 `unknown`；默认配置下 action 差异为 0（都是 ask）。
-  // 实测（12 配置 × 516 命令 × 2 平台 = 12384 格）：花括号族 936 格中
-  // **收紧 90 / 放宽 0 / 中性 558**，中性格全部是「只加 `unknown`、不移除任何半径档」。
-  //
-  // ⚠️ 三条**缺一不可**：只补 ① ② 时第 ③ 族仍是 allow（实测 `(kill 1234)` →
-  // allow/['proc']），即「只修一支」。此处对**已门控**的段是空操作（`add` 去重，
-  // 且 ① ③ 在门控内已产出 `unknown`），对**纯组档段**与「有半径档的 opaque 段」才是收益。
+  // ⚠️ 三条**缺一不可**：只补 ① ② 时第 ③ 族仍是 allow。此处对已门控的段是空操作
+  // （`add` 去重），对纯组档段与「有半径档的 opaque 段」才是收益。
   // ⚠️ `isUnknownTierSegment` 对组档段**恒假**（表里只有 del/disk/perm 成员），
   // 故它留在门控内、不随本条移出 —— 移出会改变 `diskpart` 那一族（承重格，见上）。
   if (seg && ((seg.blast && (seg.blast.level === 'unknown' || seg.blast.unjudgeable))
@@ -8472,7 +7656,7 @@ function hasNoOperand(words, opts) {
   for (let i = 0; i < w.length; i += 1) {
     // 命令头（含语句关键字之后的整条前缀链 + 命令名）按**位置**跳过 —— 见 headFull 的注释。
     // 只按词元值跳过是不够的：`time env diskpart` 里的 `env` 不在 skip 表里，
-    // 而它既不是选项也不是赋值，会被当成**非选项实参**（发现 1 的根因）。
+    // 而它既不是选项也不是赋值，会被当成**非选项实参**。
     if (i < headEnd || i < headFull) continue
     const token = String(w[i])
     // 双侧查表：写入侧已统一小写，这里再对原始词元做一次小写归一，
@@ -9110,7 +8294,7 @@ export function blastRadiusOfSegment(words, opts) {
         if (rs) {
           const ssev = BLAST_ORDER[rs.level]
           if (ssev !== undefined) {
-            // ── 内层的「读不出」必须**带上来**（发现 1 的同一族残留）────────────────────
+            // ── 内层的「读不出」必须**带上来**────────────────────
             // 内层结论可能是**并列**的两种（见 blastRadiusOfSegment 尾部的说明）：
             //   · `rs.level === 'unknown'`（空 path）—— 内层只有读不出的目标；
             //   · `rs.unjudgeable === true`          —— 内层既有已知目标、又有读不出的。
@@ -9239,7 +8423,7 @@ export function blastRadiusOfSegment(words, opts) {
     // 不能报 null（那等于宣称「确认无害」）。空 path 表示没有具体目标可显示。
     return sawUnjudgeable ? { level: 'unknown', path: '' } : null
   }
-  // ── 「读不出」与「已知最严重目标」是**并列**结论，不是二选一（发现 1 的修法）─────────
+  // ── 「读不出」与「已知最严重目标」是**并列**结论，不是二选一─────────
   // 上面那一支只在**没有任何已知目标**时兜底成 `unknown`；一旦同段里还有一个读得出的目标，
   // `unknown` 就被整条丢掉了（`return worst`）。而两者是**并列**的：
   //     `rm -rf /etc $TARGET`  既确定会删 `/etc`（outside），又可能删任意路径（unknown）
@@ -9347,17 +8531,14 @@ export function blastRadiusOfCommandPattern(words, opts) {
   //
   // ── 但「没有实参」不等于「不限定目标」────────────────────────────────────────
   // `nohup ./server.sh`、`env FOO=1 ls` 的 rest 都为空，可它们的**字面前缀**是
-  // `nohup ./server.sh ` / `env FOO=1 ls `，匹配不到任何删除命令
-  // （实测 `matchCommand('nohup ./server.sh', 'nohup rm -rf /')` = false）。
-  // 判 broad 就是**假警告**：broad 的文案说「这条规则不限删除目标 —— 它同样放行
-  // 删除盘根与系统目录」，而这些例外一个删除都放行不了。假警告会让真警告被忽略（狼来了）。
+  // `nohup ./server.sh ` / `env FOO=1 ls `，匹配不到任何删除命令 —— 判 broad 就是假警告。
   // 根因是这里的比较基准：`rest` 按 unwrapWords **剥掉 wrapper 之后**的词元切分，
   // 而 matchCommand 匹配的是**原始文本**（wrapper 还在里面），两者不是同一个东西。
   //
   // 故还要求二者之一，才判 broad：
   //   · 模式里**确实有通配符**（目标位就是通配，如 `env *`、`find *`、`rmdir /s /q *`）；
-  //   · 或命令头本身就是删除类（`rm -rf` 没有目标实参，却按前缀匹配到 `rm -rf /` ——
-  //     实测 `matchCommand('rm -rf', 'rm -rf /')` 为 true，这一档必须留着）；
+  //   · 或命令头本身就是删除类（`rm -rf` 没有目标实参，却按前缀匹配到 `rm -rf /`，
+  //     这一档必须留着）；
   //   · 或命令头是**载荷族**（`find` / `env` / `xargs` …）且**没有任何实参** ——
   //     此时它就是一条裸前缀，后面接什么由真实命令决定。
   // 第三条是必须的：`find`（裸，无实参）实测 `matchCommand('find','find / -delete')` = true，
@@ -9398,9 +8579,8 @@ export function blastRadiusOfCommandPattern(words, opts) {
   //     sudo ls *   doas cat *   pkexec echo *   env ls *   nohup ls *
   //     timeout 5 ls *   xargs ls *   stdbuf -o0 ls *   sudo -u root ls *
   // 而 broad 的文案是「这条规则**不限**删除目标 —— 它同样放行删除盘根与系统目录」。
-  // 实测这类形态**放行不了任何一条**删除命令（对 240 条危险命令的命中数为 0）：
-  // `matchCommand('sudo ls *', 'sudo rm -rf /')` = false，它只匹配 `sudo ls ...`。
-  // 这正是本文件反复警告的「假警告会让真警告被忽略（狼来了）」。
+  // 这类形态**放行不了任何一条**删除命令：`matchCommand('sudo ls *', 'sudo rm -rf /')` = false，
+  // 它只匹配 `sudo ls ...`，标 broad 就是假警告。
   //
   // 无前缀的形态（`ls *`、`git status *`）到不了这里 —— canCarryDestructivePayload
   // 对它们返回 false（`ls`/`git` 既不在破坏性名单也不在 PAYLOAD_CARRIERS 里）。
@@ -9487,17 +8667,13 @@ export function blastRadiusOfCommandPattern(words, opts) {
     return isDanger(last)
   })()
   // ── 普通命令：**不标注**（`return null`，不是交回判档）────────────────────────────
-  // `headIsDangerous` 为假 ⟹ 该模式放行不了任何删除命令（实测：640 个「前缀 + 普通命令」
-  // 候选形态对 1093 条危险命令的命中数**全为 0**）⟹ 它没有「爆炸半径」可言，标 `null`
-  // 才是对的 —— 这正是本函数上面那句「普通命令一律得 `null`（不标注）」的字面实现。
+  // `headIsDangerous` 为假 ⟹ 该模式放行不了任何删除命令 ⟹ 它没有「爆炸半径」可言，
+  // 标 `null` 才是对的 —— 这正是上面那句「普通命令一律得 `null`（不标注）」的字面实现。
   //
-  // 这里曾经写成 `return blastRadiusOfSegment(w, opts)`，而那条路会把 §5.5 新加的
-  // `isWorkspaceRoot` 钩子接进来：`sudo ls *` / `env ls *` / `nohup ls *` / `git status *`
-  // 的 `*` 经 `globRootOf` 归约为 `.`，宿主 `isWorkspaceRoot('.')` 恒真 → 得到
-  // `{level:'workspace-root', path:'.'}`（HEAD 下这些形态全是 `null`，面板零标注）。
-  // 后果是**面板假警告**：一条**放行不了任何删除命令**的 allow 例外被标成
-  // 「目标是本项目根目录 —— 整个项目的文件都会被删除」，对 `sudo ls *` 就是假话。
-  // 这正是本文件反复警告的「假警告会让真警告被忽略（狼来了）」。
+  // 不能写成 `return blastRadiusOfSegment(w, opts)`：那条路会把 `isWorkspaceRoot` 钩子接进来，
+  // `sudo ls *` / `env ls *` / `nohup ls *` / `git status *` 的 `*` 经 `globRootOf` 归约为 `.`，
+  // 宿主 `isWorkspaceRoot('.')` 恒真 → 得到 `{level:'workspace-root', path:'.'}`，于是
+  // 一条放行不了任何删除命令的 allow 例外被标成「目标是本项目根目录」—— 面板假警告。
   //
   // ⚠️ 归因**不是** `isCmdStyleSwitch` 的命令域判据（`cmdName`）：把那段换回 HEAD 写法后
   // `sudo ls *` 仍然得到 workspace-root（实测）。真因就是这条兜底把钩子接了进来。
@@ -9515,7 +8691,7 @@ export function blastRadiusOfCommandPattern(words, opts) {
 /**
  * 剥掉 opaque 构造的**外层定界符**，返回其中的正文（剥不出时返回空串）。
  *
- * 存在的理由（本轮批次 A 的修法）：词法器把整个构造的**原文**（含定界符）交给
+ * 存在的理由：词法器把整个构造的**原文**（含定界符）交给
  * `noteOpaqueText`，而 `nestedInlineProgram` 要的是「命令 + 词元数组」——
  * 直接拿 `$(sh -c "…")` 去问，首词会是 `$(sh` 而不是 `sh`，判据恒假。
  * 故先把定界符剥掉再问，**不**在调用处另写一份「什么算解释器」。
@@ -9974,55 +9150,31 @@ export function assessCommand(source, shell, hooks) {
       // ② 破坏性子设置（更细的判定，优先于分类默认值）
       if (!denied && names.some((n) => isDestructiveLabel(n))) {
         const ds = tierTableOf()
-        // ── 整行读不懂时的档位集合（§7.2 的第三个调用点）────────────────────────
-        // 这条路径**没有词元**，故 `segmentLabels` 用不上，退化为「原文粗提的名字是否
-        // 命中组表」——方向仍是收紧：多认几个名字只会让更多档参与「取最严」，
-        // 不会放宽任何东西。
+        // ── 整行读不懂时的档位集合 ─────────────────────────────────────────────
+        // 这条路径**没有词元**，故 `segmentLabels` 用不上，退化为「原文粗提的名字是否命中组表」
+        // ——方向仍是收紧：多认几个名字只会让更多档参与「取最严」，不会放宽任何东西。
         //
-        // 半径档在这条路径上**取不到**（没有词元可判），故半径侧由 `wide` 与 `unknown`
-        // **同时**参与「取较严」（设计文档 §7.2 对这条路径的原话就是
-        // 「无段可判 → 动作由 wide/unknown 取较严者决定」）；组档是**额外**的收紧来源。
+        // 半径档在这条路径上取不到（没有词元可判），故半径侧由 `wide` 与 `unknown` **同时**
+        // 参与「取较严」；组档是额外的收紧来源。
         //
-        // **不得回落到 `inside`**：`inside` 是八档里唯一**跟随大分类**的那一档（§6.1），
-        // 而大分类常态是 allow —— 回落到它等于「给破坏性命令追加一个读不懂的构造即可
-        // 静默放行」。实测（真实宿主配置：mode=allow、destructive 未配置）：
-        //     rm -rf C:/Windows                          → ask（段级 wide 档）
-        //     rm -rf C:/Windows <<EOF…EOF                → allow ← 同一命令，只因多一个 heredoc
-        //     rm -rf C:/Windows >（重定向无目标）          → allow
-        //     chmod 777 /etc/passwd <<EOF… / rm -rf . <<EOF… → allow
-        //     rm -rf /etc "unclosed / rm -rf /etc &&     → allow
-        // 即 wide/unknown 两档被一个 heredoc、一个悬空重定向或一个未闭合引号整体绕过。
+        // **不得回落到 `inside`**：`inside` 是八档里唯一**跟随大分类**的那一档，而大分类常态是
+        // allow —— 回落到它等于「给破坏性命令追加一个读不懂的构造即可静默放行」
+        // （`rm -rf C:/Windows <<EOF` 由 ask 变 allow）。
         //
-        // ── 为什么是「两个都并入」，而不是「只取较严的那一个」或「只在没组档时回落」──
-        // ① 不能只取单值：这里曾用 `BLAST_ORDER`（broad 2 < unknown 3 < system 4）论证
-        //    「`unknown` 是较严者」，但那是**严重度序**，而用户配置的是**动作**，两者
-        //    不同构 —— 本文件 TIER_ORDER 的注释自己就写着「顺序不代表严重度，真正决定
-        //    动作的是用户配置 + 取最严」。取单值时两个方向都会错：
-        //        wide=deny + unknown=allow → `rm -rf C:/Windows <<EOF` 变 **allow**
-        //          （而同一命令不带 heredoc 是 deny —— 用户显式写的 wide=deny 被绕过）
-        //        wide=allow + unknown=deny → 又会在另一侧出错
-        //    并入两者只会让结果**不松于**现状（取最严对新增档是单调的）。
-        // ② 不能只在「一个组档都没命中」时才回落：那样**命中组档的命令反而更松**。
-        //    实测 `priv=allow`（其余档 ask）时：
-        //        sudo rm -rf /              → ask（段级 wide+priv，wide 压过 priv）
-        //        sudo rm -rf / <<EOF…EOF    → **allow** ← 只命中 priv 组档，半径侧整个缺席
-        //    即同一命令加个 heredoc 就把「删盘根」从 ask 降成 allow。半径侧在这条路径上
-        //    读不出（没有词元），但**读不出不等于不存在** —— 一个读不出目标的破坏性命令
-        //    既可能落在区内、也可能落在大范围，两档都该参与「取最严」。
+        // ── 为什么是两个都并入，而不是只取较严的那一个或只在没组档时回落 ──────────
+        // ① 不能只取单值：`BLAST_ORDER` 是**严重度序**，而用户配置的是**动作**，两者不同构。
+        //    取单值时 wide=deny + unknown=allow 会让 `rm -rf C:/Windows <<EOF` 变 allow；
+        //    并入两者只会让结果不松于现状（取最严对新增档是单调的）。
+        // ② 不能只在「一个组档都没命中」时才回落：那样命中组档的命令反而更松 ——
+        //    `priv=allow` 时 `sudo rm -rf /` 是 ask，加个 heredoc 反而变 allow。
+        //    半径侧在这条路径上读不出，但**读不出不等于不存在**。
         //
-        // 注意这条路径上并 `wide` 并**不是**「凭空多一个档」：能走到这里的前提是
+        // 注意这条路径上并 `wide` 并不是「凭空多一个档」：能走到这里的前提是
         // `names.some(isDestructiveLabel)`（原文里确实认出了一个破坏性命令名）。
         //
-        // ⚠️ 上面的 `push` 顺序**不是** `TIER_ORDER`（组档在前、半径档在后），故拼完之后
-        // **必须排一次序**（发现 3 的修法）—— `decisiveTierOf` 的注释写着「并列时取 `tiers`
-        // 里**靠前**的那个（`tiers` 已是固定顺序，故结论稳定）」，而那条稳定性论证只对
-        // `tierSetOf` 的产物成立（它在返回前按 `TIER_RANK` 排过）。这条手工拼接路径不排的话，
-        // **动作不变、拒绝理由随书写形态漂移**。实测（`wide=deny` + `priv=deny` + `proc=deny`，
-        // 三档各带不同 `reasons`）：
-        //     sudo kill 1234              → deny，理由取 `proc`（段级：tiers 已排序）
-        //     sudo kill 1234 <<EOF…EOF    → deny，理由取 **`priv`** ← 同一动作，只因多了个 heredoc
-        // 排序键复用 `tierSetOf` 的**同一个** `TIER_RANK`（它就是 `TIER_ORDER` 的派生），
-        // 不新造表 —— 与段级路径同源，两条路径的 `tiers` 顺序从此不可能分叉。
+        // ⚠️ 上面的 `push` 顺序不是 `TIER_ORDER`（组档在前、半径档在后），故拼完之后
+        // **必须排一次序** —— 否则**动作不变、拒绝理由随书写形态漂移**（`decisiveTierOf` 的
+        // 稳定性论证只对 `tierSetOf` 已排序的产物成立）。排序键复用同一个 `TIER_RANK`。
         const tiers = groupTiersOf(names)
         if (segmentPrivilege(names)) tiers.push('priv')
         // 半径侧读不出 —— 档位集合与段级 opaque 段**单点共用**
@@ -10030,23 +9182,12 @@ export function assessCommand(source, shell, hooks) {
         // ⚠️ `inside` 照旧**并入**（不是「回落到它」）：它跟随大分类，但用户可能显式
         // 配了 `inside=deny`，丢掉它就等于丢掉一条显式表态。
         //
-        // ⚠️ **裸 push**（发现 6 的修法）：这里曾经写成
-        // `if (tiers.indexOf(t) === -1) tiers.push(t)`，而该条件**恒真** —— 本处的
-        // `tiers` 只有两个产出者：`groupTiersOf(names)`（值域实测只有
-        // `proc`/`power`/`priv`/`reg`）与上面那行字面量 `'priv'`，与
-        // `RADIUS_TIERS_WHEN_UNREADABLE = ['wide','unknown','inside']` **无交集**，
-        // 跳过支永不执行（等价于裸 push）。实测 318 条语料 × 2 方言，跳过支执行 0 次。
-        // 原先注释给的两条论据与实测相反，故一并订正：
-        //   · 「原先裸 push 会得到重复档位」—— 重复档确实存在，但来自上面那行
-        //     `tiers.push('priv')`（`groupTiersOf(['sudo','kill'])` 已含 `priv`），
-        //     在 HEAD 上完全相同；本守卫既非它的修法，也从未触及它。
-        //   · 「该数组是对外字段（决策日志 / 弹窗）」—— 整行分支返回对象的键实测为
-        //     `["action","code","segments","matched","reason","note"]`，**没有 `tiers` 键**，
-        //     `segments` 恒为 `[]`，故该数组从不外泄。
-        // 保留裸 push 而不是删掉整行：三档仍须并入（`inside` 见上，用户可能显式配了
-        // `inside=deny`），删掉才是 fail-open。
+        // ⚠️ 裸 push 即可：本处的 `tiers` 只有两个产出者（`groupTiersOf(names)` 与上面那行
+        // 字面量 `'priv'`），与 `RADIUS_TIERS_WHEN_UNREADABLE` 的值域无交集，去重条件恒真。
+        // 不能删掉整行：三档仍须并入（`inside` 见上，用户可能显式配了 `inside=deny`），
+        // 删掉才是 fail-open。
         for (const t of RADIUS_TIERS_WHEN_UNREADABLE) tiers.push(t)
-        // ── `outside` 档：**只在原文里读得出区外目标时**才并入（发现 1 的修法）──────────
+        // ── `outside` 档：**只在原文里读得出区外目标时**才并入──────────
         // 上面那三档是「半径侧读不出」的通用口径，而 `outside` 是**具体**档 ——
         // 无条件并入会让 58d / 58e3（八档全 allow 的用户）凭空多出一个档。
         // 判据见 `outsideTargetInUnparsable`：与段级路径对同一目标给出的结论同源。
@@ -10131,7 +9272,7 @@ export function assessCommand(source, shell, hooks) {
   // 故授权方向只查 `allowLabels`（= 并集滤掉前缀扩展出的名字，由每个段在调用前设置）。
   // 收紧方向（deny/ask）照旧查全部 `allLabels` —— 那条既有漏洞的修法不能被削掉。
   let allowLabels = null
-  // 授权面的 `Set` 视图（发现 2）：与 `allowLabels` 同源、同一次计算产出，避免在
+  // 授权面的 `Set` 视图：与 `allowLabels` 同源、同一次计算产出，避免在
   // `resolveException` 的 label 循环里对数组做 `indexOf`（那是 O(n²)）。
   let allowLabelSet = null
   const resolveException = (segText, allLabels) => {
@@ -10179,7 +9320,7 @@ export function assessCommand(source, shell, hooks) {
     //     而 `rm *`=deny 仍须命中。判据直接问那个集合（由 `segmentLabelsCore` 单点产出），
     //     不另算一份「哪些 label 是扩展来的」。
     //   · `segText` 那一趟仍在最前（它优先，且 `deny` 立即返回），保持原有优先级。
-    //   · 授权面判据用 **`Set`**（`allowSet`）而不是数组 `indexOf`（发现 2）：逐项 `indexOf`
+    //   · 授权面判据用 **`Set`**（`allowSet`）而不是数组 `indexOf`：逐项 `indexOf`
     //     在「labels 多且逐条不同名」时是 O(n²)。语义逐字不变（同一个集合、同样的判据）。
     const allowed = allowLabels || allLabels
     const allowSet = allowLabelSet || new Set(allowed)
@@ -10209,7 +9350,7 @@ export function assessCommand(source, shell, hooks) {
     const labelSet = segmentLabelsCore(seg.words)
     // 前缀扩展出的名字（`sudo kill 1234` → `kill`）。**例外匹配按方向取用**：
     // 收紧方向（deny/ask）可以用，授权方向（allow）不可以 —— 见 segmentLabelsCore 的注释。
-    // 读取一律走 `labelSet.widenedSet`（O(1)），不再用数组 `widened`（发现 2 的性能修法）。
+    // 读取一律走 `labelSet.widenedSet`（O(1)），不再用数组 `widened`。
     let labels = labelSet.labels
     // opaque 段（或提取不出词元的段）**额外**用原文粗提命令名，取并集。
     //
@@ -10250,7 +9391,7 @@ export function assessCommand(source, shell, hooks) {
     // 授权方向可用的 label 集合 = 并集滤掉**前缀扩展出的**名字（见 resolveException 的注释）。
     // 放在 opaque 并集**之后**算：rawCommandNames 补进来的名字同样可能含扩展名，
     // 而它走的是「收紧方向」（只用于查 deny 例外与破坏性名单），故不该进授权面。
-    // 判据用 `labelSet.widenedSet`（**O(1)**）而不是对 `widened` 数组做 `indexOf`（发现 2）：
+    // 判据用 `labelSet.widenedSet`（**O(1)**）而不是对 `widened` 数组做 `indexOf`：
     // 同一个集合、同一个判据，只是查询复杂度从 O(len) 降到 O(1)。
     allowLabels = labels.filter((l) => !labelSet.widenedSet.has(l))
     allowLabelSet = new Set(allowLabels)
@@ -10282,7 +9423,7 @@ export function assessCommand(source, shell, hooks) {
     // `blastRadiusOfSegment` 因此返回 `null`，而 `null` 在 §5.1 里映射成 `inside`
     // —— 「目标读不出」会被当成「目标在区内」。`tierSetOf` 靠这个字段把它改判 `unknown`。
     //
-    // `opaqueTexts` 同样必须一起传（发现 1 的修法）：`destructiveHeadReadable` 要问
+    // `opaqueTexts` 同样必须一起传：`destructiveHeadReadable` 要问
     // 「**opaque 构造自己**有没有藏一个破坏性命令」，而构造里的命令名不在 `words` 里
     // （词法器把构造整块吞掉），只能由词法器记下的构造原文回答。**漏传这一项会让该判据
     // 恒不生效**（`opaqueTexts` 缺席时按旧行为退化），靶格照旧 allow。

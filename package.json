@@ -1,7 +1,7 @@
 {
   "name": "@mrweicodes/dsh-permgate",
   "description": "Permission gateway for DSH (DeepSeek Harness): reviews tool calls per category (command/outside-read/outside-write/read/image/edit/undo/subagent/doom loop) with global/project config, exceptions, quick-tool defaults, custom rules, a fallback policy for unmatched calls, bilingual approval modal and sandbox-upgrade flow. Config persisted at $DSH_HOME/dsh-permgate/config.json.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "icon": "./icon.svg",
   "repository": {
     "type": "git",
@@ -22,7 +22,8 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc <2",
     "@deepseek-ai/dsh-permission-presets": ">=0.1.0-rc <2",
-    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc <2"
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc <2",
+    "@deepseek-ai/dsh-session": ">=0.2.1-rc <2"
   },
   "dsh": {
     "bundle": {
