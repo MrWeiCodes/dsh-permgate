@@ -53,7 +53,7 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
 - **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log. No more editing configuration files by hand — adjust permissions quickly through the settings page.
 
-  ![Permission Gateway settings](assets/settings-page-en.jpg)
+  ![Permission Gateway settings](assets/settings-page-en.png)
 
 ## Installation
 
