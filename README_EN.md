@@ -43,11 +43,13 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
   ![Approval modal](assets/approval-modal-en.png)
 
-  ![Pwsh command approval](assets/pwsh-approval-en.png)
-
 - **Custom rejection reason**: type your feedback when denying, and the AI receives a clear "why not, and what to do instead" and adjusts its plan right away.
 
   ![Rejection reason](assets/reject-reason-en.png)
+
+- **Auto review records**: every call the model allowed, denied or was unsure about leaves a record in the chat flow with its reason, risk level and the effort it ran at — scroll back whenever you want to check why something went through.
+
+  ![Auto review records](assets/auto-review-en.png)
 
 - **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log. No more editing configuration files by hand — adjust permissions quickly through the settings page.
 
