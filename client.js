@@ -1839,18 +1839,8 @@ window.__ModuleLoader__.load({
 				'mode.timeout-deny': '超时自动拒绝',
 				'mode.fallback-allow': '按设置直接放行',
 				'mode.fallback-deny': '按设置直接拒绝',
-				'panel.status': '状态',
-				'panel.sessionPerm': '当前会话权限',
-				'panel.customReview': '自定义审查',
-				'panel.none': '未选择',
-				'panel.active': '权限网关审查生效中',
-				'panel.inactive': '权限网关未生效：请在会话的权限选择中选择「自定义审查」',
-				'panel.sandboxEff': '底层沙箱（生效）',
-				'panel.sandboxDesc.ww': '（文件操作限制在工作区内）',
-				'panel.sandboxDesc.fa': '（文件操作不受工作区限制）',
-				'panel.effCats': '生效分类默认：',
+				'panel.status': '配置与统计',
 				'panel.config': '配置文件：',
-				'panel.project': '项目：',
 				'panel.stats': '最近统计：拦截 {d} · 审批 {a}',
 				'panel.loadErr': '加载错误：',
 				'panel.saveErr': '保存错误：',
@@ -2275,18 +2265,8 @@ window.__ModuleLoader__.load({
 				'mode.timeout-deny': 'Auto-denied (timeout)',
 				'mode.fallback-allow': 'Allowed by setting',
 				'mode.fallback-deny': 'Denied by setting',
-				'panel.status': 'Status',
-				'panel.sessionPerm': 'Current session permission',
-				'panel.customReview': 'Custom Review',
-				'panel.none': 'None',
-				'panel.active': 'Permission gate is active',
-				'panel.inactive': 'Permission gate inactive: select "Custom Review" in the session permission picker',
-				'panel.sandboxEff': 'Sandbox (effective)',
-				'panel.sandboxDesc.ww': '（file operations restricted to the workspace）',
-				'panel.sandboxDesc.fa': '（file operations are not workspace-restricted）',
-				'panel.effCats': 'Effective category defaults: ',
+				'panel.status': 'Config & stats',
 				'panel.config': 'Config: ',
-				'panel.project': 'Project: ',
 				'panel.stats': 'Recent: {d} denied · {a} asked',
 				'panel.loadErr': 'Load error: ',
 				'panel.saveErr': 'Save error: ',
@@ -7297,7 +7277,6 @@ window.__ModuleLoader__.load({
 			};
 
 			const customList = status && status.custom ? status.custom[tab] : null;
-			const eff = status ? status.effective : null;
 			const decisions = status && status.recentDecisions ? status.recentDecisions : [];
 			// 「最近决策」的展开：首屏用 statusView 带来的 decisions，展开后用按需取回的全量。
 			// decisionTotal 是宿主下发的计数（O(1)），首屏条数由它自己那份列表长度得出 ——
@@ -7323,8 +7302,6 @@ window.__ModuleLoader__.load({
 			};
 			const stats = status && status.stats ? status.stats : { deny: 0, ask: 0 };
 			const sandbox = status && status.sandbox ? status.sandbox : { global: 'workspace-write', project: 'inherit', effective: 'workspace-write' };
-			const presetName = status && status.preset ? status.preset : null;
-			const activeForSession = status ? status.activeForSession === true : false;
 
 			const sandboxLabel = (m) => (m === 'workspace-write' ? T('sandbox.ww') : m === 'danger-full-access' ? T('sandbox.fa') : T('sandbox.inherit'));
 			const sandboxVal = tab === 'global' ? sandbox.global : sandbox.project;
@@ -7378,26 +7355,11 @@ window.__ModuleLoader__.load({
 			return React.createElement('div', { style: { maxWidth: 760, fontFamily: FONT, color: 'var(--dsw-alias-label-primary, #24292f)' } },
 				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.status')),
-					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' } },
-						React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, T('panel.sessionPerm')),
-						React.createElement('span', { style: { fontSize: 13, color: activeForSession ? '#2e7d32' : '#888', fontWeight: 600 } }, presetName === 'custom-review' ? T('panel.customReview') : (presetName || T('panel.none'))),
-						React.createElement('span', { style: small }, activeForSession ? T('panel.active') : T('panel.inactive')),
-					),
-					React.createElement('div', { style: { fontSize: 13, marginBottom: 6 } },
-						T('panel.sandboxEff') + ' ',
-						React.createElement('span', { style: { color: sandbox.effective === 'danger-full-access' ? '#e65100' : '#2e7d32', fontWeight: 600 } }, sandboxLabel(sandbox.effective)),
-						React.createElement('span', { style: small }, sandbox.effective === 'workspace-write' ? T('panel.sandboxDesc.ww') : T('panel.sandboxDesc.fa')),
-					),
-					React.createElement('div', { style: { fontSize: 13, marginBottom: 6 } },
-						T('panel.effCats'),
-						eff ? CATS.map((c) => React.createElement('span', { key: c, style: { color: MODE_COLORS[eff[c]] || '#888', fontWeight: 600, marginRight: 8 } }, (catLabel(c) + ':' + modeLabel(eff[c])))) : '…',
-					),
 					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
 						React.createElement('span', { style: small }, T('panel.config') + (status ? status.configPath : '…')),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: openConfig }, T('panel.openConfig')),
 						React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: reload }, T('panel.reload')),
 					),
-					React.createElement('div', { style: small }, T('panel.project') + (status ? status.projectKey : '…')),
 					React.createElement('div', { style: small }, T('panel.stats').replace('{d}', String(stats.deny)).replace('{a}', String(stats.ask))),
 					status && status.loadError ? React.createElement('div', { style: { color: '#c62828', fontSize: 12 } }, T('panel.loadErr') + status.loadError) : null,
 					status && status.saveError ? React.createElement('div', { style: { color: '#c62828', fontSize: 12 } }, T('panel.saveErr') + status.saveError) : null,
