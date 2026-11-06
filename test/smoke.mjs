@@ -103,7 +103,7 @@ function makeRes() {
   }
 }
 
-function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm }) {
+function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm, settings }) {
   const registered = new Map()
   const routes = []
   const hooks = new Map()
@@ -144,11 +144,15 @@ function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm }) {
     // llm 可选：模拟 `ctx.llm` 服务（`{ stream(options) }` 返回异步可迭代块流）。
     // 不传 = 该服务不可用 → auto 走「llm service unavailable」的异常路径，
     // 这正是「其他用户不一定装了 llm 服务」那个真实场景，必须能测到。
+    //
+    // settings 可选：模拟 DSH 的 `ctx.settings`（自动审批据此读界面语言偏好，
+    // 见 index.js 的 dshPrefLang）。不传 = 该服务不可用，与 shell 载体形态一致。
     get: (k) => {
       if (k === 'subprocess') return null
       if (k === 'fsEncoding') return fsEncoding
       if (k === 'connection') return connection
       if (k === 'llm') return llm
+      if (k === 'settings') return settings
       return undefined
     },
   }
@@ -4872,7 +4876,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     { type: 'text-delta', text: json },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
-  const mkHostAuto = (autoExtra, llm, globalExtra) => {
+  const mkHostAuto = (autoExtra, llm, globalExtra, settings) => {
     const ws = tmpdirFor('pg-auto-ws-')
     const home = tmpdirFor('pg-auto-home-')
     mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
@@ -4887,8 +4891,13 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       }, globalExtra || {}),
       projects: {},
     }, null, 2), 'utf8')
-    return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm }) }
+    return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm, settings }) }
   }
+  // 造一个 `ctx.settings` 桩：`describe()` 返回 Loader 条目描述符数组，
+  // 语言偏好就在 `{ ns: 'locale', value: { preference } }` 里（见 index.js 的 dshPrefLang）。
+  const mkSettings = (preference) => ({
+    describe: () => [{ ns: 'locale', value: preference === undefined ? {} : { preference } }],
+  })
 
   // ── 真实形状的 session mock（**必须用它，不要手写 surface.nodes**）───────────
   //
@@ -5702,9 +5711,12 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       }
       const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}, sess))
       const tgt = stv && stv.autoReview && stv.autoReview.target
-      ok('★★ group24 A20: 无覆盖时 target 取自会话模型（推理等级浮层据此列档位）',
+      // 模型（provider/model）来自会话；档位来自**设置默认值** `min`。
+      // 两者不同源是有意的：`effortSource === 'setting'` 表示档位由 autoReview 配置
+      // （这里是它的默认值）决定，而不是被会话 header 带进来。
+      ok('★★ group24 A20: 无覆盖时 target 的模型取自会话，档位取自设置默认值',
         !!(tgt && tgt.provider === 'sess-p' && tgt.model === 'sess-m'
-          && tgt.effort === 'high' && tgt.effortSource === 'session' && tgt.fromSetting === false),
+          && tgt.effort === 'min' && tgt.effortSource === 'setting' && tgt.fromSetting === false),
         JSON.stringify(tgt))
     }
     // ── ①b 值域必须下发，且 timeoutMs 的 max 就是**生效侧的钳制上界** ────────────
@@ -5819,7 +5831,12 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   //
   // 假 llm 带 `prepareCall`（真宿主有它）：能力表由 configure 回调的第二个入参提供，
   // 这正是生产路径 —— 不用 resolveModelInfo 另查一次，避免能力表与派发不是同一代注册。
-  const mkLlmEffort = (efforts, sessionEffort) => {
+  // `defaultEffort` 是适配器自己的默认档，**必须能独立于第一档指定**：若固定取
+  // `efforts[0].id`，它恰好等于 `resolveEffort('min')` 的解析结果，于是
+  // 「min 解析成 low 并派发」与「min 解析为空、平台物化默认档 low」在断言上不可区分 ——
+  // 真实适配器的默认档未必是最低档，后者在真实环境会派发 medium/high。
+  // 默认取第一档只是为了不影响不关心这件事的用例；鉴别用例显式传别的档位。
+  const mkLlmEffort = (efforts, defaultEffort) => {
     const calls = []
     const answer = () => (async function* () {
       for (const c of verdict('{"risk":"low","decision":"allow"}')) yield c
@@ -5831,16 +5848,25 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       // —— 于是「推理强度没传对」会以「根本没调模型」的形式失败，看不出真正原因。
       stream(options) { calls.push(options); return answer() },
       prepareCall(config, signal, configure) {
-        const info = { provider: config.provider, id: config.model, name: config.model, reasoning: efforts ? { efforts, defaultEffort: efforts[0].id } : undefined }
+        const def = defaultEffort !== undefined ? defaultEffort : (efforts ? efforts[0].id : undefined)
+        const info = { provider: config.provider, id: config.model, name: config.model, reasoning: efforts ? { efforts, defaultEffort: def } : undefined }
         const controls = configure ? configure({}, info) : {}
-        const merged = Object.assign({}, config, controls)
         // 复刻平台的校验：模型不公布档位时**任何** requested 都抛（`resolveCallWithInfo`
         // 的 `reasoning === undefined` 分支），公布了档位但请求的不在表里同样抛。
         // 少了前一半，实现在无能力表时透传会照绿，而真实平台必抛 UNSUPPORTED_REASONING_EFFORT。
-        if (merged.reasoningEffort !== undefined && (!efforts || !efforts.some((e) => e.id === merged.reasoningEffort))) {
-          const err = new Error('unsupported effort ' + merged.reasoningEffort)
+        if (controls.reasoningEffort !== undefined && (!efforts || !efforts.some((e) => e.id === controls.reasoningEffort))) {
+          const err = new Error('unsupported effort ' + controls.reasoningEffort)
           err.code = 'UNSUPPORTED_REASONING_EFFORT'
           throw err
+        }
+        // 复刻平台的**默认档物化**（dsh-llm `resolveCallWithInfo`：
+        // `const effective = requested ?? reasoning.defaultEffort`，并把 effective 写回
+        // resolved config）。少了这一步，桩比真实 API 宽松：调用方不传档位时
+        // 真实平台会补上适配器的默认，而桩什么都不补 —— 于是「不传档位时最终派发了什么」
+        // 这类问题在测试里恒为空，与真实行为无法区分。
+        let merged = Object.assign({}, config, controls)
+        if (merged.reasoningEffort === undefined && info.reasoning && info.reasoning.defaultEffort !== undefined) {
+          merged = Object.assign({}, merged, { reasoningEffort: info.reasoning.defaultEffort })
         }
         return {
           config: merged,
@@ -5851,17 +5877,21 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   }
   const EFFORTS = [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }]
   {
-    // ① 空 = 跟随会话（会话 header 里有 high）
+    // ① 空配置 = 用**默认值** `min`（模型最低档），不跟随会话。
     //
     // ⚠️ 必须用 probeAuto 而不是裸调 pre：这里兜底是 auto，模型说 allow 才会 next()，
     // 而裸调 pre 时**模型调用本身是异步的**，await 它会等一个「永远不 settle 的
     // 弹窗路径」—— 实测会挂成 unsettled top-level await（因为 mkHostAuto 的兜底是 auto、
     // 回落是 ask，模型说 allow 后还要过沙箱闸）。probeAuto 自带超时与结案，是唯一安全的驱动方式。
-    const llm = mkLlmEffort(EFFORTS)
+    // `defaultEffort: 'medium'`：不能取第一档，否则「min 解析成 low」与
+    // 「min 解析为空、平台物化默认档 low」不可区分（见 mkLlmEffort 的说明）。
+    const llm = mkLlmEffort(EFFORTS, 'medium')
     const { ws, home, h } = mkHostAuto({}, llm)
     const pre = h.hooks.get('tools/pre-execute')
     const exec = {
       name: T, arguments: A, callId: 'c1', token: 't1',
+      // 会话 header 里是 high：若实现退回「跟随会话」，这里会拿到 high 而不是 low ——
+      // 这正是本用例的鉴别力所在（两种语义在此分叉）。
       agent: { cwd: ws, session: { id: 'a25a', requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model', reasoningEffort: 'high' } }) } },
       signal: undefined,
     }
@@ -5871,8 +5901,8 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     // 模型调用是**同步可见**的：prepareCall 在 reviewWithModel 里先于任何 await 点被调用，
     // 故这里只需等一个宏任务，不必等整条链路结案。
     await new Promise((r) => setTimeout(r, 20))
-    ok('★★ group24 A25: 推理强度留空 = 跟随会话（取会话 header 的档位）',
-      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'high',
+    ok('★★ group24 A25: 未配置时用默认档 min（模型最低），不跟随会话',
+      llm.calls.length === 1 && llm.calls[0].reasoningEffort === 'low',
       JSON.stringify(llm.calls[0] && { e: llm.calls[0].reasoningEffort }))
     // 收尾：把还挂着的审批结案，避免污染后续用例的 pending 列表
     const list = await callRoute(h.routes, 'GET', '/permgate/pending')
@@ -5892,8 +5922,9 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     releaseTmp(ws, home)
   }
   {
-    // ③ 'min' = 第一档
-    const llm = mkLlmEffort(EFFORTS)
+    // ③ 'min' = 第一档。`defaultEffort` 取 medium（≠ 第一档）：解析失败被平台物化时
+    //    会得到 medium，断言当场变红（见 mkLlmEffort 的说明）。
+    const llm = mkLlmEffort(EFFORTS, 'medium')
     const { ws, home, h } = mkHostAuto({ reasoningEffort: 'min' }, llm)
     await probeAuto(h, ws, 'a25c', T, A)
     ok('★★ group24 A25: 「最低」按模型公布的档位取',
@@ -7417,6 +7448,463 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     for (const word of ['commit', 'pushing', 'publishing', 'deleting', 'pushing,']) {
       ok('★ group24 A49: 通用判据不得列举具体动作名（' + word + '）',
         lower.indexOf(word) === -1, word + ' appears in policy')
+    }
+  }
+
+  // ── A50：`reason` 的语言跟随界面，但主策略恒为英文 ──────────────────────────
+  //
+  // 这一组守两件事，两件都只在真模型上才会暴露、且失败形态是「静默劣化」：
+  //   ① 理由的语言跟着界面走（否则英文用户拿到的是一堆中文理由）；
+  //   ② 那 9 行 JSON 形态清单**永远是英文** —— `parseReviewDecision` 只认
+  //      low/medium/high × allow/deny/escalate。若哪天有人「顺手把策略翻成中文」
+  //      并照着翻示意 JSON，模型会输出中文键名 → 每次评审都是协议错 →
+  //      全部退化成弹窗，而自动审批看起来「还在工作」。
+  {
+    const POLICY_HEAD = 'You are the final authorization reviewer for exactly one pending tool call.'
+    // 策略里**全部 9 条**合法形态，逐条钉住。
+    //
+    // 为什么必须逐条而不是抽查：`parseReviewDecision` 的合法组合就是这 9 个
+    // （low×allow / medium×{allow,deny,escalate} / high×deny，各带或不带 reason）。
+    // 抽查漏掉哪条，将来那条被翻成中文就无人发现 —— 实测过：只钉 3 条时，
+    // 把 `{"risk":"high","decision":"deny"}` 换成 `{"风险":"高","决定":"拒绝"}`
+    // 断言全绿，而那正是最危险的一条（high 只能 deny）。
+    const SHAPES = [
+      '{"risk":"low","decision":"allow"}',
+      '{"risk":"low","decision":"allow","reason":"..."}',
+      '{"risk":"medium","decision":"allow"}',
+      '{"risk":"medium","decision":"allow","reason":"..."}',
+      '{"risk":"medium","decision":"deny"}',
+      '{"risk":"medium","decision":"deny","reason":"..."}',
+      '{"risk":"high","decision":"deny"}',
+      '{"risk":"high","decision":"deny","reason":"..."}',
+      '{"risk":"medium","decision":"escalate","reason":"..."}',
+    ]
+    // 值域本身也不得被翻译：解析器只认这几个英文词。中文键名/中文值一旦进了策略，
+    // 模型照抄就是协议错（每次评审都退化成弹窗，且只在真模型上暴露）。
+    const VALUES = ['"risk"', '"decision"', '"reason"', '"low"', '"medium"', '"high"', '"allow"', '"deny"', '"escalate"']
+    const sysOf = (llm) => String((llm.calls[0] && llm.calls[0].system) || '')
+
+    // ① 有 settings 服务、偏好英文 → 追加英文那句
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm, {}, mkSettings('en'))
+      await probeAuto(h, ws, 'a50en', T, A)
+      const sys = sysOf(llm)
+      ok('★★ group24 A50: 无客户端语言时读 DSH 偏好，英文界面 → 追加英文语言指令',
+        sys.indexOf(POLICY_HEAD) !== -1 && sys.indexOf('Write the reason field in English.') !== -1
+        && sys.indexOf('简体中文') === -1,
+        JSON.stringify({ tail: sys.slice(-120) }))
+      // ★★ 主策略与 JSON 形态清单**一字未改**（这是本组最要紧的一条）
+      ok('★★ group24 A50: 策略主体与 JSON 形态清单仍是英文原文（解析器只认英文值域）',
+        SHAPES.every((s) => sys.indexOf(s) !== -1) && VALUES.every((s) => sys.indexOf(s) !== -1),
+        JSON.stringify({ missing: SHAPES.concat(VALUES).filter((s) => sys.indexOf(s) === -1) }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 偏好中文 → 追加中文那句，但 JSON 清单照旧
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm, {}, mkSettings('zh'))
+      await probeAuto(h, ws, 'a50zh', T, A)
+      const sys = sysOf(llm)
+      ok('★★ group24 A50: 中文界面 → 追加中文语言指令，且 JSON 形态清单不变',
+        sys.indexOf(POLICY_HEAD) !== -1 && sys.indexOf('简体中文') !== -1
+        && sys.indexOf('Write the reason field in English.') === -1
+        && SHAPES.every((s) => sys.indexOf(s) !== -1),
+        JSON.stringify({ tail: sys.slice(-120) }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 语言包可以注册 `en-US` 这类带子标签的 id：必须按主语言归一，
+    //    否则 `en-US` 不等于 `'en'`，会被判成中文。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm, {}, mkSettings('en-US'))
+      await probeAuto(h, ws, 'a50region', T, A)
+      ok('★★ group24 A50: 带地区子标签的偏好（en-US）按主语言归一，不误判成中文',
+        sysOf(llm).indexOf('Write the reason field in English.') !== -1,
+        JSON.stringify({ tail: sysOf(llm).slice(-120) }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 没有 settings 服务（shell 载体 / 测试宿主）→ 不崩、回落到中文那句。
+    //    「不崩」是重点：`ctx.get('settings')` 返回 undefined 时若直接解引用，
+    //    每次评审都会抛 → 全部走 autoFallback，自动审批整体失效。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a50nosvc', T, A)
+      ok('★★ group24 A50: 无 settings 服务时不崩，评审照常出结论（回落中文语言指令）',
+        r === 'allow' && sysOf(llm).indexOf(POLICY_HEAD) !== -1
+        && sysOf(llm).indexOf('简体中文') !== -1,
+        JSON.stringify({ r, tail: sysOf(llm).slice(-120) }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 客户端报过语言就以它为准 —— 即使 DSH 偏好是另一种。
+    //    GUI 里客户端每次请求都带 `lang`，那才是用户眼前的语言；DSH 偏好可能是旧的。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm, {}, mkSettings('zh'))
+      // 先让宿主记下「客户端说英文」
+      await callRoute(h.routes, 'GET', '/permgate/status?lang=en')
+      await probeAuto(h, ws, 'a50client', T, A)
+      ok('★★ group24 A50: 客户端报过语言时以客户端为准（压过 DSH 偏好）',
+        sysOf(llm).indexOf('Write the reason field in English.') !== -1
+        && sysOf(llm).indexOf('简体中文') === -1,
+        JSON.stringify({ tail: sysOf(llm).slice(-120) }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ 「没带 lang」是「这个请求没表态」，不是「用户切回中文」。
+    //    守的是路由里 `if (provided)` 那个判据本身：pending 轮询、外部脚本、浏览器直连
+    //    都不带 lang，且远比评审调用频繁。无条件写 `uiLang` 时，英文界面用户的评审理由
+    //    会在下一次轮询后变回中文。⑤ 测不出这条 —— 它的评审发生在 probeAuto 的同步段，
+    //    早于 probeAuto 自己的 pending 轮询，故必须在评审**之前**显式发一次不带 lang 的请求。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm, {}, mkSettings('zh'))
+      await callRoute(h.routes, 'GET', '/permgate/status?lang=en')
+      await callRoute(h.routes, 'GET', '/permgate/pending')
+      await probeAuto(h, ws, 'a50nolang', T, A)
+      ok('★★ group24 A50: 不带 lang 的请求不重置客户端语言（评审仍用英文）',
+        sysOf(llm).indexOf('Write the reason field in English.') !== -1
+        && sysOf(llm).indexOf('简体中文') === -1,
+        JSON.stringify({ tail: sysOf(llm).slice(-120) }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A51：协议错的一次性重试 ──────────────────────────────────────────────────
+  //
+  // 重试的**边界**是本组要钉的全部内容。放宽任一条的后果都不是「多问一次」：
+  //   · 对 `contradiction` 重试 → 模型看到被拒理由后改成合法形态，把
+  //     「拿不准」变成「猜到你想要什么」，方向是放宽；
+  //   · 无限重试 → 坏掉的 provider 烧钱并让 pre-execute 卡住；
+  //   · 重试重置超时预算 → 最坏等待从 60s 变成 AUTO_REVIEW_MAX_CALLS 次各等一份
+  //     （每次接近 60s 的可重试响应 + 最后一次真超时，最多约 4 分钟），
+  //     工具调用卡好几分钟。
+  {
+    // ① 手滑类（invalid JSON）→ 多轮修正，第二次成功即放行
+    {
+      const llm = mkLlm((_o, n) => verdict(n === 1 ? '不是 JSON' : '{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51retry', T, A)
+      ok('★★ group24 A51: 格式错走多轮修正，第二次合规 → 正常放行（不是弹窗）',
+        r === 'allow' && llm.calls.length === 2, JSON.stringify({ r, calls: llm.calls.length }))
+      // ★★ 修正轮必须把模型**自己的输出**放回上下文：这才是「追问」而不是「重发」。
+      //    只断言次数是 2 的话，「重新发一遍完全相同的请求」也能通过 —— 而那正是
+      //    改动前的行为（两次调用之间没有任何关联），测不出多轮是否真的成立。
+      const msgs = (llm.calls[1] && llm.calls[1].messages) || []
+      const roles = msgs.map((m) => m && m.role)
+      const asst = msgs.filter((m) => m && m.role === 'assistant')
+        .map((m) => (Array.isArray(m.content) ? m.content.map((b) => b && b.text).join('') : ''))
+        .join('')
+      const lastUser = msgs.filter((m) => m && m.role === 'user').pop()
+      const lastText = lastUser && Array.isArray(lastUser.content)
+        ? lastUser.content.map((b) => b && b.text).join('') : ''
+      ok('★★ group24 A51: 格式修正轮把模型自己的输出放回上下文（追问，不是重发）',
+        roles.join(',') === 'user,assistant,user'
+        && asst.indexOf('不是 JSON') !== -1
+        && lastText.indexOf('could not be used') !== -1
+        && lastText.indexOf('only fix the format') !== -1,
+        JSON.stringify({ roles, asst, lastText: lastText.slice(0, 160) }))
+      // ★★ 修正轮的 assistant 轮必须满足 dsh-llm 的 `Message` 契约：
+      //    `LlmRuntime.forAdapter` 对每条 assistant 读 `message.source.replayState`，
+      //    `source` 缺失时抛 TypeError，被 `adapterStream` 折成 finish(error) ——
+      //    格式修正轮**永远到不了 provider**，每次格式重试都在派发前变成 infra-error 回落弹窗。
+      //    假 llm 桩只实现 `stream`、不经过 forAdapter，故这里直接钉住组装出的字段
+      //    （见 index.js 的 withAssistantSource）。只查 role 与文本时，删掉那段补齐仍全绿。
+      const asstMsg = msgs.find((m) => m && m.role === 'assistant')
+      ok('★★ group24 A51: 修正轮的 assistant 消息带 source/id（dsh-llm Message 契约）',
+        !!asstMsg && !!asstMsg.source && asstMsg.source.provider === 'test-provider'
+        && typeof asstMsg.id === 'string' && asstMsg.id.length > 0,
+        JSON.stringify({ source: asstMsg && asstMsg.source, id: asstMsg && asstMsg.id }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 一直不合规 → **格式修正有界**（2 轮 = 共 3 次调用），然后走回落。
+    //    边界取 2 而不是无限：若两次都写不对，多半是模型根本不会这个协议，
+    //    继续追问只是烧钱并拖长 pre-execute。
+    {
+      const llm = mkLlm(verdict('不是 JSON'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51twice', T, A)
+      ok('★★ group24 A51: 格式修正最多 2 轮（共 3 次调用），之后走回落弹窗',
+        r && r.kind === 'ask' && llm.calls.length === 3,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ②b 重试**不重置超时预算**：整段评审（含重试）只建一个 60 秒定时器。
+    //
+    //     ② 只钉住「最多 3 次调用」。把预算的创建从 reviewWithModel 移进 attemptReview
+    //     （每次重试各自 60 秒）后 ② 仍然全绿 —— 次数没变，变的是最坏等待：每次派发
+    //     各接近 60 秒、最后一次真超时，pre-execute 能挂到约 3 分钟。这是本组注释里
+    //     列出的第三条边界，而它此前没有任何可观测面。
+    //
+    //     判据不能用「存活定时器数量」：timer 桩的 disposer 会 splice 条目，两种实现
+    //     同时都只剩一个存活定时器，数出来一样。故这里**手动触发首轮那个定时器**：
+    //     共用预算时它 resolve 的正是第二次 attemptReview 竞速的同一个 Promise，竞速
+    //     立刻返回 MODEL_TIMEOUT、走回落；每次重建时旧定时器已在上一轮 finally 被摘掉，
+    //     触发它不会 resolve 新一轮的 budget.timeout，第二次会正常放行。
+    //
+    //     定时器按**位置**取（评审开始后新建的那一个），不按 60000 匹配：那会把常量
+    //     取值钉进断言，日后调这个值时用例会以「功能坏了」的形式变红。
+    {
+      let timerBase = 0
+      let firstTimer = null
+      let hRef = null
+      const llm = mkLlm((_o, n) => {
+        if (n === 1) {
+          firstTimer = hRef.timers.slice(timerBase).pop() || null
+          return verdict('不是 JSON')
+        }
+        if (firstTimer) firstTimer.fn()
+        return verdict('{"risk":"low","decision":"allow"}')
+      })
+      const { ws, home, h } = mkHostAuto({}, llm)
+      hRef = h
+      timerBase = h.timers.length
+      const r = await probeAuto(h, ws, 'a51budget', T, A)
+      ok('★★ group24 A51: 重试不重置超时预算（触发首轮的定时器后，第二次竞速立即超时）',
+        r && r.kind === 'ask' && llm.calls.length === 2,
+        JSON.stringify({ r: r === 'allow' ? r : (r && r.kind), calls: llm.calls.length, timerMs: firstTimer && firstTimer.ms }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 矛盾（high + allow）→ **全新重做一次**，不给它看第一次的输出。
+    //
+    //    为什么不追问：指出矛盾要求复查时，medium 对 decision 没有限制，合法改法里
+    //    既有收紧的（high+deny）也有放宽的（medium+allow），模型倾向配合用户，
+    //    多半选后者 —— 那是在引导下放宽。
+    //    全新重做没有引导，第二个结论是独立采样，无论宽严都可直接采纳。
+    //
+    //    判据看两件事：调用次数是 2，且**第二次的 messages 与第一次逐字相同**
+    //    （没有把第一次的输出塞回上下文）。
+    {
+      const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51contra', T, A)
+      const m1 = JSON.stringify(llm.calls[0] && llm.calls[0].messages)
+      const m2 = JSON.stringify(llm.calls[1] && llm.calls[1].messages)
+      ok('★★ group24 A51: 矛盾走全新重做（共 2 次调用），第二次不携带第一次的输出',
+        r && r.kind === 'ask' && llm.calls.length === 2 && m1 === m2,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length, same: m1 === m2 }))
+      releaseTmp(ws, home)
+    }
+
+    // ③b 矛盾重做后给出合法结论 → **直接采纳**，即使它比第一次更宽。
+    //     这是「独立采样」与「被引导改口」的关键区别：后者必须只收更严的结论，
+    //     前者无论宽严都是模型自己的判断。
+    {
+      const llm = mkLlm((_o, n) => verdict(n === 1
+        ? '{"risk":"high","decision":"allow"}'
+        : '{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51contra2', T, A)
+      ok('★★ group24 A51: 矛盾重做后的结论直接采纳（放宽也采纳，因为它是独立判断）',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 重复成员（构造过的输出）**不重试**：重试只会让它换个构造方式。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51dup', T, A)
+      ok('★★ group24 A51: 重复顶层成员不重试（构造过的输出，重试只会换一种构造）',
+        r && r.kind === 'ask' && llm.calls.length === 1,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 模型自述 escalate **不重试**：它不是格式问题，是模型诚实地说判不了。
+    //    重试会把它变成「再问一次直到你说行」。
+    {
+      const llm = mkLlm(verdict('{"risk":"medium","decision":"escalate","reason":"拿不准"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51esc', T, A)
+      ok('★★ group24 A51: 模型自述 escalate 不重试（不是格式问题）',
+        r && r.kind === 'ask' && llm.calls.length === 1,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ 重试痕迹必须落进决策记录：`retries` + 第一次的原文。
+    //    缺了它，事后看到 protocol-error 分不清「手滑」与「根本不会这个协议」。
+    {
+      const llm = mkLlm((_o, n) => verdict(n === 1 ? '第一次乱说' : '{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a51rec', T, A)
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      // 形状固定是 `{ decisions, total, max }`（见 index.js 该路由）。
+      // 不写「顶层是数组」的兜底：那会掩盖响应形状的变化，让本断言在路由改形后
+      // 静默变成「找不到记录」而不是「路由改了」。
+      const list = (dec.data && Array.isArray(dec.data.decisions)) ? dec.data.decisions : []
+      const row = list.filter((x) => x && x.retries === 1).pop()
+      ok('★★ group24 A51: 重试痕迹落进决策记录（retries + 第一次的原始输出）',
+        r === 'allow' && !!row && typeof row.firstRaw === 'string' && row.firstRaw.indexOf('第一次乱说') !== -1,
+        JSON.stringify({ r, n: list.length, rows: list.map((x) => ({ retries: x.retries, firstRaw: x.firstRaw })) }))
+      // 同一条记录经 perm_status 返回时必须剥掉 `firstRaw`/`firstDetail`：前者是重试前
+      // 那一轮的**模型原话**，与 `rawOutput` 走同一条二阶注入通道（评审模型在 reason 里
+      // 复述被审内容 → 经工具结果回到主模型上下文）。只在面板侧断言时，
+      // PANEL_ONLY_DECISION_FIELDS 漏掉这两项也全绿。
+      const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
+      const toolRow = (Array.isArray(stv && stv.recentDecisions) ? stv.recentDecisions : [])
+        .filter((x) => x && x.retries === 1).pop()
+      ok('★★ group24 A51: 重试痕迹经 perm_status 返回时不带 firstRaw/firstDetail（原话只留面板）',
+        !!toolRow && !('firstRaw' in toolRow) && !('firstDetail' in toolRow),
+        JSON.stringify({ row: toolRow && { retries: toolRow.retries, raw: 'firstRaw' in toolRow, detail: 'firstDetail' in toolRow } }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A52：决策记录带上推理强度（实际派发的档位 + 配置原值）──────────────────
+  //
+  // 为什么必须记**实际派发值**而不是配置值：配置值在设置页本来就看得见，
+  // 答不出来的三件事才是本组的对象 ——
+  //   ① 符号值解析成了什么（`min` → 该模型的第一档）；
+  //   ② 「模型默认」实际是哪一档（我们不传，平台 `resolveCallWithInfo` 用
+  //      `requested ?? reasoning.defaultEffort` 把适配器的默认物化进 resolved config，
+  //      故只有 `prepared.config` 知道）；
+  //   ③ 降级有没有发生（模型不公布档位表时 `min`/`max`/`session` 都解析成空串、
+  //      不传、不报错，`config-error` 也不覆盖这种情形）。
+  //
+  // ③ 是这组里最要紧的一条：它此前**没有任何可观测面** —— 面板写着「模型最低」，
+  // 实际一个字节都没派发，而用户无从发现。
+  {
+    const pre = (h) => h.hooks.get('tools/pre-execute')
+    // 取最近一条决策记录。形状固定 `{ decisions, total, max }`，不写数组兜底
+    // （那会掩盖响应形状变化，让断言静默变成「找不到记录」）。
+    const lastRow = async (h) => {
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const list = (dec.data && Array.isArray(dec.data.decisions)) ? dec.data.decisions : []
+      return list[list.length - 1]
+    }
+
+    // ① 符号值 `min` + 有档位表 → 记的是**解析结果** low，且带上配置原值。
+    //    这是「记实际值不是配置值」的核心判据：若实现改成读配置，effort 会是 'min'。
+    //
+    //    `defaultEffort` 取 medium（≠ 第一档）：固定取第一档时，本断言无法区分
+    //    「min 解析成 low」与「min 解析为空、平台物化了默认档」—— 后者恰好也是 low，
+    //    而真实适配器的默认档未必是最低档（见 mkLlmEffort 的说明）。
+    {
+      const llm = mkLlmEffort(EFFORTS, 'medium')
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: 'min' }, llm)
+      const r = await probeAuto(h, ws, 'a52a', T, A)
+      const row = await lastRow(h)
+      ok('★★ group24 A52: 记录实际派发的档位（min 解析成 low，不是照抄配置值）',
+        r === 'allow' && !!row && row.effort === 'low' && row.effortWant === 'min',
+        JSON.stringify({ r, e: row && row.effort, w: row && row.effortWant }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 模型不公布档位表 → 不派发任何档位，但配置原值仍要记下来。
+    //    `effort` 缺键 + `effortWant` 有值 = 降级发生，这正是要能看见的那一格。
+    {
+      const llm = mkLlmEffort(null)
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: 'min' }, llm)
+      const r = await probeAuto(h, ws, 'a52b', T, A)
+      const row = await lastRow(h)
+      ok('★★ group24 A52: 模型不公布档位时记下「没派发」（effort 缺键 + effortWant 仍在）',
+        r === 'allow' && !!row && row.effort === undefined && row.effortWant === 'min',
+        JSON.stringify({ r, e: row && row.effort, w: row && row.effortWant }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ `@max` 是**钉住**的形态，配置原值必须原样保留（含 `@`）。
+    //    若某处剥了前缀，事后就分不清「模型最高」与「指定 max」——两者换模型后行为不同。
+    {
+      const llm = mkLlmEffort([{ id: 'low', name: 'Low' }, { id: 'max', name: 'Max' }, { id: 'high', name: 'High' }])
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: '@max' }, llm)
+      const r = await probeAuto(h, ws, 'a52c', T, A)
+      const row = await lastRow(h)
+      ok('★★ group24 A52: `@max` 的配置原值原样保留（`@` 不被剥掉）',
+        r === 'allow' && !!row && row.effort === 'max' && row.effortWant === '@max',
+        JSON.stringify({ r, e: row && row.effort, w: row && row.effortWant }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 「模型默认」= 我们不传，由平台物化适配器的 defaultEffort。
+    //    判据：记录里的 effort 等于该模型的 defaultEffort，而**不等于**配置值 'default'
+    //    —— 后者恰恰是「只看配置就答不上来」的那一格。
+    //
+    //    `defaultEffort` 取 medium（≠ 第一档）：固定取第一档时，「不派发、由平台物化」
+    //    与「错误地直接派发第一档」两条路径都会记成 low，本断言无法区分（见 mkLlmEffort
+    //    的说明）。取 medium 后，错误实现记的是 low，当场变红。
+    {
+      const llm = mkLlmEffort(EFFORTS, 'medium')
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: 'default' }, llm)
+      const r = await probeAuto(h, ws, 'a52d', T, A)
+      const row = await lastRow(h)
+      ok('★★ group24 A52: 「模型默认」记的是平台物化出的实际档位（不是字面量 default）',
+        r === 'allow' && !!row && row.effort === 'medium' && row.effortWant === 'default',
+        JSON.stringify({ r, e: row && row.effort, w: row && row.effortWant }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 「跟随会话」记的是会话当前档位，且配置原值保留 `session`。
+    //    这条与 ①②③④ 合起来覆盖 `resolveEffort` 的四个符号值：
+    //       min（①，解析成第一档）/ default（④，平台物化）/ @max（③，钉住）/ session（本条）。
+    //
+    //    会话 header 里是 high，模型档位表是 low/medium/high：若实现退回「用默认档」，
+    //    记的会是 low；若照抄配置值，effort 会是 'session'。两者都当场变红。
+    {
+      const llm = mkLlmEffort(EFFORTS)
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: 'session' }, llm)
+      const preExec = pre(h)
+      const exec = {
+        name: T, arguments: A, callId: 'c1', token: 't1',
+        agent: { cwd: ws, session: { id: 'a52e', requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model', reasoningEffort: 'high' } }) } },
+        signal: undefined,
+      }
+      // 不 await：d.autoFallback 是 ask，模型说 allow 之后会落到弹窗，await 会挂。
+      preExec(exec, async () => ({ kind: 'allow' }))
+      await new Promise((r) => setTimeout(r, 20))
+      const row = await lastRow(h)
+      ok('★★ group24 A52: 「跟随会话」记的是会话当前档位（不是字面量 session）',
+        !!row && row.effort === 'high' && row.effortWant === 'session',
+        JSON.stringify({ e: row && row.effort, w: row && row.effortWant }))
+      const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+      for (const it of (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === T)) {
+        await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'allow', lang: 'zh' })
+      }
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ 两条存储必须逐字段一致。
+    //
+    // 内存 `decisions[]`（/permgate/decisions）与持久化 `plugin:permgate/decision`
+    // （会话日志）是**两份**存储，曾出现过只给其中一份加字段的事故：面板上看得见、
+    // 重开会话就没了。这里用真 Session 同时取两份，逐字段比对。
+    {
+      const { Session, pluginRecordOf } = await loadDep('@deepseek-ai/dsh-session')
+      const session = Session.create('a52-log')
+      session.append('request/header', { header: { config: { provider: 'test-provider', model: 'test-model' } } }, { reason: 'initial' })
+      const llm = mkLlmEffort(EFFORTS)
+      const { ws, home, h } = mkHostAuto({ reasoningEffort: 'min' }, llm)
+      // 不 await（模型说 allow 后还要过沙箱闸，await 会挂成 unsettled top-level await）
+      pre(h)({
+        name: T, arguments: A, callId: 'c1', token: 't1',
+        agent: { cwd: ws, session },
+        signal: undefined,
+      }, async () => ({ kind: 'allow' }))
+      let plog = null
+      for (let i = 0; i < 200; i++) {
+        plog = session.snapshotEvents().map((e) => pluginRecordOf(e)).filter(Boolean)[0]
+        if (plog) break
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      const row = await lastRow(h)
+      ok('★★ group24 A52: 内存记录与持久化日志的档位字段一致（两条存储不能分叉）',
+        !!plog && !!row
+        && plog.data.effort === row.effort
+        && plog.data.effortWant === row.effortWant
+        && plog.data.effort === 'low' && plog.data.effortWant === 'min',
+        JSON.stringify({ log: plog && { e: plog.data.effort, w: plog.data.effortWant }, mem: row && { e: row.effort, w: row.effortWant } }))
+      releaseTmp(ws, home)
     }
   }
 }

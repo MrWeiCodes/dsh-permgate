@@ -684,6 +684,26 @@ window.__ModuleLoader__.load({
 			'%3Crect x=%227.45%22 y=%226.6%22 width=%221.1%22 height=%224.6%22 rx=%220.3%22 fill=%22black%22/%3E' +
 			'%3Crect x=%229.7%22 y=%226.6%22 width=%221.1%22 height=%224.6%22 rx=%220.3%22 fill=%22black%22/%3E' +
 			PG_SVG_CLOSE;
+		// 同一枚道闸的**内联 SVG** 版本，给 `settings.section.icon` 槽用。
+		// 上面那个 data: URI 只能喂 CSS mask；槽位要的是 React 组件，两者不能共用字符串。
+		// 几何与 PG_NAV_MASK 逐字一致 —— 分叉会让「新版走槽位、旧版走 CSS」两种显示不同，
+		// 而那种差异只在特定 DSH 版本上出现，极难对照排查。
+		const PG_NAV_SVG = (props) => {
+			const size = props && typeof props.size === 'number' ? props.size : 16;
+			return React.createElement('svg', {
+				width: size, height: size, viewBox: '0 0 16 16', fill: 'none',
+				'aria-hidden': 'true', style: { display: 'block' },
+			},
+				React.createElement('path', {
+					d: 'M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z',
+					stroke: 'currentColor', strokeWidth: 1.31831, strokeLinejoin: 'round',
+				}),
+				React.createElement('rect', { x: 4.6, y: 5.3, width: 6.8, height: 1.3, rx: 0.4, fill: 'currentColor' }),
+				React.createElement('rect', { x: 5.2, y: 6.6, width: 1.1, height: 4.6, rx: 0.3, fill: 'currentColor' }),
+				React.createElement('rect', { x: 7.45, y: 6.6, width: 1.1, height: 4.6, rx: 0.3, fill: 'currentColor' }),
+				React.createElement('rect', { x: 9.7, y: 6.6, width: 1.1, height: 4.6, rx: 0.3, fill: 'currentColor' }),
+			);
+		};
 		// 平台内置的「未匹配态」显示名：预设表按 (sandbox, approval) 反查不到任何表项时，
 		// 客户端（dsh-client-connection 的 fixture 预设表）兜底渲染这个字符串。
 		const PG_CUSTOM_BUILTIN = 'Custom';
@@ -1365,12 +1385,27 @@ window.__ModuleLoader__.load({
 				}
 			} catch (e) {}
 		}
+		// 平台是否已提供 `settings.section.icon` 槽（DSH 0.2.2+）。
+		// 由 apply 期的探测置位；置位后下面的 DOM 兼容层必须**完全停手**，
+		// 否则同一行会出现两个图标：槽位画一个（平台 flex 行里的正常子元素），
+		// CSS ::before 再画一个（劫持层给整行打的伪元素），两者并排显示。
+		// 这不是「多画一次」那么轻 —— 用户看到的是盾牌+道闸连着出现两次。
+		let pgNavIconViaSlot = false;
 		// 设置页导航图标：只认「可见文本 === 本插件 section label」的那一行。
 		// label 用与 slots.register 同一个 thunk（T('settings.title')），所以语言切换后
 		// 重扫会自动改认新文本的行，并把旧标记摘掉 —— 文字与图标永不失配。
 		// 空 label 直接返回：语言尚未解析时不能把整个 nav 都标记上。
 		function pgScanNavIcon(document) {
 			try {
+				// 槽位已接管：不清洗也不打标。已存在的旧标记必须主动摘掉 ——
+				// 探测发生在首帧之后时，兼容层可能已经给这一行打过标记了，
+				// 光「不再新增」会留下那一枚残留的伪元素图标。
+				if (pgNavIconViaSlot) {
+					for (const row of Array.from(document.querySelectorAll('[' + PG_NAV_ICON_ATTR + ']'))) {
+						row.removeAttribute(PG_NAV_ICON_ATTR);
+					}
+					return;
+				}
 				const wanted = String(T('settings.title') || '').trim();
 				if (!wanted) return;
 				const rows = document.querySelectorAll(PG_NAV_ROW_SELECTOR);
@@ -1759,7 +1794,36 @@ window.__ModuleLoader__.load({
 				'flow.why': '原因：',
 				'flow.modelReason': '模型说明：',
 				'flow.risk': '模型判定风险：',
+				// 推理强度。`flow.effort` 后面跟的是**模型自己的档位 id**（low/high/max…），
+				// 不翻译：档位 id 由模型自定义、无法穷举，且与模型名同属外部标识符。
+				// 需要解释的只有「配置值解析成了什么」，故括号里有「设置：」这个主语
+				// —— 少了它，「模型最低」会被读成模型的属性，与后半句
+				// 「该模型不公布档位」自相矛盾。
+				'flow.effort': '推理强度：',
+				'flow.effortWithWant': '{effort}（设置：{want}）',
+				// 未派发分四句，不能合成一句：`config-error`（模型公布了档位但不支持
+				// 你选的那个）与「模型压根不公布档位」是两种情况，后者的原因由
+				// `flow.why` 那行说明，此处再断言「不公布档位」就是假话。
+				// 「模型默认」「跟随会话」同样会在**不报错**的情况下落空（前者是适配器
+				// 没给 defaultEffort，后者是会话没选档位或该档位不在目标模型表里），
+				// 那时说「不公布档位」同样是假话 —— 判据见 effortFlowLabel。
+				'flow.effortNone': '未派发（设置：{want}）',
+				'flow.effortNoneNoTable': '未派发（设置：{want}；该模型不公布推理档位）',
+				'flow.effortNoneDefault': '未派发（设置：{want}；该模型没有默认推理档位）',
+				'flow.effortNoneSession': '未派发（设置：{want}；会话未选推理档位，或该档位不在目标模型的档位表里）',
 				'flow.rule': '命中规则：',
+				'flow.raw': '模型原始输出：',
+				// 风险等级：模型给的是 `low` / `medium` / `high` 三个英文原值，
+				// 面板上必须翻成界面语言 —— 直接显示 `low` 与整行中文的措辞不搭，
+				// 用户还得自己判断它在这套分级里算高还是低。
+				//
+				// 与 `modeLabel` 同一条纪律：**未知值不得退化成 key 本身**。
+				// 模型偶尔会吐出分级表外的词（`critical`），那时降级成「未知等级：X」
+				// 而不是把 `flow.riskValue.critical` 这种 key 画到界面上。
+				'flow.riskValue.low': '低',
+				'flow.riskValue.medium': '中',
+				'flow.riskValue.high': '高',
+				'flow.riskValue.unknown': '未知等级：{r}',
 				'panel.autoSaved': '已保存',
 				'panel.autoBadNumber': '请输入该范围内的整数',
 				'panel.autoMsUnit': '毫秒',
@@ -2186,7 +2250,18 @@ window.__ModuleLoader__.load({
 				'flow.why': 'Reason: ',
 				'flow.modelReason': 'Model note: ',
 				'flow.risk': 'Model risk: ',
+				'flow.effort': 'Effort: ',
+				'flow.effortWithWant': '{effort} (setting: {want})',
+				'flow.effortNone': 'not dispatched (setting: {want})',
+				'flow.effortNoneNoTable': 'not dispatched (setting: {want}; this model publishes no reasoning levels)',
+				'flow.effortNoneDefault': 'not dispatched (setting: {want}; this model has no default reasoning level)',
+				'flow.effortNoneSession': 'not dispatched (setting: {want}; the session selected no reasoning level, or its level is not one this model publishes)',
 				'flow.rule': 'Matched rule: ',
+				'flow.raw': 'Model raw output: ',
+				'flow.riskValue.low': 'low',
+				'flow.riskValue.medium': 'medium',
+				'flow.riskValue.high': 'high',
+				'flow.riskValue.unknown': 'unknown level: {r}',
 				'panel.autoSaved': 'Saved',
 				'panel.autoBadNumber': 'enter a whole number in range',
 				'panel.autoMsUnit': 'ms',
@@ -2433,6 +2508,19 @@ window.__ModuleLoader__.load({
 			const k = 'mode.' + m;
 			const s = T(k);
 			return s === k ? T('mode.unknown').replace('{a}', String(m)) : s;
+		}
+		// 风险等级的显示名。与 modeLabel 同一个降级口径：查不到就明说「未知等级：X」，
+		// 绝不把 `flow.riskValue.critical` 这种 key 画到界面上 —— 用户会以为界面坏了，
+		// 或者以为 `critical` 是他自己填错的某个东西。
+		//
+		// 为什么必须翻：`d.risk` 是模型输出里的原始英文值（见 index.js 的
+		// parseReviewDecision：值域是 low/medium/high），而它出现在一句中文
+		// （「模型判定风险：」）后面。中英混排既难读，也让用户无法把
+		// `low` 对应到这套分级里的「低」。
+		function riskLabel(r) {
+			const k = 'flow.riskValue.' + String(r);
+			const s = T(k);
+			return s === k ? T('flow.riskValue.unknown').replace('{r}', String(r)) : s;
 		}
 		// 快捷工具的用途说明：仅当 i18n 有对应文案时显示（用户自加的工具名不显示说明）
 		function quickDesc(t) {
@@ -3554,13 +3642,75 @@ window.__ModuleLoader__.load({
 		// ⚠️ 不要再另写一个 `PG_EFFORT_SYMBOLS = ['default','max','min']` 数组 ——
 		// 那是同一份知识的第二份字面量，加一个符号档时只改一处、另一处静默按具体档位
 		// 处理（显示成原始 id，或换模型时被当成钉住档位清掉）。下面从映射派生即可。
+		//
+		// `session`（跟随会话）也是符号档，且**必须显式写进配置**：宿主 resolveEffort
+		// 一直认这个值并走 follow()，缺的只是客户端这一侧 —— 不写它、也不显示它，
+		// 那一项就只能靠「删掉配置键」来表达，而删键现在的语义是「回到默认档 `min`」，
+		// 于是菜单里还列着这一项、却永远选不中（选中后宿主回落 min，面板当场改显示）。
+		const PG_EFFORT_SESSION = 'session';
 		const PG_EFFORT_SYMBOL_LABELS = {
+			session: 'panel.autoEffortSession',
 			default: 'panel.autoEffortDefault',
 			max: 'panel.autoEffortMax',
 			min: 'panel.autoEffortMin',
 		};
 		// 派生：符号档值的清单（顺序无关，只用于 indexOf 判成员）。
 		const PG_EFFORT_SYMBOLS = Object.keys(PG_EFFORT_SYMBOL_LABELS);
+
+		// ── 推理强度的显示名 ────────────────────────────────────────────────────────
+		// 输入是**配置值**（`session` / `default` / `max` / `min` / `@high` / `high`），
+		// 输出该给用户看的字符串。四种形态的处理必须与宿主 `resolveEffort` 同口径，
+		// 否则配置页写的和决策记录里说的会是两回事。
+		//
+		// `@` 前缀先剥、且**不查符号表**：`@max` 指的是名叫 `max` 的那个档位，
+		// 不是「模型最高」。查了符号表就会把钉住意图悄悄变成相对意图 ——
+		// 换模型后行为随之改变，而配置里明明写着 `@max`。
+		function effortWantLabel(v) {
+			const s = String(v || '');
+			if (!s) return '';
+			if (s.charAt(0) === PG_EFFORT_PIN) return s.slice(1);
+			if (Object.prototype.hasOwnProperty.call(PG_EFFORT_SYMBOL_LABELS, s)) return T(PG_EFFORT_SYMBOL_LABELS[s]);
+			return s;
+		}
+
+		// 决策记录里「推理强度」那一行的右半部分（不含前置的 `flow.effort`）。
+		// 会话流与会话轨迹是**同一条记录的两个视图**，措辞必须来自这一个函数 ——
+		// 各拼一遍就是同一份数据在两处显示不同（risk 那条守卫记着同一类问题）。
+		//
+		// 输入是记录里的 `effort`（实际派发的档位）与 `effortWant`（配置原值）。
+		function effortFlowLabel(d) {
+			const effort = d && d.effort ? String(d.effort) : '';
+			const want = d && d.effortWant ? String(d.effortWant) : '';
+			if (!effort) {
+				// 没派发。**不能用 fallbackReason 反推原因**：它只能回答「有没有失败」，
+				// 而空派发还有三种不报错的来源，各有各的原因 ——
+				//   · 「模型默认」：平台只在适配器给了 defaultEffort 时才物化档位，
+				//     公布了 efforts 却没有默认档的模型（pi-ai 未配 profile.reasoning）
+				//     照样落空，此时它明明公布了档位；
+				//   · 「跟随会话」：会话没主动选档位，或那个档位不在目标模型表里，
+				//     resolveEffort 的 follow() 都返回空且不报错；
+				//   · 「模型最低/最高」与具体档位：只有模型不公布档位表时才会落空。
+				// 故判据是**配置值的语义**（它决定 resolveEffort 走哪条分支），不是失败字段。
+				if (!want) return '';
+				if (d.fallbackReason) {
+					// 有失败原因（config-error / 超时 / 线路）：不断言原因，
+					// 否则会把「模型公布了档位但不支持你选的那个」说成「不公布档位」。
+					return T('flow.effortNone').replace('{want}', effortWantLabel(want));
+				}
+				// `@` 剥完为空与 `session` 同义（见 resolveEffort：`if (!v) return follow()`）。
+				const sym = want.charAt(0) === PG_EFFORT_PIN ? want.slice(1) : want;
+				const key = (sym === 'session' || sym === '') ? 'flow.effortNoneSession'
+					: sym === 'default' ? 'flow.effortNoneDefault'
+						: 'flow.effortNoneNoTable';
+				return T(key).replace('{want}', effortWantLabel(want));
+			}
+			// 括号只在需要对照时出现：符号值要解释「解析成了什么」，
+			// 而 `@high` 与裸 `high` 本身已经是答案，再加「设置：High」是冗余。
+			if (!Object.prototype.hasOwnProperty.call(PG_EFFORT_SYMBOL_LABELS, want)) return effort;
+			return T('flow.effortWithWant')
+				.replace('{effort}', effort)
+				.replace('{want}', effortWantLabel(want));
+		}
 
 		// ── 按名字模糊匹配并排序（照抄官方 ui-primitives 的 rankByName）────────────
 		// 官方 `rankByName` 不是「子串包含」，而是**大小写不敏感的有序子序列**匹配
@@ -3632,7 +3782,7 @@ window.__ModuleLoader__.load({
 
 		function ModelEffortPicker(props) {
 			// props: {
-			//   model, provider, effort    —— 用户**配置**的值（'' = 未配置 = 跟随会话）
+			//   model, provider, effort    —— 用户**配置**的值（effort 为空 = 未配置，生效的是宿主默认档）
 			//   effective                  —— 宿主下发的**实际生效** {model, provider, effort}
 			//   groups                     —— [{ id, name, models: [{ id, name, reasoning? }] }]
 			//   efforts                    —— 扁平档位表（模型自己的 reasoning 取不到时兜底）
@@ -3706,26 +3856,30 @@ window.__ModuleLoader__.load({
 			const reasoning = shownSel && shownSel.model.reasoning && typeof shownSel.model.reasoning === 'object'
 				? shownSel.model.reasoning : null;
 			const modelEfforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : [];
-			// 「指定」组的值带 `@` 前缀（见 PG_EFFORT_PIN）。显示与查名时都要剥掉，
-			// 否则面板会写出 `@max` 这种既不是档位名、也不是用户该看到的东西。
-			const effortBare = (v) => {
-				const s = String(v || '');
-				return s.charAt(0) === PG_EFFORT_PIN ? s.slice(1) : s;
-			};
 			const effortNameOf = (v) => {
 				if (!v) return '';
-				const id = effortBare(v);
-				// 符号档显示它自己的固定文案（「模型最高」），不是档位名 ——
-				// 「模型最高」跟着模型走，写死成某个模型的 `Max` 会在换模型后变成假话。
-				if (Object.prototype.hasOwnProperty.call(PG_EFFORT_SYMBOL_LABELS, v)) return T(PG_EFFORT_SYMBOL_LABELS[v]);
+				const s = String(v);
+				// 「指定」组的值带 `@` 前缀（见 PG_EFFORT_PIN），查档位表前必须剥掉，
+				// 否则永远查不到（表里是 `max`，配置里是 `@max`）。
+				const pinned = s.charAt(0) === PG_EFFORT_PIN;
+				const id = pinned ? s.slice(1) : s;
+				// 符号档（相对值）**不进档位表**：模型公布的末档常常就叫 `max`，
+				// 查表会把「模型最高」显示成那个模型的具体档位名 —— 两者在本模型上
+				// 恰好同档，换到档位表不同的模型就分道扬镳（相对 vs 钉住），
+				// 而配置里写的是前者。
+				if (!pinned && Object.prototype.hasOwnProperty.call(PG_EFFORT_SYMBOL_LABELS, s)) return effortWantLabel(s);
 				const hit = modelEfforts.find((e) => e.id === id) || flatEfforts.find((e) => e.id === id);
-				return hit && hit.name ? String(hit.name) : id;
+				// 查不到才回落 —— 那时 effortWantLabel 负责剥 `@` 与给出通用文案。
+				return hit && hit.name ? String(hit.name) : effortWantLabel(s);
 			};
 			// 与模型那一行同一条纪律：这一行回答「**我配了什么**」。
 			//
 			// 不能取 `props.effort || effective.effort`：`effective.effort` 是宿主下发的
 			// 会话当前档位，未配置时显示它，同一个全局设置项就会随对话漂移 ——
 			// 换个对话，它显示成另一个档位。没配置就写「跟随会话」，不写具体值。
+			//
+			// 「跟随会话」有两种来源，显示同一句话：显式配的 `session`（走
+			// PG_EFFORT_SYMBOL_LABELS 查文案），以及配置层真的为空（手改 config.json）。
 			const effortLabel = props.effort
 				? effortNameOf(props.effort)
 				: T('panel.autoEffortSession');
@@ -4241,7 +4395,7 @@ window.__ModuleLoader__.load({
 					onMouseMove: () => { if (highlighted !== idx) setHighlighted(idx); },
 					// 与模型 pane 同：鼠标离开就交还高亮（否则留下「白色印子」）。
 					onMouseLeave: onRowLeave,
-					onClick: () => choose({ reasoningEffort: v === '' ? null : v }),
+					onClick: () => choose({ reasoningEffort: v }),
 				},
 					React.createElement('span', { style: optionCopyStyle },
 						React.createElement('span', { style: modelNameStyle }, label)),
@@ -4261,7 +4415,7 @@ window.__ModuleLoader__.load({
 			// 顺序按**档位强弱由低到高**（最低 → 最高），与「指定」组（模型公布的档位表
 			// 本身就是升序：low → high → max）保持同一方向。
 			effortRows.push(effortGroupHeading('\u0000gh-common', T('panel.autoEffortGroupCommon')));
-			effortRows.push(effortOption('', T('panel.autoEffortSession')));
+			effortRows.push(effortOption(PG_EFFORT_SESSION, T('panel.autoEffortSession')));
 			effortRows.push(effortOption('default', T('panel.autoEffortDefault')));
 			effortRows.push(effortOption('min', T('panel.autoEffortMin')));
 			effortRows.push(effortOption('max', T('panel.autoEffortMax')));
@@ -4315,9 +4469,8 @@ window.__ModuleLoader__.load({
 					else target = rowRefs.current.model[navIndex];
 				} else {
 					// 配置的档位不在当前列表里（换了模型 / 指定档位失效）时**不**回退到 0 号：
-					// 那是「跟随会话」，焦点自动停上去再按回车就把 reasoningEffort 删了。
-					// 与模型 pane 的 navIndex 同一条纪律：没有对应项就把焦点交给浮层容器，
-					// 由 ↑↓ 进入列表（落点同样跳过「跟随会话」，见 menuKeyDown）。
+					// 焦点自动停上去再按回车就替用户改了配置。与模型 pane 的 navIndex
+					// 同一条纪律：没有对应项就把焦点交给浮层容器，由 ↑↓ 进入列表。
 					const at = effortList.indexOf(props.effort || '');
 					if (at >= 0) target = rowRefs.current.effort[at];
 				}
@@ -4359,12 +4512,12 @@ window.__ModuleLoader__.load({
 					if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
 					e.preventDefault();
 					// 进入列表的落点必须跳过「跟随会话」（模型 pane 的 0 号、推理等级 pane 的
-					// `''`）：那是**把配置删掉**的动作，不能作为焦点自动进入列表的第一站 ——
-					// 用户只是想把键盘挪进列表，不该在第一下按键后就把配置交出去。与 navIndex
-					// 的回退目标同一条纪律（见「高亮与选中是两个独立信号」）。
+					// `PG_EFFORT_SESSION`）：那是一个**改变现有配置**的动作，不能作为焦点自动
+					// 进入列表的第一站 —— 用户只是想把键盘挪进列表，不该在第一下按键后就把
+					// 配置交出去。与 navIndex 的回退目标同一条纪律（见「高亮与选中是两个独立信号」）。
 					const entry = pane === 'model'
 						? rows.findIndex((r) => r.kind === 'model')
-						: rows.findIndex((v) => v !== '');
+						: rows.findIndex((v) => v !== PG_EFFORT_SESSION);
 					if (entry < 0) return;
 					const next = e.key === 'ArrowDown' ? entry : rows.length - 1;
 					setHighlighted(next);
@@ -4388,7 +4541,7 @@ window.__ModuleLoader__.load({
 					if (row.kind === 'follow') choose({ model: null, provider: null });
 					else choose({ model: row.model.id, provider: row.provider });
 				} else {
-					choose({ reasoningEffort: row === '' ? null : row });
+					choose({ reasoningEffort: row });
 				}
 			};
 
@@ -6617,7 +6770,7 @@ window.__ModuleLoader__.load({
 								// ── 换模型后的推理等级：符号档不动，钉住的档位要看新模型支不支持 ──
 								//
 								// 三种设置的处置**不一样**，不能一律清空：
-								//   · 未配置 / 跟随会话（''）→ 跟着走，不用动；
+								//   · 未配置 / 跟随会话（'' 或符号值 `session`）→ 跟着走，不用动；
 								//   · 通用相对档（default / max / min）→ 相对值，换任何模型都成立，
 								//     **保留**。清空它等于替用户改成「跟随会话」，是没让他做的决定；
 								//   · 指定档（`@` + id）→ 钉住的是具体档位。新模型没这一档就必须处理，
@@ -6626,20 +6779,21 @@ window.__ModuleLoader__.load({
 								//     不是「最高」或「最低」：后两者会替用户做「更慢更贵」或「判断更弱」
 								//     的选择，而「模型默认」是唯一不表态的选项。
 								const curEffort = String(eff.reasoningEffort || '');
-								// 相对档（'' / default / max / min）一律保留：它们对任何模型都成立。
+								// 相对档（'' / session / default / max / min）一律保留：它们对任何模型都成立。
 								// 判据用 PG_EFFORT_SYMBOLS（从 PG_EFFORT_SYMBOL_LABELS 派生），
 								// 与显示侧同源 —— 加符号档时不会漏掉这里。
 								const isRel = !curEffort || PG_EFFORT_SYMBOLS.indexOf(curEffort) !== -1;
 								if (!isRel && curEffort.charAt(0) === '@') {
 									if (!nextModel) {
-										// ── 切回「跟随会话」：钉住的档位必须清掉 ──────────────────────
+										// ── 切回「跟随会话」：钉住的档位必须处理掉 ────────────────────
 										// 跟随会话意味着「模型由每个对话各自决定」，而定住的 `@max` 只对
 										// **某一个**模型有意义。留在配置里，用户换到任何不公布 max 的对话
 										// 都会让宿主 resolveEffort 报 config-error —— 而那时面板显示的是
 										// 「跟随会话」，看不出任何异常（又一次面板说谎）。
-										// 清成空（= 跟随会话）而不是 'default'：模型已经跟着对话走了，
-										// 档位也应当跟着对话走，这才是「跟随会话」的完整语义。
-										wantClear.push('reasoningEffort');
+										// 写成**显式的** `session` 而不是删键：模型已经跟着对话走了，档位也
+										// 应当跟着对话走，这才是「跟随会话」的完整语义；而删键现在的含义是
+										// 「用户没表态」，生效的是默认档（`min`），那会把档位钉死在最低档。
+										wantPatch.reasoningEffort = PG_EFFORT_SESSION;
 									} else {
 										// 新模型的档位表：从目录里按 (provider, model) 精确查 —— 查不到
 										// （目录没取到 / 模型不在目录里）就**不动**：没有依据时清空同样是
@@ -7451,6 +7605,10 @@ window.__ModuleLoader__.load({
 		// 为什么不复用「最近决策」面板：那是全局的、按时间倒序、且只在设置页里；
 		// 会话流里这一行要与**具体哪一步**对齐，才能回答「这次 AI 为什么这么干」。
 		const DECISION_KIND = 'permgate-auto';
+		// 轨迹页那一份必须用**不同的 kind**：`uc.events.register` 以 kind 为注册键，
+		// 同名会直接抛「already registered」。两份 Definition 认领同一个事件是合法的
+		// （match 不带 exclusive 时互不排斥），它们只是落到不同的 target。
+		const DECISION_TRAJECTORY_KIND = 'permgate-auto-traj';
 		const DECISION_RECORD = 'plugin:permgate/decision';
 		// via → 展示档位。四类在**颜色与措辞**上都要能分开：
 		// 放行是放宽（橙）、拒绝是收紧（灰蓝）、弃权与失败是「没问成模型」（红）。
@@ -7460,17 +7618,22 @@ window.__ModuleLoader__.load({
 			if (via === 'auto-escalate') return { k: 'escalate', color: '#c62828', key: 'flow.viaEscalate' };
 			return { k: 'fallback', color: '#c62828', key: 'flow.viaFallback' };
 		}
+		// 折叠态一句话讲清「谁、对什么、做了什么」。
+		// chat 行与轨迹行共用这一份：同一件事在两个视图里措辞不一致，排查时就得先
+		// 判断「是两回事还是同一个记录」，而它们本来就是同一条记录。
+		function decisionFlowHead(d) {
+			const meta = viaMeta(d.via);
+			return T(meta.key)
+				.replace('{tool}', String(d.tool || '?'))
+				.replace('{action}', T('flow.action.' + String(d.action || 'ask')))
+				.replace('{direct}', d.direct === true ? T('flow.directTag') : '');
+		}
 		function DecisionFlowRow(props) {
 			const node = (props && props.node) || {};
 			const d = node.data || {};
 			const meta = viaMeta(d.via);
 			const [open, setOpen] = React.useState(false);
-			const direct = d.direct === true;
-			// 折叠态一句话讲清「谁、对什么、做了什么」。
-			const head = T(meta.key)
-				.replace('{tool}', String(d.tool || '?'))
-				.replace('{action}', T('flow.action.' + String(d.action || 'ask')))
-				.replace('{direct}', direct ? T('flow.directTag') : '');
+			const head = decisionFlowHead(d);
 			return React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, margin: '2px 0' } },
 				React.createElement('div', {
 					style: { display: 'flex', alignItems: 'baseline', gap: 6, cursor: 'pointer', color: meta.color },
@@ -7479,13 +7642,20 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { style: { flex: '0 0 auto', opacity: 0.7 } }, open ? '▾' : '▸'),
 					React.createElement('span', null, head),
 					d.model ? React.createElement('span', { style: { color: 'rgba(128,128,128,0.85)', fontSize: 11 } }, d.model) : null,
+					// 实际派发的档位（模型自己的 id，如 low/high/max），样式与模型名同档。
+					// 只在实际派发过时显示：没派发是**异常**（降级或失败），
+					// 那种情况下展开态会说明原因，折叠态留空比画一个空的档位更好。
+					d.effort ? React.createElement('span', { style: { color: 'rgba(128,128,128,0.85)', fontSize: 11 } }, String(d.effort)) : null,
 				),
 				open ? React.createElement('div', {
 					style: { marginLeft: 16, marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(128,128,128,0.08)', border: '1px solid rgba(128,128,128,0.2)', color: 'rgba(128,128,128,0.95)' },
 				},
 					d.fallbackReason ? React.createElement('div', null, T('flow.why') + d.fallbackReason) : null,
 					d.modelReason ? React.createElement('div', null, T('flow.modelReason') + d.modelReason) : null,
-					d.risk ? React.createElement('div', null, T('flow.risk') + d.risk) : null,
+					d.risk ? React.createElement('div', null, T('flow.risk') + riskLabel(d.risk)) : null,
+					// 推理强度：与「模型判定风险」并列，回答「这次评审用哪个档位想」。
+					// 为空时整行不渲染（旧记录没有这两个字段，不能显示空行）。
+					effortFlowLabel(d) ? React.createElement('div', null, T('flow.effort') + effortFlowLabel(d)) : null,
 					d.ruleId ? React.createElement('div', null, T('flow.rule') + d.ruleId) : null,
 					d.rawOutput ? React.createElement('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, margin: '4px 0 0', opacity: 0.85 } }, d.rawOutput) : null,
 				) : null,
@@ -7536,10 +7706,120 @@ window.__ModuleLoader__.load({
 					{ name: 'conversation.chat.node', key: DECISION_KIND },
 					DecisionFlowRow,
 				));
+				// ③ 轨迹页：同一批记录在 `trajectory` target 上再认领一次。
+				//
+				// 为什么必须单独注册而不是「平台会自动兜底」：Definition 的 `target` 决定它
+				// 进哪张 Context 表（`contextsByTarget`），`buildNode` 第一行就按 target 过滤，
+				// 两个视图互相看不见。`ignorable` 记录又不在 session 的 surface 白名单
+				// （SURFACE_EVENT_TYPES）里，没有任何通用渲染器接住它 —— 会话流里能看到，
+				// 纯粹是因为上面 ① 自己认领了。
+				//
+				// 轨迹页唯一的 fallback 也指望不上：`dsh-client-ui-chat` 已经用
+				// `registerFallback` 占了那一个名额（target 还是 chat），而且 fallback 只在
+				// 「没有任何 Definition 匹配」时才触发，① 已经匹配上了，轮不到它。
+				registerDecisionTrajectory(uc);
 			} catch (e) {
 				// 注册失败不影响审批：这一行只是展示。
 				try { console.warn('[permgate] decision flow registration failed:', e && e.message ? e.message : e) } catch (e2) {}
 			}
+		}
+		// 轨迹页那一份 Definition。与 chat 的差别只在 target 和节点形状：
+		// 轨迹的 Builder 只认它自己那套 `data.kind`（`context` / `node` / `tool` / …），
+		// 把决策记录投影成 `context` 节点 —— 它会落在「输入」泳道（laneFor 把 context 归 0），
+		// 按 `location` 对齐到发生决策的那个 step，与它要回答的「这一步为什么被自动放行」一致。
+		//
+		// 为什么用 `context` 而不是造一个新 kind：轨迹页没有 per-row 的 slot 扩展点
+		// （`conversation.trajectory.images` 只给图片用），新增 kind 没有任何渲染器会认，
+		// 结果是这一行**静默消失**且无报错。复用 `context` 至少能保证它可见、可搜、可展开。
+		//
+		// 代价是它会被当成「上下文」类记录：标签显示「上下文」、详情走 markdown 渲染。
+		// 后者通过把正文包进代码块规避（模型原始输出里的 `*`/`#`/反引号不该被解析）。
+		function registerDecisionTrajectory(uc) {
+			if (typeof uc.events.register !== 'function') return;
+			uc.events.register({
+				kind: DECISION_TRAJECTORY_KIND,
+				target: 'trajectory',
+				match: (event) => {
+					if (!event || event.type !== DECISION_RECORD) return null;
+					return { id: String(event.seq), role: 'start' };
+				},
+				start: (_context, match) => {
+					const ev = match && match.event;
+					const d = (ev && ev.data) || {};
+					return {
+						// `kind: 'context'` 是**轨迹布局的分派键**，不是描述：layout() 里
+						// `node.kind === 'context'` 那一支才把它放进输入泳道，其余分支都不匹配
+						// 时节点会被静默丢弃（无报错、无日志）。缺这个字段整行就消失了。
+						kind: 'context',
+						seq: ev ? ev.seq : 0,
+						time: ev ? ev.time : 0,
+						// `source` 决定 producer 标签（contextProducer 按 kind 分支）。
+						// 这里给一个自造 kind：落到 default 分支显示该 kind 原文，
+						// 比冒充 `agent-instructions`（会显示成指令变更）诚实。
+						source: { kind: 'permgate-auto' },
+						// `form` 必须在 KNOWN_FORMS 里才会被 contextForm 采纳；`notice` 是
+						// 「宿主告知」那一档，与这条记录的性质相符。不在白名单时返回 null，
+						// 渲染退化成不透明的 JSON 折叠块 —— 那等于没显示。
+						form: 'notice',
+						content: decisionTrajectoryBlocks(d),
+						data: d,
+					};
+				},
+				update: (context) => context.state,
+				buildViewNode: (context) => {
+					const st = context.state;
+					if (!st) return null;
+					return {
+						key: context.key,
+						kind: DECISION_TRAJECTORY_KIND,
+						id: context.id,
+						target: 'trajectory',
+						anchorSeq: st.seq,
+						location: (context.start && context.start.location) || { kind: 'unresolved' },
+						data: { kind: 'node', node: st },
+					};
+				},
+			});
+		}
+		// 轨迹行的正文：拆成**两个 block** —— 首行一句话 + 明细。
+		//
+		// 为什么拆开：轨迹的折叠态只取第一个 text block（previewContent 取首段），
+		// 合成一段的话折叠行会把整份明细都摊出来，一屏就被审批记录占满。
+		// 拆开后折叠态只显示那句话，展开才看得到明细，与 chat 行的交互一致。
+		//
+		// 模型可控的文本（modelReason / rawOutput）一律进围栏：`isMarkdownRecord` 把
+		// context 判为 markdown 记录，详情面板会按 markdown 渲染 inputDetail，模型输出里
+		// 的 `#`/`*`/反引号不围起来就会把这条记录显示成格式错乱的正文。
+		// 宿主生成的那几行（model / ruleId / risk / fallbackReason）保持纯文本 ——
+		// 它们不含 markdown，包进代码块只会让中文按代码字体渲染，更难读。
+		function decisionTrajectoryBlocks(d) {
+			const head = { type: 'text', text: decisionFlowHead(d) }
+			const meta = []
+			if (d.model) meta.push(String(d.model))
+			if (d.ruleId) meta.push(T('flow.rule') + d.ruleId)
+			if (d.risk) meta.push(T('flow.risk') + riskLabel(d.risk))
+			// 与 chat 视图同一句（见 effortFlowLabel）：同一条记录在两个视图里
+			// 措辞不一致，排查时就得先判断「是两回事还是同一个记录」。
+			if (effortFlowLabel(d)) meta.push(T('flow.effort') + effortFlowLabel(d))
+			if (d.fallbackReason) meta.push(T('flow.why') + d.fallbackReason)
+			const fenced = []
+			if (d.modelReason) fenced.push(T('flow.modelReason') + d.modelReason)
+			if (d.rawOutput) fenced.push(T('flow.raw') + String(d.rawOutput))
+			const detail = []
+			if (meta.length > 0) detail.push(meta.join('\n'))
+			if (fenced.length > 0) detail.push(fenceCode(fenced.join('\n')))
+			if (detail.length === 0) return [head]
+			return [head, { type: 'text', text: detail.join('\n\n') }]
+		}
+		// 围栏长度必须**超过内容里最长的一段反引号**：固定写三个反引号时，
+		// 模型输出里自带一行 ``` 就会提前闭合代码块，后半段重新变成 markdown。
+		// CommonMark 的规则是「至少 3 个、且多于内容中最长的反引号串」，照此实现。
+		function fenceCode(text) {
+			let longest = 0
+			const runs = String(text).match(/`+/g)
+			if (runs) for (const run of runs) if (run.length > longest) longest = run.length
+			const mark = '`'.repeat(Math.max(3, longest + 1))
+			return mark + '\n' + text + '\n' + mark
 		}
 
 		function apply(ctx) {
@@ -7612,6 +7892,30 @@ window.__ModuleLoader__.load({
 				{ name: 'settings.section', id: 'permgate', order: 30, label: () => T('settings.title') },
 				Panel,
 			));
+			// 导航图标：DSH 0.2.2 起平台开了 `settings.section.icon` 槽（list 型，按 id 匹配
+			// 到对应的 section；未注册时平台回落到它自己的齿轮）。
+			//
+			// `slots.inject(key, cb)` 的语义是「槽声明后才执行 cb」，槽不存在时**静默等待**
+			// 而非抛错 —— 所以旧版平台上 cb 永不执行，pgNavIconViaSlot 保持 false，
+			// 下面的 DOM 兼容层照常接管。新版上 cb 执行，兼容层随即停手。
+			//
+			// 两者并存不是冗余：兼容层靠 MutationObserver 认文本、打标记、CSS 换图标，
+			// 在 0.2.2 上虽然也能工作，但依赖 `[role="dialog"] nav button` 这种结构选择器，
+			// 平台一改版就静默失效。槽位是稳定契约，能走就走。
+			try {
+				slots.inject('settings.section.icon', () => {
+					// 回调被调用 === 槽位存在。在这里置位，让 DOM 兼容层从下一次扫描起停手；
+					// 扫描是 MutationObserver + rAF 驱动的，置位后最多晚一帧就清干净。
+					pgNavIconViaSlot = true;
+					try { if (typeof pgRescan === 'function') pgRescan(); } catch (e) {}
+					return slots.register(
+						{ name: 'settings.section.icon', id: 'permgate' },
+						PG_NAV_SVG,
+					);
+				});
+			} catch (e) {
+				// register 失败（例如 id 冲突）只丢图标，不影响设置页本身。
+			}
 			// conversation.composer.dock 不再注册：那里的分类徽标（DockBar）已删除，
 			// 理由见其原位置留下的注释（DSH 0.1.7 起该槽位与原生 ContextMeter 同处一个
 			// 横向 flex 行，徽标无法独占一行；且徽标只是只读展示，删除不损失功能）。

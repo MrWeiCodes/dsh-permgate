@@ -18,6 +18,9 @@ import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, se
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
+// 消息 id：assistant 轮属于 dsh-llm 的 `Message`（不是无身份的 `RequestUserInput`），
+// 契约要求带 `id`。只用来满足契约，不参与任何判定。
+import { randomUUID } from 'node:crypto'
 // 工作区外访问拆成读 / 写两道闸。**键名与显示名不一致是有意的**：
 //   · 写闸复用老键 `directory`（显示名「工作区外写入」）—— 存量配置的 mode 与例外列表
 //     才能原地留在写闸上。若新建 outsideWrite 又不写迁移，buildConfig 的 `for (const c of CATS)`
@@ -1046,6 +1049,10 @@ export default {
     const upgradedCalls = new Map()
     // 客户端最近请求的语言（zh/en），用于宿主即时文案（弹窗标签、升级审批提示）
     let uiLang = 'zh'
+    // 客户端是否**报过**语言。与 `uiLang` 分开是因为「没报过」与「报的是中文」
+    // 是两件事：纯 CLI 会话一次 `/permgate/*` 请求都不发，`uiLang` 恒为上面的初值，
+    // 那时只能去读 DSH 自己的语言偏好（见 reviewReasonLang）。
+    let uiLangFromClient = false
     // 例外爆炸半径的**按模式文本记忆化**（statusView 每次都要现算，而例外文本无长度上限）。
     //
     // 为什么需要：exceptionBlast 对每条 allow 例外最多做 2 次 decomposeCommand（两门方言）
@@ -1687,7 +1694,9 @@ export default {
       // 在这里加白名单只会把「将来适配器新增的档位」挡在门外，而那是 fail-closed 到 ask
       // 的路径上的一次静默降级 —— 与本文件其它「保留未知值、交给读取侧判定」的口径一致。
       //
-      // 空串**不落键**（= 跟随会话）：与 provider/model 同一条纪律，只承载用户显式写下的值。
+      // 空串**不落键**：与 provider/model 同一条纪律，只承载用户显式写下的值。
+      // 注意它**不等于**「跟随会话」—— 跟随会话是符号值 `session`，会落到这里并被保留；
+      // 空串/缺键表示用户没表态，生效的是 AUTO_REVIEW_DEFAULTS.reasoningEffort。
       if (typeof raw.reasoningEffort === 'string' && raw.reasoningEffort.trim()) out.reasoningEffort = raw.reasoningEffort.trim().slice(0, 50)
       return Object.keys(out).length ? out : null
     }
@@ -5544,6 +5553,38 @@ export default {
           ? d.rawOutput.slice(0, RAW_OUTPUT_MAX) + '…[truncated ' + (d.rawOutput.length - RAW_OUTPUT_MAX) + ' chars]'
           : d.rawOutput
       }
+      // 格式重试：只在**真的重试过**时落键（值为次数）。缺键 = 一次就得到结论。
+      //
+      // 为什么必须记：协议错落进决策记录时，光看 `protocol-error` 分不清
+      // 「模型偶尔手滑」（重试一次就好了）与「模型根本不会这个协议」（两次都错）——
+      // 前者不用管，后者说明该换模型或该改策略。两者的处置完全相反。
+      //
+      // `firstRaw` 同样只在重试过时存在：模型第一次吐的原文是排查协议错的
+      // 唯一直接证据，第二次成功也不该把它覆盖掉。
+      if (typeof d.retries === 'number' && d.retries > 0) {
+        rec.retries = d.retries
+        // 两类重试分开记：`formatRounds > 0` = 追问过格式，
+        // `contradictionRetry > 0` = 因矛盾重做过。它们的处置含义完全不同 ——
+        // 前者说明模型不会写这个格式，后者说明它对这类调用的分级不稳定。
+        if (typeof d.formatRounds === 'number' && d.formatRounds > 0) rec.formatRounds = d.formatRounds
+        if (typeof d.contradictionRetry === 'number' && d.contradictionRetry > 0) rec.contradictionRetry = d.contradictionRetry
+        if (typeof d.firstRaw === 'string' && d.firstRaw) {
+          rec.firstRaw = d.firstRaw.length > RAW_OUTPUT_MAX
+            ? d.firstRaw.slice(0, RAW_OUTPUT_MAX) + '…[truncated ' + (d.firstRaw.length - RAW_OUTPUT_MAX) + ' chars]'
+            : d.firstRaw
+        }
+        if (d.firstDetail) rec.firstDetail = String(d.firstDetail)
+      }
+      // 推理强度：`effortWant` 是配置原值，`effort` 是实际派发的档位。
+      //
+      // 为什么必须在记录里：`resolveEffort` 在模型不公布档位表时把 `min`/`max`/`session`
+      // 一律解析成空串（不传、不报错），面板写着「模型最低」而实际什么都没传。那个
+      // 不一致此前**没有任何可观测面** —— `config-error` 只覆盖具体档位不被支持的情形。
+      //
+      // `effort` 为空时不落键（与其它「只在有值时写入」的字段同口径）；
+      // `effortWant` 恒落键：它为空就分不清「跟随会话」与「没有这个字段」。
+      if (d.effort) rec.effort = String(d.effort)
+      if (d.effortWant) rec.effortWant = String(d.effortWant)
       decisions.push(rec)
       if (decisions.length > MAX_DECISIONS) decisions.splice(0, decisions.length - MAX_DECISIONS)
     }
@@ -5613,6 +5654,33 @@ export default {
         if (d.cancelled) rec.cancelled = true
         // 模型给出的风险等级：auto-allow / auto-deny 才有，用于事后统计「模型把什么判成高风险」。
         if (d.risk) rec.risk = String(d.risk)
+        // 格式重试：只在**真的重试过**时落键（值为次数）。缺键 = 一次就得到结论。
+        //
+        // 为什么必须记：协议错落进决策记录时，光看 `protocol-error` 分不清
+        // 「模型偶尔手滑」（重试一次就好了）与「模型根本不会这个协议」（两次都错）——
+        // 前者不用管，后者说明该换模型或该改策略。两者的处置完全相反。
+        //
+        // `firstRaw` / `firstDetail` 同样只在重试过时存在：模型第一次吐的原文是
+        // 排查协议错的唯一直接证据，第二次成功也不该把它覆盖掉。
+        //
+        // 两类重试分开记，与 recordDecision 同口径：`retries` 是两类合计，单看它
+        // 答不了「偶尔手滑 vs 根本不会协议」—— `formatRounds` 是追问格式的次数，
+        // `contradictionRetry` 是因矛盾重做的次数，后者说明模型对这类调用的分级不稳定。
+        // 落盘日志是重启后唯一的审计通道（内存 decisions 重启即失），缺了这两个键，
+        // 「一次矛盾重做」与「一次格式手滑」在日志里完全同形。
+        if (typeof d.retries === 'number' && d.retries > 0) {
+          rec.retries = d.retries
+          if (typeof d.formatRounds === 'number' && d.formatRounds > 0) rec.formatRounds = d.formatRounds
+          if (typeof d.contradictionRetry === 'number' && d.contradictionRetry > 0) rec.contradictionRetry = d.contradictionRetry
+          const fr = clip(d.firstRaw)
+          if (fr) rec.firstRaw = fr
+          if (d.firstDetail) rec.firstDetail = String(d.firstDetail)
+        }
+        // 推理强度：与 recordDecision 同口径（两条存储必须逐字段一致，否则
+        // 「最近决策」面板与会话流里同一条记录会显示不同内容）。
+        // `effort` 为空 = 这次没派发档位；`effortWant` 恒落键，它是配置侧的原值。
+        if (d.effort) rec.effort = String(d.effort)
+        if (d.effortWant) rec.effortWant = String(d.effortWant)
         appendRecord(session, DECISION_RECORD_TYPE, rec)
       } catch (e) {
         // 审计写失败不影响审批结果。留一条 warn 而不是静默：它一旦长期失败（例如平台改签名），
@@ -6151,6 +6219,23 @@ export default {
       'Use "escalate" only when you genuinely cannot decide — never guess.',
     ].join('\n')
 
+    // ── 理由语言：策略恒为英文，只有 `reason` 跟界面语言走 ──────────────────────
+    // `reason` 的全部消费点都是**给人看**的界面（决策记录的会话行与轨迹行、
+    // 审批弹窗的 `modelReason`），它从不回传主模型 —— `toolView` 会把它剥掉。
+    // 故它跟界面语言走，而不是跟策略语言走。
+    //
+    // 只**追加一句**、不改主策略，两条理由：
+    //   ① `REVIEW_POLICY` 的英文措辞有实测基线（见 test/smoke.mjs 的 A49 组），
+    //      整份翻译成中文后那条基线作废，而中文版的判定质量在本仓无法验证；
+    //   ② 中文版里那 9 行 JSON 形态清单**必须原样保留英文** —— `parseReviewDecision`
+    //      校验的是 `low/medium/high` × `allow/deny/escalate` 这几个英文值域，
+    //      模型若照着中文示意输出键名，每次自动审批都会变成协议错、全部退化成弹窗，
+    //      而且只在真模型上暴露，mock 测试发现不了。
+    const REVIEW_REASON_LANG_CLAUSE = {
+      en: '\nWrite the reason field in English.',
+      zh: '\nWrite the reason field in Simplified Chinese (简体中文).',
+    }
+
     // ── 参数的结构限制（不是脱敏）────────────────────────────────────────────
     // 只做一件事：防止「一份巨大参数把请求撑爆」。深度/数组/键数/单串长度都有上限，
     // 超出部分截断并标注。这与信任无关，纯粹是请求体积的硬保护，故不可关。
@@ -6349,8 +6434,24 @@ export default {
       }
       const risk = obj.risk
       const decision = obj.decision
-      if (REVIEW_RISKS.indexOf(risk) === -1) return { ok: false, code: 'protocol-error', detail: 'invalid risk' }
+      // ── 顺序有约束：**先 decision，后 risk** ─────────────────────────────────
+      // 两者都非法时，报出来的 detail 决定这条输出能不能被追问（判据见
+      // RETRYABLE_PROTOCOL_DETAILS：错落在 `decision` 上的不追问）。
+      // 先查 risk 的话，`{"risk":"critical","decision":"block"}` 会报 `invalid risk`，
+      // 而它的 decision 同样非法 —— 追问「只改 risk 不改判断」时模型仍要动 decision，
+      // 于是 `invalid risk` 这条本应安全的 detail 也成了引导改结论的通道。
+      // 先查 decision 则保证：凡是报到 `invalid risk` 的输出，decision 已经通过枚举校验。
+      // 但「有解」不等于「可以追问」—— `allow` 配上表外风险标签是**矛盾**而不是格式错，
+      // 故那里按 code 分流（见下方 risk 校验处），只有 deny/escalate 落到这个 detail。
       if (REVIEW_DECISIONS.indexOf(decision) === -1) return { ok: false, code: 'protocol-error', detail: 'invalid decision' }
+      if (REVIEW_RISKS.indexOf(risk) === -1) {
+        // `allow` 配上无法解析的风险标签，与 `high with non-deny` 是同一种矛盾：
+        // 模型放行了，而它给的风险词落在三档之外（比 `high` 更高，或只是大小写写歪）。
+        // `allow` 的合法 risk 只有 `low`/`medium`，故追问「不要改判断，只改格式」时，
+        // 唯一能保住 `allow` 的解就是把风险标签降下来 —— 那是在引导下放宽。
+        // `deny`/`escalate` 不受此限：换任意合法 risk 都仍是拒绝/存疑，追问不动结论。
+        return { ok: false, code: decision === 'allow' ? 'contradiction' : 'protocol-error', detail: 'invalid risk' }
+      }
       const hasReason = Object.prototype.hasOwnProperty.call(obj, 'reason')
       // 形态校验（与 REVIEW_POLICY 声明的形态一一对应）：
       //   low    → 只能 allow
@@ -7111,8 +7212,9 @@ export default {
 
     // ── 推理强度：把设置值解析成**该模型真正接受**的档位 ─────────────────────────
     // 设置值有三种形态：
-    //   · 四个符号值（'' 跟随会话 / 'default' 模型默认 / 'max' 模型最高 / 'min' 模型最低）——
-    //     它们描述的是「相对于这个模型取哪一档」，故必须拿到模型的 efforts 表才能解析；
+    //   · 四个符号值（'session' 跟随会话 / 'default' 模型默认 / 'max' 模型最高 /
+    //     'min' 模型最低）—— 它们描述的是「相对于这个模型取哪一档」，故必须拿到模型的
+    //     efforts 表才能解析；
     //   · `@` + 档位 id —— **钉住**某个具体档位（面板「指定」组存的就是这个形态）。
     //     为什么需要它：模型公布的末档常常就叫 `max`，与「模型最高」的符号值同名。
     //     二者派发出去是同一个档位，但**配置语义不同** —— 「模型最高」跟着模型走
@@ -7156,7 +7258,8 @@ export default {
         const s = typeof sessionEffort === 'string' ? sessionEffort.trim() : ''
         return { effort: s && efforts.some((e) => e.id === s) ? s : '' }
       }
-      // 空 = 跟随会话。（`@` 剥完为空也走这里：用户没指定任何档位，等同跟随会话。）
+      // 空 = 跟随会话（手改配置留下的空串，与缺键同义）。（`@` 剥完为空也走这里：
+      // 用户没指定任何档位，等同跟随会话。）
       if (!v) return follow()
       // 符号值只在**没加前缀**时才解释。带了 `@` 的 `@max` 必须按具体档位处理，
       // 否则「指定 max」会被误解成「模型最高」，换模型后行为就变了。
@@ -7209,7 +7312,146 @@ export default {
     // **本函数不抛异常**：所有失败都折成 escalate 返回值。理由：它是判定链上的一环，
     // 抛出去会打断 pre-execute 的主流程，而那条路径的 catch 是 fail-safe 的 deny ——
     // 那会让「模型超时」变成「直接拒绝」，比按 autoFallback 处理更糟。
-    async function reviewWithModel(exec, d, agent, signal) {
+    // ── 评审失败的重试策略 ───────────────────────────────────────────────────────
+    // 两类失败的正确处置**不同**，这是本段存在的唯一理由：
+    //
+    // 【格式错】模型还没有可信结论，或结论的**标签**写歪了。此时把它的输出放回上下文、
+    //   追加一句要求修正 —— 这是**帮它表达**。只对「不改 `decision` 就能写出合法形态」的错成立，
+    //   判据与残留风险都写在 RETRYABLE_PROTOCOL_DETAILS 上方。
+    //   ⚠️ **不能理解成「结论方向必然不变」**：修正轮会把原文塞回上下文（见 reviewWithModel
+    //   里的 `extra`），原文里已经写下的结论会再进一次模型视野，它可能顺手改掉 `decision`
+    //   而不是只补语法。
+    //
+    // 【矛盾】`high + allow`（以及 `allow` 配上三档之外的风险标签）：模型自己的分级
+    //   与结论没对齐，这一次的判断**不可信**。
+    //   此时**不能**追问 —— 追问等于指出矛盾并要求复查，而 medium 对 decision 没有限制，
+    //   合法改法里既有收紧的（high+deny）也有放宽的（medium+allow），模型倾向配合，
+    //   多半选后者，那就是**在引导下放宽**。正确做法是**全新重做一次**：模型看不到第一次
+    //   的输出，第二个结论是独立采样，无论宽严都可直接采纳。
+    //
+    // 其余失败不重试：
+    //   · `duplicate top-level member` / `review output too deeply nested` ——
+    //     构造过的输出，重采样不会改变，重试只会换个构造方式；
+    //   · `last block is not text` / `expected exactly one text block` /
+    //     `non-reasoning block before text` —— 块结构问题，重试大概率同样；
+    //   · `infra-error` —— 线路故障，已由超时管；
+    //   · `escalate` / `breaker` / `config-error` —— 都不是格式问题。
+    //
+    // 白名单而不是黑名单：新出现的失败形态默认**不重试**（保守），要重试必须显式列出。
+    //
+    // ⚠️ 判据只有一条：**这个错是不是落在 `decision` 上**。
+    //   追问会把模型自己的输出塞回上下文，再追加 formatRepairPrompt（「不要改判断，只改格式」）。
+    //   错落在 `decision` 上时，这句话自相矛盾：`decision` 就是结论本身，修它必然要模型
+    //   重新选一个结论 —— 而它倾向配合用户，选出来的多半是 allow，于是直接放行、无人在环。
+    //   错落在别的字段上时，报错把模型指向那个字段，结论不必动。
+    //
+    //   「落在 decision 上」有两种成因，判据相同：
+    //   · `decision` 的值不在枚举里（`invalid decision`）—— 模型必须重新选一个；
+    //   · `decision` 合法但与 `risk` 冲突（`low with non-allow` / `high with non-deny`，
+    //     以及 `allow` 配上三档之外的 `risk`）——
+    //     改哪一个都是在改判断，而提示语无法指定改哪一个。前两条的两个值本身都合法；
+    //     第三条里 `risk` 非法，但 `allow` 只接受 `low`/`medium`，保住它的唯一解是把
+    //     风险标签降下来 —— 那同样是在引导下放宽。
+    //
+    //   注意别用「有没有不动 `decision` 的合法解」当判据：`low + deny` 有 `medium + deny`
+    //   这类解，按那条判据该重试，但它的 `decision` 是被 `risk` 否决的那个字段，追问只
+    //   会把它往 `allow` 推 —— 判据必须看**报错指向谁**，不是看解集存在性。
+    //
+    //   据此分三类，只有前两类可以进白名单：
+    //   · **没有可解析的结论**（`empty output` / `invalid JSON` / `not a single object`）——
+    //     模型没吐出可解析的裁决。这三条的残留风险不同，不能一概说成「没有被引导的对象」：
+    //     `empty output` 的 `raw` 是空串，`reviewWithModel` 走空输出分支、不塞 assistant 轮，
+    //     确实没有可被引导的对象；另外两条的 `raw` 是模型吐的原文，会被原样塞回，
+    //     于是原文里已经写下的结论（`{"risk":"low","decision":"deny"` 缺个右括号）会再进一次
+    //     上下文 —— 模型可能顺手把 `decision` 改成 `allow` 而不是补齐语法，那同样直接放行。
+    //     仍然接受这个风险：与下面第三类不同，这里「不改结论」**确实有解**（补上语法即可），
+    //     提示语与协议不冲突，没有逼模型在「改格式」与「改结论」之间二选一；而模型自己的
+    //     意图文本就在上下文里，可以重读后照原意补全。另一头是移出白名单的代价：这类语法
+    //     手滑是最常见的一种，全部退回弹窗等于把「帮它表达」这半条功能砍掉。两害相权取前者：
+    //     它的失效需要一个额外条件（模型主动改写 `decision`），而后者是每次都发生的功能损失。
+    //   · **错在别的字段**（`invalid risk` / `reason not a string`）——
+    //     `invalid risk` 报错时 `decision` 已经通过枚举校验（见 parseReviewDecision 里两条
+    //     校验的顺序），且只有 `deny`/`escalate` 会走到这个 detail：换任意合法 risk 都
+    //     仍是拒绝/存疑，结论不动。`allow` + 表外 risk 由 parseReviewDecision 直接报
+    //     `contradiction`（见第三类）；`reason not a string` 只需改旁注。两者都不必动结论。
+    //   · **错落在 `decision` 上**（`invalid decision` / `low with non-allow` /
+    //     `high with non-deny` / `allow` + 表外 `risk`）——
+    //     一律不收，退回人工弹窗（escalate → autoFallback）。三条形态的合法解不同，
+    //     但都属于「模型必须重新选结论」：
+    //     · `invalid decision`：单字段合法解完全由 `risk` 决定 —— `low + block` 只有
+    //       `low + allow` 一个（放行），`medium + block` 有 allow / deny / escalate 三个，
+    //       `high + block` 只有 `high + deny`（拒绝），`critical + block` 一个也没有
+    //       （`risk` 也非法，得同时改两个字段）。四档的走向并不一致：`low` 唯一解是
+    //       放行，`high` 唯一解是拒绝，`medium` 三态任选，`critical` 无解。
+    //     · `low with non-allow` / `high with non-deny`：`decision` 合法但被 `risk` 否决。
+    //       改 `decision` 一步即可通过：`low + deny` → `allow`（放行）、`low + escalate`
+    //       → `allow`（放行）、`high + escalate` → `deny`。改 `risk` 未必更宽，但要求
+    //       模型主动抬风险等级（`low + deny` 抬到 `medium` 或 `high` 都合法，
+    //       `low + escalate` 只能抬到 `medium`），而报错指向 `decision` 一侧，
+    //       提示语又说「不要改判断」—— 两个信号冲突时模型倾向就地改 `decision`，
+    //       在 `low` 档那一步恰好是放行。是否重试取决于报错指向谁，不看解集宽严。
+    //     · `allow` + 表外 `risk`：`allow` 的合法 risk 只有 `low`/`medium`，保住
+    //       `allow` 的唯一解是把风险标签降到这两档 —— 追问等于要求它降低自己给出的
+    //       风险等级，那正是「在引导下放宽」，故按矛盾走全新重做。
+    //
+    //   以后往白名单里加新 detail 时，先看它指向 `decision` 本身还是别的字段。
+    //   指向 `decision` 的一律不进 —— 那等于让模型重答一次问题。
+    const RETRYABLE_PROTOCOL_DETAILS = [
+      'empty output',
+      'invalid JSON',
+      'not a single object',
+      'invalid risk',
+      'reason not a string',
+    ]
+    function isFormatError(rv) {
+      if (!rv || rv.code !== 'protocol-error') return false
+      return RETRYABLE_PROTOCOL_DETAILS.indexOf(String(rv.detail || '')) !== -1
+    }
+    // 矛盾单独一类：走「全新重做」，不走多轮。
+    function isContradiction(rv) {
+      return !!rv && rv.code === 'contradiction'
+    }
+
+    // ── 重试轮次上限 ─────────────────────────────────────────────────────────────
+    // 格式修正最多 2 轮（共 3 次调用）：第一轮是首评，之后两次机会改格式。
+    // 取 2 而不是 1 或 3：
+    //   · 1 轮对「模型只是忘了加引号」这类手滑太紧，实测中这类错误第二次就对了；
+    //   · 3 轮以上收益趋零（若两次都写不对，多半是它根本不会这个协议），
+    //     而每多一轮就多一次完整调用（含材料组装与派发）。
+    const AUTO_REVIEW_MAX_FORMAT_ROUNDS = 2
+    // 总调用数硬上限（首评 + 格式 2 轮 + 矛盾重做 1 次 = 4）。这个数字是**兜底**：
+    // 上面两个分支各自已有界，这里是防止日后加新分支时忘了算总数。
+    // 它与超时预算共同构成「最坏等待」的上界 —— 预算共用，故调用次数多不等于等得久。
+    const AUTO_REVIEW_MAX_CALLS = 4
+
+    // 格式修正的追加指令。**只讲格式，不讲结论**：任何「你觉得该怎样」的暗示
+    // 都会把一次格式修正变成一次引导，而引导的方向是模型配合用户。
+    //
+    // 用英文写：与 REVIEW_POLICY 同语言，避免同一请求里 system（英文）与
+    // 这段修正指令（中文）混排 —— 那会让模型把这段当成「另一个说话人」的要求。
+    // 附上它自己违规的具体原因（`detail`），比只说「格式不对」更有效：
+    // `invalid risk` 与 `not a single object` 需要的修正完全不同。
+    function formatRepairPrompt(detail) {
+      const why = String(detail || 'the output did not match the required schema')
+      return 'Your previous reply could not be used: ' + why + '.\n'
+        + 'Reply again with exactly one JSON object and no other text, using only the shapes listed '
+        + 'in the system prompt. Do not change your assessment; only fix the format.'
+    }
+
+    // 一次评审调用（不含重试）。拆出来的理由：重试要复用**整个**发起流程
+    // （含 prepareCall、超时竞速、块结构校验），在外面复制一份必然漂移。
+    //
+    // `budget` 由调用方（reviewWithModel）创建并在多次尝试之间**共用** ——
+    // 见 reviewWithModel 里对「重试不重置超时预算」的说明。本函数只负责
+    // 在这份预算上竞速，自己**不建定时器、也不清理它**（那是调用方的事：
+    // 它要在重试之间保留同一个定时器）。
+    //
+    // `extraMessages` 是**追加在审查材料之后**的对话轮次（格式错修正用）：
+    // 空数组 = 首轮，与改动前的请求逐字相同。格式修正轮里它形如
+    // `[assistant: 模型上一次的输出, user: 修正要求]`。
+    async function attemptReview(exec, d, agent, budget, extraMessages) {
+      const modelSignal = budget.modelSignal
+      const MODEL_TIMEOUT = budget.MODEL_TIMEOUT
       // ① 熔断：已触发就不再问模型（省一次调用，且避免「模型持续乱拒」时反复烧钱）
       if (autoBreakerTripped(exec)) {
         return { verdict: 'escalate', code: 'breaker', detail: 'consecutive denies reached the configured threshold' }
@@ -7222,34 +7464,6 @@ export default {
       const override = { provider: autoReviewSetting('provider'), model: autoReviewSetting('model') }
       const target = reviewTarget(agent, override)
       if (!target) return { verdict: 'escalate', code: 'infra-error', detail: 'no model available' }
-      // ── 模型等待超时：**这里必须自己兜，外层兜不住**────────────────────────────
-      // 本函数跑在 `tools/pre-execute` 里，而宿主 `dsh-tool-call-timeout-policy` 的超时
-      // 挂在 `tools/execute`（该包 lib/index.js:116），后者由 dsh-tools 的
-      // `dispatchScheduledExecution` 在 **pre-execute 之后**才进入
-      // （dsh-tools lib/index.js:3321 是 pre-execute，:3427 才是 tools/execute）。
-      // 也就是说：pre-execute 挂住时，外层的 deadline **从未被创建**，声明
-      // `defineTool({ timeoutMs })` 对本阶段完全无效（已实测：工具声明了 timeoutMs，
-      // 但 pre-execute 不返回时外层定时器根本没启动）。
-      //
-      // 故超时由本函数自己管：`AbortSignal.timeout` 只负责通知 provider 停，
-      // 真正让 `await` 返回的是下面那个 Promise 竞速。
-      //
-      // `AbortSignal.any` / `.timeout` 需要 Node ≥ 20.3 / 17.3；宿主 DSH 自身与
-      // dsh-timeout（lib/index.js:68）已在用 `AbortSignal.any`，故这里不引入新下限。
-      const modelAbort = new AbortController()
-      const modelSignal = signal
-        ? AbortSignal.any([signal, modelAbort.signal])
-        : modelAbort.signal
-      const MODEL_TIMEOUT = Symbol('auto-review-model-timeout')
-      let clearTimer = () => {}
-      const timeout = new Promise((resolve) => {
-        // 用 ctx.timer（不是裸 setTimeout）：插件卸载/上下文销毁时 cordis 会连带清掉
-        // 这个定时器，不留一个在已销毁的闭包里跑的回调。
-        clearTimer = ctx.timer.setTimeout(() => {
-          try { modelAbort.abort(new Error('auto review model timeout')) } catch (e) {}
-          resolve(MODEL_TIMEOUT)
-        }, AUTO_REVIEW_MODEL_TIMEOUT_MS)
-      })
       // ── 推理强度：用 `prepareCall` 的 configure 回调拿该模型的能力表 ────────────
       // 为什么不用 `resolveModelInfo` 再自己拼请求：那要多一次调用，而且拿到的元数据
       // 与**真正派发**的那次调用之间隔着一次适配器注册变更（HMR 可以插在中间），
@@ -7264,6 +7478,10 @@ export default {
       try {
         const wantEffort = autoReviewSetting('reasoningEffort')
         const sessEffort = sessionEffortOf(agent)
+        // `resolveEffort` 把空串当「跟随会话」（`if (!v) return follow()`），记录侧同口径：
+        // 两边对同一个配置值给出不同的名字，事后就无法从记录反推当时的判定。
+        // 正常路径下走不到这里 —— normalizeAutoReview 丢弃空串、autoReviewSetting 回落默认值。
+        budget.dispatchWant = wantEffort || 'session'
         let effortProblem = ''
         // ── prepareCall 只传**路由与控制项**，请求体留到派发时合并 ──────────────────
         // 平台的 `prepareCall` 会把 controls 做 `structuredClone`（它要 freeze 一份与
@@ -7282,9 +7500,31 @@ export default {
           // temperature 0：判定要可复现，不要创造性
           temperature: 0,
         }
+        // ── 修正轮的 assistant 历史必须满足 `RequestMessage` 契约 ─────────────────
+        // 格式修正轮会把模型上一次的输出作为 assistant 轮塞回上下文（见 reviewWithModel
+        // 里的 `extra`）。那个轮次必须在这里被投影成真正的 `Message`：dsh-llm 的
+        // `LlmRuntime.forAdapter` 对每条 assistant 消息读 `message.source.replayState`，
+        // `source` 缺失时抛 TypeError，被 `adapterStream` 折成 finish(error) —— 表现为
+        // `reviewer ended with error UNKNOWN` 的 infra-error，于是格式修正轮**永远到不了
+        // provider**（假 llm 桩不复刻这层投影，故只在真实宿主上暴露）。
+        //
+        // `source` 指向**本次派发的 target**：适配器据它判断历史消息的路由归属
+        // （`forAdapter` 用 source.provider 查适配器，跨适配器时据此剥掉 replayState）。
+        // `id` 是 Message 的必填身份，只用于满足契约，不参与判定。
+        //
+        // 补齐放在请求组装处而不是产出 `extra` 的那层：只有这里知道本次的 target。
+        const withAssistantSource = (m) => (m && m.role === 'assistant'
+          ? Object.assign({
+            id: randomUUID(),
+            source: { kind: 'model', provider: target.provider, model: target.model },
+          }, m)
+          : m)
         const body = {
-          system: REVIEW_POLICY,
-          messages: [{ role: 'user', content: [{ type: 'text', text: reviewUserText(exec, d, agent) }] }],
+          // 策略恒为英文，末尾按界面语言追加一句「reason 用哪种语言写」。
+          // 为什么只追加这一句而不是整份翻译：见 REVIEW_REASON_LANG_CLAUSE 的注释。
+          system: REVIEW_POLICY + REVIEW_REASON_LANG_CLAUSE[reviewReasonLang()],
+          messages: [{ role: 'user', content: [{ type: 'text', text: reviewUserText(exec, d, agent) }] }]
+            .concat((extraMessages || []).map(withAssistantSource)),
           // 宿主 signal 与本地超时并集：两者任一触发都要停。
           signal: modelSignal,
         }
@@ -7298,9 +7538,13 @@ export default {
           // configure 里报的「不支持」不会让 prepareCall 抛（它只做能力校验与默认物化），
           // 故在此主动折成异常 —— 否则会带着「面板写着 high、实际没传」的配置派发出去。
           if (effortProblem) {
-            clearTimer()
             return { verdict: 'escalate', code: 'config-error', detail: effortProblem }
           }
+          // 派发档位在 `prepared.stream()` **之前**读：stream 是一次性句柄，
+          // 调用后这个 prepared 对象不能再复用（平台会抛 INVALID_PREPARED_CALL）。
+          // 读的是 `prepared.config` 而不是 `r.effort`：平台已经把适配器的
+          // defaultEffort 物化进来了，故「模型默认」在这里才看得出实际是哪一档。
+          budget.dispatchEffort = String(prepared.config.reasoningEffort || '')
           stream = prepared.stream(Object.assign({}, prepared.config, body))
         } else {
           // 回退：无 prepareCall 的宿主/测试桩。符号值（max/min/default/跟随会话）在此
@@ -7308,12 +7552,13 @@ export default {
           const v = String(wantEffort || '').trim()
           const literal = v && ['session', 'default', 'max', 'min'].indexOf(v) === -1 ? v : ''
           const opts = Object.assign({}, base, body)
+          // 回退路径没有能力表可查，故 dispatchEffort 只能是 literal（可能为空）。
+          // 不用空串覆盖符号值解析结果以外的语义：这条路径本来就一个档位都没派发。
+          budget.dispatchEffort = literal
           stream = llm.stream(literal ? Object.assign(opts, { reasoningEffort: literal }) : opts)
         }
       } catch (e) {
-        // 定时器已经建好了（上面那个 Promise 的 executor 是同步跑的），这条早退路径
-        // 也必须清掉它 —— 否则每次 `llm.stream` 同步抛错都留一个 60 秒的空定时器。
-        clearTimer()
+        // 定时器由调用方（reviewWithModel）持有并清理，这里不碰它。
         // `prepareCall` 对不支持的档位抛 UNSUPPORTED_REASONING_EFFORT：那是**配置错**，
         // 不是线路故障，单独给一个 code，让弹窗/会话流能说清「换个档或换模型」。
         const msg = e && e.message ? e.message : String(e)
@@ -7334,11 +7579,9 @@ export default {
         // 而不是指望对端配合。被丢下的那个 stream 会随 modelSignal 的 abort 自行结束
         // （守规矩的 provider 会；不守的也只是泄漏一个不会再被读的生成器，
         //  而它的结论本来就不能用）。
-        r = await Promise.race([readReviewStream(stream), timeout])
+        r = await Promise.race([readReviewStream(stream), budget.timeout])
       } catch (e) {
         return { verdict: 'escalate', code: 'infra-error', detail: 'stream failed: ' + (e && e.message ? e.message : String(e)) }
-      } finally {
-        clearTimer()
       }
       if (r === MODEL_TIMEOUT) {
         // 超时不是「模型拒绝」，故 noteAutoOutcome 记 other（熔断计数不变）——
@@ -7370,6 +7613,154 @@ export default {
       return { verdict: 'deny', risk: r.risk, reason: r.reason, raw: r.raw }
     }
 
+    // ── 评审入口：一次调用 + 有界重试 ───────────────────────────────────────────
+    // 两类重试的处置不同（理由见 isFormatError 上方的注释）：
+    //   · 格式错 → **多轮修正**：把模型自己的输出放回上下文，追加一句要求修正。
+    //     最多 AUTO_REVIEW_MAX_FORMAT_ROUNDS 轮。结论方向不变，只是帮它表达。
+    //   · 矛盾   → **全新重做一次**：不给它看第一次的输出，独立重采样。
+    //     无论第二次是收紧还是放宽都直接采纳（那是独立判断，不是被引导的改口）。
+    //
+    // 三条硬边界：
+    //   ① 每类各自有界（格式轮 + 矛盾轮），总量不超过 AUTO_REVIEW_MAX_CALLS。
+    //   ② 所有调用**共用同一个 60 秒超时预算**。各自计时的话最坏能等到 4 分钟，
+    //      而这条路径在 pre-execute 里 —— 等于把工具调用卡住 4 分钟。
+    //   ③ 宿主 signal 已 abort 时不再发起新一轮。
+    //
+    // `retries` / `formatRounds` / `contradictionRetry` 随返回值带出，供决策记录
+    // 区分「一次就得到结论」与「追问/重做后才得到」：缺了它们，事后看到
+    // protocol-error 无从判断模型是偶尔手滑还是根本不会这个协议。
+    async function reviewWithModel(exec, d, agent, signal) {
+      // ── 超时预算在**两次尝试之间共用** ─────────────────────────────────────────
+      // 定时器建在这里而不是 attemptReview 里：建在里面的话每次尝试各自 60 秒，
+      // 重试一次最坏等 120 秒 —— 而这条路径在 pre-execute 里，等于把工具调用卡两分钟。
+      // 共用预算后「用户等待上限」与不重试时一致，重试只能吃掉第一次剩下的时间。
+      //
+      // 本函数跑在 `tools/pre-execute` 里，而宿主 `dsh-tool-call-timeout-policy` 的超时
+      // 挂在 `tools/execute`（该包 lib/index.js:116），后者由 dsh-tools 的
+      // `dispatchScheduledExecution` 在 **pre-execute 之后**才进入
+      // （dsh-tools lib/index.js:3321 是 pre-execute，:3427 才是 tools/execute）。
+      // 也就是说：pre-execute 挂住时，外层的 deadline **从未被创建**，声明
+      // `defineTool({ timeoutMs })` 对本阶段完全无效（已实测：工具声明了 timeoutMs，
+      // 但 pre-execute 不返回时外层定时器根本没启动）。
+      //
+      // 故超时必须由本插件自己管：`AbortSignal` 只负责通知 provider 停，
+      // 真正让 `await` 返回的是与定时器的 Promise 竞速。
+      //
+      // `AbortSignal.any` / `.timeout` 需要 Node ≥ 20.3 / 17.3；宿主 DSH 自身与
+      // dsh-timeout（lib/index.js:68）已在用 `AbortSignal.any`，故这里不引入新下限。
+      const modelAbort = new AbortController()
+      const budget = {
+        modelSignal: signal ? AbortSignal.any([signal, modelAbort.signal]) : modelAbort.signal,
+        MODEL_TIMEOUT: Symbol('auto-review-model-timeout'),
+        timeout: null,
+        // ── 输出口：attemptReview 派发后回填，供本函数随返回值带出 ────────────────
+        // 这个对象原本只承载**输入**预算（signal / 超时），这两个是反方向的：
+        // 派发才知道用了哪个档位，而档位必须在决策记录里。
+        //
+        // `dispatchEffort` 记的是**平台最终派发的档位**（`prepared.config.reasoningEffort`），
+        // 不是配置值：`resolveCallWithInfo` 会在我们没传时把适配器的 defaultEffort
+        // 物化进 resolved config，故「模型默认」实际是哪一档只有它答得上。
+        // 空串 = 这次没有派发任何档位（符号值解析不出来，见 resolveEffort）。
+        dispatchEffort: '',
+        // 配置原值（归一后）。与 dispatchEffort 成对才有意义：单看 `low` 不知道
+        // 它是「模型最低」解析出来的，还是用户钉住的 `@low`。
+        dispatchWant: '',
+      }
+      let clearTimer = () => {}
+      budget.timeout = new Promise((resolve) => {
+        // 用 ctx.timer（不是裸 setTimeout）：插件卸载/上下文销毁时 cordis 会连带清掉
+        // 这个定时器，不留一个在已销毁的闭包里跑的回调。
+        clearTimer = ctx.timer.setTimeout(() => {
+          try { modelAbort.abort(new Error('auto review model timeout')) } catch (e) {}
+          resolve(budget.MODEL_TIMEOUT)
+        }, AUTO_REVIEW_MODEL_TIMEOUT_MS)
+      })
+      try {
+        // ── 轮次状态 ────────────────────────────────────────────────────────────
+        let calls = 0            // 已发起的评审调用数（含首轮）
+        let formatRounds = 0     // 格式修正轮数
+        let contradictionRetry = 0
+        let firstRaw = null      // 第一次的原始输出（仅在重试过时保留）
+        let firstDetail = null
+        // 格式修正轮追加的对话轮次。首轮为空数组，与改动前的请求逐字相同。
+        let extra = []
+
+        const aborted = () => !!(signal && signal.aborted)
+        // 预算耗尽判据：超时那条返回值的 detail 以 'review timed out' 开头。
+        const timedOut = (rv) => rv && rv.code === 'infra-error' && String(rv.detail || '').indexOf('review timed out') === 0
+        // ── 出口包装：把派发档位附加到**每一个**返回值上 ──────────────────────────
+        // 逐处手写必然漏：本函数有五个 return 点（超时/abort、格式轮耗尽、矛盾重做耗尽、
+        // 首轮即失败、重试后失败），而漏掉的那条出口会让决策记录里恰好缺字段 ——
+        // 那种缺失在界面上与「旧记录没有这个字段」完全同形。
+        // 故单点附加，与调用点 carry 是同一个教训。
+        //
+        // 多轮重试时取的是**最后一轮**的值：同一份配置下各轮相同；若有某一轮在派发前
+        // 就失败（config-error 不覆盖），保留上一轮真正派发出去的那个值 —— 比清空更
+        // 接近「上一次实际用的是什么」。
+        const done = (rv) => {
+          const out = Object.assign({}, rv, {
+            effort: budget.dispatchEffort,
+            effortWant: budget.dispatchWant,
+          })
+          // 重试痕迹同属「每个出口都要带」的字段。`firstRaw` 只在重试过时非 null
+          // （下面两个重试分支记下），它必须在**任何**出口上跟着走 —— 包括
+          // 「格式错后又超时/abort」那条：那正是最需要第一次原文的场景，而它此前
+          // 恰好漏在超时出口上。与 effort 一样单点附加，不逐出口手写。
+          if (firstRaw !== null) { out.firstRaw = firstRaw; out.firstDetail = firstDetail }
+          return out
+        }
+
+        for (;;) {
+          calls += 1
+          const rv = await attemptReview(exec, d, agent, budget, extra)
+          // 超时/abort：任何后续轮次的竞速都会立刻返回同一个超时符号，白花一次派发。
+          if (timedOut(rv) || aborted()) {
+            return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+          }
+          if (isFormatError(rv)) {
+            // 第一轮的原始输出留档：模型第一次吐了什么，是排查协议错的唯一直接证据。
+            if (firstRaw === null) { firstRaw = rv.raw || ''; firstDetail = rv.detail }
+            if (formatRounds >= AUTO_REVIEW_MAX_FORMAT_ROUNDS || calls >= AUTO_REVIEW_MAX_CALLS) {
+              return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+            }
+            formatRounds += 1
+            // ── 把模型自己的输出放回上下文，追加修正要求 ──────────────────────────
+            // 空输出（`empty output`）不塞 assistant 轮：那会得到一条空的 assistant
+            // 消息，部分适配器会直接拒绝整个请求。改成只追加 user 轮，措辞里点明
+            // 「你上一次没有输出任何内容」。
+            //
+            // 这里只产出内容；assistant 轮的 `source` / `id` 由 attemptReview 在
+            // 组装请求时补齐 —— 那是唯一知道本次派发目标（provider/model）的地方。
+            const said = typeof rv.raw === 'string' ? rv.raw : ''
+            extra = said
+              ? [
+                { role: 'assistant', content: [{ type: 'text', text: said }] },
+                { role: 'user', content: [{ type: 'text', text: formatRepairPrompt(rv.detail) }] },
+              ]
+              : [{ role: 'user', content: [{ type: 'text', text: formatRepairPrompt(rv.detail) }] }]
+            continue
+          }
+          if (isContradiction(rv)) {
+            if (firstRaw === null) { firstRaw = rv.raw || ''; firstDetail = rv.detail }
+            if (contradictionRetry >= 1 || calls >= AUTO_REVIEW_MAX_CALLS) {
+              return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+            }
+            contradictionRetry += 1
+            // **全新重做**：清空 extra，让下一次请求与首轮逐字相同 ——
+            // 模型看不到第一次的输出，第二个结论是独立采样。
+            extra = []
+            continue
+          }
+          // 其余失败（infra-error / breaker / config-error / 重复成员 / 深度超限 /
+          // 块结构 / escalate）一律不重试，直接返回。
+          if (calls === 1) return done(rv)
+          return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+        }
+      } finally {
+        clearTimer()
+      }
+    }
+
     // ── 自动审批的设置项（§2.4）──────────────────────────────────────────────────
     // 集中定义在一处（§6.6 单一事实源）：默认值、合法范围、取值函数都在这里，
     // 别处只调用 `autoReviewTimeoutMs()` / `AUTO_REVIEW_DEFAULTS`，不各写一份数字。
@@ -7391,11 +7782,25 @@ export default {
       provider: '',
       model: '',
       // 推理强度。取值见 resolveEffort：
-      //   ''（= 跟随会话）/ 'default'（模型默认）/ 'max'（最高）/ 'min'（最低）
+      //   'session'（= 跟随会话）/ 'default'（模型默认）/ 'max'（最高）/ 'min'（最低）
       //   / 该模型公布的任一档位 id（如 'high'）
-      // 默认留空 = 跟随会话，与「模型覆盖留空则跟随会话」同一条纪律：
-      // 用户没表态时用会话自己的选择，而不是替他从模型的档位里挑一个。
-      reasoningEffort: '',
+      //
+      // 「跟随会话」是符号值 `session`，**不是空串**：空串/缺键表示「用户没表态」，
+      // 而没表态时生效的是下面的默认值。把两者混成一个值，这个默认值就永远表达不出来
+      // —— 面板上「跟随会话」那一项选完会回落成默认档，用户看到的却是另一行。
+      //
+      // 默认 `min` 而不是跟随会话：评审要回答的是「这次调用该不该放行」，判断材料
+      // 是结构化的（命中分类、工具参数、用户原话、最近历史），属于比对而非多步推理。
+      // 跟随会话会把主对话的推理强度带进来 —— 那是为**写代码**调的档位，
+      // 用在这里只是让每次工具调用都多等几秒。
+      //
+      // 代价与边界：`resolveEffort` 在模型不公布档位表时把 `min` 解析成「不传」
+      // （退回适配器默认）—— 那时本项**不生效**。这不是静默失效：面板的推理等级
+      // 选择器本来就从模型目录读档位，不公布时「指定」组为空，用户看得见。
+      //
+      // 已显式配过该键的用户不受影响（autoReviewSetting 优先读配置）——
+      // 改默认值只影响从未表态过的人，不会覆盖存量选择。
+      reasoningEffort: 'min',
     }
     // ── 评审调用的模型等待上限（毫秒）────────────────────────────────────────────
     // **与 AUTO_REVIEW_DEFAULTS.timeoutMs 是两件事，不复用同一个键**：
@@ -7440,6 +7845,50 @@ export default {
       const v = autoReviewSetting('timeoutMs')
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return 0
       return Math.min(Math.floor(v), AUTO_REVIEW_RANGES.timeoutMs.max)
+    }
+
+    // ── 界面语言：客户端报过就用它，否则读 DSH 自己的语言偏好 ───────────────────
+    // 为什么不能只信 `uiLang`：它由 `/permgate/*` 请求写入，而**纯 CLI 会话一次都不发**
+    // 那些请求（写它的入口是 Web GUI 里挂载的 OverlayRoot 与设置页）。于是英文用户在
+    // 终端里跑自动审批，理由会一直是中文，且没有任何可观测信号 —— 与「面板说谎」同族。
+    //
+    // 读 `settings` 而不是猜：DSH 的语言偏好存在 `locale` namespace 的 `preference`
+    // 字段里（dsh-client-locale 的 LOCALE_SETTINGS_NAMESPACE / LOCALE_PREFERENCE_FIELD）。
+    // 该字段缺失表示「跟随浏览器」——宿主无从得知，那时回落 `uiLang`，
+    // 与 normLang 的「缺失/非法一律中文」同口径。
+    //
+    // 走 `ctx.get` 而非写进 inject：`settings` 是可选依赖，测试宿主与 shell 载体未必有它，
+    // 硬 inject 会让整个插件等这个服务出现（与 getLlmService 同一条纪律）。
+    const DSH_LANG_CACHE_MS = 5000
+    let dshLangCache = { at: 0, value: null }
+    function dshPrefLang() {
+      const now = Date.now()
+      // 缓存：`describe()` 会遍历全部 Loader 条目并对每条的 schema+config 做
+      // JSON.stringify，而它要被每次评审调用。5 秒足够跟上用户切语言，
+      // 又不至于让一次长任务里几百次评审重复付这份开销。
+      if (now - dshLangCache.at < DSH_LANG_CACHE_MS) return dshLangCache.value
+      let v = null
+      try {
+        const svc = ctx.get('settings')
+        if (svc && typeof svc.describe === 'function') {
+          const rows = svc.describe()
+          if (Array.isArray(rows)) {
+            const row = rows.find((r) => r && r.ns === 'locale')
+            const pref = row && row.value && typeof row.value === 'object' ? row.value.preference : undefined
+            // 语言包可以注册任意 BCP 47 标签（`en-US`、`zh-TW`），而本插件只有 zh/en
+            // 两套文案：取主语言子标签再归一，避免 `en-US` 被判成中文。
+            if (typeof pref === 'string' && pref) v = normLang(pref.split('-')[0].toLowerCase())
+          }
+        }
+      } catch (e) { v = null }
+      dshLangCache = { at: now, value: v }
+      return v
+    }
+    // 评审理由该用哪种语言。客户端报过就以它为准（GUI 里最准：那就是用户眼前的语言），
+    // 否则用 DSH 的偏好，再否则沿用 `uiLang`（其初值是中文）。
+    function reviewReasonLang() {
+      if (uiLangFromClient) return uiLang
+      return dshPrefLang() || uiLang
     }
 
     // ── 熔断器（§3.5）：真·连续语义 ─────────────────────────────────────────────
@@ -8492,11 +8941,15 @@ export default {
               if (!t) return null
               const eff = autoReviewSetting('reasoningEffort')
               const sess = sessionEffortOf(exec && exec.agent)
+              // `session` 是符号值（跟随会话），不是档位 id：解析成会话当前档位再下发，
+              // 否则面板会收到一个不存在的档位名。取不到就给空 = 不传，与 resolveEffort 同口径。
+              const follow = eff === 'session'
+              const effort = follow ? sess : (eff || sess)
               return {
                 provider: t.provider,
                 model: t.model,
-                effort: eff || sess || '',
-                effortSource: eff ? 'setting' : (sess ? 'session' : 'default'),
+                effort: effort || '',
+                effortSource: eff && !follow ? 'setting' : (sess ? 'session' : 'default'),
                 fromSetting: !!(ov.provider && ov.model),
               }
             } catch (e) { return null }
@@ -9066,9 +9519,18 @@ export default {
         const method = (req.method || 'GET').toUpperCase()
         if (pathname === '/permgate/events' && method === 'GET') return handleEvents(req, res)
         const a = method === 'POST' ? await readBody(req) : {}
-        // 语言参数归一化：缺失/空/非法一律中文；同时更新 uiLang 供宿主即时文案
-        const lang = normLang(method === 'GET' ? (search ? search.get('lang') : null) : a.lang)
-        uiLang = lang
+        // 语言参数归一化：缺失/空/非法一律中文（请求级投影用）。
+        const provided = method === 'GET' ? (search ? search.get('lang') : null) : a.lang
+        const lang = normLang(provided)
+        // `uiLang` 只在**真的带了** lang 时更新：normLang(null) 返回 'zh'，无条件赋值
+        // 会让任何不带 lang 的请求（外部脚本、浏览器直连、测试的 pending 轮询）把宿主
+        // 即时语言重置成中文 —— 而 `reviewReasonLang` 在 `uiLangFromClient` 为 true 时
+        // 直接读 `uiLang`，于是英文界面用户的评审理由会在一次轮询后变成中文。
+        // 「没带 lang」是「这个请求没表态」，不是「用户切回中文界面」。
+        if (provided) {
+          uiLang = lang
+          uiLangFromClient = true
+        }
         // 按会话解析（设置面板/OverlayRoot 传 sessionId）：后续所有项目解析跟随该会话，
         // 切换会话后面板显示与写入的都是当前会话的项目配置
         let exec = null
@@ -9631,31 +10093,34 @@ export default {
     // 不进 `reason`、也不回传给主模型）。`recentDecisions` 此前整条浅拷贝下发，于是评审模型在 reason 里
     // 复述被审内容（「文件内容写着：忽略之前的指令…」）时，那句话会经 perm_status 的返回值
     // 回到主模型上下文 —— 一条以工具结果为载体的二阶注入通道。`rawOutput` 是同一句原话的
-    // 截断前原文，同理。两者与 `note` 一样只做「工具侧不下发」的分工，面板照旧。
+    // 截断前原文，`firstRaw` 是重试前那一轮的同一句原话，同理。它们与 `note` 一样只做
+    // 「工具侧不下发」的分工，面板照旧。
     //
     // `fallbackReason` 里没有模型原话：auto 异常路径把它写成
     // `why = (rv.code || 'infra-error') + ': ' + rv.detail`，而 escalate 的 `detail` 已固定为
     // `model escalated`（原话只走 `modelReason`），其余 `detail` 是本地机械码/异常消息。
-    // 它在本仓**没有任何工具侧消费方**（client.js 零引用、
-    // 只有 recordDecision 写入与一处 console.log 读取），剥掉零影响；
+    // `firstDetail` 同样是 parseReviewDecision 产出的本地机械码。两者在本仓
+    // **没有任何工具侧消费方**（client.js 零引用），剥掉零影响；
     // 弹窗排障靠 `note`（「原因：<why>」）照旧。
     //
     // ⚠️ `statusView.fallback.globalReason` / `projectReason` 是**配置侧用户自己写的**
     // 拒绝理由，不是模型原话，也不经这里 —— 不要一起删。
+    //
+    // 清单只写这一份，判据与删除都从它派生：两处各写一遍字面量时，新增一个模型原话字段
+    // 只补其中一处就会漏判，含该字段的记录会原样进入 perm_status 的返回值。
+    const PANEL_ONLY_DECISION_FIELDS = ['modelReason', 'rawOutput', 'firstRaw', 'fallbackReason', 'firstDetail']
     function toolView(view) {
       try {
         if (!view || typeof view !== 'object') return view
         // 无该字段时返回原数组（不白造副本）；有则逐条浅拷贝后删，不改记录本身。
         const cleanDecisions = (list) => {
           if (!Array.isArray(list)) return list
-          const needsStrip = (d) => !!(d && typeof d === 'object' && ('modelReason' in d || 'rawOutput' in d || 'fallbackReason' in d))
+          const needsStrip = (d) => !!(d && typeof d === 'object' && PANEL_ONLY_DECISION_FIELDS.some((k) => k in d))
           if (!list.some(needsStrip)) return list
           return list.map((d) => {
             if (!needsStrip(d)) return d
             const e = Object.assign({}, d)
-            delete e.modelReason
-            delete e.rawOutput
-            delete e.fallbackReason
+            for (const k of PANEL_ONLY_DECISION_FIELDS) delete e[k]
             return e
           })
         }
@@ -9831,6 +10296,25 @@ export default {
           // `rawOutput` 是模型的**原始输出**（§7.3 第二条）：出问题时可复现它到底说了什么，
           // 而不是只看我们解析出来的 risk/decision。截断在 recordDecision 里做。
           const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, blast: d.blast, rawOutput: rv.raw }
+          // 推理强度：`effortWant` 是配置原值（归一后不可能是空串），`effort` 是
+          // 实际派发的档位（允许为空 = 这次一个字节都没派发）。
+          //
+          // 两个都无条件挂，且不放在下面那个 `retries > 0` 分支里：档位与「重试过没有」
+          // 无关 —— 不重试的那次恰恰是绝大多数，把它们关进重试分支等于常态下不记录。
+          //
+          // 成对才有信息量：单看 `low` 分不清它是「模型最低」解析出来的，
+          // 还是用户钉住的 `@low`；单看 `min` 又不知道实际派发了什么。
+          carry.effortWant = String(rv.effortWant || '')
+          carry.effort = String(rv.effort || '')
+          // 格式重试的痕迹（reviewWithModel 只在真重试过时给这些字段）。
+          // 挂在 carry 上而不是逐个出口写：五个出口都要带，逐处写必然漏一个。
+          if (typeof rv.retries === 'number' && rv.retries > 0) {
+            carry.retries = rv.retries
+            if (rv.formatRounds > 0) carry.formatRounds = rv.formatRounds
+            if (rv.contradictionRetry > 0) carry.contradictionRetry = rv.contradictionRetry
+            if (rv.firstRaw) carry.firstRaw = rv.firstRaw
+            if (rv.firstDetail) carry.firstDetail = rv.firstDetail
+          }
           // ── 拒绝时 `reason` **不能**被 auto 的结论整句顶掉（§4.5A 的另一半）──────────
           // `d.reason` 是**用户配置的拒绝理由的唯一载体**（decide 的 `exReason` 把分类/例外
           // 的 reason 拼进「执行命令（…）」这类文案）。存储侧（normalizeCategory /

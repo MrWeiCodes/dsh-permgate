@@ -1826,9 +1826,14 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     } catch (e) { return false }
     if (typeof setting !== 'function') return false
     if (setting('reasoningEffort') !== 'high') return false
-    // 未配置时回落到默认值（空串 = 跟随会话）
+    // 未配置时回落到默认值。默认是 `min`（模型最低档）：评审是材料比对，
+    // 不是多步推理，跟随会话只会把主对话为写代码调的档位带进来。
+    //
+    // 这里钉**字面值**而不是「只要是个合法符号就行」：默认值改了是行为变更，
+    // 必须有人主动改这条断言 —— 否则「默认从 min 悄悄变回跟随会话」无人发现，
+    // 而那会让每次工具调用都多等几秒。
     const def = new Function(defBody + '\n; return AUTO_REVIEW_DEFAULTS.reasoningEffort')()
-    if (def !== '') return false
+    if (def !== 'min') return false
     // ② 客户端侧：statusView 的那一行必须真的读它（不是写死某个值）
     const iView = src.indexOf('reasoningEffort: autoReviewSetting(')
     return iView !== -1
@@ -1842,12 +1847,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //   ② 把「指定」组也包在条件里/去掉 —— 模型真实公布的档位名（Max）就消失了。
   ok('★★ 推理等级分「通用/指定」两组：通用四档恒在，指定随后', (function () {
     // 通用四档由 `effortRows.push(effortOption(...))` 四次给出，
-    // 值分别是 '' / default / **min / max**（顺序即展示顺序）。
+    // 值分别是 **session**（= 跟随会话）/ default / min / max（顺序即展示顺序）。
+    //
+    // ⚠️ 「跟随会话」写的是符号值 `PG_EFFORT_SESSION`，不是空串：空串/缺键表示
+    // 「用户没表态」，生效的是默认档（`min`），用户选这一项会当场落回默认档，
+    // 菜单里那一项就成了选不中的死项。
     //
     // ⚠️ 顺序按**档位强弱由低到高**（最低 → 最高），与紧跟其后的「指定」组同方向
     // （模型公布的档位表本身就是 low → high → max 升序）。实测反馈「模型最低应该排在
     // 模型最高前面」—— 原来 max 在前、min 在后，与「指定」组方向相反。
-    const pushes = [...cli.matchAll(/effortRows\.push\(effortOption\('([^']*)', T\('(panel\.autoEffort[A-Za-z]+)'\)\)\)/g)]
+    const pushes = [...cli.matchAll(/effortRows\.push\(effortOption\((?:'([^']*)'|(PG_EFFORT_SESSION)), T\('(panel\.autoEffort[A-Za-z]+)'\)\)\)/g)]
     if (pushes.length !== 4) return false
     const want = [
       ['', 'panel.autoEffortSession'],
@@ -1856,14 +1865,18 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       ['max', 'panel.autoEffortMax'],
     ]
     for (let i2 = 0; i2 < 4; i2++) {
-      if (pushes[i2][1] !== want[i2][0] || pushes[i2][2] !== want[i2][1]) return false
+      if ((pushes[i2][1] || '') !== want[i2][0] || pushes[i2][3] !== want[i2][1]) return false
     }
+    // 上面那条比较对符号分支只拿到符号名，`|| ''` 又把它归一成空串 —— 常量值改成空串时
+    // 四条 push 的文本一字不变，整组断言照样绿。故常量值必须单独钉住。
+    const mSession = cli.match(/const PG_EFFORT_SESSION = '([^']+)'/)
+    if (!mSession || mSession[1] !== 'session') return false
     // 这两组各有分组标题，且**通用组标题排在最前**（用户要求「中间间隔开来」）。
     const iPane = cli.indexOf('const effortRows = [];')
     if (iPane < 0) return false
     const iCommon = cli.indexOf("effortRows.push(effortGroupHeading('\\u0000gh-common'", iPane)
     if (iCommon < 0) return false
-    const iFirst = cli.indexOf("effortRows.push(effortOption('',", iPane)
+    const iFirst = cli.indexOf('effortRows.push(effortOption(PG_EFFORT_SESSION,', iPane)
     if (iFirst < 0) return false
     if (iCommon > iFirst) return false
     // 四档在 pane 构造里**无条件**出现：不得被 `if (modelEfforts.length)` 之类的条件包住
@@ -1922,6 +1935,201 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     }
     return true
   })())
+  // ⑨c2 轨迹页那一份 Definition：target 必须是 trajectory，且节点 data.kind 必须是 context
+  //
+  // 这条链路的断法与 chat 那边不同，且**全部静默**：
+  //   · 没注册 trajectory target 的 Definition → 轨迹页看不到（Context 按 target 分表，
+  //     两个视图互相不可见），而这正是用户报的「会话流有、轨迹页没有」；
+  //   · 注册了但 `data.kind` 不是轨迹 Builder 认识的键 → layout() 的分支全不匹配，
+  //     节点被丢弃，同样无报错无日志。
+  // 两者都无法从外部区分「没发生过」与「发生了但没显示」，故在此钉死。
+  ok('★★ 轨迹页 Definition：target=trajectory，节点 data.kind=context', (function () {
+    const i = cli.indexOf('function registerDecisionTrajectory(')
+    if (i < 0) return false
+    // ⚠️ 判据必须作用在**去注释的代码**上：本函数上方与内部有多处注释在解释
+    // `kind: 'context'` 为什么必需，直接对源码切片 indexOf 会命中注释 —— 把代码改成
+    // `kind: 'contextX'` 断言照样通过（实测踩到）。去掉 `//` 行注释后再判。
+    const stripComments = (src) => src.split('\n').map((l) => {
+      const k = l.indexOf('//')
+      return k === -1 ? l : l.slice(0, k)
+    }).join('\n')
+    const body = stripComments(cli.slice(i, i + 2200))
+    // ① target 必须是 trajectory（写成 chat 就等于没注册，两条视图仍互不可见）。
+    //    ⚠️ 判据只作用在 `events.register({` 到 `match:` 之间：`buildViewNode` 返回的
+    //    节点里也有一个 `target: 'trajectory'`，对整个函数体做 indexOf 时，把 register
+    //    那一处改成 chat 断言照样通过 —— 判据落在切片上而不是结构上，又是一次假绿。
+    const iReg = body.indexOf('events.register({')
+    const iMatch = body.indexOf('match: (event) => {')
+    if (iReg < 0 || iMatch < 0 || iMatch < iReg) return false
+    if (body.slice(iReg, iMatch).indexOf("target: 'trajectory'") === -1) return false
+    // ② kind 常量必须与 chat 那份**不同**：events.register 以 kind 为键，重名会抛错
+    const mTraj = cli.match(/const DECISION_TRAJECTORY_KIND = '([^']+)';/)
+    const mChat = cli.match(/const DECISION_KIND = '([^']+)';/)
+    if (!mTraj || !mChat) return false
+    if (mTraj[1] === mChat[1]) return false
+    // ③ start() 产出的 state 必须带 data.kind='context' —— 这是轨迹布局的分派键，
+    //    缺了它 layout() 的 `node.kind === 'context'` 分支不命中，整行静默消失。
+    if (body.indexOf("kind: 'context',") === -1) return false
+    // ④ buildViewNode 必须包成 `{ kind: 'node', node: st }` —— 轨迹 Builder 只认这一层
+    if (body.indexOf("data: { kind: 'node', node: st }") === -1) return false
+    // ⑤ form 必须在轨迹的 KNOWN_FORMS 白名单里，否则 contextForm 返回 null，
+    //    渲染退化成不透明的 JSON 折叠块（等于没显示）。
+    if (body.indexOf("form: 'notice'") === -1) return false
+    // ⑥ match 同样不得按 via 过滤（与 chat 那份同一纪律）
+    const matchSlice = body.slice(iMatch, iMatch + 200)
+    if (matchSlice.indexOf('event.type !== DECISION_RECORD') === -1) return false
+    if (matchSlice.indexOf('.via') !== -1) return false
+    return true
+  })())
+  // ⑨c3 轨迹行正文的围栏必须**动态加长**，不能固定三个反引号
+  //
+  // 模型原始输出里自带 ``` 时，固定三反引号会提前闭合代码块，后半段重新按 markdown
+  // 解析 —— 表现为「详情里冒出一堆莫名其妙的标题和粗体」。CommonMark 的规则是围栏
+  // 至少 3 个、多于内容中最长的反引号串，且闭合围栏不短于开启围栏，实现必须照此。
+  ok('★★ 轨迹行围栏长度随内容中最长反引号串增长', (function () {
+    const i = cli.indexOf('function fenceCode(')
+    if (i < 0) return false
+    // 抠出整个函数体（大括号配平）后**真跑**：文本判据钉不住行为 —— 「取最长」
+    // 退化成「取最后一个」或「取第一个」时源码里的关键字样一字不变，而内容里的
+    // 长反引号串不在末尾/不在首位时围栏会短于内容里的串，照样提前闭合代码块。
+    // 反过来，等价的写法重构（如 Math.max(...runs.map)）必须仍能通过。
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    let fence = null
+    try { fence = new Function('return (' + body + ')')() } catch (e) { return false }
+    if (typeof fence !== 'function') return false
+    // 围栏长度 = 输出首/尾那段反引号串的长度；实现怎么写不关心，只看围栏够不够长。
+    const fenceLens = (text) => {
+      const out = String(fence(text))
+      const o = /^(`+)\n/.exec(out)
+      const c = /\n(`+)$/.exec(out)
+      return [o ? o[1].length : 0, c ? c[1].length : 0]
+    }
+    const maxRun = (text) => {
+      let n = 0
+      for (const run of String(text).match(/`+/g) || []) if (run.length > n) n = run.length
+      return n
+    }
+    // 判据是 CommonMark 的不变量，而不是某几个期望值：
+    //   · 开启围栏不少于 3 个、且严格长于内容里最长的反引号串（否则内容自己就闭合了）；
+    //   · 闭合围栏不短于开启围栏（尾部写死三个时，开头 5 个的代码块永远闭合不了）。
+    // 样本必须覆盖最长串的**位置**：只测最长串在首位时，把「取最长」退化成「取首个串」
+    // 照样全绿，而 '``\n````\nrest' 这类内容（最长串在后面）的围栏会短于内容里的串。
+    const samples = ['abc', 'a```b', 'x````y```z', 'x```y````z```w', '``\n````\nrest']
+    for (const s of samples) {
+      const [open, close] = fenceLens(s)
+      if (open < Math.max(3, maxRun(s) + 1)) return false
+      if (close < open) return false
+    }
+    return true
+  })())
+  // ⑨c4 设置页导航图标：优先走 `settings.section.icon` 槽，且与 DOM 兼容层互斥
+  //
+  // DSH 0.2.2 开了这个槽（list 型、按 section id 匹配）。两条路径必须**互斥**：
+  // 槽位画一个图标（平台 flex 行的正常子元素），兼容层的 CSS ::before 再画一个
+  // （劫持层给整行打的伪元素），同一行会出现两个盾牌+道闸。
+  //
+  // 判据不是「代码里有 pgNavIconViaSlot 这个名字」，而是三件事同时成立：
+  //   ① 槽位回调里置位；② 扫描函数在置位后**摘掉已有标记且不再打标**；
+  //   ③ 槽位注册的 id 与 section 的 id 一致（不一致时平台根本不会渲染）。
+  // ② 用 document mock 真跑：只查「分支里出现 removeAttribute」「guard 在 set 之前」
+  // 这类文本时，删掉分支末尾的 `return` 三条判据全绿，而扫描会继续走到打标那一行，
+  // 槽位图标 + CSS ::before 双图标照旧出现。
+  ok('★★ 导航图标走 settings.section.icon 槽，并与 DOM 兼容层互斥', (function () {
+    // ① 槽位注册存在，且 id 与 settings.section 的 id 同为 'permgate'
+    const iSlot = cli.indexOf("slots.inject('settings.section.icon'")
+    if (iSlot < 0) return false
+    const slotBody = cli.slice(iSlot, iSlot + 700)
+    if (slotBody.indexOf("name: 'settings.section.icon', id: 'permgate'") === -1) return false
+    // ② 回调里必须置位互斥标志（否则兼容层继续画，出现双图标）
+    if (slotBody.indexOf('pgNavIconViaSlot = true') === -1) return false
+    // ③ 标志必须在扫描函数里**读取**并生效：置位后既摘掉残留标记，也不再新增标记。
+    //    这里用 document mock 真跑，而不是查 `if (pgNavIconViaSlot)` 这个写法 ——
+    //    把分支里的 `return` 删掉时文本判据全绿，而扫描会继续往下走到打标那一行，
+    //    槽位图标 + CSS ::before 双图标照旧出现。
+    const iScan = cli.indexOf('function pgScanNavIcon(')
+    if (iScan < 0) return false
+    let d = 0
+    let scanBody = ''
+    for (let k = cli.indexOf('{', iScan); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { scanBody = cli.slice(iScan, k + 1); break } }
+    }
+    if (!scanBody) return false
+    const navAttr = (cli.match(/const PG_NAV_ICON_ATTR = '([^']+)'/) || [])[1]
+    const navSel = (cli.match(/const PG_NAV_ROW_SELECTOR = '([^']+)'/) || [])[1]
+    if (!navAttr || !navSel) return false
+    // 按名从源码抠一个完整函数声明：置位分支若被提取成同作用域的辅助函数
+    // （等价重构），这里把它一起拼进来，避免判据退化成「写法不对就红」。
+    const grabFn = (name) => {
+      const at = cli.indexOf('function ' + name + '(')
+      if (at < 0) return ''
+      let depth = 0
+      for (let k = cli.indexOf('{', at); k < cli.length; k++) {
+        if (cli[k] === '{') depth++
+        else if (cli[k] === '}') { depth--; if (depth === 0) return cli.slice(at, k + 1) }
+      }
+      return ''
+    }
+    // 返回该行在扫描后是否带标记；扫描抛错时返回 null（判据随即变红，不静默跳过）。
+    // label 是 T('settings.title') 的返回值：置位分支必须**先于** label 解析执行，
+    // 故要能在 label 为空时也验证它 —— 语言未解析时 label 为空串，若 guard 排在
+    // `if (!wanted) return` 之后，残留标记就永远摘不掉。
+    const scanNav = (viaSlot, marked, label = 'PermGate') => {
+      const row = {
+        textContent: 'PermGate',
+        attrs: new Set(marked ? [navAttr] : []),
+        setAttribute(k) { this.attrs.add(k) },
+        getAttribute(k) { return this.attrs.has(k) ? '' : null },
+        removeAttribute(k) { this.attrs.delete(k) },
+      }
+      const doc = {
+        querySelectorAll(sel) {
+          if (sel === '[' + navAttr + ']') return row.attrs.has(navAttr) ? [row] : []
+          if (sel === navSel) return [row]
+          return []
+        },
+      }
+      const deps = []
+      // 置位分支若被提取成同作用域的辅助函数（等价重构），把它一起拼进来；
+      // 不能靠「ReferenceError 再补」—— 函数体自带 try/catch，未定义的标识符
+      // 会被它自己吞掉，表现为「标记没摘掉」而不是抛错。
+      for (let pass = 0; pass < 4; pass++) {
+        const before = deps.length
+        const names = (deps.join('\n') + '\n' + scanBody).match(/\b[A-Za-z_$][\w$]*\(/g) || []
+        for (const call of names) {
+          const name = call.slice(0, -1)
+          if (name === 'pgScanNavIcon') continue
+          const extra = grabFn(name)
+          if (extra && deps.indexOf(extra) === -1) deps.push(extra)
+        }
+        if (deps.length === before) break
+      }
+      try {
+        new Function('PG_NAV_ICON_ATTR', 'PG_NAV_ROW_SELECTOR', 'T', 'pgNavIconViaSlot',
+          deps.join('\n') + '\n' + scanBody + '\nreturn pgScanNavIcon;')(navAttr, navSel, () => label, viaSlot)(doc)
+      } catch (e) { return null }
+      return row.attrs.has(navAttr)
+    }
+    // 置位后：已有标记必须被摘掉（探测晚于首帧时的残留），且不得重新打标
+    if (scanNav(true, true) !== false) return false
+    if (scanNav(true, false) !== false) return false
+    // 空 label（语言尚未解析）同样要摘：guard 若被挪到 `if (!wanted) return` 之后，
+    // 这条路径就再也走不到，残留标记与槽位图标双图标并存。
+    if (scanNav(true, true, '') !== false) return false
+    // 反证：未置位时正常路径仍要打标（防止把扫描函数整个改瞎后上面两条假绿）
+    if (scanNav(false, false) !== true) return false
+    // ⑥ 图标组件必须存在且吃 size（owner props 给的是 {size, active}）
+    if (cli.indexOf('const PG_NAV_SVG = (props) =>') === -1) return false
+    return true
+  })())
+
+
   // ⑨d 换模型必须**同时提交 provider**（官方把服务商合并进「模型」这一级）
   //
   // 不清/不换的后果是「新 model + 旧 provider」这个**必然无效**的组合被静默提交：
@@ -3239,11 +3447,12 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       const runPick = (eff, next) => {
         const calls = []
         const stray = []
-        const fn = new Function('setFields', 'setField', 'PG_EFFORT_SYMBOLS', 'eff', 'groups', 'return (patch) => ' + onPick)(
+        const fn = new Function('setFields', 'setField', 'PG_EFFORT_SYMBOLS', 'PG_EFFORT_SESSION', 'eff', 'groups', 'return (patch) => ' + onPick)(
           (p, c) => calls.push({ patch: p || {}, clear: c || [] }),
           // 记录而不抛错：抛错会让整包崩在这条用例上，其余断言拿不到结果
           (k, v) => stray.push([k, v]),
-          ['default', 'max', 'min'],
+          ['session', 'default', 'max', 'min'],
+          'session',
           eff, groups)
         fn(next)
         // 逐字段 setField 出现 = 并发请求的来源，这条断言必须变红
@@ -3262,10 +3471,13 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       if (c2[0].patch.reasoningEffort !== 'default') return false
       // ④ 回退目标必须是 default —— 不是 max/min（那会替用户选更快或更弱）
       if (c2[0].patch.reasoningEffort === 'max' || c2[0].patch.reasoningEffort === 'min') return false
-      // ⑤ 切回「跟随会话」→ 清掉档位（放 clear 里，与 model/provider 同一个请求）
+      // ⑤ 切回「跟随会话」→ 档位写成**显式的** `session`（与 model/provider 同一个请求）。
+      //    不能写成 clear：删键现在的含义是「用户没表态」，生效的是默认档 `min`，
+      //    那会把档位钉死在最低档，与「跟随会话」正好相反。
       const c3 = runPick({ model: 'm1', provider: 'a', reasoningEffort: '@max' }, { model: null, provider: null })
       if (c3.length !== 1) return false
-      if (c3[0].clear.indexOf('reasoningEffort') === -1) return false
+      if (c3[0].patch.reasoningEffort !== 'session') return false
+      if (c3[0].clear.indexOf('reasoningEffort') !== -1) return false
       if (c3[0].clear.indexOf('model') === -1) return false
       if (c3[0].clear.indexOf('provider') === -1) return false
       // ⑥ 目录查不到新模型档位表 → 不动（没有依据就不改，交给宿主报 config-error）
@@ -12661,6 +12873,64 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
     if (/a reason with allow/i.test(policy)) return false
     // ③ 但仍必须禁止真正的矛盾形态（否则是「一起放过头」）
     return /Never return low with deny, or high with allow\./.test(policy)
+  })())
+
+  // ── 决策记录的「风险等级」必须翻成界面语言 ──────────────────────
+  //
+  // 这条守的是「中英混排」：`d.risk` 是模型输出里的**原始英文值**
+  // （index.js 的 parseReviewDecision 把值域钉在 low/medium/high），
+  // 而它跟在中文标签「模型判定风险：」后面 —— 直接渲染出来就是
+  // 「模型判定风险：low」，用户还得自己判断它在这套分级里算高还是低。
+  //
+  // 两个渲染点都要走 riskLabel：会话行与轨迹行是**同一条记录的两个视图**，
+  // 只改一处就是同一份数据在两个地方显示不同（本文件反复记录的那类分叉）。
+  ok('★★ 决策记录的 risk 走 riskLabel 翻成界面语言（两个视图都不能直出英文原值）', (function () {
+    // ① riskLabel 本身存在，且降级口径与 modeLabel 一致（未知值不退化成 key）
+    if (cli.indexOf('function riskLabel(r)') === -1) return false
+    if (cli.indexOf("T('flow.riskValue.unknown').replace('{r}', String(r))") === -1) return false
+    // ② 三个已知等级都有中英两份文案
+    for (const r of ['low', 'medium', 'high']) {
+      if (cli.indexOf("'flow.riskValue." + r + "':") === -1) return false
+    }
+    // ③ 两个渲染点都必须经过它 —— 逐处检查 `T('flow.risk') + …` 后面跟的是 riskLabel
+    const hits = cli.split("\n").filter((l) => l.indexOf("T('flow.risk')") !== -1 && !/^\s*(\/\/|\*|\/\*)/.test(l))
+    if (hits.length !== 2) return false
+    return hits.every((l) => l.indexOf('riskLabel(d.risk)') !== -1)
+  })())
+
+  // ── 推理强度那一行：两个视图必须同源 ────────────────────────────
+  // 与上面 risk 那条同一个理由，但风险不同：risk 是封闭三值，两个视图各拼一遍
+  // 最多显示不一致；而推理强度要拼「配置值 → 实际值」的对照，各拼一遍时**语义**
+  // 都可能分叉（一处写「模型最低」、一处写「min」），事后从两个视图读到的
+  // 是两种说法。
+  //
+  // 故判据是「两个渲染点都调 effortFlowLabel」，而不是「两处都出现了 T('flow.effort')」：
+  // 后者在各自拼字符串时同样成立，拦不住分叉。
+  ok('★★ 决策记录的推理强度两个视图同源（都走 effortFlowLabel，不许各拼一遍）', (function () {
+    // ① 三个函数都在，且各只有一份定义
+    for (const sig of ['function effortWantLabel(v)', 'function effortFlowLabel(d)']) {
+      if (cli.split(sig).length !== 2) return false
+    }
+    // ② 两个渲染点都调它
+    const hits = cli.split("\n").filter((l) => l.indexOf("T('flow.effort')") !== -1 && !/^\s*(\/\/|\*|\/\*)/.test(l))
+    if (hits.length !== 2) return false
+    if (!hits.every((l) => l.indexOf('effortFlowLabel(d)') !== -1)) return false
+    // ③ 折叠态那一行显示的必须是**实际派发值**，不是配置值：
+    //    配置值在设置页已经有一处，会话流里再显示一遍等于没回答问题。
+    const fold = cli.split("\n").filter((l) => l.indexOf('fontSize: 11 } }, String(d.effort)') !== -1)
+    if (fold.length !== 1) return false
+    // ④ 未派发要分两句：`config-error`（模型公布了档位但不支持你选的那个）与
+    //    「模型压根不公布档位」是两回事，合成一句会在前者上说假话。
+    for (const k of ['flow.effort', 'flow.effortWithWant', 'flow.effortNone', 'flow.effortNoneNoTable']) {
+      if ((cli.split("'" + k + "':").length - 1) !== 2) return false   // 中英各一条
+    }
+    // ⑤ `@` 前缀必须先剥、且**不查符号表**：查了就会把钉住的 `@max` 说成「模型最高」，
+    //    换模型后行为与配置里的意图相反。
+    const at = cli.indexOf('function effortWantLabel(v)')
+    const body = cli.slice(at, cli.indexOf('function effortFlowLabel(d)'))
+    return body.indexOf('charAt(0) === PG_EFFORT_PIN') !== -1
+      && body.indexOf('PG_EFFORT_SYMBOL_LABELS') !== -1
+      && body.indexOf('charAt(0) === PG_EFFORT_PIN') < body.indexOf('PG_EFFORT_SYMBOL_LABELS')
   })())
 
   // ── 非审查会话不记决策 ──────────────────────────────────────────
