@@ -12933,6 +12933,62 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
       && body.indexOf('charAt(0) === PG_EFFORT_PIN') < body.indexOf('PG_EFFORT_SYMBOL_LABELS')
   })())
 
+  // ★★ `@` 钉住的档位在「未派发」时不得被解释成符号值
+  //
+  // 判据必须**真跑** effortFlowLabel：文本判据钉不住这一格 —— 把 `pinned` 判断删掉、
+  // 改成先剥前缀再比对符号值，源码里 `PG_EFFORT_PIN` / `session` / `default` 这些字样
+  // 一字不变，任何 indexOf 组合都照样绿。
+  //
+  // 为什么要防：`@session` 在 resolveEffort 里走 pinned 分支，去档位表里找名叫
+  // `session` 的具体档位，查不到就不派发。它与「跟随会话」毫无关系，而先剥前缀的
+  // 写法会把这条记录解释成「会话未选推理档位」—— 用户照着这句话去查会话设置，
+  // 永远查不出问题。
+  ok('★★ `@session` 的未派发原因不得说成「会话没选档位」（钉住 ≠ 跟随会话）', (function () {
+    const i = cli.indexOf('function effortWantLabel(v)')
+    const j = cli.indexOf('function effortFlowLabel(d)')
+    if (i < 0 || j < 0 || j < i) return false
+    // 抠出两个函数体（大括号配平）后真跑，T 用最小真实字典：
+    // 只有被断言的那三条有文案，其余回落到 key 本身 —— 走错分支时断言看得到 key。
+    const cut = (from) => {
+      let d = 0
+      for (let k = cli.indexOf('{', from); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(from, k + 1) }
+      }
+      return ''
+    }
+    const body = cut(i) + '\n' + cut(j)
+    if (!body) return false
+    const DICT = {
+      'flow.effortNone': 'none:{want}',
+      'flow.effortNoneNoTable': 'notable:{want}',
+      'flow.effortNoneDefault': 'nodefault:{want}',
+      'flow.effortNoneSession': 'session:{want}',
+      'panel.autoEffortSession': '跟随会话',
+      'panel.autoEffortDefault': '模型默认',
+    }
+    const Tstub = (k) => (Object.prototype.hasOwnProperty.call(DICT, k) ? DICT[k] : String(k))
+    let label = null
+    try {
+      label = new Function('PG_EFFORT_PIN', 'PG_EFFORT_SYMBOL_LABELS', 'T',
+        body + '\n; return effortFlowLabel;')('@', { session: 'panel.autoEffortSession', default: 'panel.autoEffortDefault' }, Tstub)
+    } catch (e) { return false }
+    if (typeof label !== 'function') return false
+    // ① `@session` = 钉住一个不存在的档位 → 必须是「不公布档位」，不是「会话没选」。
+    if (label({ effort: '', effortWant: '@session' }).indexOf('notable:') !== 0) return false
+    // ② 真正的 `session` 才走「会话没选」。
+    if (label({ effort: '', effortWant: 'session' }).indexOf('session:') !== 0) return false
+    // ③ `@default` 同样是钉住，不得说成「模型没有默认档位」。
+    if (label({ effort: '', effortWant: '@default' }).indexOf('notable:') !== 0) return false
+    // ④ `default` 才走「没有默认档位」。
+    if (label({ effort: '', effortWant: 'default' }).indexOf('nodefault:') !== 0) return false
+    // ⑤ `@` 单独一个字符剥完为空 → resolveEffort 的 `if (!v)` 走 follow()，等同跟随会话。
+    if (label({ effort: '', effortWant: '@' }).indexOf('session:') !== 0) return false
+    // ⑥ 有失败原因时不断言原因（config-error 时模型公布了档位，只是不支持你选的）。
+    if (label({ effort: '', effortWant: 'min', fallbackReason: 'config-error' }).indexOf('none:') !== 0) return false
+    return true
+  })())
+
   // ── 非审查会话不记决策 ──────────────────────────────────────────
   // 判据必须用 decide() 外面那个 customReview（与 decide() 内部同源），
   // 且**不能**退化成「无条件记录」或「无条件不记」——两者都会让面板失真。

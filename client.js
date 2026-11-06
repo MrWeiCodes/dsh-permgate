@@ -3697,10 +3697,18 @@ window.__ModuleLoader__.load({
 					// 否则会把「模型公布了档位但不支持你选的那个」说成「不公布档位」。
 					return T('flow.effortNone').replace('{want}', effortWantLabel(want));
 				}
-				// `@` 剥完为空与 `session` 同义（见 resolveEffort：`if (!v) return follow()`）。
-				const sym = want.charAt(0) === PG_EFFORT_PIN ? want.slice(1) : want;
-				const key = (sym === 'session' || sym === '') ? 'flow.effortNoneSession'
-					: sym === 'default' ? 'flow.effortNoneDefault'
+				// 判据必须区分 `@` 前缀：`@session` 指的是**名叫 session 的那个具体档位**
+				// （resolveEffort 的 pinned 分支去查档位表，查不到就不派发），
+				// 与「跟随会话」毫无关系。先剥前缀再比对符号值，会把用户钉住的档位
+				// 解释成「会话没选档位」—— 假话。
+				//
+				// 例外是 `@` 单独一个字符：resolveEffort 的 `if (!v) return follow()`
+				// 在 pinned 分支之前，剥完为空确实走跟随会话，那时与 `session` 同义。
+				const pinned = want.charAt(0) === PG_EFFORT_PIN;
+				const sym = pinned ? want.slice(1) : want;
+				const followsSession = sym === '' || (!pinned && sym === 'session');
+				const key = followsSession ? 'flow.effortNoneSession'
+					: (!pinned && sym === 'default') ? 'flow.effortNoneDefault'
 						: 'flow.effortNoneNoTable';
 				return T(key).replace('{want}', effortWantLabel(want));
 			}

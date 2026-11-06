@@ -10312,9 +10312,16 @@ export default {
             carry.retries = rv.retries
             if (rv.formatRounds > 0) carry.formatRounds = rv.formatRounds
             if (rv.contradictionRetry > 0) carry.contradictionRetry = rv.contradictionRetry
-            if (rv.firstRaw) carry.firstRaw = rv.firstRaw
-            if (rv.firstDetail) carry.firstDetail = rv.firstDetail
           }
+          // 第一次的原文与机械码**独立于 `retries`** 挂载，与 reviewWithModel 的 done()
+          // 同口径（那边也是单点附加、不看重试轮数）。
+          //
+          // 当前实现里这两者天然同步（firstRaw 只在两个重试分支赋值，而那两个分支之后
+          // calls >= 2），但把它们关进上面的 retries 分支，等于给「日后给 firstRaw 加一条
+          // 不经重试的赋值路径」预设了一个静默吞掉的坑 —— 那时记录里会缺字段，
+          // 而缺失在界面上与「旧记录没有这个字段」完全同形。
+          if (rv.firstRaw) carry.firstRaw = rv.firstRaw
+          if (rv.firstDetail) carry.firstDetail = rv.firstDetail
           // ── 拒绝时 `reason` **不能**被 auto 的结论整句顶掉（§4.5A 的另一半）──────────
           // `d.reason` 是**用户配置的拒绝理由的唯一载体**（decide 的 `exReason` 把分类/例外
           // 的 reason 拼进「执行命令（…）」这类文案）。存储侧（normalizeCategory /
