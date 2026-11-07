@@ -11448,7 +11448,9 @@ group('24. 破坏性命令八档：缺省值、迁移、per-tier reason')
     if (!/if \(patch\.autoFallback !== undefined\) next\.autoFallback = patch\.autoFallback/.test(src)) return false
     // ② 路由层必须把请求里的 autoFallback 透传进 patch（漏了它上一条永远收不到值）
     if (!/if \(a\.autoFallback !== undefined\) patch\.autoFallback = a\.autoFallback/.test(src)) return false
-    // ③ 快捷工具：setQuickAction 的第六个参数，显式传入优先于已有值
+    // ③ 快捷工具：setQuickAction 的第六个参数，显式传入优先于已有值。
+    //    核对落在**函数体内**的取值与用法上：漏接这个参数、或接而不读，两条都会红。
+    //    路由层的透传由下面的 ⑥ 单独守。
     const qm = src.match(/function setQuickAction\(root, targetKey, tool, action, reason, autoFallback\) \{[\s\S]*?\n    \}/)
     if (!qm) return false
     if (!/const req = autoFallback === 'ask' \|\| autoFallback === 'allow' \|\| autoFallback === 'deny' \? autoFallback : undefined/.test(qm[0])) return false
@@ -13303,12 +13305,20 @@ group('30. 边界根与相对路径解析基准分离（DSH 0.2.1 的 workingDir
     qdSrc.length > 0)
   if (qdSrc) {
     const defOf = (k) => (new RegExp('(?:^|[\\s{])' + k + ":\\s*'([^']+)'").exec(qdSrc) || [])[1] || null
-    ok('★★ 30 schedule_create / update 默认 ask（能建出周期提醒 = 无人值守自动唤醒 AI）',
-      defOf('schedule_create') === 'ask' && defOf('schedule_update') === 'ask',
-      'create=' + defOf('schedule_create') + ' update=' + defOf('schedule_update'))
-    ok('★ 30 schedule_list / delete 默认 allow（只读 / 只做减法，方向都是收紧）',
-      defOf('schedule_list') === 'allow' && defOf('schedule_delete') === 'allow',
-      'list=' + defOf('schedule_list') + ' delete=' + defOf('schedule_delete'))
+    ok('★★ 30 schedule_create / edit 默认 ask（能建出周期提醒 = 无人值守自动唤醒 AI）',
+      defOf('schedule_create') === 'ask' && defOf('schedule_edit') === 'ask',
+      'create=' + defOf('schedule_create') + ' edit=' + defOf('schedule_edit'))
+    ok('★ 30 schedule_list / view 默认 allow（只读，方向都是收紧）',
+      defOf('schedule_list') === 'allow' && defOf('schedule_view') === 'allow',
+      'list=' + defOf('schedule_list') + ' view=' + defOf('schedule_view'))
+    // 旧名必须与新名并存（用户要求兼容回退到 0.2.2-alpha.3 之前的 DSH）。
+    // 它们**不**同步到新键：旧版两个工具的能力在新版被并进同一个 schedule_edit，
+    // 复刻任一个旧键都会改变授权面（见 QUICK_DEFAULTS 处的说明），故这里只钉住「键还在」。
+    ok('★★ 30 schedule 旧名 schedule_update / schedule_delete 仍在表里（兼容回退旧 DSH）',
+      defOf('schedule_update') === 'ask' && defOf('schedule_delete') === 'allow',
+      'update=' + defOf('schedule_update') + ' delete=' + defOf('schedule_delete'))
+    ok('★ 30 list_subagent_models 默认 allow（只读枚举子代理可用的路由）',
+      defOf('list_subagent_models') === 'allow', 'list_subagent_models=' + defOf('list_subagent_models'))
     ok('★ 30 working_directory 默认 allow 且必须在面板清单里（可单独收紧）',
       defOf('working_directory') === 'allow'
       // QUICK_PRESET 由 QUICK_DEFAULTS 的键派生，故「在表里」即「在清单里」；
@@ -13340,6 +13350,63 @@ group('30. 边界根与相对路径解析基准分离（DSH 0.2.1 的 workingDir
       && cli.includes("'quick.run_code': 'run a model-written TypeScript program (direct Node API use inside it bypasses this review)'"))
   }
 }
+
+
+// ─────────────────────────────────────────────────────────────
+// ★ 30b 旧键写入**不得**波及新键：真实求值（不是匹配字面量）
+//
+// 旧版 schedule_update / schedule_delete 是两个不同工具，新版把它们并进同一个
+// schedule_edit（action 含 update 与 delete）。故旧键的值推不出新键的值 ——
+// 写入侧若复刻旧键，allow 会从「允许修改」扩大到「允许无确认删除」。
+// 这条不变式只能靠真实求值守：抽 setQuickAction 跑一遍，看落盘对象里另一代键有没有动。
+group('30b. 写旧键不波及新键（两代 DSH 的键各按自己命中的那一版裁决）')
+;(function () {
+  const setFn = (src.match(/function setQuickAction\(root, targetKey, tool, action, reason, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0]
+  const allStmt = (src.match(/const ALL_MODES = \[[^\n]*/) || [''])[0]
+  const faStmt = (src.match(/function finalActionOf\(action, autoFallback\) \{[\s\S]*?\n    \}/) || [''])[0]
+  ok('★ 30b 抽取 setQuickAction / 依赖常量成功',
+    !!(setFn && allStmt && faStmt),
+    'set=' + !!setFn + ' modes=' + !!allStmt + ' fa=' + !!faStmt)
+  if (!(setFn && allStmt && faStmt)) return
+  const build = (globalBlock) => {
+    const cfg = { global: globalBlock }
+    const fn = new Function('config', 'ensureProject', 'normalizeText', 'normalizeAutoFallback',
+      [allStmt, faStmt, setFn, 'return setQuickAction;'].join('\n'))(
+      cfg,
+      () => cfg.global,
+      (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : undefined),
+      (v, action) => ((action === 'auto' && (v === 'ask' || v === 'allow' || v === 'deny')) ? v : undefined)
+    )
+    return { cfg, fn }
+  }
+  try {
+    // ① 把旧键设为 allow，**不得**顺带放行新键 —— 否则「允许修改提醒」会变成
+    //    「允许无确认删除」（新版删除是 schedule_edit 的 action:'delete'）。
+    const a = build({ quickTools: {} })
+    if (a.fn('X:/ws', 'global', 'schedule_update', 'allow', undefined, undefined) !== true) return ok('★★ 30b 旧键写入不波及新键', false, '写入返回非 true')
+    ok('★★ 30b 旧键 schedule_update 写 allow 不波及 schedule_edit（否则等于放行无确认删除）',
+      a.cfg.global.quickTools.schedule_update.action === 'allow'
+      && a.cfg.global.quickTools.schedule_edit === undefined,
+      JSON.stringify(a.cfg.global.quickTools))
+    // ② 旧键 schedule_delete 同理：它在新版下根本命不中，更不该把只读的
+    //    schedule_view 一起改掉（那会让用户以为「已禁止删除」，实际只禁止了查看）。
+    const b = build({ quickTools: {} })
+    b.fn('X:/ws', 'global', 'schedule_delete', 'deny', undefined, undefined)
+    ok('★★ 30b 旧键 schedule_delete 写 deny 不波及 schedule_view（旧键新版命不中）',
+      b.cfg.global.quickTools.schedule_delete.action === 'deny'
+      && b.cfg.global.quickTools.schedule_view === undefined,
+      JSON.stringify(b.cfg.global.quickTools))
+    // ③ 删除（inherit）只删自己那一键，不替另一代做决定。
+    const c = build({ quickTools: { schedule_update: { action: 'deny' }, schedule_edit: { action: 'allow' } } })
+    c.fn('X:/ws', 'global', 'schedule_update', 'inherit', undefined, undefined)
+    ok('★ 30b 删除旧键不连带删除新键',
+      c.cfg.global.quickTools.schedule_update === undefined
+      && c.cfg.global.quickTools.schedule_edit.action === 'allow',
+      JSON.stringify(c.cfg.global.quickTools))
+  } catch (err) {
+    ok('★★ 30b 旧键写入不波及新键', false, '抛错：' + err.message)
+  }
+})()
 
 
 // ─────────────────────────────────────────────────────────────

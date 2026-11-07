@@ -777,7 +777,9 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   // 26 → 27：新增 plugin_manager（DSH 自带核心依赖，管插件的元操作里权限最大的一个）
   // 27 → 32：DSH 0.2.1 新增的常驻工具（working_directory + schedule_* 四个）
   // 32 → 33：run_code（PTC 模式的保留传输工具，默认 ask）
-  ok('group5: status 下发 quickPreset（33 项：22 常规 + perm_status + cordis_run/stop/undefine + plugin_manager + working_directory/schedule_* + run_code）', presetList.length === 33, 'len=' + presetList.length)
+  // 33 → 36：list_subagent_models，以及 schedule 改名的两代键并存
+  //          （schedule_edit/schedule_view 新增，schedule_update/schedule_delete 保留）
+  ok('group5: status 下发 quickPreset（36 项：含 schedule 两代键名与 list_subagent_models）', presetList.length === 36, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
   // 9 个权限写工具已移除：它们既不该在预设清单里，也不再是可调用的工具
   const permWrites = presetList.filter((t) => /^perm_/.test(t) && t !== 'perm_status')
@@ -7757,6 +7759,171 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       ok('★★ group24 A51: 重试痕迹经 perm_status 返回时不带 firstRaw/firstDetail（原话只留面板）',
         !!toolRow && !('firstRaw' in toolRow) && !('firstDetail' in toolRow),
         JSON.stringify({ row: toolRow && { retries: toolRow.retries, raw: 'firstRaw' in toolRow, detail: 'firstDetail' in toolRow } }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A53：线路故障的原样重发 ──────────────────────────────────────────────────
+  //
+  // 这一组守的是「网络抖动不该变成一次弹窗」。要点有四条：
+  //   ① 重发一次，第二次成功即按结论走（不弹窗）；
+  //   ② **只重发一次**：两次都失败就走回落，不能无限重试（烧钱 + pre-execute 卡住）；
+  //   ③ 超时**不重发** —— 预算已经花光，重发必然立刻又超时，只是白烧一次派发；
+  //   ④ 重发痕迹必须落进决策记录，且经 perm_status 返回时剥掉原始错误文本
+  //      （provider 的错误消息里可能带被审内容，与 rawOutput 同一条二阶注入通道）。
+  {
+    // ① 第一次断线，第二次成功 → 正常放行，不弹窗。
+    //
+    //    假 llm 用 `stream` 抛异常模拟连接失败（对应 index.js 的 `stream failed: ...`）。
+    //    不能只让 generator 抛：那条路径在 readReviewStream 里被折成
+    //    `reviewer ended with error`，虽然也命中白名单，但走的是另一段代码。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const realStream = llm.stream
+      llm.stream = function (options) {
+        if (llm.calls.length === 0) { llm.calls.push(options); throw new Error('ECONNRESET') }
+        return realStream.call(this, options)
+      }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53once', T, A)
+      ok('★★ group24 A53: 线路故障重发一次，第二次成功 → 正常放行（不弹窗）',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 两次都断线 → 有界，走回落弹窗（不是无限重试）。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      llm.stream = function (options) { llm.calls.push(options); throw new Error('ECONNRESET') }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53twice', T, A)
+      ok('★★ group24 A53: 线路故障只重发一次（两次都失败 → 回落弹窗，不是无限重试）',
+        r && r.kind === 'ask' && llm.calls.length === 2,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 超时**不重发**：预算已耗尽，重发必然立刻又超时。
+    //
+    //    判据看调用次数是 1。这条与 ② 的区别只在失败形态：② 是 `stream failed`（可重发），
+    //    这里是 `review timed out`（不可重发）。若把 isRetryableInfra 写成「凡是
+    //    infra-error 都重发」，② 仍绿、这条会红 —— 它钉的正是那个白名单。
+    {
+      let timerBase = 0
+      let firstTimer = null
+      let hRef = null
+      const llm = mkLlm((_o, n) => {
+        if (n === 1) {
+          firstTimer = hRef.timers.slice(timerBase).pop() || null
+          // 触发超时定时器：它 resolve 的是 budget.timeout，竞速立刻返回 MODEL_TIMEOUT。
+          if (firstTimer) firstTimer.fn()
+        }
+        return verdict('{"risk":"low","decision":"allow"}')
+      })
+      const { ws, home, h } = mkHostAuto({}, llm)
+      hRef = h
+      timerBase = h.timers.length
+      const r = await probeAuto(h, ws, 'a53timeout', T, A)
+      ok('★★ group24 A53: 超时不重发（预算已耗尽，重发只会白烧一次派发）',
+        r && r.kind === 'ask' && llm.calls.length === 1,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 重发痕迹落进决策记录，且经 perm_status 返回时剥掉 firstInfraDetail。
+    //
+    //    `firstInfraDetail` 是 provider 的错误原文，可能包含被审内容
+    //    （例如「failed to parse: <文件内容>」），与 rawOutput 走同一条二阶注入通道。
+    //    只在面板侧断言时，PANEL_ONLY_DECISION_FIELDS 漏掉它也全绿。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const realStream = llm.stream
+      llm.stream = function (options) {
+        if (llm.calls.length === 0) { llm.calls.push(options); throw new Error('ECONNRESET') }
+        return realStream.call(this, options)
+      }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53rec', T, A)
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const list = (dec.data && Array.isArray(dec.data.decisions)) ? dec.data.decisions : []
+      const row = list.filter((x) => x && x.infraRetry === 1).pop()
+      ok('★★ group24 A53: 重发痕迹落进决策记录（infraRetry + 第一次的故障说明）',
+        r === 'allow' && !!row && typeof row.firstInfraDetail === 'string'
+        && row.firstInfraDetail.indexOf('ECONNRESET') !== -1,
+        JSON.stringify({ r, rows: list.map((x) => ({ n: x.infraRetry, d: x.firstInfraDetail })) }))
+      const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
+      const toolRow = (Array.isArray(stv && stv.recentDecisions) ? stv.recentDecisions : [])
+        .filter((x) => x && x.infraRetry === 1).pop()
+      ok('★★ group24 A53: 重发痕迹经 perm_status 返回时不带 firstInfraDetail（错误原文只留面板）',
+        !!toolRow && !('firstInfraDetail' in toolRow),
+        JSON.stringify({ row: toolRow && { n: toolRow.infraRetry, has: 'firstInfraDetail' in toolRow } }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 没重发过时 `infraRetry` 仍落键为 0：缺键与 0 的区别是「旧版本没有这个字段」
+    //    与「这次没重发」，后者是排查「为什么没重试」时必须能读到的值。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53zero', T, A)
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const list = (dec.data && Array.isArray(dec.data.decisions)) ? dec.data.decisions : []
+      const row = list.pop()
+      ok('★ group24 A53: 没重发时 infraRetry 落键为 0（缺键与 0 语义不同）',
+        r === 'allow' && !!row && row.infraRetry === 0 && !('firstInfraDetail' in row),
+        JSON.stringify({ r, row: row && { n: row.infraRetry, d: 'firstInfraDetail' in row } }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ **流中途异常**（不是 stream 同步抛）→ 折成 `stream failed`，同样重发一次。
+    //
+    //    这条与 ① 走的是**不同的代码路径**，必须各测一遍：
+    //      · ① 的 `llm.stream` 同步抛 → attemptReview 的 try/catch → `llm call failed: ...`
+    //      · ⑥ 的生成器在迭代中抛 → readReviewStream 的 catch → `stream failed: ...`
+    //    两条都在 RETRYABLE_INFRA_DETAILS 里。只测 ① 时，把 `stream failed` 从白名单
+    //    删掉不会有任何断言变红 —— 实测过：删掉后全套仍绿，那一条等于没接线。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      let n = 0
+      llm.stream = function (options) {
+        llm.calls.push(options)
+        n += 1
+        if (n === 1) {
+          // 抛在生成器体内：readReviewStream 的 `for await` 会捕获它并折成 infra-error。
+          return (async function* () { throw new Error('ECONNRESET mid-stream') })()
+        }
+        return (async function* () { for (const c of verdict('{"risk":"low","decision":"allow"}')) yield c })()
+      }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53midstream', T, A)
+      ok('★★ group24 A53: 流中途异常（stream failed）同样重发一次 → 正常放行',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑦ **provider 报错结束**（finish 的 kind 是 error）→ `reviewer ended with error`，
+    //    同样重发一次。这是第三条 detail，③ 与 ① 都覆盖不到它。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      let n = 0
+      llm.stream = function (options) {
+        llm.calls.push(options)
+        n += 1
+        if (n === 1) {
+          return (async function* () {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'finish', reason: { kind: 'error', code: 'UPSTREAM_503' } }
+          })()
+        }
+        return (async function* () { for (const c of verdict('{"risk":"low","decision":"allow"}')) yield c })()
+      }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53provider', T, A)
+      ok('★★ group24 A53: provider 报错结束（reviewer ended with error）同样重发一次 → 正常放行',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
       releaseTmp(ws, home)
     }
   }

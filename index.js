@@ -266,6 +266,11 @@ const INTENT_LOOKBACK_STEPS = 6
 const QUICK_DEFAULTS = {
   web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
   ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
+  // list_subagent_models：枚举子代理可以路由到哪些 provider / model（由
+  // dsh-tool-subagent 的 modelDiscovery 注册，standard / cordis / ptc 三个 preset 都开）。
+  // 纯只读、无副作用：只查注册表，不改配置也不发起委派 —— 比 list_agents 更轻，
+  // 后者还能列出正在跑的子代理。故 allow。
+  list_subagent_models: 'allow',
   job_list: 'allow', job_output: 'allow', job_kill: 'allow',
   get_goal: 'allow', create_goal: 'allow', update_goal: 'allow',
   send_message: 'allow', interrupt_agent: 'allow',
@@ -342,20 +347,40 @@ const QUICK_DEFAULTS = {
   // schedule_*：会话内提醒（写入会话日志、按时投递一条 prompt 回来）。不碰文件系统、
   // 不执行命令，属「给本会话加个闹钟」。
   //
-  // ── 为什么 create/update 是 ask，而 list/delete 可以是 allow ──────────────
+  // ── 为什么 create/edit 是 ask，而 list/view 可以是 allow ──────────────────
   // 差别不在「碰不碰文件」，而在**能否产生无人值守的自动触发**：
-  //   · create / update 都能建出 `every_seconds >= 60` 的周期提醒
-  //     （dsh-schedule 的 MIN_EVERY_INTERVAL_SECONDS = 60，update 的 change 还允许改
-  //     kind），到点经 followup → wakeDriver **唤醒模型跑一轮**。这是一条旧版插件
-  //     没有的通道：调用本身不写盘，真正的副作用是「此后每次到点都由 AI 自己发起一轮」，
-  //     而发起者与授权者都是 AI。用户不在环时无人能拦。
-  //   · list 只读；delete 只做减法（取消提醒），方向都是收紧，故仍 allow。
-  // 这两个键此前不在表里、走兜底默认 ask；本次纳入表时若沿用 allow，等于无任何配置变更
-  // 就把旧版的 ask 静默放宽 —— 与 plugin_manager 那条同一条理由：纳入本表的目的是让用户
-  // **能在面板上单独收紧它**，而不是替用户放宽。
-  // 存量配置无需迁移：上一发布版没有这些键，不会落盘；改默认值即生效，故**不**进
-  // QUICK_RETIRED_DEFAULTS（那里只收「曾被 freshConfig 全量 seed 过」的历史默认）。
+  //   · create / edit 都能建出 `every_seconds >= 60` 的周期提醒
+  //     （dsh-schedule 的 MIN_EVERY_INTERVAL_SECONDS = 60），到点经 followup →
+  //     wakeDriver **唤醒模型跑一轮**。这是一条旧版插件没有的通道：调用本身不写盘，
+  //     真正的副作用是「此后每次到点都由 AI 自己发起一轮」，而发起者与授权者都是 AI。
+  //     用户不在环时无人能拦。edit 的 action 参数还能删任务，但删是收紧方向。
+  //   · list 只读；view 按 id 读一条，同样只读。
+  //
+  // ── 键名与 DSH 版本的对应关系（改键名前必须读这段）───────────────────────
+  // DSH 0.2.2-alpha.3 把四个工具重排成四个新名字，**不是简单改名**：
+  //   schedule_update（只改） → 能力并入 schedule_edit（action 含 update 与 delete）
+  //   schedule_delete（只删） → 能力并入 schedule_edit；新增的 schedule_view 只是只读查看
+  // 即两个旧键的**并集**才等于新 schedule_edit，任一旧键的值都推不出它的值。
+  // 旧名在 0.2.2-alpha.3 起不再注册，故**两代键都要留在本表里**：
+  //   · 只留新键：DSH 回退到 0.2.2-alpha.2 及更早时，schedule_update / schedule_delete
+  //     落不到本表（旧版另两个工具名与新版相同，仍命中），改走兜底策略（默认 ask）。
+  //     后果分两种，别把后者当成前者的普遍结果：全新配置里这两个键没有落盘值，
+  //     于是按兜底 ask 裁决、面板上也没有它们的行；存量配置里它们早被 freshConfig
+  //     seed 落盘（见下方 QUICK_RETIRED_DEFAULTS 处关于「落盘值压过预设默认」的说明），
+  //     仍按落盘值裁决、面板也仍有行 —— 落不到表只改变**该键没有落盘值**的那部分配置。
+  //   · 只留旧键：新版下 schedule_edit 走兜底 ask、schedule_view 走兜底 ask ——
+  //     前者碰巧方向安全，后者则是把只读操作也弹窗。
+  // 两代并存时任一版本下都命中，代价只是面板上多出两行（单代 DSH 注册 4 个 schedule
+  // 工具，本表有 6 个键；新版下命不中的是 schedule_update / schedule_delete 两行，
+  // 用户改了也不生效）。这层代价**只能由面板文案承担**（旧键标签写明「旧版 DSH 用」），
+  // 不能在写入侧把旧键的值同步到新键：两个旧键各自只是 schedule_edit 的**一部分**
+  // （update 一个 action、delete 另一个 action），复刻任一方都会**扩大**授权 ——
+  // 旧键的 allow 会连另一个 action 一起放行（「允许修改」变成「允许无确认删除」），
+  // 旧键的 deny 则会在新版下被理解成整个 edit 都禁止，而用户只表了态其中一半。
   schedule_create: 'ask', schedule_list: 'allow',
+  schedule_edit: 'ask', schedule_view: 'allow',
+  // 旧名（0.2.2-alpha.3 之前）：保留以兼容回退到旧 DSH 的场景，理由见上。
+  // 它们只在自己命中的旧 DSH 里生效，新版下由 schedule_edit / schedule_view 裁决。
   schedule_update: 'ask', schedule_delete: 'allow',
   // run_code：**PTC 模式**的保留传输工具（dsh-tools 的 RUN_CODE_NAME），由
   // dsh-agent-tool-presentation 的 `mode: ptc` 引入，只在 ptc 预设下可见 ——
@@ -397,6 +422,11 @@ const REMOVED_WRITE_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set
   'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule',
   'perm_remove_rule', 'perm_reload']
 const REMOVED_WRITE_TOOL_SET = new Set(REMOVED_WRITE_TOOLS)
+// 这里曾有一张 QUICK_LEGACY_ALIASES（旧键 → 新键，写入侧单向同步），已删除。
+// 它建立在「两代键是同一个工具、只是改名」这个错误前提上：新版 schedule_edit 的
+// update 与 delete 两个 action 分别来自旧版两个**不同**工具，任一旧键的值都推不出它的值。
+// 复刻旧键的值因此必然改变授权面（allow 扩大、deny 越界），而不再只是「让面板不说谎」。
+// 面板那一半改由旧键的用途标签承担（见 client.js 的 quick.schedule_update / _delete）。
 // 预设默认值的历史值：旧版 freshConfig 会把**当时**的 QUICK_DEFAULTS 全量 seed 进配置并落盘
 // （1.5.1–1.5.8 一直如此），而 quickAction 的优先级是「项目键 → 全局键 → 预设默认 → 兜底」，
 // 落盘的显式值会永久压过新默认 —— 于是「只改 QUICK_DEFAULTS」对存量配置零效果：
@@ -5575,6 +5605,18 @@ export default {
         }
         if (d.firstDetail) rec.firstDetail = String(d.firstDetail)
       }
+      // 线路故障的重发：**独立于 `retries`** 记录。
+      //
+      // 为什么不能并进上面那个 `retries > 0` 分支：那一支的语义是「模型答得不对」，
+      // 而线路故障是「模型根本没答上」—— 两者的排查方向相反（前者换模型/改策略，
+      // 后者查网络/provider）。混在同一个 `retries` 计数里，事后看到 `retries: 1`
+      // 分不清是哪一种。
+      //
+      // `infraRetry` 恒落键（含 0）：缺键与 0 的区别正是「旧版本没有这个字段」
+      // 与「这次没重发」，而后者是排查「为什么没重试」时必须能读到的值。
+      if (typeof d.infraRetry === 'number' && d.infraRetry >= 0) rec.infraRetry = d.infraRetry
+      // 第一次的故障说明：只在真重发过时存在（重发成功后就只剩这里能查到）。
+      if (d.firstInfraDetail) rec.firstInfraDetail = String(d.firstInfraDetail).slice(0, REVIEW_REASON_MAX)
       // 推理强度：`effortWant` 是配置原值，`effort` 是实际派发的档位。
       //
       // 为什么必须在记录里：`resolveEffort` 在模型不公布档位表时把 `min`/`max`/`session`
@@ -5676,6 +5718,11 @@ export default {
           if (fr) rec.firstRaw = fr
           if (d.firstDetail) rec.firstDetail = String(d.firstDetail)
         }
+        // 线路故障的重发：与 recordDecision 同口径（两条存储必须逐字段一致）。
+        // 独立于上面的 `retries > 0` 分支，理由见 recordDecision 处的说明：
+        // 「模型答得不对」与「模型根本没答上」的排查方向相反。
+        if (typeof d.infraRetry === 'number' && d.infraRetry >= 0) rec.infraRetry = d.infraRetry
+        if (d.firstInfraDetail) rec.firstInfraDetail = clip(d.firstInfraDetail)
         // 推理强度：与 recordDecision 同口径（两条存储必须逐字段一致，否则
         // 「最近决策」面板与会话流里同一条记录会显示不同内容）。
         // `effort` 为空 = 这次没派发档位；`effortWant` 恒落键，它是配置侧的原值。
@@ -7411,6 +7458,34 @@ export default {
     function isContradiction(rv) {
       return !!rv && rv.code === 'contradiction'
     }
+    // ── 线路故障：单独一类，走「原样重发一次」────────────────────────────────────
+    //
+    // 与格式错的区别：**请求本身没有任何问题**，是连接断了、provider 回了 5xx、
+    // 或者流在中途异常结束。同一份请求再发一次是合理的 —— 不需要改提示语、
+    // 不需要把上一次的输出塞回上下文（没有可用输出）。
+    //
+    // 只重试一次的三个理由：
+    //   · 与格式重试**共用同一份 60 秒预算**（见 reviewWithModel 里的定时器），
+    //     多一轮就多吃一段等待，而这条路径在 pre-execute 里；
+    //   · 网络故障极少是「第二次就好」以外的形态：要么瞬时抖动（重试能救），
+    //     要么 provider 挂了（重试也救不了，只是多等一轮）；
+    //   · 不重试的代价是**每次网络抖动都弹窗**，而弹窗要人处理，比多等几秒贵得多。
+    //
+    // 白名单而不是「凡是 infra-error 都重试」：`review timed out` 也是 infra-error，
+    // 但它由预算耗尽产生 —— 预算已经花光，重试必然立刻又超时，只是白烧一次派发。
+    // 超时那条在循环开头就被 timedOut 短路掉了，这里显式排除是为防日后有人调换顺序。
+    const RETRYABLE_INFRA_DETAILS = [
+      'stream failed',
+      'llm call failed',
+      'reviewer ended with error',
+      'stream ended without terminal finish',
+    ]
+    function isRetryableInfra(rv) {
+      if (!rv || rv.code !== 'infra-error') return false
+      const d = String(rv.detail || '')
+      if (d.indexOf('review timed out') === 0) return false
+      return RETRYABLE_INFRA_DETAILS.some((p) => d.indexOf(p) === 0)
+    }
 
     // ── 重试轮次上限 ─────────────────────────────────────────────────────────────
     // 格式修正最多 2 轮（共 3 次调用）：第一轮是首评，之后两次机会改格式。
@@ -7419,10 +7494,19 @@ export default {
     //   · 3 轮以上收益趋零（若两次都写不对，多半是它根本不会这个协议），
     //     而每多一轮就多一次完整调用（含材料组装与派发）。
     const AUTO_REVIEW_MAX_FORMAT_ROUNDS = 2
-    // 总调用数硬上限（首评 + 格式 2 轮 + 矛盾重做 1 次 = 4）。这个数字是**兜底**：
-    // 上面两个分支各自已有界，这里是防止日后加新分支时忘了算总数。
+    // 线路故障的原样重发次数。取 1：与格式重试共用同一份超时预算，多一轮就多吃一段
+    // 等待，而这条路径在 pre-execute 里；且网络故障要么瞬时抖动（一次就够），
+    // 要么 provider 挂了（重试救不了，只是多等一轮）。
+    const AUTO_REVIEW_MAX_INFRA_RETRIES = 1
+    // 总调用数硬上限（首评 + 格式 2 轮 + 矛盾重做 1 次 + 线路重发 1 次 = 5）。这个数字是**兜底**：
+    // 上面几个分支各自已有界，这里是防止日后加新分支时忘了算总数。
     // 它与超时预算共同构成「最坏等待」的上界 —— 预算共用，故调用次数多不等于等得久。
-    const AUTO_REVIEW_MAX_CALLS = 4
+    //
+    // ⚠️ 各分支的上限**相加**才是真正的最坏值，而这个常量是**总数**闸门：
+    // 两者不等时以本常量为准（它是硬上限）。取 5 而不是 2+1+1=4：上面每个分支
+    // 的 `calls >= AUTO_REVIEW_MAX_CALLS` 判断都依赖它留有余量，收紧到 4 会让
+    // 「格式 2 轮 + 矛盾 1 次」这类组合在最后一轮被提前截断。
+    const AUTO_REVIEW_MAX_CALLS = 5
 
     // 格式修正的追加指令。**只讲格式，不讲结论**：任何「你觉得该怎样」的暗示
     // 都会把一次格式修正变成一次引导，而引导的方向是模型配合用户。
@@ -7680,8 +7764,12 @@ export default {
         let calls = 0            // 已发起的评审调用数（含首轮）
         let formatRounds = 0     // 格式修正轮数
         let contradictionRetry = 0
+        let infraRetry = 0       // 线路故障的原样重发次数
         let firstRaw = null      // 第一次的原始输出（仅在重试过时保留）
         let firstDetail = null
+        // 第一次的线路故障说明。与 firstRaw 分开：那两种失败**没有模型输出**，
+        // firstRaw 会是空串，排查时需要的恰恰是 detail（连接错误原文 / provider 的 finish 原因）。
+        let firstInfraDetail = null
         // 格式修正轮追加的对话轮次。首轮为空数组，与改动前的请求逐字相同。
         let extra = []
 
@@ -7702,11 +7790,29 @@ export default {
             effort: budget.dispatchEffort,
             effortWant: budget.dispatchWant,
           })
+          // 重试计数只算「模型答得不对」的两类（格式修正 + 矛盾重做），不含线路故障的
+          // 原样重发 —— 后者由 `infraRetry` 单独记录。两者排查方向相反（前者换模型/
+          // 改策略，后者查网络/provider），混进同一个计数就分不清了（见 recordDecision）。
+          // 单点计算而非逐出口手写：五个出口各写一份同样的公式，口径迟早分叉。
+          // 缺键仍表示「没重试过」，与记录层 `retries > 0` 才落键同口径。
+          const retries = formatRounds + contradictionRetry
+          if (retries > 0) {
+            out.retries = retries
+            if (formatRounds > 0) out.formatRounds = formatRounds
+            if (contradictionRetry > 0) out.contradictionRetry = contradictionRetry
+          }
           // 重试痕迹同属「每个出口都要带」的字段。`firstRaw` 只在重试过时非 null
           // （下面两个重试分支记下），它必须在**任何**出口上跟着走 —— 包括
           // 「格式错后又超时/abort」那条：那正是最需要第一次原文的场景，而它此前
           // 恰好漏在超时出口上。与 effort 一样单点附加，不逐出口手写。
           if (firstRaw !== null) { out.firstRaw = firstRaw; out.firstDetail = firstDetail }
+          // 线路故障的第一次说明：只在真重发过时存在。它回答的是「第一次为什么失败」，
+          // 而重发成功后这个信息就只剩这里能查到 —— 用户看到一次正常的放行，
+          // 无从知道背后有过一次断线。
+          if (firstInfraDetail !== null) out.firstInfraDetail = firstInfraDetail
+          // `infraRetry` 恒落键（含 0）：它与 formatRounds/contradictionRetry 不同 ——
+          // 后两者缺键表示「没发生过」，而这里要让记录能区分「没重发过」与「旧版本没有这个字段」。
+          out.infraRetry = infraRetry
           return out
         }
 
@@ -7715,13 +7821,13 @@ export default {
           const rv = await attemptReview(exec, d, agent, budget, extra)
           // 超时/abort：任何后续轮次的竞速都会立刻返回同一个超时符号，白花一次派发。
           if (timedOut(rv) || aborted()) {
-            return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+            return done(rv)
           }
           if (isFormatError(rv)) {
             // 第一轮的原始输出留档：模型第一次吐了什么，是排查协议错的唯一直接证据。
             if (firstRaw === null) { firstRaw = rv.raw || ''; firstDetail = rv.detail }
             if (formatRounds >= AUTO_REVIEW_MAX_FORMAT_ROUNDS || calls >= AUTO_REVIEW_MAX_CALLS) {
-              return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+              return done(rv)
             }
             formatRounds += 1
             // ── 把模型自己的输出放回上下文，追加修正要求 ──────────────────────────
@@ -7743,7 +7849,7 @@ export default {
           if (isContradiction(rv)) {
             if (firstRaw === null) { firstRaw = rv.raw || ''; firstDetail = rv.detail }
             if (contradictionRetry >= 1 || calls >= AUTO_REVIEW_MAX_CALLS) {
-              return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+              return done(rv)
             }
             contradictionRetry += 1
             // **全新重做**：清空 extra，让下一次请求与首轮逐字相同 ——
@@ -7751,10 +7857,21 @@ export default {
             extra = []
             continue
           }
-          // 其余失败（infra-error / breaker / config-error / 重复成员 / 深度超限 /
+          // 其余失败（breaker / config-error / 重复成员 / 深度超限 /
           // 块结构 / escalate）一律不重试，直接返回。
-          if (calls === 1) return done(rv)
-          return done(Object.assign({}, rv, { retries: calls - 1, formatRounds, contradictionRetry }))
+          //
+          // 线路故障是唯一的例外：请求本身没问题，原样重发一次。
+          // 位置必须在最后 —— 上面几类各自有「重试前要先构造下一轮请求」的动作
+          // （extra 的增删），而这里两者都不改，`extra` 保持原样即是「原样重发」。
+          if (isRetryableInfra(rv)) {
+            if (firstInfraDetail === null) firstInfraDetail = String(rv.detail || '')
+            if (infraRetry >= AUTO_REVIEW_MAX_INFRA_RETRIES || calls >= AUTO_REVIEW_MAX_CALLS) {
+              return done(rv)
+            }
+            infraRetry += 1
+            continue
+          }
+          return done(rv)
         }
       } finally {
         clearTimer()
@@ -10108,7 +10225,7 @@ export default {
     //
     // 清单只写这一份，判据与删除都从它派生：两处各写一遍字面量时，新增一个模型原话字段
     // 只补其中一处就会漏判，含该字段的记录会原样进入 perm_status 的返回值。
-    const PANEL_ONLY_DECISION_FIELDS = ['modelReason', 'rawOutput', 'firstRaw', 'fallbackReason', 'firstDetail']
+    const PANEL_ONLY_DECISION_FIELDS = ['modelReason', 'rawOutput', 'firstRaw', 'fallbackReason', 'firstDetail', 'firstInfraDetail']
     function toolView(view) {
       try {
         if (!view || typeof view !== 'object') return view
@@ -10322,6 +10439,11 @@ export default {
           // 而缺失在界面上与「旧记录没有这个字段」完全同形。
           if (rv.firstRaw) carry.firstRaw = rv.firstRaw
           if (rv.firstDetail) carry.firstDetail = rv.firstDetail
+          // 线路故障的重发痕迹。与 firstRaw 同口径（独立于 `retries`），
+          // 但它**恒落键**（含 0）：缺键与 0 的区别是「旧版本没有这个字段」与
+          // 「这次没重发」，后者是排查「为什么没重试」时必须能读到的值。
+          if (typeof rv.infraRetry === 'number' && rv.infraRetry >= 0) carry.infraRetry = rv.infraRetry
+          if (rv.firstInfraDetail) carry.firstInfraDetail = rv.firstInfraDetail
           // ── 拒绝时 `reason` **不能**被 auto 的结论整句顶掉（§4.5A 的另一半）──────────
           // `d.reason` 是**用户配置的拒绝理由的唯一载体**（decide 的 `exReason` 把分类/例外
           // 的 reason 拼进「执行命令（…）」这类文案）。存储侧（normalizeCategory /

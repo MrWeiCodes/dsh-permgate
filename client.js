@@ -2047,6 +2047,8 @@ window.__ModuleLoader__.load({
 				'quick.ask_user_question': '向你提问',
 				'quick.todo_write': '任务清单',
 				'quick.list_agents': '列出子代理',
+				// 只读枚举「子代理可以路由到哪些 provider / model」——不发起委派、不改配置。
+				'quick.list_subagent_models': '列出子代理可用的模型（只读，不发起委派）',
 				'quick.job_list': '后台任务列表',
 				'quick.job_output': '读取任务输出',
 				'quick.job_kill': '终止后台任务',
@@ -2075,8 +2077,14 @@ window.__ModuleLoader__.load({
 				// 看不出「AI 会在没有你操作的时候自己动起来」这层含义，故 create/update 两条明写。
 				'quick.schedule_create': '创建定时提醒（到点自动唤醒 AI 跑一轮，无需你在场）',
 				'quick.schedule_list': '列出本会话的定时提醒',
-				'quick.schedule_update': '修改定时提醒（含触发时间；改完仍会到点自动唤醒 AI）',
-				'quick.schedule_delete': '删除定时提醒',
+				'quick.schedule_edit': '修改定时提醒（含触发时间；改完仍会到点自动唤醒 AI），也能删除',
+				'quick.schedule_view': '按 id 查看一条定时提醒',
+				// 旧名：DSH 0.2.2-alpha.3 起不再注册（改名不是等价的，见 index.js 的
+				// QUICK_DEFAULTS 注释），两代键都留在清单里以兼容回退到旧 DSH 的部署。
+				// 标签必须写明「仅旧版 DSH 生效」：新版下这两行改不动任何东西，
+				// 真正的删除权限在 schedule_edit 那一行，不写清楚就是面板说谎。
+				'quick.schedule_update': '修改定时提醒（仅旧版 DSH 生效；新版请改 schedule_edit）',
+				'quick.schedule_delete': '删除定时提醒（仅旧版 DSH 生效；新版请改 schedule_edit）',
 				// run_code 的关键不是「执行代码」这件事本身（cordis_run 也会），而是
 				// **执行面有一半在本插件视野之外**：程序内对 tools.* 的调用会逐条过闸，
 				// 但直接调 Node API 的部分只有 DSH 原生沙箱管得住。文案点出这层区别，
@@ -2402,6 +2410,8 @@ window.__ModuleLoader__.load({
 				'quick.ask_user_question': 'ask you a question',
 				'quick.todo_write': 'todo list',
 				'quick.list_agents': 'list subagents',
+				// Read-only enumeration of the routes a subagent may use; spawns nothing.
+				'quick.list_subagent_models': 'list models available to subagents (read-only, spawns nothing)',
 				'quick.job_list': 'list background jobs',
 				'quick.job_output': 'read job output',
 				'quick.job_kill': 'kill a background job',
@@ -2430,8 +2440,14 @@ window.__ModuleLoader__.load({
 				// "create a reminder" alone reads like a desktop alarm clock, so create/update say it.
 				'quick.schedule_create': 'create a timed reminder (wakes the AI for another turn when due, with nobody present)',
 				'quick.schedule_list': 'list this session\'s timed reminders',
-				'quick.schedule_update': 'change a timed reminder (including when it fires; it still wakes the AI unattended)',
-				'quick.schedule_delete': 'delete a timed reminder',
+				'quick.schedule_edit': 'change a timed reminder (including when it fires; it still wakes the AI unattended), or delete it',
+				'quick.schedule_view': 'read one timed reminder by id',
+				// Legacy names: no longer registered as of DSH 0.2.2-alpha.3 (the rename was not
+				// equivalent — see QUICK_DEFAULTS in index.js). Both generations stay in the list
+				// so a rollback to an older DSH still resolves. The label must say "older DSH only":
+				// on a current DSH these rows change nothing, and delete lives on schedule_edit.
+				'quick.schedule_update': 'change a timed reminder (older DSH only; use schedule_edit on current DSH)',
+				'quick.schedule_delete': 'delete a timed reminder (older DSH only; use schedule_edit on current DSH)',
 				// The point is not "it runs code" (cordis_run does too) but that half its
 				// execution surface is outside this review: tools.* sub-calls pass through
 				// the gate one by one, while direct Node API use is bounded only by the
