@@ -7807,8 +7807,13 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     // ③ 超时**不重发**：预算已耗尽，重发必然立刻又超时。
     //
     //    判据看调用次数是 1。这条与 ② 的区别只在失败形态：② 是 `stream failed`（可重发），
-    //    这里是 `review timed out`（不可重发）。若把 isRetryableInfra 写成「凡是
-    //    infra-error 都重发」，② 仍绿、这条会红 —— 它钉的正是那个白名单。
+    //    这里是 `review timed out`（不可重发）。
+    //
+    //    ⚠️ 它守的是**循环开头的 `timedOut(rv)` 短路**，不是 `isRetryableInfra` 里那句
+    //    `review timed out` 排除。两者都能让超时不重发，而前者先执行、超时根本到不了后者
+    //    —— 把 `isRetryableInfra` 那句删掉或改成 `return true`，本用例仍然全绿（实测）。
+    //    那句是**防御性冗余**：它只在有人把 `timedOut` 短路挪到重试分支之后时才生效。
+    //    故不要以为本用例在保护那个白名单条目。
     {
       let timerBase = 0
       let firstTimer = null
@@ -7825,7 +7830,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       hRef = h
       timerBase = h.timers.length
       const r = await probeAuto(h, ws, 'a53timeout', T, A)
-      ok('★★ group24 A53: 超时不重发（预算已耗尽，重发只会白烧一次派发）',
+      ok('★★ group24 A53: 超时不重发（循环开头的 timedOut 短路，调用次数停在 1）',
         r && r.kind === 'ask' && llm.calls.length === 1,
         JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
       releaseTmp(ws, home)
@@ -7922,6 +7927,37 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       const { ws, home, h } = mkHostAuto({}, llm)
       const r = await probeAuto(h, ws, 'a53provider', T, A)
       ok('★★ group24 A53: provider 报错结束（reviewer ended with error）同样重发一次 → 正常放行',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑧ **流正常结束但没有 finish 块** → `stream ended without terminal finish`。
+    //
+    //    这是第四条 detail，前三条都覆盖不到：①⑥ 是抛错、⑦ 有 finish 块但 kind 是 error。
+    //    这里流**正常走完**（迭代自然结束），只是没等到终止块 —— provider 提前断连、
+    //    或被中间层截断时就是这个形状。
+    //
+    //    它同时是白名单里唯一没有用例的条目：此前把这一行删掉，全套仍然全绿。
+    //    不补这一条，「重发」对这条 detail 就没有任何保护。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      let n = 0
+      llm.stream = function (options) {
+        llm.calls.push(options)
+        n += 1
+        if (n === 1) {
+          // 只有内容块、没有 finish：for await 自然结束，finished 仍为 false。
+          return (async function* () {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', text: '{"risk":"low","decision":"allow"}' }
+          })()
+        }
+        return (async function* () { for (const c of verdict('{"risk":"low","decision":"allow"}')) yield c })()
+      }
+      const { ws, home, h } = mkHostAuto({}, llm)
+      const r = await probeAuto(h, ws, 'a53nofinish', T, A)
+      ok('★★ group24 A53: 流无终止块（stream ended without terminal finish）同样重发一次 → 正常放行',
         r === 'allow' && llm.calls.length === 2,
         JSON.stringify({ r, calls: llm.calls.length }))
       releaseTmp(ws, home)

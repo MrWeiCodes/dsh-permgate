@@ -7473,7 +7473,11 @@ export default {
     //
     // 白名单而不是「凡是 infra-error 都重试」：`review timed out` 也是 infra-error，
     // 但它由预算耗尽产生 —— 预算已经花光，重试必然立刻又超时，只是白烧一次派发。
-    // 超时那条在循环开头就被 timedOut 短路掉了，这里显式排除是为防日后有人调换顺序。
+    //
+    // 超时的实际拦截点是 `reviewWithModel` 循环开头的 `timedOut(rv)` 短路：超时在那里
+    // 就 return 了，**根本到不了本函数**。下面那句 `review timed out` 排除因此是
+    // 防御性冗余（顺序若被调换，它才会成为最后一道闸）。别把它当主防线，也别删：
+    // 删掉后行为不变，但顺序一旦改动就变成「超时也重发」。
     const RETRYABLE_INFRA_DETAILS = [
       'stream failed',
       'llm call failed',
@@ -7483,6 +7487,7 @@ export default {
     function isRetryableInfra(rv) {
       if (!rv || rv.code !== 'infra-error') return false
       const d = String(rv.detail || '')
+      // 防御性冗余（见上）：正常路径下超时已被 timedOut 短路，走不到这里。
       if (d.indexOf('review timed out') === 0) return false
       return RETRYABLE_INFRA_DETAILS.some((p) => d.indexOf(p) === 0)
     }
