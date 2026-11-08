@@ -5106,12 +5106,16 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     releaseTmp(ws, home)
   }
 
-  // ── A4：模型返回 high+allow（矛盾）→ 异常路径，不是放行 ──────────────────────
+  // ── A4：模型返回 `allow` + 表外 risk（矛盾）→ 异常路径，不是放行 ──────────────
+  //
+  // ⚠️ 载荷必须是 `allow` + **表外 risk**：`high + allow` 已不再是矛盾（risk 与
+  // decision 是两个独立维度，见 parseReviewDecision 的形态校验段），它走的是
+  // 「高风险放行重做」那条分支（见 A54）。这是 `contradiction` 目前唯一的来源。
   {
-    const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+    const llm = mkLlm(verdict('{"risk":"critical","decision":"allow"}'))
     const { ws, home, h } = mkHostAuto({}, llm)
     const r = await probeAuto(h, ws, 'a4', T, A)
-    ok('★★ group24 A4: 模型返回 high+allow（矛盾）→ 走异常路径，绝不放行',
+    ok('★★ group24 A4: 模型返回 allow + 表外 risk（矛盾）→ 走异常路径，绝不放行',
       r && r.kind === 'ask', JSON.stringify(r))
     releaseTmp(ws, home)
   }
@@ -5568,8 +5572,12 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   // 协议非法时 `rv.reason` 是空串（模型输出被拒，没有可信理由可引用）。
   // `normalizeText` 把空串折成 undefined → entry.modelReason 为 null，
   // 客户端 `p.modelReason ? … : null` 因此不渲染 —— 不会出现「模型判断：」后面跟空白的空行。
+  //
+  // ⚠️ 载荷用 `allow` + 表外 risk（矛盾，不重做，一次调用即回落）：
+  // 此前用的是 `high + allow`，而它现在会走「高风险放行重做」并在带 reason 时
+  // **正常放行** —— 那时本断言看到的 null 来自另一条路径，测的东西已经不是这里要测的。
   {
-    const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+    const llm = mkLlm(verdict('{"risk":"critical","decision":"allow"}'))
     const { ws, home, h } = mkHostAuto({ timeoutMs: 5000 }, llm)
     const r = await probeAuto(h, ws, 'a16c', T, A)
     ok('★★ group24 A16c: 失败路径无理由时 modelReason 为 null（不渲染空行）',
@@ -7348,14 +7356,38 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   //
   // A4/A5b 已覆盖 high+allow 与重复成员。这里补两条「放宽 reason 后可能被顺手放开」
   // 的形态，防止有人把 `hasReason` 的检查删过头：
-  //   · low + deny + reason —— 形态矛盾，仍必须拒
   //   · allow + reason 且 reason 不是字符串 —— 仍必须拒
+  //   · `low + escalate` —— 仍必须拒（risk 与 decision 唯一保留的形态约束）
+  //
+  // ⚠️ `low + deny` **不再是**矛盾：risk 与 decision 是两个独立维度（风险是事实、
+  // 决策是选择），它现在是合法形态、直接生效。这条用例改钉那个行为。
   {
     const llm = mkLlm(verdict('{"risk":"low","decision":"deny","reason":"看起来危险"}'))
     const { ws, home, h } = mkHostAuto({}, llm)
     const r = await probeAuto(h, ws, 'a47', T, A)
-    ok('★★ group24 A47: low+deny 仍是形态矛盾（放宽 reason 不等于放宽矛盾）',
-      r && r.kind === 'ask', JSON.stringify(r))
+    ok('★★ group24 A47: low+deny（带 reason）是合法结论，一次调用直接拒绝（不重做）',
+      r === 'deny' && llm.calls.length === 1, JSON.stringify({ r, calls: llm.calls.length }))
+    releaseTmp(ws, home)
+  }
+  {
+    // 不带 reason 的 `low + deny` 才被拒 —— 判据是 `missing required reason`，
+    // 走格式修正轮而不是矛盾重做。
+    const llm = mkLlm(verdict('{"risk":"low","decision":"deny"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a47b', T, A)
+    ok('★★ group24 A47b: low+deny 缺 reason → 判协议错（走格式修正轮，最终回落）',
+      r && r.kind === 'ask' && llm.calls.length === 3,
+      JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+    releaseTmp(ws, home)
+  }
+  {
+    // `low + escalate` 是仅存的形态约束：风险很低却说判不了，自相矛盾。
+    const llm = mkLlm(verdict('{"risk":"low","decision":"escalate","reason":"拿不准"}'))
+    const { ws, home, h } = mkHostAuto({}, llm)
+    const r = await probeAuto(h, ws, 'a47c', T, A)
+    ok('★★ group24 A47c: low+escalate 仍是形态矛盾（唯一保留的 risk×decision 约束）',
+      r && r.kind === 'ask' && llm.calls.length === 1,
+      JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
     releaseTmp(ws, home)
   }
   {
@@ -7457,19 +7489,21 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   //
   // 这一组守两件事，两件都只在真模型上才会暴露、且失败形态是「静默劣化」：
   //   ① 理由的语言跟着界面走（否则英文用户拿到的是一堆中文理由）；
-  //   ② 那 9 行 JSON 形态清单**永远是英文** —— `parseReviewDecision` 只认
+  //   ② 那 12 行 JSON 形态清单**永远是英文** —— `parseReviewDecision` 只认
   //      low/medium/high × allow/deny/escalate。若哪天有人「顺手把策略翻成中文」
   //      并照着翻示意 JSON，模型会输出中文键名 → 每次评审都是协议错 →
   //      全部退化成弹窗，而自动审批看起来「还在工作」。
   {
     const POLICY_HEAD = 'You are the final authorization reviewer for exactly one pending tool call.'
-    // 策略里**全部 9 条**合法形态，逐条钉住。
+    // 策略里**全部 12 条**合法形态，逐条钉住。
     //
-    // 为什么必须逐条而不是抽查：`parseReviewDecision` 的合法组合就是这 9 个
-    // （low×allow / medium×{allow,deny,escalate} / high×deny，各带或不带 reason）。
+    // 为什么必须逐条而不是抽查：`parseReviewDecision` 的合法组合就是这 12 个
+    // （low×{allow,deny} / medium×{allow,deny,escalate} / high×{allow,deny,escalate}，
+    // 其中 allow/deny 各带或不带 reason；两个 risk×decision 不匹配的格子
+    // 只列**带 reason** 的版本，解析器也强制它们带 reason）。
     // 抽查漏掉哪条，将来那条被翻成中文就无人发现 —— 实测过：只钉 3 条时，
     // 把 `{"risk":"high","decision":"deny"}` 换成 `{"风险":"高","决定":"拒绝"}`
-    // 断言全绿，而那正是最危险的一条（high 只能 deny）。
+    // 断言全绿，而那正是最危险的一条（high 曾经只能 deny）。
     const SHAPES = [
       '{"risk":"low","decision":"allow"}',
       '{"risk":"low","decision":"allow","reason":"..."}',
@@ -7479,7 +7513,10 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       '{"risk":"medium","decision":"deny","reason":"..."}',
       '{"risk":"high","decision":"deny"}',
       '{"risk":"high","decision":"deny","reason":"..."}',
+      '{"risk":"low","decision":"deny","reason":"..."}',
+      '{"risk":"high","decision":"allow","reason":"..."}',
       '{"risk":"medium","decision":"escalate","reason":"..."}',
+      '{"risk":"high","decision":"escalate","reason":"..."}',
     ]
     // 值域本身也不得被翻译：解析器只认这几个英文词。中文键名/中文值一旦进了策略，
     // 模型照抄就是协议错（每次评审都退化成弹窗，且只在真模型上暴露）。
@@ -7675,22 +7712,25 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       releaseTmp(ws, home)
     }
 
-    // ③ 矛盾（high + allow）→ **全新重做一次**，不给它看第一次的输出。
+    // ③ 矛盾（`allow` + 表外 risk）→ **全新重做一次**，不给它看第一次的输出。
     //
-    //    为什么不追问：指出矛盾要求复查时，medium 对 decision 没有限制，合法改法里
-    //    既有收紧的（high+deny）也有放宽的（medium+allow），模型倾向配合用户，
-    //    多半选后者 —— 那是在引导下放宽。
+    //    为什么不追问：指出矛盾要求复查时，合法改法里既有收紧的也有放宽的，
+    //    模型倾向配合用户，多半选后者 —— 那是在引导下放宽。
     //    全新重做没有引导，第二个结论是独立采样，无论宽严都可直接采纳。
+    //
+    //    ⚠️ 载荷必须是 `allow` + **表外 risk**：`high + allow` 已不再是矛盾
+    //    （risk 与 decision 是两个独立维度），它走的是另一条分支（高风险放行重做，
+    //    见下方 ③c）。这是 `contradiction` 这个 code 目前唯一的来源。
     //
     //    判据看两件事：调用次数是 2，且**第二次的 messages 与第一次逐字相同**
     //    （没有把第一次的输出塞回上下文）。
     {
-      const llm = mkLlm(verdict('{"risk":"high","decision":"allow"}'))
+      const llm = mkLlm(verdict('{"risk":"critical","decision":"allow"}'))
       const { ws, home, h } = mkHostAuto({}, llm)
       const r = await probeAuto(h, ws, 'a51contra', T, A)
       const m1 = JSON.stringify(llm.calls[0] && llm.calls[0].messages)
       const m2 = JSON.stringify(llm.calls[1] && llm.calls[1].messages)
-      ok('★★ group24 A51: 矛盾走全新重做（共 2 次调用），第二次不携带第一次的输出',
+      ok('★★ group24 A51: 矛盾（allow + 表外 risk）走全新重做（共 2 次调用），第二次不携带第一次的输出',
         r && r.kind === 'ask' && llm.calls.length === 2 && m1 === m2,
         JSON.stringify({ r: r && r.kind, calls: llm.calls.length, same: m1 === m2 }))
       releaseTmp(ws, home)
@@ -7701,7 +7741,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     //     前者无论宽严都是模型自己的判断。
     {
       const llm = mkLlm((_o, n) => verdict(n === 1
-        ? '{"risk":"high","decision":"allow"}'
+        ? '{"risk":"critical","decision":"allow"}'
         : '{"risk":"low","decision":"allow"}'))
       const { ws, home, h } = mkHostAuto({}, llm)
       const r = await probeAuto(h, ws, 'a51contra2', T, A)
@@ -8107,6 +8147,280 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
         && plog.data.effortWant === row.effortWant
         && plog.data.effort === 'low' && plog.data.effortWant === 'min',
         JSON.stringify({ log: plog && { e: plog.data.effort, w: plog.data.effortWant }, mem: row && { e: row.effort, w: row.effortWant } }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A54：高风险放行的两维处置（`high + allow`）────────────────────────────────
+  //
+  // 这一组守的是「模型判定高风险却放行」这条路径。要点五条：
+  //   ① 它**先全新重做一次**，重做后仍是 `high + allow` 才按设置处置；
+  //   ② 第一维三支（拒绝 / 询问 / 允许）各自产出正确的终局动作与 via；
+  //   ③ 三支都**不经过 autoFallback 回落链** —— 把回落值设成 allow + 等待时限 0，
+  //      拒绝仍是拒绝、询问仍然弹窗。这是本组最要紧的一条：把它当成 escalate 送进
+  //      回落链时，「拒绝」会变成「直接放行」，且没有任何断言会变红；
+  //   ④ 第二维（等你多久）只在第一维是询问时有意义：`wait` 不建定时器，
+  //      其余两档按「等待人工的时限」倒计时；
+  //   ⑤ 三个 via 在会话流里走**红色系**，与普通放行可区分。
+  {
+    // 重做用的假 llm：两次都给同一个结论。`high + allow` 带 reason（解析器强制）。
+    const HR_ALLOW = '{"risk":"high","decision":"allow","reason":"用户明确要求把生产库导出到外部存储"}'
+
+    // ① 第一维 = 拒绝：两次调用后 deny，via = auto-deny-high，不弹窗。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      // 回落值设成 allow + 等待时限 0：若这条路径误入回落链，结果会是 allow。
+      const { ws, home, h } = mkHostAuto({ timeoutMs: 0, highRiskAction: 'deny' }, llm, { fallbackAutoFallback: 'allow' })
+      const r = await probeAuto(h, ws, 'a54deny', T, A)
+      ok('★★ group24 A54: 高风险放行 + 第一维「拒绝」→ 两次调用后直接拒绝，不弹窗',
+        r === 'deny' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const row = ((dec.data && dec.data.decisions) || []).filter((x) => x.via === 'auto-deny-high').pop()
+      ok('★★ group24 A54: 该拒绝记为 auto-deny-high（与「模型自己拒绝」可区分）',
+        !!row && row.action === 'deny' && row.risk === 'high',
+        JSON.stringify({ via: row && row.via, action: row && row.action, risk: row && row.risk }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 第一维 = 询问（默认）：两次调用后弹窗，via = auto-ask-high。
+    //    同样把回落值设成 allow + 时限 0 —— 询问必须仍然是询问。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      const { ws, home, h } = mkHostAuto({ timeoutMs: 0 }, llm, { fallbackAutoFallback: 'allow' })
+      const r = await probeAuto(h, ws, 'a54ask', T, A)
+      ok('★★ group24 A54: 高风险放行 + 第一维「询问」→ 两次调用后弹窗（不被回落值覆盖）',
+        r && r.kind === 'ask' && llm.calls.length === 2,
+        JSON.stringify({ r: r && r.kind, calls: llm.calls.length }))
+      // 弹窗必须写明这是高风险放行，且带上模型自己写的理由 ——
+      // 用户要判断的是「我的策略写得对，还是太宽」，与「模型拿不准」是两种决定。
+      ok('★★ group24 A54: 弹窗带上模型原话（判断策略宽严的唯一依据）',
+        r && r.kind === 'ask' && String(r.entry.modelReason || '').indexOf('生产库') !== -1,
+        JSON.stringify(r && r.entry ? { modelReason: r.entry.modelReason } : r))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 第一维 = 允许：两次调用后放行，via = auto-allow-high，risk 仍是 high。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      const { ws, home, h } = mkHostAuto({ highRiskAction: 'allow' }, llm)
+      const r = await probeAuto(h, ws, 'a54allow', T, A)
+      ok('★★ group24 A54: 高风险放行 + 第一维「允许」→ 两次调用后放行',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const row = ((dec.data && dec.data.decisions) || []).filter((x) => x.via === 'auto-allow-high').pop()
+      ok('★★ group24 A54: 该放行记为 auto-allow-high 且 risk 保持 high（不谎报风险）',
+        !!row && row.action === 'allow' && row.risk === 'high',
+        JSON.stringify({ via: row && row.via, action: row && row.action, risk: row && row.risk }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 重做后**不再是**高风险放行 → 按新结论正常走，不惊动高风险设置。
+    //    这条防的是「只重做一次就无条件按设置处置」：那样第一次是 high+allow、
+    //    第二次模型改成了 medium+allow，仍会被第一维的「拒绝」拦下。
+    {
+      const llm = mkLlm((_o, n) => verdict(n === 1
+        ? HR_ALLOW
+        : '{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({ highRiskAction: 'deny' }, llm)
+      const r = await probeAuto(h, ws, 'a54changed', T, A)
+      ok('★★ group24 A54: 重做后不再高风险 → 按新结论放行（高风险设置不介入）',
+        r === 'allow' && llm.calls.length === 2,
+        JSON.stringify({ r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 第二维：第一维 = 询问时，`wait` 不建定时器（弹窗挂到用户处理为止）。
+    //    判据看弹窗条目上的 `deadline`：null = 不倒计时。
+    //
+    //    ⚠️ 「等待人工的时限」必须非 0，否则 wait 与 deny 两档都拿不到 deadline，
+    //    断言无法区分「按设置不倒计时」与「时限本身是 0」。取 7000 并断言它**原样**
+    //    出现在 deadline 的差值里（不是硬编码 20000 那个默认值）。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      const { ws, home, h } = mkHostAuto({ timeoutMs: 7000, highRiskAction: 'ask', highRiskTimeout: 'wait' }, llm)
+      const r = await probeAuto(h, ws, 'a54wait', T, A)
+      ok('★★ group24 A54: 第二维「一直等」→ 弹窗 deadline 为 null（不倒计时）',
+        r && r.kind === 'ask' && r.entry.deadline === null && llm.calls.length === 2,
+        JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, calls: llm.calls.length } : { r, calls: llm.calls.length }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ 第二维 = 拒绝：deadline 非 null，且超时落点是拒绝（记录 timeout-deny）。
+    //
+    //    判据里断言 `timeoutMs` 等于「等待人工的时限」的生效值（7000），
+    //    不是硬编码的默认值：复用同一个设置项是本设计的一部分，
+    //    若哪天改成另写一个常量，这条会变红。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      const { ws, home, h } = mkHostAuto({ timeoutMs: 7000, highRiskAction: 'ask', highRiskTimeout: 'deny' }, llm)
+      const r = await probeAuto(h, ws, 'a54tmo-deny', T, A)
+      const dl = r && r.kind === 'ask' && typeof r.entry.deadline === 'number'
+        ? r.entry.deadline - Date.now() : null
+      ok('★★ group24 A54: 第二维「拒绝」→ deadline 按「等待人工的时限」倒计时，落点为拒绝',
+        r && r.kind === 'ask' && dl !== null && dl > 0 && dl <= 7000 && r.entry.onTimeout === 'deny',
+        JSON.stringify(r && r.entry ? { dl, onTimeout: r.entry.onTimeout } : r))
+      releaseTmp(ws, home)
+    }
+
+    // ⑦ 第二维 = 允许：同上，落点是允许。
+    {
+      const llm = mkLlm(verdict(HR_ALLOW))
+      const { ws, home, h } = mkHostAuto({ timeoutMs: 7000, highRiskAction: 'ask', highRiskTimeout: 'allow' }, llm)
+      const r = await probeAuto(h, ws, 'a54tmo-allow', T, A)
+      ok('★★ group24 A54: 第二维「允许」→ deadline 非空、落点为允许',
+        r && r.kind === 'ask' && typeof r.entry.deadline === 'number' && r.entry.onTimeout === 'allow',
+        JSON.stringify(r && r.entry ? { deadline: r.entry.deadline, onTimeout: r.entry.onTimeout } : r))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A55：额外审批策略注入 system ─────────────────────────────────────────────
+  //
+  // 三条：① 有策略时 system 里带它、且仍以 REVIEW_POLICY 开头（前缀不变 = KV cache
+  // 仍能命中）；② 无策略时 system **逐字不变**（这是保住现有基线的硬要求）；
+  // ③ 项目层 `replace` 时全局策略不出现（那是「本项目不沿用全局宽松规则」的唯一手段）。
+  {
+    const HEAD = 'You are the final authorization reviewer for exactly one pending tool call.'
+    const GLOBAL_POLICY = '本项目的只读命令（npm test / git status）可以直接放行。'
+    const PROJECT_POLICY = '本项目额外要求：任何 npm 命令都必须先问。'
+    const sysOf = (llm) => String((llm.calls[0] && llm.calls[0].system) || '')
+
+    // ① 全局策略非空 → system 含它，且仍以 REVIEW_POLICY 开头。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({ policy: GLOBAL_POLICY }, llm)
+      await probeAuto(h, ws, 'a55g', T, A)
+      const sys = sysOf(llm)
+      ok('★★ group24 A55: 全局策略注入 system，且仍以 REVIEW_POLICY 开头（前缀可缓存）',
+        sys.indexOf(HEAD) === 0 && sys.indexOf(GLOBAL_POLICY) !== -1
+        && sys.indexOf('CONFIGURED RULES:') !== -1,
+        JSON.stringify({ head: sys.slice(0, 40), has: sys.indexOf(GLOBAL_POLICY) !== -1 }))
+      // 策略段必须写明「冲突时以这些规则为准」与「不得改变风险评级」——
+      // 少了前一句，用户写的放宽规则会被内置策略的 fail-closed 句子压住；
+      // 少了后一句，模型会为了让结论自洽而把 high 报成 medium（谎报风险）。
+      ok('★★ group24 A55: 策略段同时写明「冲突时以用户规则为准」与「不得改变风险评级」',
+        sys.indexOf('these rules win') !== -1 && sys.indexOf('never') !== -1
+        && sys.indexOf('let these rules change the rating') !== -1,
+        JSON.stringify({ tail: sys.slice(-400) }))
+      releaseTmp(ws, home)
+    }
+
+    // ② 无策略 → system 逐字不变（与改动前的拼接结果完全一致）。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({}, llm)
+      await probeAuto(h, ws, 'a55none', T, A)
+      const sys = sysOf(llm)
+      ok('★★ group24 A55: 无策略时 system 不含策略段（请求逐字不变，保住现有基线）',
+        sys.indexOf('CONFIGURED RULES:') === -1 && sys.indexOf(HEAD) === 0,
+        JSON.stringify({ tail: sys.slice(-120) }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 项目层 `replace` → 全局策略不出现在 system 里。
+    //
+    //    这条是 `replace` 模式存在的全部理由：没有它，全局写了一条「这类操作可以
+    //    放行」之后，任何项目都无法在本项目里推翻它。
+    {
+      const llm = mkLlm(verdict('{"risk":"low","decision":"allow"}'))
+      const { ws, home, h } = mkHostAuto({ policy: GLOBAL_POLICY }, llm)
+      // 直接改磁盘配置再 reload：这条测的是**读取侧**的合并，走路由会顺带测写入侧，
+      // 两者混在一起时失败无法归因。
+      const cfgPath = join(home, 'dsh-permgate', 'config.json')
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      const key = Object.keys(cfg.projects || {})[0] || ws
+      cfg.projects = cfg.projects || {}
+      cfg.projects[key] = cfg.projects[key] || {}
+      cfg.projects[key].autoReview = { policy: PROJECT_POLICY, policyMode: 'replace' }
+      writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8')
+      await callRoute(h.routes, 'POST', '/permgate/reload', {})
+      await probeAuto(h, ws, 'a55rep', T, A)
+      const sys = sysOf(llm)
+      ok('★★ group24 A55: 项目层「替换全局」→ 全局策略不发送，只发项目策略',
+        sys.indexOf(GLOBAL_POLICY) === -1 && sys.indexOf(PROJECT_POLICY) !== -1,
+        JSON.stringify({ g: sys.indexOf(GLOBAL_POLICY) !== -1, p: sys.indexOf(PROJECT_POLICY) !== -1 }))
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A56：`/permgate/set-auto-policy` 的写入语义 ───────────────────────────────
+  //
+  // 四种写法必须分开，折叠任意两种都会让面板显示的值与实际裁决分叉：
+  //   ① 字段缺席 = 不动它；② `policy: ''` = 显式清除；
+  //   ③ `'inherit'` = 项目层删键；④ 非法值 / 超长 = 回 `{ error }`，不静默落值。
+  {
+    const post = (h, body) => callRoute(h.routes, 'POST', '/permgate/set-auto-policy', body)
+    // 项目块的键是**归一化后的路径**（宿主 norm：反斜杠转正斜杠、剥尾部分隔符），
+    // 不是 mkdtemp 给的原始 Windows 路径。比较前必须做同样的归一，否则永远找不到块。
+    const normKey = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const readAR = (home, target, ws) => {
+      const cfg = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+      if (target === 'global') return cfg.global.autoReview || {}
+      const p = cfg.projects || {}
+      const k = Object.keys(p).find((x) => normKey(x) === normKey(ws))
+      return (k && p[k].autoReview) || {}
+    }
+
+    // ① 逐字段写入，不互相覆盖。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      await post(h, { target: 'global', policy: '规则甲' })
+      await post(h, { target: 'global', highRiskAction: 'deny' })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: 逐字段写入（改 highRiskAction 不会把 policy 清掉）',
+        ar.policy === '规则甲' && ar.highRiskAction === 'deny',
+        JSON.stringify(ar))
+      // ② `policy: ''` 是显式清除（删键），不是「写入空串」。
+      await post(h, { target: 'global', policy: '' })
+      const ar2 = readAR(home, 'global', ws)
+      ok('★★ group24 A56: policy 传空串 = 显式清除（删键，不落空串）',
+        !('policy' in ar2) && ar2.highRiskAction === 'deny',
+        JSON.stringify(ar2))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 项目层 `'inherit'` = 删键（回到继承全局）。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      await post(h, { target: 'project', highRiskAction: 'allow' })
+      const a1 = readAR(home, 'project', ws)
+      await post(h, { target: 'project', highRiskAction: 'inherit' })
+      const a2 = readAR(home, 'project', ws)
+      ok('★★ group24 A56: 项目层传 inherit = 删键（回到继承全局，不落 inherit 字面量）',
+        a1.highRiskAction === 'allow' && !('highRiskAction' in a2),
+        JSON.stringify({ before: a1, after: a2 }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 非法值 / 超长 → `{ error }`，且磁盘不变（不静默落某个值）。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const r1 = await post(h, { target: 'global', highRiskAction: 'nonsense' })
+      const r2 = await post(h, { target: 'global', policy: 'x'.repeat(4001) })
+      const r3 = await post(h, { target: 'global', highRiskTimeout: 'inherit' })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: 非法值 / 超长 / 全局层 inherit 都回 error，且磁盘不变',
+        !!(r1.data && r1.data.error) && !!(r2.data && r2.data.error) && !!(r3.data && r3.data.error)
+        && !('highRiskAction' in ar) && !('policy' in ar),
+        JSON.stringify({ r1: r1.data, r2: r2.data && r2.data.error, r3: r3.data && r3.data.error, ar }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ `set-auto-review` 的 clear 能清掉三个新键（`explicit` 含它们，
+    //    「全部恢复默认」按钮因此也能覆盖）。
+    {
+      const { ws, home, h } = mkHostAuto({ policy: '规则乙', highRiskAction: 'allow', highRiskTimeout: 'wait' }, undefined)
+      const st0 = await callRoute(h.routes, 'GET', '/permgate/status')
+      const explicit = (st0.data && st0.data.autoReview && st0.data.autoReview.explicit) || []
+      const r = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { clear: explicit })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: set-auto-review 的 clear 覆盖三个新键（「全部恢复默认」也能清掉）',
+        explicit.indexOf('policy') !== -1 && explicit.indexOf('highRiskAction') !== -1
+        && explicit.indexOf('highRiskTimeout') !== -1
+        && !('policy' in ar) && !('highRiskAction' in ar) && !('highRiskTimeout' in ar),
+        JSON.stringify({ explicit, ar }))
       releaseTmp(ws, home)
     }
   }

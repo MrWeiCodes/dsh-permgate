@@ -237,7 +237,7 @@ ok('侧边栏用当前 GUI 会话身份（不是宿主下发的 exec.session.id�
   ok('快照形状不认识时返回 undefined（不冒充有会话）',
     api2.pgCurrentSessionId({ phase: 'ready' }) === undefined && api2.pgCurrentSessionId(undefined) === undefined)
 }
-ok('normTarget 定义 + 六个设置路由统一使用（含 set-category / set-quick / set-command-sub / set-doomloop）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 6)
+ok('normTarget 定义 + 七个设置路由统一使用（含 set-category / set-quick / set-command-sub / set-doomloop / set-auto-policy）', src.includes('function normTarget(a) {') && (src.match(/const target = normTarget\(a\)/g) || []).length === 7)
 ok('pathArg 对 str_replace_editor 取 path（command+path 优先）', src.includes("if (typeof args.command === 'string' && typeof args.path === 'string') return args.path"))
 
 // ─────────────────────────────────────────────────────────────
@@ -1754,7 +1754,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
-    // 宿主 AUTO_REVIEW_DEFAULTS 的 7 个键，每个都要有控件
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 10 个键，每个都要有控件
     //
     // 曾经有第 8 个 `redactContentKeys`（「隐藏参数内容」），已删除：它**从未接线**
     // （`reviewUserText` 一次都没读过它），而它的设计前提也是错的 ——
@@ -1763,10 +1763,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     //
     // 还有第 7 个 `cacheEnabled`（「记住放行过的调用」），也已删除 —— 见下一条断言。
     //
+    // 后加的 `policy` / `highRiskAction` / `highRiskTimeout` 三个键的控件**不在本卡片里**
+    // （它们是第二张卡片 `policyCard` 的内容，见下方那条断言）。故这里的 `body` 判定
+    // 对它们改用「整张 auto tab 的输出」：本卡片 + 第二张卡片都算。
+    //
     // ⚠️ 这份清单必须与宿主 AUTO_REVIEW_DEFAULTS **逐键对齐**：多一个键而这里没加，
     // 那条设置就退化成「只能手改 config.json」；这里多一个而宿主没有，则面板会渲染
     // 一个提交了没人读的控件。两者都是本文件反复记录的面板说谎。
-    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model', 'reasoningEffort']
+    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model', 'reasoningEffort', 'policy', 'highRiskAction', 'highRiskTimeout']
+    // 后三个由第二张卡片（`policyCard`）负责，而它定义在本卡片内部，
+    // 故 `body` 已经把它们包住了 —— 一次截取即可，不必再单独切一段。
     for (const k of keys) {
       if (body.indexOf("'" + k + "'") === -1) return false
     }
@@ -1837,6 +1843,251 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // ② 客户端侧：statusView 的那一行必须真的读它（不是写死某个值）
     const iView = src.indexOf('reasoningEffort: autoReviewSetting(')
     return iView !== -1
+  })())
+  // ⑨a2 三个新键的默认值（`policy` / `highRiskAction` / `highRiskTimeout`）
+  //
+  // 判据走真实求值（与上一条同一手法）：这三个默认值是**行为**，不是文案 ——
+  // 改了它，所有从未表态过的用户的实际处置都会变，必须有人主动改这条断言。
+  //
+  //   · `policy: ''` —— 空串就是「没有策略」，且 `reviewPolicySection` 据此返回空串
+  //     （请求逐字不变）。它**不是**「跟随会话」那种空串语义。
+  //   · `highRiskAction: 'ask'` —— 默认不是 `allow`：那是无人在环的高风险放行。
+  //   · `highRiskTimeout: 'deny'` —— 默认不是 `wait`：没人在场时不该让工具调用
+  //     永久挂起，也不该静默放行。
+  ok('★★ 三个新键的默认值（policy 空串 / highRiskAction ask / highRiskTimeout deny）', (function () {
+    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+    if (iDef < 0) return false
+    let d = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    if (!defBody) return false
+    let defs = null
+    try { defs = new Function(defBody + '\n; return AUTO_REVIEW_DEFAULTS')() } catch (e) { return false }
+    return !!defs && defs.policy === '' && defs.highRiskAction === 'ask' && defs.highRiskTimeout === 'deny'
+  })())
+  // ⑨a3 `reviewPolicyOf` 的三态合并 + 空串不产生段落
+  //
+  // 走**真实求值**：把 AUTO_REVIEW_DEFAULTS / 三个值域表 / normalizeProjectAutoReview /
+  // reviewPolicyOf 以及它依赖的两个小函数抽出来跑。只匹配源码里的字符串无法区分
+  // 「写了」与「写对位置」—— 而这段的分支只有三条，写错任意一条都会让某个模式的
+  // 行为与面板文案不符（例如 replace 模式实际仍发送全局策略）。
+  ok('★★ reviewPolicyOf 三态（inherit / append / replace）+ 空串不产生段落', (function () {
+    const grab = (marker, isFn) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      if (!isFn) {
+        let d = 0
+        for (let k = src.indexOf('{', i); k < src.length; k++) {
+          if (src[k] === '{') d++
+          else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+        }
+        return ''
+      }
+      let d = 0
+      for (let k = src.indexOf('{', i); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const consts = grab('const POLICY_MODES = ')
+    const fnProj = grab('function normalizeProjectAutoReview(raw) {', true)
+    const fnBlock = grab('function autoReviewBlockOf(block) {', true)
+    const fnProject = grab('function projectAutoReviewOf(root) {', true)
+    const fnOf = grab('function reviewPolicyOf(root) {', true)
+    const fnSection = grab('function reviewPolicySection(root) {', true)
+    if (!consts || !fnProj || !fnBlock || !fnProject || !fnOf || !fnSection) return false
+    let api = null
+    try {
+      api = new Function('config', 'projectBlock',
+        consts + '\n' + fnProj + '\n' + fnBlock + '\n' + fnProject + '\n' + fnOf + '\n' + fnSection
+        + '\n; return { reviewPolicyOf, reviewPolicySection }')({}, () => ({}))
+    } catch (e) { return false }
+    if (!api) return false
+    // 用一个可变的 config 逐场景跑（闭包读的是传进去的那个对象）
+    const mk = (g, p) => {
+      const cfg = { global: g ? { autoReview: g } : {}, projects: {} }
+      const pb = p ? { autoReview: p } : {}
+      const run = new Function('config', 'projectBlock',
+        consts + '\n' + fnProj + '\n' + fnBlock + '\n' + fnProject + '\n' + fnOf + '\n' + fnSection
+        + '\n; return { reviewPolicyOf, reviewPolicySection }')(cfg, () => pb)
+      return run
+    }
+    const G = '全局规则'
+    const P = '项目规则'
+    // ① inherit（默认）：只用全局
+    {
+      const r = mk({ policy: G }, null)
+      const o = r.reviewPolicyOf('/x')
+      if (o.mode !== 'inherit' || o.text !== G) return false
+    }
+    // ② append：全局 + 空行 + 项目
+    {
+      const r = mk({ policy: G }, { policy: P, policyMode: 'append' })
+      const o = r.reviewPolicyOf('/x')
+      if (o.mode !== 'append' || o.text !== G + '\n\n' + P) return false
+    }
+    // ③ replace：只用项目（全局那段**不发送**）
+    {
+      const r = mk({ policy: G }, { policy: P, policyMode: 'replace' })
+      const o = r.reviewPolicyOf('/x')
+      if (o.mode !== 'replace' || o.text !== P) return false
+    }
+    // ④ 两层都空 → text 为空串，`reviewPolicySection` 也返回空串
+    //    （请求逐字不变是本设计保住现有基线的硬要求）
+    {
+      const r = mk({}, null)
+      const o = r.reviewPolicyOf('/x')
+      if (o.text !== '') return false
+      if (r.reviewPolicySection('/x') !== '') return false
+    }
+    // ⑤ 有策略时段头存在，且**以空行开头**（接在 REVIEW_POLICY 之后不粘连）
+    {
+      const r = mk({ policy: G }, null)
+      const sec = r.reviewPolicySection('/x')
+      if (sec.indexOf('\n\nCONFIGURED RULES:\n') !== 0) return false
+      if (sec.indexOf(G) === -1) return false
+    }
+    return true
+  })())
+  // ⑨a4 `highRiskActionOf` / `highRiskTimeoutOf` 的继承穿透
+  //
+  // 判据同样是真实求值：这两条链是「项目显式 → 全局显式 → 缺省」，
+  // 任何一环写反都会让面板显示的值与裁决用的值来自不同层。
+  ok('★★ highRiskActionOf / highRiskTimeoutOf 三层取值（项目 → 全局 → 缺省）', (function () {
+    const grab = (marker) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = src.indexOf('{', i); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+      }
+      return ''
+    }
+    // 单行常量按行取（它们是数组字面量，用 grab 的花括号配平会取到别处）
+    const grabLine = (marker) => {
+      const j = src.indexOf(marker)
+      if (j < 0) return ''
+      const end = src.indexOf('\n', j)
+      return src.slice(j, end)
+    }
+    const consts = grabLine('const HIGH_RISK_ACTIONS = ')
+    const consts2 = grabLine('const HIGH_RISK_TIMEOUTS = ')
+    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+    if (iDef < 0) return false
+    let d0 = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d0++
+      else if (src[k] === '}') { d0--; if (d0 === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    const fnBlock = grab('function autoReviewBlockOf(block) {')
+    const fnProject = grab('function projectAutoReviewOf(root) {')
+    const fnAct = grab('function highRiskActionOf(root) {')
+    const fnTmo = grab('function highRiskTimeoutOf(root) {')
+    if (!consts || !consts2 || !defBody || !fnBlock || !fnProject || !fnAct || !fnTmo) return false
+    const mk = (g, p) => {
+      const cfg = { global: g ? { autoReview: g } : {}, projects: {} }
+      const pb = p ? { autoReview: p } : {}
+      return new Function('config', 'projectBlock',
+        consts + '\n' + consts2 + '\n' + defBody + '\n' + fnBlock + '\n' + fnProject + '\n' + fnAct + '\n' + fnTmo
+        + '\n; return { highRiskActionOf, highRiskTimeoutOf }')(cfg, () => pb)
+    }
+    // ① 两层都缺 → 缺省值（ask / deny）
+    {
+      const a = mk(null, null)
+      if (a.highRiskActionOf('/x') !== 'ask') return false
+      if (a.highRiskTimeoutOf('/x') !== 'deny') return false
+    }
+    // ② 只有全局 → 用全局
+    {
+      const a = mk({ highRiskAction: 'allow', highRiskTimeout: 'wait' }, null)
+      if (a.highRiskActionOf('/x') !== 'allow') return false
+      if (a.highRiskTimeoutOf('/x') !== 'wait') return false
+    }
+    // ③ 项目显式 → 项目优先（不是「项目或全局」混着取）
+    {
+      const a = mk({ highRiskAction: 'allow', highRiskTimeout: 'wait' }, { highRiskAction: 'deny', highRiskTimeout: 'allow' })
+      if (a.highRiskActionOf('/x') !== 'deny') return false
+      if (a.highRiskTimeoutOf('/x') !== 'allow') return false
+    }
+    // ④ 项目缺键（继承）→ 穿透全局，且**两个维度各算各的**
+    //    （合成一个判断时，只有一个维度继承、另一个用缺省，测不出来）
+    {
+      const a = mk({ highRiskAction: 'allow', highRiskTimeout: 'wait' }, {})
+      if (a.highRiskActionOf('/x') !== 'allow') return false
+      if (a.highRiskTimeoutOf('/x') !== 'wait') return false
+    }
+    // ⑤ 非法值不生效（回落下一层）—— 手改 config.json 塞进来的垃圾不能改变处置
+    {
+      const a = mk({ highRiskAction: 'nonsense', highRiskTimeout: 'nonsense' }, {})
+      if (a.highRiskActionOf('/x') !== 'ask') return false
+      if (a.highRiskTimeoutOf('/x') !== 'deny') return false
+    }
+    return true
+  })())
+  // ⑨a5 `normalizeProjectAutoReview` 只认四个键，其它一律丢弃
+  //
+  // 工程参数（timeoutMs / breakerThreshold / 模型覆盖）**仍只有全局一份**：
+  // 项目层若也接受它们，同一个模型调用在不同项目里超时不同，而评审结论本身全局一致。
+  ok('★★ normalizeProjectAutoReview 只认四个键（工程参数不得下沉到项目层）', (function () {
+    const i = src.indexOf('function normalizeProjectAutoReview(raw) {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+    }
+    const consts = (function () {
+      const j = src.indexOf('const POLICY_MODES = ')
+      if (j < 0) return ''
+      let d2 = 0
+      for (let k = src.indexOf('{', j); k < src.length; k++) {
+        if (src[k] === '{') d2++
+        else if (src[k] === '}') { d2--; if (d2 === 0) return src.slice(j, k + 1) }
+      }
+      return ''
+    })()
+    if (!body || !consts) return false
+    // 上限常量与两个值域表也一起注入（函数体引用了它们）
+    const grabLine = (marker) => {
+      const j = src.indexOf(marker)
+      if (j < 0) return ''
+      const end = src.indexOf('\n', j)
+      return src.slice(j, end)
+    }
+    const maxLine = grabLine('const AUTO_POLICY_MAX = ')
+    const actLine = grabLine('const HIGH_RISK_ACTIONS = ')
+    const tmoLine = grabLine('const HIGH_RISK_TIMEOUTS = ')
+    let fn = null
+    try {
+      fn = new Function(maxLine + '\n' + actLine + '\n' + tmoLine + '\n' + consts + '\n' + body + '\n; return normalizeProjectAutoReview')()
+    } catch (e) { return false }
+    if (typeof fn !== 'function') return false
+    // ① 四个合法键都保留
+    const okAll = fn({ policy: '规则', policyMode: 'replace', highRiskAction: 'deny', highRiskTimeout: 'wait' })
+    if (!okAll || okAll.policy !== '规则' || okAll.policyMode !== 'replace'
+      || okAll.highRiskAction !== 'deny' || okAll.highRiskTimeout !== 'wait') return false
+    // ② 工程参数一律丢弃（不能因为「多存一份」就让项目层超时生效）
+    const dropped = fn({ timeoutMs: 0, breakerThreshold: 3, historyN: 5, historyBudget: 999, provider: 'p', model: 'm', reasoningEffort: 'max' })
+    if (dropped !== null) return false
+    // ③ `'inherit'` 不落键（它正是缺键的含义）
+    const inh = fn({ policyMode: 'inherit', highRiskAction: 'inherit', highRiskTimeout: 'inherit' })
+    if (inh !== null) return false
+    // ④ 非法值不落键
+    if (fn({ highRiskAction: 'nonsense' }) !== null) return false
+    if (fn({ highRiskTimeout: 'nonsense' }) !== null) return false
+    if (fn({ policyMode: 'nonsense' }) !== null) return false
+    // ⑤ 空串 / 纯空白的 policy 不落键；超长也不落（不静默截断）
+    if (fn({ policy: '' }) !== null) return false
+    if (fn({ policy: '   ' }) !== null) return false
+    if (fn({ policy: 'x'.repeat(4001) }) !== null) return false
+    return true
   })())
   // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后
   //
@@ -1933,6 +2184,30 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     for (const k of ['flow.viaAllow', 'flow.viaDeny', 'flow.viaEscalate', 'flow.viaFallback']) {
       if (cli.indexOf("'" + k + "'") === -1) return false
     }
+    // ⑤b 高风险放行的三档也要有文案，且**与普通放行分色**
+    //
+    // 这三档是本功能最需要被看见的一类：模型明知高风险仍放行。与普通放行同色会让
+    // 用户在会话流里划过去 —— 而「事后能分辨谁拍的板」正是记录存在的理由。
+    for (const k of ['flow.viaAllowHigh', 'flow.viaDenyHigh', 'flow.viaAskHigh']) {
+      if (cli.indexOf("'" + k + "'") === -1) return false
+    }
+    const iMeta = cli.indexOf('function viaMeta(via) {')
+    if (iMeta < 0) return false
+    let dm = 0
+    let metaBody = ''
+    for (let k = cli.indexOf('{', iMeta); k < cli.length; k++) {
+      if (cli[k] === '{') dm++
+      else if (cli[k] === '}') { dm--; if (dm === 0) { metaBody = cli.slice(iMeta, k + 1); break } }
+    }
+    if (!metaBody) return false
+    // 三个新 via 各自单独一支（合成一支就无法给出各自的文案）
+    for (const v of ['auto-allow-high', 'auto-deny-high', 'auto-ask-high']) {
+      if (metaBody.indexOf("via === '" + v + "'") === -1) return false
+    }
+    // 普通放行的颜色（橙）不得被高风险放行复用
+    const mAllow = metaBody.match(/via === 'auto-allow'\) return \{ k: 'allow', color: '([^']+)'/)
+    const mHigh = metaBody.match(/via === 'auto-allow-high'\) return \{ k: 'allowHigh', color: '([^']+)'/)
+    if (!mAllow || !mHigh || mAllow[1] === mHigh[1]) return false
     return true
   })())
   // ⑨c2 轨迹页那一份 Definition：target 必须是 trajectory，且节点 data.kind 必须是 context
@@ -2221,8 +2496,23 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (cli.indexOf("'panel.autoProviderPh'") !== -1) return false
     if (cli.indexOf("'panel.autoModelPh'") !== -1) return false
     if (cli.indexOf("'panel.autoModelManual'") !== -1) return false
-    // ② 卡片里不得再有原生 <select>
-    if (card.indexOf("createElement('select'") !== -1) return false
+    // ② **模型选择那一部分**里不得再有原生 <select>
+    //
+    // ⚠️ 判据要排除同卡片里的 `policyCard`：那是「额外审批策略」的第二张卡片，
+    // 它的几个三态下拉本来就是原生 select（选项只有三四个、没有 drill 层级，
+    // 用浮层反而是过度设计）。本条守的是**模型选择**不得退回 select ——
+    // 那条判据的理由（当前值只能塞进选项文字、表达不了 drill）只对它成立。
+    const cardNoPolicy = (function () {
+      const a = card.indexOf('const policyCard = () => {')
+      if (a < 0) return card
+      let d4 = 0
+      for (let k = card.indexOf('{', a); k < card.length; k++) {
+        if (card[k] === '{') d4++
+        else if (card[k] === '}') { d4--; if (d4 === 0) return card.slice(0, a) + card.slice(k + 1) }
+      }
+      return card.slice(0, a)
+    })()
+    if (cardNoPolicy.indexOf("createElement('select'") !== -1) return false
     // ③ 卡片把这件事交给 ModelEffortPicker 组件（不是就地拼一堆 button）
     if (card.indexOf('React.createElement(ModelEffortPicker, {') === -1) return false
     // ④ 组件必须**portal 到 document.body**（内联展开就是没这一步）
@@ -4891,11 +5181,19 @@ ok('invoke 把 saveError 与 error 同等对待（写盘失败不报「已保存
 // 那些不该出现在面板清单里（另有断言钉住「client 无此类残留」）。
 ok('WRITE_METHODS 与面板调用的写盘端点一致（不多不少）', (function () {
   const canon = (s) => s.replace(/^\/?permgate[\/:]/, '').replace(/^\/+/, '');
-  // 宿主侧：真正调用 persist() 的路由
+  // 宿主侧：**无条件**写盘的路由。
+  //
+  // 判据是「有一行只写着 `await persist(exec)`」，不是「整段里出现过 persist」：
+  // `/permgate/decide` 只在 `if (ruleCount > 0)` 时才落盘，它的返回形状也不同
+  // （`{ ok: true }` 而不是整份 statusView），不属于这条契约的覆盖范围 ——
+  // 把它算进来会让「面板必须列进 WRITE_METHODS」这条要求指向一个没有 saveError 的路由。
+  //
+  // 也不用固定字符窗口：窗口是随手定的数，路由体长一点就会漏判，而漏判的方向是
+  // 「宿主明明是写盘路由，面板却没列进 WRITE_METHODS」，于是它的假成功不被拦截。
   const hostWrites = new Set();
   for (const b of src.split(/if \(pathname === '/).slice(1)) {
     const raw = (b.match(/^([^']+)'/) || [])[1];
-    if (raw && /await persist\(exec\)/.test(b.slice(0, 1500))) hostWrites.add(canon(raw));
+    if (raw && /^\s*await persist\(exec\)$/m.test(b)) hostWrites.add(canon(raw));
   }
   // 面板侧：invoke(...) 调用过的端点
   const called = new Set();
@@ -4926,7 +5224,7 @@ ok('走 call 的写盘端点逐字自查 saveError（不被 WRITE_METHODS 覆盖
   const hostWrites = new Set();
   for (const b of src.split(/if \(pathname === '/).slice(1)) {
     const raw = (b.match(/^([^']+)'/) || [])[1];
-    if (raw && /await persist\(exec\)/.test(b.slice(0, 1500))) hostWrites.add(canon(raw));
+    if (raw && /^\s*await persist\(exec\)$/m.test(b)) hostWrites.add(canon(raw));
   }
   const lines = cli.split('\n');
   const problems = [];
@@ -12853,17 +13151,137 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
     if (/allow with reason/.test(codeOnly)) return false
     // ③ 正断言：reason 的类型检查**仍在**（放宽的是「能不能带」，不是「能带什么」）
     if (!/hasReason && typeof obj\.reason !== 'string'/.test(codeOnly)) return false
-    // ④ 正断言：形态矛盾检查仍在（放宽 reason 不得顺带放开 low+deny / high+allow）
-    return /risk === 'low' && decision !== 'allow'/.test(codeOnly)
-      && /risk === 'high' && decision !== 'deny'/.test(codeOnly)
+    // ④ 正断言：唯一保留的形态约束仍在 —— `low` 不能 escalate
+    //    （`low+deny` / `high+allow` 已开放，理由见 parseReviewDecision 的形态校验段）
+    return /risk === 'low' && decision === 'escalate'/.test(codeOnly)
   })())
-  // ★★ 策略文本必须与解析器同源：声明了 allow+reason 合法，解析器就得收。
+  // ★★ `parseReviewDecision` 的形态校验：真实求值，逐形态钉住
+  //
+  // 为什么不只靠 smoke 的端到端用例：那边只能看到「落到了哪个动作」，
+  // 而下面这些**区分不出来**——
+  //   · `reason` 是**空串**还是**缺键**：两者都会走格式修正轮，行为完全一样；
+  //   · `detail` 具体是哪个串：白名单按 detail 精确匹配，写错一个字就静默不重试；
+  //   · `low + deny` 是否真的**没有**额外标记（而不是恰好没被读到）。
+  //
+  // 求值方式：把 parseReviewDecision 与它依赖的常量/函数抽出来注进 new Function。
+  // 依赖链要一起带上，否则会以 ReferenceError 变成「测试写错了」而不是「实现回退了」。
+  ok('★★ parseReviewDecision 逐形态：新形态合法、缺 reason 报 missing required reason', (function () {
+    // 按花括号配平取函数体会被 `'{'` 这类**字符串字面量**骗到：`topLevelKeyCount`
+    // 内部到处是 `text[i] !== '"'`、`c === 92` 这种比较，但它也含 `'{'` / `'['` 字面量，
+    // 朴素的计数会把引号里的花括号算进去、切在函数中间（实测直接语法错）。
+    // 故改用「扫到一条以 4 空格缩进的单独 `}` 为止」——本文件所有 IIFE 内函数都是这个缩进，
+    // 且函数体内不会出现 4 空格缩进的单独 `}`（内层更深）。
+    const grabFn = (marker) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      const end = src.indexOf('\n    }\n', i)
+      if (end < 0) return ''
+      return src.slice(i, end + '\n    }'.length)
+    }
+    const grabLine = (marker) => {
+      const j = src.indexOf(marker)
+      if (j < 0) return ''
+      return src.slice(j, src.indexOf('\n', j))
+    }
+    const parts = [
+      grabLine('const REVIEW_DECISIONS = '),
+      grabLine('const REVIEW_RISKS = '),
+      grabLine('const REVIEW_REASON_MAX = '),
+      grabLine('const TOP_LEVEL_KEY_MAX_NESTING = '),
+      grabFn('function topLevelKeyCount(text) {'),
+      grabFn('function parseReviewDecision(text) {'),
+    ]
+    if (parts.some((p) => !p)) return false
+    let parse = null
+    try {
+      parse = new Function(parts.join('\n') + '\n; return parseReviewDecision')()
+    } catch (e) { return false }
+    if (typeof parse !== 'function') return false
+
+    // ① `high + allow`（带 reason）→ ok，且 reason 原样带出
+    const hr = parse('{"risk":"high","decision":"allow","reason":"策略允许"}')
+    if (!hr.ok || hr.decision !== 'allow' || hr.risk !== 'high' || hr.reason !== '策略允许') return false
+    // ② `low + deny`（带 reason）→ ok
+    const ld = parse('{"risk":"low","decision":"deny","reason":"就是不许"}')
+    if (!ld.ok || ld.decision !== 'deny' || ld.risk !== 'low') return false
+    // ③ `low + escalate` → 仍是协议错（唯一保留的形态约束）
+    const le = parse('{"risk":"low","decision":"escalate","reason":"拿不准"}')
+    if (le.ok || le.code !== 'protocol-error' || le.detail !== 'low with escalate') return false
+    // ④ `high + allow` 缺 reason → protocol-error / missing required reason
+    const hrNo = parse('{"risk":"high","decision":"allow"}')
+    if (hrNo.ok || hrNo.code !== 'protocol-error' || hrNo.detail !== 'missing required reason') return false
+    // ⑤ `low + deny` 缺 reason → 同上
+    const ldNo = parse('{"risk":"low","decision":"deny"}')
+    if (ldNo.ok || ldNo.detail !== 'missing required reason') return false
+    // ⑥ **空串 reason** 与纯空白同样算没写 —— 这一格端到端测不出来（两者都走格式修正轮）
+    for (const blank of ['', '   ', '\n\t ']) {
+      const r1 = parse(JSON.stringify({ risk: 'high', decision: 'allow', reason: blank }))
+      if (r1.ok || r1.detail !== 'missing required reason') return false
+      const r2 = parse(JSON.stringify({ risk: 'low', decision: 'deny', reason: blank }))
+      if (r2.ok || r2.detail !== 'missing required reason') return false
+    }
+    // ⑦ 其余形态**不受** reason 强制：不带 reason 的 `low + allow` / `high + deny` 照旧合法
+    if (!parse('{"risk":"low","decision":"allow"}').ok) return false
+    if (!parse('{"risk":"high","decision":"deny"}').ok) return false
+    // ⑧ `contradiction` 只剩一个来源：`allow` + 表外 risk
+    const ct = parse('{"risk":"critical","decision":"allow"}')
+    if (ct.ok || ct.code !== 'contradiction') return false
+    // `deny` + 表外 risk 仍是 protocol-error（不是矛盾）
+    const dn = parse('{"risk":"critical","decision":"deny"}')
+    if (dn.ok || dn.code !== 'protocol-error') return false
+    return true
+  })())
+  // ★★ `missing required reason` 必须可追问（进白名单 + isFormatError 认它）
+  //
+  // 这条 detail 指向 `reason` 字段而不是 `decision`，所以追问是安全的：
+  // 模型补一句理由即可，结论一个字都不用动。把它移出白名单的后果是**静默的**——
+  // 模型偶尔漏写理由时，一次本该自动通过的判定退回人工弹窗，而没有任何报错。
+  ok('★★ missing required reason 在 RETRYABLE_PROTOCOL_DETAILS 里，且 isFormatError 认它', (function () {
+    const grabFn = (marker) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = src.indexOf('{', i); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const grabArr = (marker) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      const j = src.indexOf(']', i)
+      if (j < 0) return ''
+      return src.slice(i, j + 1)
+    }
+    const arr = grabArr('const RETRYABLE_PROTOCOL_DETAILS = [')
+    const fn = grabFn('function isFormatError(rv) {')
+    if (!arr || !fn) return false
+    let api = null
+    try {
+      api = new Function(arr + '\n' + fn + '\n; return { RETRYABLE_PROTOCOL_DETAILS, isFormatError }')()
+    } catch (e) { return false }
+    if (!api) return false
+    if (api.RETRYABLE_PROTOCOL_DETAILS.indexOf('missing required reason') === -1) return false
+    // isFormatError 的完整判据：code 必须是 protocol-error **且** detail 在白名单里
+    if (api.isFormatError({ code: 'protocol-error', detail: 'missing required reason' }) !== true) return false
+    // 反面对照：同一个 detail 配上别的 code 不算格式错（防止有人把 code 判据删掉）
+    if (api.isFormatError({ code: 'contradiction', detail: 'missing required reason' }) !== false) return false
+    // 不在白名单里的 detail 也不算（防止有人改成「凡是 protocol-error 都重试」）
+    if (api.isFormatError({ code: 'protocol-error', detail: 'low with escalate' }) !== false) return false
+    return true
+  })())
+  // ★★ 策略文本必须与解析器同源：声明了哪些形态合法，解析器就得收。
   //
   // 曾经的不一致是双向的：策略写着「Never return … a reason with allow」，
   // 而模型照样会带 —— 说明这条约束既没被遵守、也没被正确执行（判成了协议错）。
   // 现在两边都放开，这条守卫防的是「只改一边」：策略放开、解析器没放开（等于没改），
   // 或解析器放开、策略还写着禁止（模型会继续被误导）。
-  ok('★★ REVIEW_POLICY 与解析器对 allow+reason 的口径一致', (function () {
+  //
+  // 两个新形态（`low+deny` / `high+allow`）同一条纪律：它们必须是**带 reason** 的版本，
+  // 解析器也强制 reason 非空 —— 少了这一句，模型会照着写不带理由的高风险放行，
+  // 而解析器判它协议错、转人工，那一格等于没开放。
+  ok('★★ REVIEW_POLICY 与解析器对形态的口径一致（含 low+deny / high+allow）', (function () {
     const i = src.indexOf('const REVIEW_POLICY = [')
     if (i < 0) return false
     const j = src.indexOf("].join('\\n')", i)
@@ -12873,8 +13291,13 @@ group('29. 决策记录：首屏/展开双通道 + 非审查会话不记')
     if (policy.indexOf('{"risk":"medium","decision":"allow","reason":"..."}') === -1) return false
     // ② 策略里不得再出现「带 reason 的 allow 非法」这种表述
     if (/a reason with allow/i.test(policy)) return false
-    // ③ 但仍必须禁止真正的矛盾形态（否则是「一起放过头」）
-    return /Never return low with deny, or high with allow\./.test(policy)
+    // ③ 两个新形态必须**以带 reason 的形式**出现在形态清单里
+    if (policy.indexOf('{"risk":"low","decision":"deny","reason":"..."}') === -1) return false
+    if (policy.indexOf('{"risk":"high","decision":"allow","reason":"..."}') === -1) return false
+    // ④ 不得再写着「这两个形态禁止」（那是旧的形态禁令）
+    if (/Never return low with deny, or high with allow\./.test(policy)) return false
+    // ⑤ 但必须写明它们**要带 reason** —— 解析器强制非空，策略不写就是两边不一致
+    return /low with deny and high with allow are valid, but they must carry a reason/.test(policy)
   })())
 
   // ── 决策记录的「风险等级」必须翻成界面语言 ──────────────────────

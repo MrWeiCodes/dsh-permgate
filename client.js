@@ -516,6 +516,9 @@ window.__ModuleLoader__.load({
 			// 自动审批的工程参数（超时/熔断/缓存/模型覆盖）：**只有全局层**，
 			// 故不传 target（理由见宿主路由处注释：这些参数不该跟着项目变）。
 			'permgate:set-auto-review': ['POST', '/permgate/set-auto-review'],
+			// 额外审批策略 + 高风险处置的两维。与上面那条分开：这条**两层都能写**
+			// （项目层可以有一套与全局不同的规则），故 target 由调用方显式给。
+			'permgate:set-auto-policy': ['POST', '/permgate/set-auto-policy'],
 			'permgate:set-quick': ['POST', '/permgate/set-quick'],
 			'permgate:add-exception': ['POST', '/permgate/add-exception'],
 			// 就地修改一条例外（保 id、保下标）。**不是** add/remove 的组合：
@@ -1750,7 +1753,7 @@ window.__ModuleLoader__.load({
 				'panel.autoReviewHint': '把某个分类设成「自动审批」后，每次调用先问模型，模型说行就直接过。下面这些是它的运行参数，全局生效。',
 				'panel.autoNoLlm': '没检测到可用的模型服务。现在所有「自动审批」都会退回你设的兜底动作。',
 				'panel.autoTimeout': '等待人工的时限',
-				'panel.autoTimeoutHint': '模型判断失败时，弹窗等你多久。仅当「失败后」是允许/拒绝时有效：超时就按它执行；填 0 则不弹窗、直接执行。「失败后」是询问时本项不生效，弹窗照常弹，一直等你决定',
+				'panel.autoTimeoutHint': '弹窗等你多久。有两个用途：①「失败后」是允许/拒绝时，模型判断失败后按它超时执行；②「等你多久」不是「一直等」时，高风险放行等你这么久再按它执行。填 0 则用途①不弹窗、直接执行，用途②等同「一直等」。两处询问时都不受本项影响，弹窗照常弹、一直等你决定',
 				'panel.autoBreaker': '连续拒绝上限',
 				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
 				'panel.autoHistory': '工具调用历史',
@@ -1831,8 +1834,38 @@ window.__ModuleLoader__.load({
 				'panel.autoCharsUnit': '字符',
 				'panel.autoReset': '全部恢复默认',
 				'panel.autoResetConfirm': '确认全部恢复？',
-				'panel.autoResetWarn': '会清掉本页全部显式设置，且无法撤销',
+				'panel.autoResetWarn': '会清掉全局的全部显式设置，且无法撤销',
 				'panel.autoResetDone': '已恢复默认',
+				// ── 额外审批策略卡片 ────────────────────────────────────────────
+				'panel.autoPolicy': '额外审批策略',
+				'panel.autoPolicyHint': '写给审批模型的补充规则，会接在内置策略之后一起发过去。它不改变风险等级，只影响判定。',
+				'panel.autoPolicyGlobal': '全局',
+				'panel.autoPolicyProject': '本项目',
+				'panel.autoPolicyMode': '用法',
+				'panel.autoPolicyModeInherit': '继承全局',
+				'panel.autoPolicyModeAppend': '追加到全局',
+				'panel.autoPolicyModeReplace': '替换全局',
+				'panel.autoPolicyInheritHint': '当前为「继承全局」，这段不会发送',
+				'panel.autoPolicyReplaceHint': '当前为「替换全局」，全局那段不会发送',
+				'panel.autoPolicyPh': '例如：本项目里 npm / git status 这类只读命令可以直接放行',
+				'panel.autoPolicyCount': '{n} / {max}',
+				'panel.autoPolicyTooLong': '策略超出长度上限',
+				'panel.autoPolicySaved': '已保存',
+				'panel.autoPolicySave': '保存',
+				'panel.autoHighRisk': '模型判定高风险、却给出放行时',
+				'panel.autoHighRiskHint': '模型可能既标了高风险、又给出放行。这里决定这种情况怎么办。它会先重新问一次模型，仍是高风险放行才按这里处置',
+				'panel.autoHighRiskTimeout': '等你多久',
+				'panel.autoHighRiskTimeoutHint': '选「询问」时才生效。一直等 = 弹窗不超时；拒绝/允许 = 到「等待人工的时限」后照做',
+				'panel.autoHighRisk.deny': '拒绝',
+				'panel.autoHighRisk.ask': '询问',
+				'panel.autoHighRisk.allow': '允许',
+				'panel.autoHighRiskTimeout.wait': '一直等',
+				'panel.autoHighRiskTimeout.deny': '拒绝',
+				'panel.autoHighRiskTimeout.allow': '允许',
+				'panel.autoPolicyInherit': '继承全局',
+				'flow.viaAllowHigh': '自动审批：模型判定高风险仍放行 {tool} → {action}',
+				'flow.viaDenyHigh': '自动审批：模型判定高风险并放行，被你的设置拒绝 {tool} → {action}',
+				'flow.viaAskHigh': '自动审批：模型判定高风险却放行，等你决定 {tool} → {action}',
 				// 审计专用动作值（宿主无人在环结案）：不在设置页下拉里，只出现在「最近决策」。
 				// 必须与宿主写入的 action 字面量一一对应，否则 T 会原样显示 mode.timeout-allow。
 				'mode.timeout-allow': '超时自动允许',
@@ -2213,7 +2246,7 @@ window.__ModuleLoader__.load({
 				'panel.autoReviewHint': 'When a category is set to Auto review, each call is checked by a model first. These are its runtime settings, global to all projects.',
 				'panel.autoNoLlm': 'No model service is available. Every Auto review call will fall back to the action you chose.',
 				'panel.autoTimeout': 'Wait for a human',
-				'panel.autoTimeoutHint': 'when the model fails, how long the dialog waits. Only used when "if it fails" is allow/deny: on timeout that action runs; 0 means no dialog, run it right away. When "if it fails" is ask this setting does nothing — the dialog still appears and waits for you',
+				'panel.autoTimeoutHint': 'how long a dialog waits. Two uses: (1) when "if it fails" is allow/deny, the model failed and this is how long the dialog waits before that action runs; (2) when "How long to wait" is not "Wait", how long a high-risk allow waits before following it. 0 makes use (1) skip the dialog and run right away, and makes use (2) behave like "Wait". Neither "Ask" case is affected — the dialog still appears and waits for you',
 				'panel.autoBreaker': 'Consecutive denials',
 				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
 				'panel.autoHistory': 'Tool call history',
@@ -2267,8 +2300,37 @@ window.__ModuleLoader__.load({
 				'panel.autoCharsUnit': 'chars',
 				'panel.autoReset': 'Reset all to defaults',
 				'panel.autoResetConfirm': 'Reset everything?',
-				'panel.autoResetWarn': 'clears every explicit setting on this tab; cannot be undone',
+				'panel.autoResetWarn': 'clears every explicit global setting; cannot be undone',
 				'panel.autoResetDone': 'Reset to defaults',
+				'panel.autoPolicy': 'Extra review rules',
+				'panel.autoPolicyHint': 'Extra rules for the approval model, appended after the built-in policy. They do not change the risk level, only the decision.',
+				'panel.autoPolicyGlobal': 'Global',
+				'panel.autoPolicyProject': 'This project',
+				'panel.autoPolicyMode': 'Usage',
+				'panel.autoPolicyModeInherit': 'Inherit global',
+				'panel.autoPolicyModeAppend': 'Append to global',
+				'panel.autoPolicyModeReplace': 'Replace global',
+				'panel.autoPolicyInheritHint': 'Set to "Inherit global"; this text is not sent',
+				'panel.autoPolicyReplaceHint': 'Set to "Replace global"; the global text is not sent',
+				'panel.autoPolicyPh': 'e.g. in this project, read-only commands like npm / git status can be allowed directly',
+				'panel.autoPolicyCount': '{n} / {max}',
+				'panel.autoPolicyTooLong': 'the policy is over the length limit',
+				'panel.autoPolicySaved': 'Saved',
+				'panel.autoPolicySave': 'Save',
+				'panel.autoHighRisk': 'Model rates it high risk but allows it',
+				'panel.autoHighRiskHint': 'The model may mark a call high risk and still allow it. This decides what happens then. It asks the model once more first; only a second high-risk allow is handled here',
+				'panel.autoHighRiskTimeout': 'How long to wait',
+				'panel.autoHighRiskTimeoutHint': 'only used when the setting above is Ask. Wait = the dialog never times out; Deny/Allow = follow that once "Wait for a human" elapses',
+				'panel.autoHighRisk.deny': 'Deny',
+				'panel.autoHighRisk.ask': 'Ask',
+				'panel.autoHighRisk.allow': 'Allow',
+				'panel.autoHighRiskTimeout.wait': 'Wait',
+				'panel.autoHighRiskTimeout.deny': 'Deny',
+				'panel.autoHighRiskTimeout.allow': 'Allow',
+				'panel.autoPolicyInherit': 'Inherit global',
+				'flow.viaAllowHigh': 'Auto review: model rated {tool} high risk and allowed it → {action}',
+				'flow.viaDenyHigh': 'Auto review: model rated {tool} high risk and allowed it; denied by your setting → {action}',
+				'flow.viaAskHigh': 'Auto review: model rated {tool} high risk but allowed it; waiting for you → {action}',
 				'mode.timeout-allow': 'Auto-allowed (timeout)',
 				'mode.timeout-deny': 'Auto-denied (timeout)',
 				'mode.fallback-allow': 'Allowed by setting',
@@ -4768,6 +4830,39 @@ window.__ModuleLoader__.load({
 			// 不放进 statusView：那条路由会走网络（每个 provider 一次 listModels + 每个
 			// 模型一次 resolveModelInfo），不能挂在每次状态刷新上。
 			const [llmCat, setLlmCat] = React.useState({ data: null, loading: false });
+			// ── 额外审批策略的编辑态（**必须在组件层，不能写进卡片里**）────────────
+			//
+			// hook 写在 `autoReviewCard` 里会随 tab 切换改变 hook 数量，React 抛 #310
+			// （Rendered more hooks than during the previous render）→ 整页白屏。
+			// 卡片是普通函数、不是组件，它每次渲染都被调用一次，而它只在 auto tab 被调用。
+			//
+			// 两个 textarea 是**受控**的（长文本靠 key 重挂载会丢焦点，而编辑策略时
+			// 中途失焦极常见）；四个下拉的值即提交值。
+			const [policyGlobal, setPolicyGlobal] = React.useState('');
+			const [policyProject, setPolicyProject] = React.useState('');
+			const [policyMode, setPolicyMode] = React.useState('inherit');
+			// 两个维度 × 两层，四个下拉各自一份状态（**不能合成一个**：卡片上下排，
+			// 全局与项目同时可见，合成一份会让改全局时把项目的选择一起改掉）。
+			//
+			// 全局层的取值是**全局层单独的生效值**（本层显式值 → 宿主下发的默认值）：面板直接
+			// 显示「这种情况现在会怎样」，不额外标注「默认」。**不得**用 effectiveHighRisk*
+			// ——那是项目优先的，会把项目层的值显示成全局的（见 applyStatus 处的说明）。
+			// 项目层的取值是**本层显式值**，缺键显示「继承全局」。
+			const [policyHighRisk, setPolicyHighRisk] = React.useState('ask');
+			const [policyHighRiskTimeout, setPolicyHighRiskTimeout] = React.useState('deny');
+			const [policyProjectHighRisk, setPolicyProjectHighRisk] = React.useState('inherit');
+			const [policyProjectHighRiskTimeout, setPolicyProjectHighRiskTimeout] = React.useState('inherit');
+			// 未保存草稿标记：`{ global: false, project: false }`，与 loopThDirty 同构。
+			//
+			// 为什么是「脏标记」而不是「焦点标记」：这一格用**保存按钮**而非 onBlur 提交
+			// （长文本编辑中途失焦极常见），故失焦不代表放弃草稿。用焦点标记的话，
+			// 用户点一下别处再回来，一次 SSE status 推送就会把他正在写的文字冲掉。
+			//
+			// 为什么按层各一格而不是一个单值：两个 textarea 同屏常显（项目层 mode 为
+			// append/replace 时都可见），单值标记只能保住最后编辑的那一格 —— 先编全局
+			// 再编项目、点项目「保存」时，全局草稿会在那次 applyStatus 里被服务端值覆盖。
+			// 每格由 savePolicy 在**保存本层策略文本**后单独清空，此后服务端值才会回填。
+			const policyDirty = React.useRef({ global: false, project: false });
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
 			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
@@ -5186,6 +5281,34 @@ window.__ModuleLoader__.load({
 				// 否则每次 SSE status 推送（宿主在 persist 成功、session/event 时都会广播）
 				// 都会把用户正在打的字冲掉 —— 那是 loopThDirty 那段注释记录的同一类坑。
 				setExEdit((cur) => (cur === null ? null : (excActs[tab] && excActs[tab][cur] ? cur : null)));
+				// ── 额外审批策略的草稿回填 ───────────────────────────────────────────
+				// 有未保存草稿的那一格 **不覆盖**：applyStatus 不只由面板自身的 invoke
+				// 回调触发，还由 SSE 的 status/refresh 事件触发（宿主在 init、配置重载、
+				// 会话事件时都会广播）。不保住草稿，用户「已输入但还没点保存」的文字
+				// 会被一次后台推送静默清空 —— 与 reasonEditing 那条同一个坑。
+				//
+				// 判据用 `policyDirty`（保存成功才清）而不是焦点：这一格用保存按钮提交，
+				// 失焦不表示放弃草稿（见 policyDirty 处的说明）。
+				const pol = (s.autoReview && s.autoReview.policy) || null;
+				if (pol) {
+					if (!policyDirty.current.global) setPolicyGlobal(String(pol.global || ''));
+					if (!policyDirty.current.project) setPolicyProject(String(pol.project || ''));
+					setPolicyMode(pol.projectMode === 'append' || pol.projectMode === 'replace' ? pol.projectMode : 'inherit');
+					// 四个下拉各自回填：
+					//   全局层 → **全局层单独**的生效值：本层显式值，缺键用宿主下发的默认值；
+					//   项目层 → **本层显式值**，缺键显示「继承全局」。
+					//
+					// ⚠️ 全局层**不能**用 `effectiveHighRisk*`：那是 highRiskActionOf /
+					// highRiskTimeoutOf 按**当前项目**求出的（项目显式 → 全局显式 → 缺省）。
+					// 拿它回填全局行，项目层设了 deny 而全局缺键时，全局行会显示「拒绝」——
+					// 实际全局是默认的 ask，换个项目就变一次（与 commandSub.globalEffectiveProbe
+					// 同一类「面板说谎」）。全局行的取值链只有「全局显式 → 默认」两级。
+					const defs = (s.autoReview && s.autoReview.defaults) || {};
+					setPolicyHighRisk(pol.highRiskAction || defs.highRiskAction || 'ask');
+					setPolicyHighRiskTimeout(pol.highRiskTimeout || defs.highRiskTimeout || 'deny');
+					setPolicyProjectHighRisk(pol.projectHighRiskAction || 'inherit');
+					setPolicyProjectHighRiskTimeout(pol.projectHighRiskTimeout || 'inherit');
+				}
 			};
 
 			const refresh = () => {
@@ -5212,7 +5335,7 @@ window.__ModuleLoader__.load({
 			const WRITE_METHODS = [
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
 				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
-				'permgate:set-doomloop', 'permgate:set-auto-review',
+				'permgate:set-doomloop', 'permgate:set-auto-review', 'permgate:set-auto-policy',
 				'permgate:add-exception', 'permgate:set-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 				'permgate:reorder',
@@ -6703,6 +6826,167 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T(labelKey)),
 					...children,
 				);
+				// ── 第二张卡片：额外审批策略 + 高风险处置的两维 ──────────────────────────
+				//
+				// 与上面那张的分工：那张配「评审机制怎么跑」（工程参数，只有全局一份）；
+				// 这张配「怎么判定」——用户写的自然语言规则，以及模型给出「高风险放行」
+				// 这种结论时怎么办。策略与处置都**两层可写**（项目层可继承 / 追加 / 替换）。
+				//
+				// 写在 `autoReviewCard` **内部**、`tabBtn` **之前**，两条都是硬约束：
+				//   · 在内部 → auto tab 的分流那两行不用改（`tab='auto'` 不会流进下面
+				//     100+ 处 `tab === 'global' ? A : B`，否则会集体走「项目层」分支、
+				//     并向宿主发 `{ target: 'auto' }`）；
+				//   · 在 `tabBtn` 之前 → 「全部恢复默认」那条断言用 `const tabBtn = `
+				//     作锚点精确截取本卡片函数体，第二张卡片必须落在截取范围内。
+				//
+				// ⚠️ 这里**不得有任何 hook**：hook 数量会随 tab 切换变化，React 抛 #310
+				// 整页白屏。状态全部在组件层（见 policyGlobal / policyDirty 那一批）。
+				const policyCard = () => {
+					const pol = ar.policy || {};
+					// 值域与上限都由宿主下发（见 statusView 的 policy 子对象）：
+					// 客户端不写死第二份 —— 否则「宿主加一档」与「面板能选什么」会分叉。
+					const actions = Array.isArray(pol.highRiskActions) ? pol.highRiskActions : ['deny', 'ask', 'allow'];
+					const timeouts = Array.isArray(pol.highRiskTimeouts) ? pol.highRiskTimeouts : ['wait', 'deny', 'allow'];
+					const modes = Array.isArray(pol.policyModes) ? pol.policyModes : ['append', 'replace'];
+					const maxLen = typeof pol.maxLength === 'number' && pol.maxLength > 0 ? pol.maxLength : 4000;
+					// 第二维的显示条件看**生效**的第一维，不看本层原值：本层选「继承全局」
+					// 而全局是「询问」时，第二维仍然生效 —— 用本层原值判会把它藏起来。
+					//
+					// 但两层各自的「生效值」不同源，必须分开算：
+					//   · 项目行 → `effectiveHighRiskAction`（项目显式 → 全局显式 → 缺省），
+					//     这正是项目层实际会怎么处置；
+					//   · 全局行 → 全局显式值或宿主下发的默认值（`dflt`，与上面那张卡片同源）。
+					//     用项目优先的 effective 判，会在「项目设 deny、全局缺键」时把**全局**的
+					//     第二维整行藏起来 —— 用户无法配置全局的等待时长，且切个会话控件就
+					//     出现/消失。
+					const globalAction = pol.highRiskAction || dflt.highRiskAction || 'ask';
+					const effAction = pol.effectiveHighRiskAction || 'ask';
+					const savePolicy = (target, key, value) => {
+						invoke('permgate:set-auto-policy', { target: target, [key]: value }, () => {
+							// 保存成功才清脏标记：失败时草稿必须留着，否则用户输入的文字
+							// 会被一次「没保存成功」的响应顺手清掉。
+							//
+							// **只清这次真正保存的那一格**，且只在提交的是策略文本时清：
+							// 处置下拉 / 用法下拉保存的不是 textarea 里的文字，清掉标记会让
+							// 下一次 status 推送（宿主 persist 成功必 broadcast）把另一格
+							// 未保存的草稿覆盖掉。
+							if (key === 'policy') policyDirty.current[target] = false;
+							setMsg(T('panel.autoPolicySaved'));
+						});
+					};
+					// 文本域：**受控**（与上面数字框的非受控不同）。长文本靠 key 重挂载
+					// 会丢焦点，而编辑策略时中途失焦极常见 —— 那正是本条用保存按钮的理由。
+					const area = (which, value, onChange, disabled) => {
+						const over = value.length > maxLen;
+						return React.createElement('div', null,
+							React.createElement('textarea', {
+								className: 'pg-field',
+								style: { width: '100%', minHeight: 96, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12, resize: 'vertical', opacity: disabled ? 0.5 : 1 },
+								rows: 6,
+								value: value,
+								placeholder: T('panel.autoPolicyPh'),
+								disabled: disabled || busy,
+								onChange: (e) => { policyDirty.current[which] = true; onChange(e.target.value); },
+							}),
+							React.createElement('div', {
+								style: { fontSize: 11, textAlign: 'right', color: over ? '#c62828' : 'rgba(128,128,128,0.9)' },
+							}, (over ? T('panel.autoPolicyTooLong') + ' · ' : '')
+								+ T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(maxLen))),
+						);
+					};
+					// 三/四态下拉。`inherit` 只在项目层出现（全局层没有可继承的对象）。
+					//
+					// `keyPrefix` 是 i18n 键前缀（`panel.autoHighRisk` / `panel.autoHighRiskTimeout`），
+					// 选项文案由它拼出 `.<取值>` —— 两个维度的取值集合不同（第二维多一个 `wait`），
+					// 故不能共用一套标签。
+					const picker = (keyPrefix, hintKey, value, onChange, values, withInherit) => React.createElement('div', { style: { marginTop: 8 } },
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+							React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T(keyPrefix)),
+							React.createElement('select', {
+								className: 'pg-field',
+								style: { padding: '2px 6px' },
+								value: value,
+								disabled: busy,
+								onChange: (e) => onChange(e.target.value),
+							}, (withInherit ? ['inherit'] : []).concat(values).map((m) => React.createElement('option', { key: m, value: m },
+								m === 'inherit' ? T('panel.autoPolicyInherit') : T(keyPrefix + '.' + m)))),
+						),
+						hintKey ? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T(hintKey)) : null,
+					);
+					const modeLabel = (m) => T(m === 'append' ? 'panel.autoPolicyModeAppend' : (m === 'replace' ? 'panel.autoPolicyModeReplace' : 'panel.autoPolicyModeInherit'));
+					const projectRoot = status ? String(status.projectKey || '') : '';
+					return React.createElement('div', { style: card },
+						React.createElement('div', { style: h() }, T('panel.autoPolicy')),
+						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T('panel.autoPolicyHint')),
+						// ── 全局层 ────────────────────────────────────────────────────────
+						React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginTop: 6 } }, T('panel.autoPolicyGlobal')),
+						area('global', policyGlobal, setPolicyGlobal, false),
+						picker('panel.autoHighRisk', 'panel.autoHighRiskHint', policyHighRisk, (v) => {
+							setPolicyHighRisk(v);
+							savePolicy('global', 'highRiskAction', v);
+						}, actions, false),
+						// 第二维条件渲染：第一维（**全局层**的生效值）不是「询问」时它不起作用，藏起来。
+						// 判据用 globalAction 而不是 effAction —— 后者项目优先，会在项目设了
+						// deny 时把全局这一行整个藏掉（见 effAction 处的说明）。
+						globalAction === 'ask'
+							? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyHighRiskTimeout, (v) => {
+								setPolicyHighRiskTimeout(v);
+								savePolicy('global', 'highRiskTimeout', v);
+							}, timeouts, false)
+							: null,
+						React.createElement('div', { style: { marginTop: 8 } },
+							React.createElement('button', {
+								className: 'pg-btn',
+								disabled: busy || policyGlobal.length > maxLen,
+								onClick: () => savePolicy('global', 'policy', policyGlobal),
+							}, T('panel.autoPolicySave')),
+						),
+						// ── 项目层 ────────────────────────────────────────────────────────
+						React.createElement('div', { style: { borderTop: '1px solid rgba(128,128,128,0.25)', marginTop: 10, paddingTop: 8 } }),
+						React.createElement('div', { style: { fontSize: 12, fontWeight: 600 } },
+							T('panel.autoPolicyProject') + (projectRoot ? '  ' + projectRoot : '')),
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' } },
+							React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T('panel.autoPolicyMode')),
+							React.createElement('select', {
+								className: 'pg-field',
+								style: { padding: '2px 6px' },
+								value: policyMode,
+								disabled: busy,
+								onChange: (e) => {
+									setPolicyMode(e.target.value);
+									savePolicy('project', 'policyMode', e.target.value);
+								},
+							}, ['inherit'].concat(modes).map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m)))),
+						),
+						// 两行提示互斥：「继承全局」说这段不发送，「替换全局」说全局那段不发送，
+						// 「追加到全局」两者都发送 → 都不显示。
+						policyMode === 'inherit'
+							? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T('panel.autoPolicyInheritHint'))
+							: (policyMode === 'replace'
+								? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.autoPolicyReplaceHint'))
+								: null),
+						// 继承态下 textarea 禁用并置灰：这时它写什么都不发送，可编辑会让用户
+						// 以为自己在改什么（面板说谎的另一种形态）。
+						area('project', policyProject, setPolicyProject, policyMode === 'inherit'),
+						picker('panel.autoHighRisk', 'panel.autoHighRiskHint', policyProjectHighRisk, (v) => {
+							setPolicyProjectHighRisk(v);
+							savePolicy('project', 'highRiskAction', v);
+						}, actions, true),
+						effAction === 'ask'
+							? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyProjectHighRiskTimeout, (v) => {
+								setPolicyProjectHighRiskTimeout(v);
+								savePolicy('project', 'highRiskTimeout', v);
+							}, timeouts, true)
+							: null,
+						React.createElement('div', { style: { marginTop: 8 } },
+							React.createElement('button', {
+								className: 'pg-btn',
+								disabled: busy || policyMode === 'inherit' || policyProject.length > maxLen,
+								onClick: () => savePolicy('project', 'policy', policyProject),
+							}, T('panel.autoPolicySave')),
+						),
+					);
+				};
 				return React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.autoReview')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } }, T('panel.autoReviewHint')),
@@ -6821,10 +7105,16 @@ window.__ModuleLoader__.load({
 					}),
 					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } },
 						effortHintText),
-					// 恢复默认：一次性清掉本卡片所有显式配置（等价于「这块我没设过」）。
+					// 恢复默认：一次性清掉**全局层**的全部显式配置（等价于「全局这块我没设过」）。
+					// 范围是 `config.global.autoReview` 的键；项目层那份落在
+					// `projects[root].autoReview`，按项目单独裁决，清掉它会波及一个只属于
+					// 当前项目的设置，故不在本按钮里（要改就走第二张卡片各自的下拉）。
 					// 只在确实有显式配置时出现 —— 没有可恢复的东西时给个按钮是误导。
 					// 会清掉全部显式配置且不可撤销，故必须有二次确认（复用 confirmDelete）。
 					resetAllButton(),
+					// 第二张卡片：额外审批策略 + 高风险处置的两维（定义在本函数内部，
+					// 位置约束见 policyCard 处的说明）。
+					policyCard(),
 				);
 			};
 
@@ -7598,7 +7888,18 @@ window.__ModuleLoader__.load({
 		const DECISION_RECORD = 'plugin:permgate/decision';
 		// via → 展示档位。四类在**颜色与措辞**上都要能分开：
 		// 放行是放宽（橙）、拒绝是收紧（灰蓝）、弃权与失败是「没问成模型」（红）。
+		//
+		// 高风险放行的三档单独一套，**都是红色系**（比普通放行的橙更重）：
+		// 它们是「模型明知高风险仍放行」，是几类里最需要被看见的一种 ——
+		// 与普通放行同色会让用户在会话流里划过去。
+		//
+		//   auto-allow-high  红：模型说高风险、仍放行，且用户的设置允许
+		//   auto-deny-high   最深：模型想放行，被用户的设置拦下（说明策略比模型更严）
+		//   auto-ask-high    红：模型想放行，被高风险设置拦下来问人
 		function viaMeta(via) {
+			if (via === 'auto-allow-high') return { k: 'allowHigh', color: '#d93025', key: 'flow.viaAllowHigh' };
+			if (via === 'auto-deny-high') return { k: 'denyHigh', color: '#8b0000', key: 'flow.viaDenyHigh' };
+			if (via === 'auto-ask-high') return { k: 'askHigh', color: '#d93025', key: 'flow.viaAskHigh' };
 			if (via === 'auto-allow') return { k: 'allow', color: '#bf8700', key: 'flow.viaAllow' };
 			if (via === 'auto-deny') return { k: 'deny', color: '#57606a', key: 'flow.viaDeny' };
 			if (via === 'auto-escalate') return { k: 'escalate', color: '#c62828', key: 'flow.viaEscalate' };
