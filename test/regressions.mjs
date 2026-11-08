@@ -2061,12 +2061,13 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       const end = src.indexOf('\n', j)
       return src.slice(j, end)
     }
-    const maxLine = grabLine('const AUTO_POLICY_MAX = ')
+    const warnLine = grabLine('const AUTO_POLICY_WARN = ')
+    const hardLine = grabLine('const AUTO_POLICY_HARD_MAX = ')
     const actLine = grabLine('const HIGH_RISK_ACTIONS = ')
     const tmoLine = grabLine('const HIGH_RISK_TIMEOUTS = ')
     let fn = null
     try {
-      fn = new Function(maxLine + '\n' + actLine + '\n' + tmoLine + '\n' + consts + '\n' + body + '\n; return normalizeProjectAutoReview')()
+      fn = new Function(warnLine + '\n' + hardLine + '\n' + actLine + '\n' + tmoLine + '\n' + consts + '\n' + body + '\n; return normalizeProjectAutoReview')()
     } catch (e) { return false }
     if (typeof fn !== 'function') return false
     // ① 四个合法键都保留
@@ -2083,10 +2084,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (fn({ highRiskAction: 'nonsense' }) !== null) return false
     if (fn({ highRiskTimeout: 'nonsense' }) !== null) return false
     if (fn({ policyMode: 'nonsense' }) !== null) return false
-    // ⑤ 空串 / 纯空白的 policy 不落键；超长也不落（不静默截断）
+    // ⑤ 空串 / 纯空白的 policy 不落键
     if (fn({ policy: '' }) !== null) return false
     if (fn({ policy: '   ' }) !== null) return false
-    if (fn({ policy: 'x'.repeat(4001) }) !== null) return false
+    // ⑥ 超长**不再丢键**：加载侧丢弃会在下一次写盘时被永久抹掉（用户收不到任何提示），
+    //    故 warn 线以上、硬上限以内必须原样保留 —— 长度是用户的判断，不是加载侧该拦的。
+    //    超过提示线仍要能落盘，否则「4000 只是建议」在重启后就不成立了。
+    {
+      const long = fn({ policy: 'x'.repeat(8000) })
+      if (!long || long.policy.length !== 8000) return false
+    }
     return true
   })())
   // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后

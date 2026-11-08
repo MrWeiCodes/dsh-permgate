@@ -1841,14 +1841,28 @@ window.__ModuleLoader__.load({
 				'panel.autoPolicyHint': '写给审批模型的补充规则，会接在内置策略之后一起发过去。它不改变风险等级，只影响判定。',
 				'panel.autoPolicyGlobal': '全局',
 				'panel.autoPolicyProject': '本项目',
-				'panel.autoPolicyMode': '用法',
+				// 标签说的是「本项目这段与全局那段是什么关系」，三个选项正是三种关系。
+				// 早先写「用法」—— 它没说和**谁**的关系，而这段文本的三种取值的差别
+				// 全在作用域上（发不发、发哪一份），不是「怎么用」。
+				'panel.autoPolicyMode': '与全局的关系',
 				'panel.autoPolicyModeInherit': '继承全局',
 				'panel.autoPolicyModeAppend': '追加到全局',
 				'panel.autoPolicyModeReplace': '替换全局',
 				'panel.autoPolicyInheritHint': '当前为「继承全局」，这段不会发送',
 				'panel.autoPolicyReplaceHint': '当前为「替换全局」，全局那段不会发送',
-				'panel.autoPolicyPh': '例如：本项目里 npm / git status 这类只读命令可以直接放行',
+				// 占位示例必须**两个方向都给**（一条拒绝 + 一条放行），且不写作用域词
+				// （「本项目」在全局那格里是错的，两格共用同一份文案）。
+				//
+				// 示例本身必须**照着写也安全**：早先写的是「npm / git status 这类只读命令
+				// 可以直接放行」，而 `npm` 包含 install / publish / run，照字面落地等于
+				// 把写盘与外发一起放行。改用只读查询的具体命令，并配一条硬拒绝 ——
+				// 拒绝那一条是内置策略无从得知的（它不知道哪个项目有 .env 或私钥），
+				// 这正是本卡片存在的理由。
+				'panel.autoPolicyPh': '例如：.env、*.pem 一律拒绝；git status、ls 这类只读查询直接放行',
 				'panel.autoPolicyCount': '{n} / {max}',
+				// 两档提示分开：warn 是建议（照常能存），TooLong 是真上限（按钮禁用）。
+				// 合成一句会让用户以为「超过建议值就存不了」。
+				'panel.autoPolicyTooLongWarn': '策略偏长，模型注意力可能被稀释',
 				'panel.autoPolicyTooLong': '策略超出长度上限',
 				'panel.autoPolicySaved': '已保存',
 				'panel.autoPolicySave': '保存',
@@ -2306,14 +2320,18 @@ window.__ModuleLoader__.load({
 				'panel.autoPolicyHint': 'Extra rules for the approval model, appended after the built-in policy. They do not change the risk level, only the decision.',
 				'panel.autoPolicyGlobal': 'Global',
 				'panel.autoPolicyProject': 'This project',
-				'panel.autoPolicyMode': 'Usage',
+				// 与中文同义：三个选项描述的是本项目这段文本与全局那段的关系。
+				'panel.autoPolicyMode': 'Relation to global',
 				'panel.autoPolicyModeInherit': 'Inherit global',
 				'panel.autoPolicyModeAppend': 'Append to global',
 				'panel.autoPolicyModeReplace': 'Replace global',
 				'panel.autoPolicyInheritHint': 'Set to "Inherit global"; this text is not sent',
 				'panel.autoPolicyReplaceHint': 'Set to "Replace global"; the global text is not sent',
-				'panel.autoPolicyPh': 'e.g. in this project, read-only commands like npm / git status can be allowed directly',
+				// 与中文同一份示例的两个方向，理由见中文那处的说明。
+				'panel.autoPolicyPh': 'e.g. always deny .env and *.pem; allow read-only queries like git status and ls',
 				'panel.autoPolicyCount': '{n} / {max}',
+				// 两档提示分开，理由见中文那处。
+				'panel.autoPolicyTooLongWarn': 'policy is long; model attention may be diluted',
 				'panel.autoPolicyTooLong': 'the policy is over the length limit',
 				'panel.autoPolicySaved': 'Saved',
 				'panel.autoPolicySave': 'Save',
@@ -6828,16 +6846,14 @@ window.__ModuleLoader__.load({
 				);
 				// ── 第二张卡片：额外审批策略 + 高风险处置的两维 ──────────────────────────
 				//
-				// 与上面那张的分工：那张配「评审机制怎么跑」（工程参数，只有全局一份）；
+				// 与上面那张**并列**（见上面 return 处的说明）：那张配「评审机制怎么跑」，
 				// 这张配「怎么判定」——用户写的自然语言规则，以及模型给出「高风险放行」
 				// 这种结论时怎么办。策略与处置都**两层可写**（项目层可继承 / 追加 / 替换）。
 				//
-				// 写在 `autoReviewCard` **内部**、`tabBtn` **之前**，两条都是硬约束：
-				//   · 在内部 → auto tab 的分流那两行不用改（`tab='auto'` 不会流进下面
-				//     100+ 处 `tab === 'global' ? A : B`，否则会集体走「项目层」分支、
-				//     并向宿主发 `{ target: 'auto' }`）；
-				//   · 在 `tabBtn` 之前 → 「全部恢复默认」那条断言用 `const tabBtn = `
-				//     作锚点精确截取本卡片函数体，第二张卡片必须落在截取范围内。
+				// 定义在 `autoReviewCard` **内部**：它要读 `ar.policy` 与 `dflt`，而那两个
+				// 由本函数从 status 取出。为此传参进去只会多一层接口，没有别的收益。
+				// auto tab 的分流（`tab === 'auto' ? autoReviewCard() : null`）因此不用改 ——
+				// `tab='auto'` 不会流进下面 100+ 处 `tab === 'global' ? A : B`。
 				//
 				// ⚠️ 这里**不得有任何 hook**：hook 数量会随 tab 切换变化，React 抛 #310
 				// 整页白屏。状态全部在组件层（见 policyGlobal / policyDirty 那一批）。
@@ -6848,7 +6864,13 @@ window.__ModuleLoader__.load({
 					const actions = Array.isArray(pol.highRiskActions) ? pol.highRiskActions : ['deny', 'ask', 'allow'];
 					const timeouts = Array.isArray(pol.highRiskTimeouts) ? pol.highRiskTimeouts : ['wait', 'deny', 'allow'];
 					const modes = Array.isArray(pol.policyModes) ? pol.policyModes : ['append', 'replace'];
-					const maxLen = typeof pol.maxLength === 'number' && pol.maxLength > 0 ? pol.maxLength : 4000;
+					// 两个长度阈值，语义不同（见 statusView 的 policy 子对象）：
+					//   · `warnLen` 是**建议线**：超过只标红提示，照常保存、照常生效；
+					//   · `maxLen` 是**真上限**：超过才禁用保存（宿主也会回 error）。
+					// 早先只有一个 `maxLength = 4000`，既当提示又当禁令，于是「策略写长了
+					// 就不让存」——而长度本来就是用户自己的判断。
+					const warnLen = typeof pol.warnLength === 'number' && pol.warnLength > 0 ? pol.warnLength : 4000;
+					const maxLen = typeof pol.maxLength === 'number' && pol.maxLength > 0 ? pol.maxLength : 20000;
 					// 第二维的显示条件看**生效**的第一维，不看本层原值：本层选「继承全局」
 					// 而全局是「询问」时，第二维仍然生效 —— 用本层原值判会把它藏起来。
 					//
@@ -6876,22 +6898,37 @@ window.__ModuleLoader__.load({
 					};
 					// 文本域：**受控**（与上面数字框的非受控不同）。长文本靠 key 重挂载
 					// 会丢焦点，而编辑策略时中途失焦极常见 —— 那正是本条用保存按钮的理由。
+					//
+					// 长度提示分两档，颜色与措辞都不同：
+					//   · 超过 `warnLen` —— 橙色 + 「注意力可能被稀释」：**不影响保存**，
+					//     这是建议。写成红色或禁用按钮等于把建议变成禁令。
+					//   · 超过 `maxLen` —— 红色 + 「超出上限」：保存按钮禁用。
 					const area = (which, value, onChange, disabled) => {
-						const over = value.length > maxLen;
+						const overWarn = value.length > warnLen;
+						const overMax = value.length > maxLen;
+						const color = overMax ? '#c62828' : (overWarn ? '#bf8700' : 'rgba(128,128,128,0.9)');
+						const notice = overMax
+							? T('panel.autoPolicyTooLong') + ' · '
+							: (overWarn ? T('panel.autoPolicyTooLongWarn') + ' · ' : '');
 						return React.createElement('div', null,
 							React.createElement('textarea', {
 								className: 'pg-field',
-								style: { width: '100%', minHeight: 96, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12, resize: 'vertical', opacity: disabled ? 0.5 : 1 },
+								// `boxSizing` 不能省：`.pg-field` 自带 padding 与 border，而默认的
+								// content-box 下 `width:'100%'` 只约束内容区，加上那 18px 会比卡片还宽
+								// —— textarea 从卡片右边伸出去。仓库里其它 `width:'100%'` 都配了它。
+								style: { width: '100%', boxSizing: 'border-box', minHeight: 96, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12, resize: 'vertical', opacity: disabled ? 0.5 : 1 },
 								rows: 6,
 								value: value,
 								placeholder: T('panel.autoPolicyPh'),
 								disabled: disabled || busy,
 								onChange: (e) => { policyDirty.current[which] = true; onChange(e.target.value); },
 							}),
+							// 分母跟当前生效的那一档走：超上限时显示真上限（保存按钮正是按它
+							// 禁用），否则界面上唯一的阈值数字是建议线，用户会把文本裁到建议线
+							// 以下，删掉本可保存、也本会生效的那一段。
 							React.createElement('div', {
-								style: { fontSize: 11, textAlign: 'right', color: over ? '#c62828' : 'rgba(128,128,128,0.9)' },
-							}, (over ? T('panel.autoPolicyTooLong') + ' · ' : '')
-								+ T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(maxLen))),
+								style: { fontSize: 11, textAlign: 'right', color: color },
+							}, notice + T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(overMax ? maxLen : warnLen))),
 						);
 					};
 					// 三/四态下拉。`inherit` 只在项目层出现（全局层没有可继承的对象）。
@@ -6987,7 +7024,12 @@ window.__ModuleLoader__.load({
 						),
 					);
 				};
-				return React.createElement('div', { style: card },
+				// 两张**并列**的卡片，不是一张套一张。两者是 auto tab 下的两类设置：
+				// 这张配「评审机制怎么跑」（超时 / 熔断 / 历史 / 模型），只有全局一份；
+				// `policyCard` 配「怎么判定」（自然语言规则 + 高风险处置），项目层也能写。
+				// 嵌套会让后者看起来是前者的一个参数，而它们的作用域并不相同。
+				return React.createElement(React.Fragment, null,
+				React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.autoReview')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } }, T('panel.autoReviewHint')),
 					// 评审能力不可用时的醒目提示：用户看到「auto 一直在弹窗」时，
@@ -7112,9 +7154,8 @@ window.__ModuleLoader__.load({
 					// 只在确实有显式配置时出现 —— 没有可恢复的东西时给个按钮是误导。
 					// 会清掉全部显式配置且不可撤销，故必须有二次确认（复用 confirmDelete）。
 					resetAllButton(),
-					// 第二张卡片：额外审批策略 + 高风险处置的两维（定义在本函数内部，
-					// 位置约束见 policyCard 处的说明）。
-					policyCard(),
+				),
+				policyCard(),
 				);
 			};
 

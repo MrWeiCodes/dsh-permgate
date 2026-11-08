@@ -8394,17 +8394,54 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       releaseTmp(ws, home)
     }
 
-    // ④ 非法值 / 超长 → `{ error }`，且磁盘不变（不静默落某个值）。
+    // ④ 非法值 / 超硬上限 → `{ error }`，且磁盘不变（不静默落某个值）。
+    //
+    //    ⚠️ 判据用**硬上限以上**（20001），不是提示线以上（4001）：4000 只是建议线，
+    //    超过它照常保存。早先这里喂 4001 并断言回 error，把「建议」钉成了「禁令」。
     {
       const { ws, home, h } = mkHostAuto({}, undefined)
       const r1 = await post(h, { target: 'global', highRiskAction: 'nonsense' })
-      const r2 = await post(h, { target: 'global', policy: 'x'.repeat(4001) })
+      const r2 = await post(h, { target: 'global', policy: 'x'.repeat(20001) })
       const r3 = await post(h, { target: 'global', highRiskTimeout: 'inherit' })
       const ar = readAR(home, 'global', ws)
-      ok('★★ group24 A56: 非法值 / 超长 / 全局层 inherit 都回 error，且磁盘不变',
+      ok('★★ group24 A56: 非法值 / 超硬上限 / 全局层 inherit 都回 error，且磁盘不变',
         !!(r1.data && r1.data.error) && !!(r2.data && r2.data.error) && !!(r3.data && r3.data.error)
         && !('highRiskAction' in ar) && !('policy' in ar),
         JSON.stringify({ r1: r1.data, r2: r2.data && r2.data.error, r3: r3.data && r3.data.error, ar }))
+      releaseTmp(ws, home)
+    }
+
+    // ④b 提示线以上、硬上限以内 → **照常保存**（4000 是建议不是限制）。
+    //     这条与 ④ 成对：少了它，「超过 4000 也能存」就无人守护，
+    //     一次「顺手把 4001 改成报错」的改动会静默把建议变成禁令。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const longPolicy = 'x'.repeat(8000)
+      const r = await post(h, { target: 'global', policy: longPolicy })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: 超过提示线但未超硬上限 → 照常保存（4000 只是建议）',
+        !(r.data && r.data.error) && ar.policy === longPolicy,
+        JSON.stringify({ err: r.data && r.data.error, len: ar.policy ? ar.policy.length : 0 }))
+      releaseTmp(ws, home)
+    }
+
+    // ④c 超长策略在**加载侧不被丢弃**：写盘后重启（reload）仍完整读回。
+    //
+    //     这条守的是数据完整性，不是长度策略：加载侧丢弃超长键的后果是
+    //     「下次任意写盘时被 JSON.stringify(config) 永久抹掉」，而用户全程无提示。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const longPolicy = 'y'.repeat(8000)
+      await post(h, { target: 'global', policy: longPolicy })
+      await callRoute(h.routes, 'POST', '/permgate/reload', {})
+      const st = await callRoute(h.routes, 'GET', '/permgate/status')
+      const shown = st.data && st.data.autoReview && st.data.autoReview.policy && st.data.autoReview.policy.global
+      // 再触发一次无关写盘，确认它不会在落盘时消失
+      await callRoute(h.routes, 'POST', '/permgate/set-sandbox', { target: 'global', mode: 'workspace-write' })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: 超长策略 reload 后仍完整读回，且无关写盘不会把它抹掉',
+        shown === longPolicy && ar.policy === longPolicy,
+        JSON.stringify({ shownLen: shown ? shown.length : 0, diskLen: ar.policy ? ar.policy.length : 0 }))
       releaseTmp(ws, home)
     }
 

@@ -1673,7 +1673,8 @@ export default {
     //   historyBudget    200..100000 的整数
     //   provider / model 非空字符串（成对才有意义，但这里不强制成对 ——
     //                     reviewTarget 要求两者都在才用，缺一个就回落会话模型）
-    //   policy           非空字符串，≤ AUTO_POLICY_MAX（空串 = 没有策略，不落键）
+    //   policy           非空字符串（空串 = 没有策略，不落键）；
+    //                    超过 AUTO_POLICY_WARN 只提示，超过 AUTO_POLICY_HARD_MAX 才拒收
     //   highRiskAction   deny / ask / allow（缺键 = ask）
     //   highRiskTimeout  wait / deny / allow（缺键 = deny）
     //
@@ -1693,14 +1694,30 @@ export default {
       historyBudget: { min: 200, max: 100000 },
     }
 
-    // ── 额外审批策略：长度上限与两个值域 ────────────────────────────────────────
-    // 单层上限。两层合计 8000，加 `REVIEW_POLICY` 约 2200，system 总长仍在万字量级；
-    // 再长就开始挤占模型对材料的注意力，而策略是每一条判据都要被读完才生效的东西。
+    // ── 额外审批策略：长度提示线与硬上限 ────────────────────────────────────────
+    // 两个数字回答两个不同的问题，**不能合并成一个**：
+    //
+    //   · `AUTO_POLICY_WARN`（提示线）—— 超过它策略**照常生效**，只在面板上标红并
+    //     提示「注意力可能被稀释」。它是建议，不是限制：写多长是用户的判断，
+    //     插件没有理由替他决定「这么多规则你不可能维护」。
+    //   · `AUTO_POLICY_HARD_MAX`（硬上限）—— 超过它**拒绝保存**并回 error。
+    //     存在的理由是防误操作（整份文档粘进输入框），不是防「规则多」：
+    //     那种情况下每次评审的 system 会膨胀到几万 token，超出模型上下文窗口后
+    //     评审必然失败、全部退化成弹窗，而用户看不出是自己粘错了。
+    //
+    // 提示线取 4000 的依据：实测一句话规则约 35 字、带条件的中等规则约 78 字、
+    // 带理由的详细规则约 94 字 —— 4000 字能装 40~100 条，远超实际需要。
+    // 再多的问题不是装不下，而是模型每次都要在几十条里找相关的那一条，准确率下降。
+    //
+    // 硬上限取 20000：约为提示线的 5 倍，够容纳「规则写得极细」的正当用法，
+    // 又能在误粘整份文档时拦住。两层合计 40000 字符 ≈ 全中文 6 万 token，
+    // 已接近多数模型的上下文窗口，再高就不是「策略太长」而是「配置坏了」。
     //
     // 不放进 AUTO_REVIEW_RANGES：那张表只服务数字项（normalizeAutoReview 的 num()
     // 与面板提交前的越界拦截），字符串项的上限各自单独定义 —— provider / model /
     // reasoningEffort 同样是就地写字面量。
-    const AUTO_POLICY_MAX = 4000
+    const AUTO_POLICY_WARN = 4000
+    const AUTO_POLICY_HARD_MAX = 20000
     // 高风险放行的两个维度（取值函数见 highRiskActionOf / highRiskTimeoutOf）。
     //
     // `'inherit'` **不在**这两张表里：它是项目层的继承标记，不是生效值。
@@ -1754,13 +1771,12 @@ export default {
       // 显式写下的值）。但空串在这里的语义与那两个键不同 —— 它们表示「跟随会话」，
       // 这里的空串就是「没有策略」；两者都由读取侧把空串与缺键当作同一件事。
       //
-      // 超长**不静默截断**：策略是用户写的规则，截掉尾部会**静默删掉后面的规则**，
-      // 而那些规则看起来仍然生效（面板上完整显示，磁盘上是残的）。路由侧对超长直接
-      // 回 `{ error }`；这里作为加载侧只能丢弃该键，方向是「回到没有策略」而不是
-      // 「带着半份策略跑」—— 半份策略比没有策略更危险，它会让模型以为某些事已被允许。
-      if (typeof raw.policy === 'string' && raw.policy.trim()) {
-        if (raw.policy.length <= AUTO_POLICY_MAX) out.policy = raw.policy
-      }
+      // 超长**不截断、也不丢弃**（`AUTO_POLICY_HARD_MAX` 以内）：截掉尾部会静默删掉
+      // 后面的规则，而面板上完整显示、磁盘上是残的；丢弃更糟 —— 加载侧丢掉的键会在
+      // 下一次任意写盘时被 `JSON.stringify(config)` 永久抹掉，用户全程收不到提示。
+      // 超过提示线（`AUTO_POLICY_WARN`）只是「注意力可能被稀释」，由面板标红提示，
+      // 规则**照常生效**。
+      if (typeof raw.policy === 'string' && raw.policy.trim()) out.policy = raw.policy
       // 两个处置维度：值域外的一律丢弃（不落默认值 —— 落默认会经 persist 变成用户表态）。
       // 默认值由读取侧推导，与 normalizeAutoReview 的其余键同口径。
       if (HIGH_RISK_ACTIONS.indexOf(raw.highRiskAction) !== -1) out.highRiskAction = raw.highRiskAction
@@ -1777,16 +1793,14 @@ export default {
     // 缺省 inherit（穿透全局）。故 `'inherit'` 也不落键 —— 它正是缺键的含义，
     // 落盘只会让「用户显式选了继承」与「用户没表态」变得不可区分。
     //
-    // 项目层的 `policy` 与全局层同口径：空串 / 超长都不落键。
+    // 项目层的 `policy` 与全局层同口径：空串不落键，超长不截断也不丢弃。
     // ⚠️ 但 `policyMode: 'replace'` + 空 `policy` 是一个**有意义的组合**（「本项目没有
     // 额外规则，且全局的也不要」）。它由 `policyMode` 单独承载：`replace` 落键即可，
     // 不需要一个空串 policy 来配合 —— reviewPolicyOf 对 `replace` 只读项目层文本。
     function normalizeProjectAutoReview(raw) {
       if (!raw || typeof raw !== 'object') return null
       const out = {}
-      if (typeof raw.policy === 'string' && raw.policy.trim()) {
-        if (raw.policy.length <= AUTO_POLICY_MAX) out.policy = raw.policy
-      }
+      if (typeof raw.policy === 'string' && raw.policy.trim()) out.policy = raw.policy
       if (POLICY_MODES.indexOf(raw.policyMode) !== -1) out.policyMode = raw.policyMode
       if (HIGH_RISK_ACTIONS.indexOf(raw.highRiskAction) !== -1) out.highRiskAction = raw.highRiskAction
       if (HIGH_RISK_TIMEOUTS.indexOf(raw.highRiskTimeout) !== -1) out.highRiskTimeout = raw.highRiskTimeout
@@ -9373,9 +9387,14 @@ export default {
               highRiskActions: HIGH_RISK_ACTIONS,
               highRiskTimeouts: HIGH_RISK_TIMEOUTS,
               policyModes: POLICY_MODES,
-              // 长度上限与宿主归一化同源：客户端据此在提交前拦住超长输入，
+              // 两个长度阈值与宿主校验同源：面板据此决定「标红提示」与「禁用保存」，
               // 而不是让宿主丢弃后仍回「已保存」（那正是面板说谎）。
-              maxLength: AUTO_POLICY_MAX,
+              //
+              // 两个数字语义不同，客户端**不得**把它们合成一个：
+              //   · `warnLength` 只影响颜色与提示，超了照常能保存、照常生效；
+              //   · `maxLength` 才是真上限，超了保存按钮禁用（宿主也会回 error）。
+              warnLength: AUTO_POLICY_WARN,
+              maxLength: AUTO_POLICY_HARD_MAX,
             }
           })(),
           // ── `ready` 已删除（曾是 `ready: AUTO_REVIEW_READY`）───────────────────────
@@ -10307,13 +10326,17 @@ export default {
           const block = target === 'global' ? config.global : ensureProject(rootOf(exec))
           if (!block.autoReview || typeof block.autoReview !== 'object') block.autoReview = {}
           const ar = block.autoReview
-          // 策略文本：空串 = 清除，超长 = 报错。**不截断** —— 截掉尾部会静默删掉
+          // 策略文本：空串 = 清除，超硬上限 = 报错。**不截断** —— 截掉尾部会静默删掉
           // 后面的规则，而那些规则看起来仍然生效（面板完整显示，磁盘上是残的）。
+          //
+          // 超过提示线（`AUTO_POLICY_WARN`）**照常保存**：那是建议，不是限制。
+          // 面板会标红并提示注意力可能被稀释，但收不收由用户判断 —— 这条路由若在这里
+          // 拦下，等于把「建议」变成了「禁止」，用户写长策略就再也存不进去。
           if (a.policy !== undefined) {
             if (typeof a.policy !== 'string') return json(res, { error: 'policy 必须是字符串' })
             const t = a.policy.trim()
             if (!t) delete ar.policy
-            else if (a.policy.length > AUTO_POLICY_MAX) return json(res, { error: '策略过长（上限 ' + AUTO_POLICY_MAX + ' 字符）' })
+            else if (a.policy.length > AUTO_POLICY_HARD_MAX) return json(res, { error: '策略过长（上限 ' + AUTO_POLICY_HARD_MAX + ' 字符）' })
             else ar.policy = a.policy
           }
           // 合并方式只在项目层有意义：全局层没有「继承谁」这回事。
