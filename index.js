@@ -10290,6 +10290,20 @@ export default {
           }
           const patch = a && typeof a.patch === 'object' ? a.patch : null
           if (!patch && !(a && Array.isArray(a.clear))) return json(res, { error: '缺少 patch' })
+          // ── policy 的长度硬上限在这里也要查一遍 ────────────────────────────────
+          // `normalizeAutoReview` 作为**加载侧**不能丢超长策略（丢了会在下一次写盘时
+          // 被 JSON.stringify(config) 永久抹掉，用户全程无提示），故它不判长度。
+          // 但本路由是**写入侧**：同一个字段若只有 set-auto-policy 拦、这里不拦，
+          // 直接调本路由 `{patch:{policy:'x'.repeat(20001)}}` 就能绕过上限落盘，
+          // 两条路由对同一字段给出不同答案 —— 面板当前只走 set-auto-policy，
+          // 但这是对外 HTTP 路由，脚本调用同样算数。
+          //
+          // 放在写入之前：`config.global.autoReview` 的其它字段此刻还没动，
+          // 早退不会留下「一半写进去」的状态（与 set-auto-policy 同一条纪律）。
+          if (patch && patch.policy !== undefined && typeof patch.policy === 'string'
+            && patch.policy.length > AUTO_POLICY_HARD_MAX) {
+            return json(res, { error: '策略过长（上限 ' + AUTO_POLICY_HARD_MAX + ' 字符）' })
+          }
           if (!config.global.autoReview || typeof config.global.autoReview !== 'object') config.global.autoReview = {}
           if (patch) {
             const normalized = normalizeAutoReview(patch)

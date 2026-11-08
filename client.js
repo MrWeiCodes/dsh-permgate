@@ -1753,7 +1753,30 @@ window.__ModuleLoader__.load({
 				'panel.autoReviewHint': '把某个分类设成「自动审批」后，每次调用先问模型，模型说行就直接过。下面这些是它的运行参数，全局生效。',
 				'panel.autoNoLlm': '没检测到可用的模型服务。现在所有「自动审批」都会退回你设的兜底动作。',
 				'panel.autoTimeout': '等待人工的时限',
-				'panel.autoTimeoutHint': '弹窗等你多久。有两个用途：①「失败后」是允许/拒绝时，模型判断失败后按它超时执行；②「等你多久」不是「一直等」时，高风险放行等你这么久再按它执行。填 0 则用途①不弹窗、直接执行，用途②等同「一直等」。两处询问时都不受本项影响，弹窗照常弹、一直等你决定',
+				// ── 这段文案为什么长这样 ────────────────────────────────────────────
+				// 它要给一个**同时服务两处**的数字写说明，而那两处对 `0` 的语义正好相反：
+				// 异常回落那条「0 = 不弹窗、直接执行」，高风险放行那条「0 = 一直等」。
+				// 早先按「两个用途 ①②」并列，读起来像在解一道有两个未知数的题。
+				//
+				// 改成**先说这个数字本身干什么**，再分两行说各自的特例。用户读第一句
+				// 就知道「这是弹窗等多久」，后面两行只是例外清单，不必先理解两套流程。
+				//
+				// 两行都写「当 X 选成 A/B 时」，**不用否定式**（原先写「不是『一直等』时」）：
+				// 否定式要求读者先在脑中排除一个选项，而且「等你多久」是下拉标签、
+				// 「一直等」是它的选项 —— 两个层级的东西并排在一个否定句里，很难读。
+				// 正面列举该维度真正会用到本项的取值，读者不必做减法。
+				//
+				// 不受本项影响的情形必须单独写，否则会被读成「询问也受这个数字管」。
+				// 但两条路径的判据不同：模型失败那条看「失败后」是不是 ask，
+				// 高风险那条看「等你多久」是不是 wait —— 后者没有「询问」这个选项
+				//（见 HIGH_RISK_TIMEOUTS），把两者并成一句「选『询问』时不起作用」
+				// 会让用户去一个不存在的位置找它；且只设了「失败后」= 询问 时，
+				// 高风险那条其实仍由本项倒计时。
+				// 故保持一条 bullet，但两个分句各带路径名与各自的取值。
+				'panel.autoTimeoutHint': '弹窗弹出后等你多久，超时就不等了。'
+					+ '\n· 模型判断失败、而「失败后」选成允许或拒绝：到点按那个动作执行。填 0 = 不弹窗，直接执行。'
+					+ '\n· 高风险放行、而「等你多久」选成拒绝或允许：到点按那个选择执行。填 0 = 一直等。'
+					+ '\n· 模型判断失败、而「失败后」选成「询问」，或高风险放行、而「等你多久」选成「一直等」：这两种情形不受本项影响，弹窗照常弹，一直等你决定。',
 				'panel.autoBreaker': '连续拒绝上限',
 				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
 				'panel.autoHistory': '工具调用历史',
@@ -1862,8 +1885,12 @@ window.__ModuleLoader__.load({
 				'panel.autoPolicyCount': '{n} / {max}',
 				// 两档提示分开：warn 是建议（照常能存），TooLong 是真上限（按钮禁用）。
 				// 合成一句会让用户以为「超过建议值就存不了」。
+				//
+				// 超上限那句把**真上限**也写进文案：计数器的分母恒为建议线，
+				// 不在这里给出真上限的话，用户看到「20001 / 4000」只会以为
+				// 「超了 5 倍」，而不知道 20000 才是存不进去的那条线。
 				'panel.autoPolicyTooLongWarn': '策略偏长，模型注意力可能被稀释',
-				'panel.autoPolicyTooLong': '策略超出长度上限',
+				'panel.autoPolicyTooLong': '策略超出长度上限（{max} 字符）',
 				'panel.autoPolicySaved': '已保存',
 				'panel.autoPolicySave': '保存',
 				'panel.autoHighRisk': '模型判定高风险、却给出放行时',
@@ -2260,7 +2287,10 @@ window.__ModuleLoader__.load({
 				'panel.autoReviewHint': 'When a category is set to Auto review, each call is checked by a model first. These are its runtime settings, global to all projects.',
 				'panel.autoNoLlm': 'No model service is available. Every Auto review call will fall back to the action you chose.',
 				'panel.autoTimeout': 'Wait for a human',
-				'panel.autoTimeoutHint': 'how long a dialog waits. Two uses: (1) when "if it fails" is allow/deny, the model failed and this is how long the dialog waits before that action runs; (2) when "How long to wait" is not "Wait", how long a high-risk allow waits before following it. 0 makes use (1) skip the dialog and run right away, and makes use (2) behave like "Wait". Neither "Ask" case is affected — the dialog still appears and waits for you',
+				'panel.autoTimeoutHint': 'how long the dialog waits after it appears; when it runs out, waiting stops.'
+					+ '\n· model failed and "if it fails" is Allow or Deny: run that action when it runs out. 0 = no dialog, run it right away.'
+					+ '\n· high-risk allow and "How long to wait" is Deny or Allow: follow that choice when it runs out. 0 = wait forever.'
+					+ '\n· "if it fails" is Ask, or high-risk allow and "How long to wait" is Wait: this setting does nothing; the dialog still appears and waits for you.',
 				'panel.autoBreaker': 'Consecutive denials',
 				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
 				'panel.autoHistory': 'Tool call history',
@@ -2330,9 +2360,9 @@ window.__ModuleLoader__.load({
 				// 与中文同一份示例的两个方向，理由见中文那处的说明。
 				'panel.autoPolicyPh': 'e.g. always deny .env and *.pem; allow read-only queries like git status and ls',
 				'panel.autoPolicyCount': '{n} / {max}',
-				// 两档提示分开，理由见中文那处。
+				// 两档提示分开，理由见中文那处（超上限那句带真上限）。
 				'panel.autoPolicyTooLongWarn': 'policy is long; model attention may be diluted',
-				'panel.autoPolicyTooLong': 'the policy is over the length limit',
+				'panel.autoPolicyTooLong': 'the policy is over the length limit ({max} chars)',
 				'panel.autoPolicySaved': 'Saved',
 				'panel.autoPolicySave': 'Save',
 				'panel.autoHighRisk': 'Model rates it high risk but allows it',
@@ -6908,7 +6938,7 @@ window.__ModuleLoader__.load({
 						const overMax = value.length > maxLen;
 						const color = overMax ? '#c62828' : (overWarn ? '#bf8700' : 'rgba(128,128,128,0.9)');
 						const notice = overMax
-							? T('panel.autoPolicyTooLong') + ' · '
+							? T('panel.autoPolicyTooLong').replace('{max}', String(maxLen)) + ' · '
 							: (overWarn ? T('panel.autoPolicyTooLongWarn') + ' · ' : '');
 						return React.createElement('div', null,
 							React.createElement('textarea', {
@@ -6923,12 +6953,12 @@ window.__ModuleLoader__.load({
 								disabled: disabled || busy,
 								onChange: (e) => { policyDirty.current[which] = true; onChange(e.target.value); },
 							}),
-							// 分母跟当前生效的那一档走：超上限时显示真上限（保存按钮正是按它
-							// 禁用），否则界面上唯一的阈值数字是建议线，用户会把文本裁到建议线
-							// 以下，删掉本可保存、也本会生效的那一段。
+							// 分母**恒为建议线**，不随超上限切换 —— 切换会让用户在 20000
+							// 附近敲一个字就看到「20000 / 4000」突变「20001 / 20000」，
+							// 像是上限被临时放宽。真上限由上面那句提示单独给出。
 							React.createElement('div', {
 								style: { fontSize: 11, textAlign: 'right', color: color },
-							}, notice + T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(overMax ? maxLen : warnLen))),
+							}, notice + T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(warnLen))),
 						);
 					};
 					// 三/四态下拉。`inherit` 只在项目层出现（全局层没有可继承的对象）。
@@ -7038,7 +7068,10 @@ window.__ModuleLoader__.load({
 						? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 4 } }, T('panel.autoNoLlm'))
 						: null,
 					row('panel.autoTimeout', numInput('timeoutMs', 110, T('panel.autoMsUnit')),
-						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoTimeoutHint'))),
+						// `whiteSpace: 'pre-line'` 是**必须的**：这条文案按行分点（见 i18n 处），
+						// 而默认的 `normal` 会把换行折叠成空格，三条并成一大段 ——
+						// 那正是它原本难读的原因。`pre-line` 保留换行、其余空白仍折叠。
+						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', whiteSpace: 'pre-line' } }, T('panel.autoTimeoutHint'))),
 					row('panel.autoBreaker', numInput('breakerThreshold', 90, T('panel.autoTimesUnit')),
 						React.createElement('span', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)' } }, T('panel.autoBreakerHint'))),
 					row('panel.autoHistory', numInput('historyN', 70, T('panel.autoTimesUnit')), numInput('historyBudget', 90, T('panel.autoCharsUnit')),

@@ -19,6 +19,42 @@ const ok = (name, cond, extra) => { if (!cond) fail.push(name + (extra ? ' — '
 const group = (t) => console.log('\n— ' + t)
 
 /**
+ * 取 client.js 的 I18N 中**某条 zh 文案的最终渲染文本**。
+ *
+ * 为什么不能就地 `/'key':\s*'([^']*)'/`：文案可以写成多段字面量用 `+` 拼接
+ * （分点长句必须这么写，否则一行放不下），那种正则会只抓到第一段 —— 断言读到
+ * 半句话，红的理由却是「文案没说」，指错了方向。
+ *
+ * 做法：从 `'key':` 起，把后面连续的 `+ '...'` 片段全部收下并拼接，然后按 JS
+ * 字符串转义规则还原（`\n` → 换行）。遇到不是 `+` 开头的片段就停。
+ */
+const zhText = (key) => {
+  const at = cli.indexOf("'" + key + "':")
+  if (at < 0) return ''
+  let i = cli.indexOf(':', at) + 1
+  const parts = []
+  for (;;) {
+    while (i < cli.length && /\s/.test(cli[i])) i++
+    if (cli[i] !== "'" && cli[i] !== '"') break
+    const quote = cli[i]
+    i++
+    let s = ''
+    while (i < cli.length) {
+      if (cli[i] === '\\') { s += cli[i] + cli[i + 1]; i += 2; continue }
+      if (cli[i] === quote) { i++; break }
+      s += cli[i]
+      i++
+    }
+    parts.push(s)
+    while (i < cli.length && /\s/.test(cli[i])) i++
+    if (cli[i] !== '+') break
+    i++
+  }
+  // 只还原断言会用到的转义；其余原样保留（断言里匹配的是中文与标点）。
+  return parts.join('').replace(/\\n/g, '\n').replace(/\\'/g, "'").replace(/\\\\/g, '\\')
+}
+
+/**
  * 把 index.js 的**真实判定链** `destructiveTiers` 抽出来并**实际求值**。
  *
  * 只对生产判定链求值：对已下线的推导函数求值，会让断言对着一个没人调用的函数变绿。
@@ -1698,13 +1734,18 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // 判据分两半：
   //   ① 必须正面写出「询问时弹窗照常弹 / 一直等你」；
   //   ② 不得出现「询问时不弹」这类反向组合（含「不弹这个窗」这种造词）。
+  //
+  // ⚠️ 取值必须走 `zhText` 而不是就地正则：这段文案按行分点，是多段字面量用 `+`
+  // 拼起来的。原先的 `/'([^']*)'/` 只抓到**第一段**，于是文案里明明写着「询问」，
+  // 断言却读到空 —— 那不是文案错，是取值方式错。`zhText` 会把整条语句的字符串
+  // 片段全部拼回来（含 `+` 拼接与转义），拿到的是**最终渲染出来的文本**。
   ok('★★ 超时文案写明「询问时照常弹窗、只是不计时」（不得说成询问时不弹窗）', (function () {
-    const m = cli.match(/'panel\.autoTimeoutHint':\s*'([^']*)'/)
-    if (!m) return false
-    const zh = m[1]
-    // ① 正面表述必须在
-    if (zh.indexOf('询问时') < 0) return false
-    if (!/询问时[^。]*弹窗照常弹/.test(zh) && !/询问时[^。]*一直等你/.test(zh)) return false
+    const zh = zhText('panel.autoTimeoutHint')
+    if (!zh) return false
+    // ① 正面表述必须在。用 `[^。]*` 而不是紧邻：文案里是「选「询问」时，…」，
+    //    中间隔着引号与逗号，紧邻匹配会误红。
+    if (zh.indexOf('询问') < 0) return false
+    if (!/询问[^。]*弹窗照常弹/.test(zh) && !/询问[^。]*一直等你/.test(zh)) return false
     // ② 反向表述不得出现：「询问」附近说「不弹」
     if (/询问[^。]{0,12}不弹/.test(zh)) return false
     // ③ 不得出现「这个窗」这种把单一弹窗说成两个的措辞

@@ -8445,6 +8445,30 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       releaseTmp(ws, home)
     }
 
+    // ④d `set-auto-review` 的 patch 走的是 `normalizeAutoReview`，而它作为**加载侧**
+    //     不判长度（判了就会丢键）。若这条路由自己不查硬上限，同一字段就有两条口径：
+    //     直接调它 `{patch:{policy:'x'.repeat(20001)}}` 能绕过 set-auto-policy 的上限落盘。
+    //
+    //     判据取**磁盘**而不是响应：这条路由在 patch 校验失败时也回 error，
+    //     只查 error 分不清「拦下了」与「拦下了但前面已写进去」。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const tooLong = 'z'.repeat(20001)
+      const r = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { policy: tooLong } })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A56: set-auto-review 的 patch 同样受硬上限约束（不能绕过 set-auto-policy）',
+        !!(r.data && r.data.error) && !('policy' in ar),
+        JSON.stringify({ err: r.data && r.data.error, diskLen: ar.policy ? ar.policy.length : 0 }))
+      // 对照：硬上限以内（8000）必须照常保存 —— 否则上面那条会被「一律拒绝」满足
+      const okLen = 'z'.repeat(8000)
+      const r2 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { policy: okLen } })
+      const ar2 = readAR(home, 'global', ws)
+      ok('★★ group24 A56: set-auto-review 的 patch 在硬上限以内照常保存',
+        !(r2.data && r2.data.error) && ar2.policy === okLen,
+        JSON.stringify({ err: r2.data && r2.data.error, len: ar2.policy ? ar2.policy.length : 0 }))
+      releaseTmp(ws, home)
+    }
+
     // ⑤ `set-auto-review` 的 clear 能清掉三个新键（`explicit` 含它们，
     //    「全部恢复默认」按钮因此也能覆盖）。
     {
