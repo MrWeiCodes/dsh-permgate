@@ -8485,6 +8485,306 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       releaseTmp(ws, home)
     }
   }
+
+  // ── A57：拒绝时回给模型的那句话（denyReasonMode / denyReason）─────────────────
+  //
+  // 这一组守的是「模型收到什么」，不是「配置存了什么」—— 两者的分叉正是本组要防的：
+  // 面板显示「已保存」而回给模型的仍是默认文案时，没有任何断言会变红。
+  //
+  // 三条边界：
+  //   ① 自定义只替换**结论那一句**，分段摘要必须还在（模型靠它知道该改哪一段）；
+  //   ② 决策记录与弹窗**不受影响** —— 它们读 d.reason，而本设置只管回给模型的那句；
+  //   ③ 三种自动审批拒绝共用同一个出口，故一处生效即覆盖全部三种。
+  {
+    // 探测一次直接拒绝，返回回给模型的那句 reason（不是 'deny' 这个字符串）。
+    // 与 probeAuto 分开：那个把结果压成 'deny'/'allow'/'ask'，拿不到文本。
+    const probeDenyText = async (h, ws, sess, cmd) => {
+      const pre = h.hooks.get('tools/pre-execute')
+      const exec = {
+        name: 'bash', arguments: { command: cmd }, callId: 'c1', token: 't1',
+        agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
+        signal: undefined,
+      }
+      let nexted = false
+      let settled = false
+      let result = null
+      const p = pre(exec, async () => { nexted = true; return { kind: 'allow' } })
+      p.then((r) => { settled = true; result = r }, () => { settled = true })
+      const t0 = Date.now()
+      while (Date.now() - t0 < 15000 && !nexted && !settled) {
+        const list = await callRoute(h.routes, 'GET', '/permgate/pending')
+        const items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === 'bash')
+        if (items.length) {
+          for (const it of items) await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
+          await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
+          return { kind: 'ask', reason: String(items[0].reason || '') }
+        }
+        await new Promise((r) => setTimeout(r, 1))
+      }
+      if (nexted) return { kind: 'allow', reason: '' }
+      if (!settled) throw new Error('probeDenyText 超时')
+      return { kind: result && result.kind, reason: String((result && result.reason) || '') }
+    }
+    // 命令分类设成 auto，且破坏性子设置也设成 auto（回落 deny）—— 这样 `rm -rf ./build`
+    // 才会走评审段。
+    //
+    // ⚠️ **两个都要设**：`destructive` 缺键时 destructiveTiers 对每一档回落 `ask`，
+    // 而 ask 比大分类的 auto 更严（strictest 合并），于是命令停在弹窗、根本到不了评审段。
+    // 只设大分类时本组所有用例都会拿到「执行命令」这句 ask 理由，看起来像实现没生效。
+    const mkDenyHost = (autoExtra, llm) => {
+      const ws = tmpdirFor('pg-deny-ws-')
+      const home = tmpdirFor('pg-deny-home-')
+      mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: {
+          fallbackMode: 'ask',
+          doomloop: { mode: 'allow' },
+          command: {
+            mode: 'auto',
+            autoFallback: 'deny',
+            exceptions: [],
+            destructive: { action: 'auto', autoFallbacks: { inside: 'deny' } },
+          },
+          autoReview: Object.assign({}, autoExtra || {}),
+        },
+        projects: {},
+      }, null, 2), 'utf8')
+      return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm }) }
+    }
+    const MODEL_DENY = '{"risk":"medium","decision":"deny","reason":"不可逆删除"}'
+    const MODEL_HR_ALLOW = '{"risk":"high","decision":"allow","reason":"用户明确要求"}'
+    const CUSTOM = '这个目录不许动'
+
+    // ① 默认（不配两键）→ 模型收到真实原因 + 分段摘要。这是**回归基线**：
+    //    下面每一条「自定义生效」都拿它做对照，少了它，一个「永远返回自定义」的实现
+    //    也能让所有自定义用例变绿。
+    {
+      const llm = mkLlm(verdict(MODEL_DENY))
+      const { ws, home, h } = mkDenyHost({}, llm)
+      const r = await probeDenyText(h, ws, 'a57base', 'rm -rf ./build')
+      ok('★★ group24 A57: 默认模式回真实原因，且带分段摘要（回归基线）',
+        r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1
+        && r.reason.indexOf('分段：') !== -1 && r.reason.indexOf('rm -rf ./build') !== -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
+
+    // ② custom + 有文本 → 结论那句被替换，分段摘要保留。
+    {
+      const llm = mkLlm(verdict(MODEL_DENY))
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM }, llm)
+      const r = await probeDenyText(h, ws, 'a57custom', 'rm -rf ./build')
+      ok('★★ group24 A57: 自定义原因替换结论那句，分段摘要仍附上',
+        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
+        && r.reason.indexOf('自动审批：模型拒绝') === -1
+        && r.reason.indexOf('分段：') !== -1,
+        JSON.stringify(r))
+      // 决策记录必须仍是真实结论 —— 本设置只管回给模型的那句，不改审计。
+      const dec = await callRoute(h.routes, 'GET', '/permgate/decisions')
+      const row = ((dec.data && dec.data.decisions) || []).filter((x) => x.via === 'auto-deny').pop()
+      ok('★★ group24 A57: 决策记录仍是真实原因（自定义不改审计）',
+        !!row && String(row.reason || '').indexOf('自动审批：模型拒绝') !== -1
+        && String(row.reason || '').indexOf(CUSTOM) === -1,
+        JSON.stringify({ reason: row && row.reason }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 高风险放行被拦（auto-deny-high）同样生效 —— 三种拒绝共用一个出口。
+    {
+      const llm = mkLlm(verdict(MODEL_HR_ALLOW))
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM, highRiskAction: 'deny' }, llm)
+      const r = await probeDenyText(h, ws, 'a57high', 'rm -rf ./build')
+      ok('★★ group24 A57: 高风险放行被拦时也用自定义原因（三种拒绝共用出口）',
+        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
+        && r.reason.indexOf('按你的设置拒绝') === -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 异常路径 + timeoutMs 0 + 回落 deny（auto-fallback-direct）同样生效。
+    {
+      const llm = undefined   // 无 llm → 异常路径
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM, timeoutMs: 0 }, llm)
+      const r = await probeDenyText(h, ws, 'a57fb', 'rm -rf ./build')
+      ok('★★ group24 A57: 异常回落直接拒绝时也用自定义原因（三种拒绝共用出口）',
+        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
+        && r.reason.indexOf('未能给出结论') === -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ custom 但文本为空 → 用默认文案（「留空 = 默认」）。
+    {
+      const llm = mkLlm(verdict(MODEL_DENY))
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom' }, llm)
+      const r = await probeDenyText(h, ws, 'a57empty', 'rm -rf ./build')
+      ok('★★ group24 A57: 选自定义但文本为空 → 回默认文案（留空 = 默认）',
+        r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ mode 是 default 而文本非空 → 仍用默认文案（模式优先，文本被忽略）。
+    //    这条防「只要有文本就自定义」——那样切回「真实原因」不生效，而面板显示已切回。
+    {
+      const llm = mkLlm(verdict(MODEL_DENY))
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'default', denyReason: CUSTOM }, llm)
+      const r = await probeDenyText(h, ws, 'a57ignored', 'rm -rf ./build')
+      ok('★★ group24 A57: 模式为 default 时文本被忽略（模式优先）',
+        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === -1
+        && r.reason.indexOf('自动审批：模型拒绝') !== -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
+
+    // ⑦⑧ 项目层覆盖：custom 用项目文本；项目显式 default 时**不**穿透全局 custom。
+    {
+      const ws = tmpdirFor('pg-deny-pj-ws-')
+      const home = tmpdirFor('pg-deny-pj-home-')
+      mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+      const projKey = String(ws).replace(/\\/g, '/')
+      const writeCfg = (proj) => writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: {
+          fallbackMode: 'ask',
+          doomloop: { mode: 'allow' },
+          command: {
+            mode: 'auto',
+            autoFallback: 'deny',
+            exceptions: [],
+            destructive: { action: 'auto', autoFallbacks: { inside: 'deny' } },
+          },
+          autoReview: { denyReasonMode: 'custom', denyReason: '全局那句' },
+        },
+        projects: { [projKey]: { autoReview: proj } },
+      }, null, 2), 'utf8')
+      // ⑦ 项目 custom + 项目文本 → 用项目那句
+      {
+        writeCfg({ denyReasonMode: 'custom', denyReason: '项目那句' })
+        const llm = mkLlm(verdict(MODEL_DENY))
+        const h = createHost({ workspaceRoot: ws, dshHome: home, llm })
+        const r = await probeDenyText(h, ws, 'a57pj1', 'rm -rf ./build')
+        ok('★★ group24 A57: 项目层 custom + 项目文本 → 用项目那句（项目优先）',
+          r.kind === 'deny' && r.reason.indexOf('项目那句') === 0 && r.reason.indexOf('全局那句') === -1,
+          JSON.stringify(r))
+      }
+      // ⑧ 项目显式 default → 用默认文案，**不**因为全局是 custom 而穿透
+      {
+        writeCfg({ denyReasonMode: 'default' })
+        const llm = mkLlm(verdict(MODEL_DENY))
+        const h = createHost({ workspaceRoot: ws, dshHome: home, llm })
+        const r = await probeDenyText(h, ws, 'a57pj2', 'rm -rf ./build')
+        ok('★★ group24 A57: 项目层显式 default → 用默认文案（不穿透全局 custom）',
+          r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1
+          && r.reason.indexOf('全局那句') === -1,
+          JSON.stringify(r))
+      }
+      releaseTmp(ws, home)
+    }
+  }
+
+  // ── A58：denyReasonMode / denyReason 的写入语义 ───────────────────────────────
+  // 与 A56 同构：缺席不动、空串清除、inherit 删键、非法/超长报错且磁盘不变。
+  // 另加一条 A56 没有的：**切换 mode 不删文本**（切回 custom 时那句话应该还在）。
+  {
+    const post = (h, body) => callRoute(h.routes, 'POST', '/permgate/set-auto-policy', body)
+    const readAR = (home, target, ws) => {
+      const cfg = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
+      if (target === 'global') return cfg.global.autoReview || {}
+      const p = cfg.projects || {}
+      const normKey = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      const k = Object.keys(p).find((x) => normKey(x) === normKey(ws))
+      return (k && p[k].autoReview) || {}
+    }
+
+    // ① 空串 = 删键（回到「留空 = 默认文案」），不落空串。
+    {
+      const { ws, home, h } = mkHostAuto({ denyReasonMode: 'custom', denyReason: '先写一句' }, undefined)
+      await post(h, { target: 'global', denyReason: '' })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: denyReason 传空串 = 显式清除（删键，不落空串）',
+        !('denyReason' in ar) && ar.denyReasonMode === 'custom',
+        JSON.stringify(ar))
+      releaseTmp(ws, home)
+    }
+
+    // ② 项目层 inherit = 删键。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      await post(h, { target: 'project', denyReasonMode: 'custom' })
+      const a1 = readAR(home, 'project', ws)
+      await post(h, { target: 'project', denyReasonMode: 'inherit' })
+      const a2 = readAR(home, 'project', ws)
+      ok('★★ group24 A58: 项目层 denyReasonMode 传 inherit = 删键（回到继承全局）',
+        a1.denyReasonMode === 'custom' && !('denyReasonMode' in a2),
+        JSON.stringify({ before: a1, after: a2 }))
+      releaseTmp(ws, home)
+    }
+
+    // ③ 全局层 inherit / 非法 mode / 超长文本 → error，且磁盘不变。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const r1 = await post(h, { target: 'global', denyReasonMode: 'inherit' })
+      const r2 = await post(h, { target: 'global', denyReasonMode: 'nonsense' })
+      const r3 = await post(h, { target: 'global', denyReason: 'x'.repeat(501) })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: 全局层 inherit / 非法 mode / 超长文本都回 error，且磁盘不变',
+        !!(r1.data && r1.data.error) && !!(r2.data && r2.data.error) && !!(r3.data && r3.data.error)
+        && !('denyReasonMode' in ar) && !('denyReason' in ar),
+        JSON.stringify({ r1: r1.data, r2: r2.data && r2.data.error, r3: r3.data && r3.data.error, ar }))
+      releaseTmp(ws, home)
+    }
+
+    // ④ 上限以内（500）照常保存 —— 与 ③ 成对，否则「一律拒绝」也能让上面那条绿。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const exact = 'y'.repeat(500)
+      const r = await post(h, { target: 'global', denyReason: exact })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: 500 字符（上限本身）照常保存',
+        !(r.data && r.data.error) && ar.denyReason === exact,
+        JSON.stringify({ err: r.data && r.data.error, len: ar.denyReason ? ar.denyReason.length : 0 }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑤ 切 mode **不删**文本：切回 custom 时那句话应该还在。
+    {
+      const { ws, home, h } = mkHostAuto({ denyReasonMode: 'custom', denyReason: '那句话' }, undefined)
+      await post(h, { target: 'global', denyReasonMode: 'default' })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: 切到 default 后 denyReason 仍在磁盘上（切回不丢用户输入）',
+        ar.denyReasonMode === 'default' && ar.denyReason === '那句话',
+        JSON.stringify(ar))
+      releaseTmp(ws, home)
+    }
+
+    // ⑥ statusView 下发两层显式值与值域（面板据此渲染下拉与 maxLength）。
+    {
+      const { ws, home, h } = mkHostAuto({ denyReasonMode: 'custom', denyReason: '全局文案' }, undefined)
+      const st = await callRoute(h.routes, 'GET', '/permgate/status')
+      const pol = (st.data && st.data.autoReview && st.data.autoReview.policy) || {}
+      ok('★★ group24 A58: statusView 下发 denyReason 两层显式值 + 值域 + 上限',
+        pol.denyReasonMode === 'custom' && pol.denyReason === '全局文案'
+        && pol.projectDenyReasonMode === null && pol.projectDenyReason === null
+        && Array.isArray(pol.denyReasonModes) && pol.denyReasonModes.indexOf('custom') !== -1
+        && pol.denyReasonMaxLength === 500,
+        JSON.stringify({ mode: pol.denyReasonMode, text: pol.denyReason, pm: pol.projectDenyReasonMode, modes: pol.denyReasonModes, max: pol.denyReasonMaxLength }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑦ 「全部恢复默认」也要能清掉这两个键（explicit 含它们）。
+    {
+      const { ws, home, h } = mkHostAuto({ denyReasonMode: 'custom', denyReason: '要清掉' }, undefined)
+      const st0 = await callRoute(h.routes, 'GET', '/permgate/status')
+      const explicit = (st0.data && st0.data.autoReview && st0.data.autoReview.explicit) || []
+      await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { clear: explicit })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: set-auto-review 的 clear 覆盖 denyReasonMode / denyReason',
+        explicit.indexOf('denyReasonMode') !== -1 && explicit.indexOf('denyReason') !== -1
+        && !('denyReasonMode' in ar) && !('denyReason' in ar),
+        JSON.stringify({ explicit, ar }))
+      releaseTmp(ws, home)
+    }
+  }
 }
 
 if (fail.length) {

@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
 		let Primitives = null;
 		try { Primitives = require("@deepseek-ai/dsh-client-ui-primitives"); } catch (e) { Primitives = null; }
 
-		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-args-note { color: #bf8700; white-space: nowrap; margin-left: 6px; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; }";
+		const CSS = ".pg-modal { position: fixed; top: 16px; right: 16px; z-index: 9999; width: 420px; max-width: 92vw; max-height: 82vh; overflow-y: auto; background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); border-radius: 10px; box-shadow: 0 10px 36px rgba(0,0,0,0.32); padding: 14px 16px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-modal-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; } .pg-modal-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8b949e); margin-bottom: 8px; word-break: break-all; line-height: 1.4; } .pg-modal-req { font-size: 12px; margin-bottom: 4px; } .pg-modal-body { font-size: 12px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; } .pg-intent { font-size: 12px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid var(--dsw-alias-brand-primary, #1f6feb); border-radius: 6px; padding: 6px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 6px; line-height: 1.5; word-break: break-word; } .pg-intent-tag { display: inline-block; font-weight: 700; color: var(--dsw-alias-brand-primary, #1f6feb); margin-right: 6px; font-size: 11px; } .pg-args { font-size: 11px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); border-left: 3px solid rgba(128,128,128,0.65); border-radius: 6px; padding: 5px 8px; color: var(--dsw-alias-label-secondary, #57606a); margin-bottom: 8px; line-height: 1.5; word-break: break-all; font-family: ui-monospace, Consolas, monospace; } .pg-args-tag { display: inline-block; font-weight: 700; color: rgba(128,128,128,0.95); margin-right: 6px; font-size: 11px; font-family: system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif; } .pg-args-row { display: flex; gap: 6px; padding: 1px 0; } .pg-args-label { font-weight: 600; flex: 0 0 auto; } .pg-args-val { word-break: break-all; flex: 1; } .pg-args-note { color: #bf8700; white-space: nowrap; margin-left: 6px; } .pg-cand-head { font-size: 12px; font-weight: 600; margin: 6px 0 4px; } .pg-cand-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #8c959f); margin-bottom: 4px; } .pg-cand { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); } .pg-cand-label { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; } .pg-radio { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-secondary, #57606a); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s ease; } .pg-radio:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-radio-allow { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-radio-deny { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.12); font-weight: 600; } .pg-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; } .pg-action { display: inline-flex; align-items: center; padding: 5px 16px; border-radius: 6px; border: 1px solid; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-action:hover { filter: brightness(1.07); box-shadow: 0 2px 8px rgba(0,0,0,0.18); } .pg-action:active { transform: translateY(1px); box-shadow: none; } .pg-action:disabled { opacity: 0.5; cursor: not-allowed; filter: none; box-shadow: none; } .pg-action-allow { border-color: rgba(26, 127, 55, 0.45); color: #1a7f37; background: rgba(26, 127, 55, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-allow { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 45%, transparent); color: var(--dsw-alias-state-success-primary, #1a7f37); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a7f37) 12%, transparent); } } .pg-action-deny { border-color: rgba(207, 34, 46, 0.45); color: #cf222e; background: rgba(207, 34, 46, 0.12); } @supports (color: color-mix(in srgb, red 10%, blue)) { .pg-action-deny { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 45%, transparent); color: var(--dsw-alias-state-error-primary, #cf222e); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #cf222e) 12%, transparent); } } .pg-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; } .pg-btn:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); background: rgba(31, 111, 235, 0.08); } .pg-btn:active { transform: translateY(1px); } .pg-btn:disabled { opacity: 0.5; cursor: not-allowed; } .pg-btn-danger:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.08); } .pg-btn-on { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.12); font-weight: 600; } .pg-btn-on:hover { border-color: var(--dsw-alias-state-success-primary, #1a7f37); color: var(--dsw-alias-state-success-primary, #1a7f37); background: rgba(26, 127, 55, 0.2); } .pg-btn-off { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.1); font-weight: 600; } .pg-btn-off:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: var(--dsw-alias-state-error-primary, #cf222e); background: rgba(207, 34, 46, 0.16); } .pg-btn-confirm { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); } .pg-btn-confirm:hover { border-color: var(--dsw-alias-state-error-primary, #cf222e); color: #ffffff; background: var(--dsw-alias-state-error-primary, #cf222e); filter: brightness(1.12); } .pg-field { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.4)); background: var(--dsw-alias-bg-layer-1, #f6f8fa); color: var(--dsw-alias-label-primary, #24292f); color-scheme: light dark; font-size: 13px; font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease; } .pg-field:hover { border-color: var(--dsw-alias-brand-primary, #1f6feb); } .pg-field:focus { outline: none; border-color: var(--dsw-alias-brand-primary, #1f6feb); box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.22); } .pg-field:disabled { opacity: 0.5; cursor: not-allowed; } .pg-field option { color: var(--dsw-alias-label-primary, #24292f); background: var(--dsw-alias-bg-overlay, #ffffff); } .pg-tab { padding: 6px 16px; border-radius: 6px 6px 0 0; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--dsw-alias-label-primary, #24292f); cursor: pointer; font-size: 13px; font-family: inherit; margin-right: 4px; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; } .pg-tab:hover { background: rgba(128, 128, 128, 0.12); } .pg-tab-on { border-bottom-color: var(--dsw-alias-brand-primary, #1f6feb); color: var(--dsw-alias-brand-primary, #1f6feb); font-weight: 600; } .pg-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1, #f6f8fa); border: 1px solid var(--dsw-alias-border-l1, #d0d7de); } .pg-seg-btn { padding: 3px 14px; border-radius: 6px; border: none; background: transparent; color: var(--dsw-alias-label-secondary, #57606a); cursor: pointer; font-size: 12px; font-family: inherit; transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease; } .pg-seg-btn:hover { color: var(--dsw-alias-label-primary, #24292f); } .pg-seg-btn-on { background: var(--dsw-alias-bg-overlay, #ffffff); color: var(--dsw-alias-label-primary, #24292f); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.14); }";
 
 		// ── 审批卡片：拖动柄 + 缩略按钮 + 缩小方块 ─────────────────────────────
 		// 标题栏整条是拖动柄（cursor:move 给出可拖暗示）；缩略按钮在柄内，需自身拦掉
@@ -1894,6 +1894,7 @@ window.__ModuleLoader__.load({
 				'panel.autoPolicySaved': '已保存',
 				'panel.autoPolicySave': '保存',
 				'panel.autoHighRisk': '模型判定高风险、却给出放行时',
+				'panel.autoHighRiskTitle': '高风险放行怎么办',
 				'panel.autoHighRiskHint': '模型可能既标了高风险、又给出放行。这里决定这种情况怎么办。它会先重新问一次模型，仍是高风险放行才按这里处置',
 				'panel.autoHighRiskTimeout': '等你多久',
 				'panel.autoHighRiskTimeoutHint': '选「询问」时才生效。一直等 = 弹窗不超时；拒绝/允许 = 到「等待人工的时限」后照做',
@@ -1904,6 +1905,16 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRiskTimeout.deny': '拒绝',
 				'panel.autoHighRiskTimeout.allow': '允许',
 				'panel.autoPolicyInherit': '继承全局',
+				'panel.autoDenyReasonTitle': '拒绝时告诉模型什么',
+				'panel.autoDenyReason': '说什么',
+				'panel.autoDenyReasonHint': '模型被拒后会收到一句说明。默认让它知道是自己拒的、还是它放行后被你的设置拦下的',
+				'panel.autoDenyReason.default': '真实原因',
+				'panel.autoDenyReason.custom': '我写的一句话',
+				'panel.autoDenyReasonPh': '留空则用下面的默认文案',
+				'panel.autoDenyReasonPhInherit': '留空则沿用全局那句',
+				'panel.autoDenyReasonInherit': '留空：将沿用全局的自定义原因 —— {text}',
+				'panel.autoDenyReasonDefaultsLabel': '留空时按情形发这几句：',
+				'panel.autoDenyReasonCustomHint': '自定义后仍会附上「哪一段、哪一档」的摘要',
 				'flow.viaAllowHigh': '自动审批：模型判定高风险仍放行 {tool} → {action}',
 				'flow.viaDenyHigh': '自动审批：模型判定高风险并放行，被你的设置拒绝 {tool} → {action}',
 				'flow.viaAskHigh': '自动审批：模型判定高风险却放行，等你决定 {tool} → {action}',
@@ -1923,6 +1934,7 @@ window.__ModuleLoader__.load({
 				'panel.tabGlobal': '全局',
 				'panel.tabProject': '项目',
 				'panel.tabAuto': '自动审批',
+				'panel.autoScope': '设置范围',
 				'panel.editGlobal': '正在编辑全局设置（所有项目的默认）。',
 				'panel.editProject': '正在编辑当前项目（{p}），项目设置优先于全局。',
 				'panel.sandbox': '底层沙箱',
@@ -2366,6 +2378,7 @@ window.__ModuleLoader__.load({
 				'panel.autoPolicySaved': 'Saved',
 				'panel.autoPolicySave': 'Save',
 				'panel.autoHighRisk': 'Model rates it high risk but allows it',
+				'panel.autoHighRiskTitle': 'When a high-risk call is allowed',
 				'panel.autoHighRiskHint': 'The model may mark a call high risk and still allow it. This decides what happens then. It asks the model once more first; only a second high-risk allow is handled here',
 				'panel.autoHighRiskTimeout': 'How long to wait',
 				'panel.autoHighRiskTimeoutHint': 'only used when the setting above is Ask. Wait = the dialog never times out; Deny/Allow = follow that once "Wait for a human" elapses',
@@ -2376,6 +2389,16 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRiskTimeout.deny': 'Deny',
 				'panel.autoHighRiskTimeout.allow': 'Allow',
 				'panel.autoPolicyInherit': 'Inherit global',
+				'panel.autoDenyReasonTitle': 'What the model is told on denial',
+				'panel.autoDenyReason': 'Say',
+				'panel.autoDenyReasonHint': 'After a denial the model gets one line. By default it learns whether it denied the call itself or your setting overruled it',
+				'panel.autoDenyReason.default': 'The real reason',
+				'panel.autoDenyReason.custom': 'My own wording',
+				'panel.autoDenyReasonPh': 'Leave empty to use the defaults below',
+				'panel.autoDenyReasonPhInherit': 'Leave empty to reuse the global wording',
+				'panel.autoDenyReasonInherit': 'Left empty: the global custom wording is sent — {text}',
+				'panel.autoDenyReasonDefaultsLabel': 'When left empty, one of these is sent:',
+				'panel.autoDenyReasonCustomHint': 'Your wording still gets the "which segment, which tier" summary appended',
 				'flow.viaAllowHigh': 'Auto review: model rated {tool} high risk and allowed it → {action}',
 				'flow.viaDenyHigh': 'Auto review: model rated {tool} high risk and allowed it; denied by your setting → {action}',
 				'flow.viaAskHigh': 'Auto review: model rated {tool} high risk but allowed it; waiting for you → {action}',
@@ -2393,6 +2416,7 @@ window.__ModuleLoader__.load({
 				'panel.tabGlobal': 'Global',
 				'panel.tabProject': 'Project',
 				'panel.tabAuto': 'Auto review',
+				'panel.autoScope': 'Scope',
 				'panel.editGlobal': 'Editing global settings (default for all projects).',
 				'panel.editProject': 'Editing current project ({p}); project settings override global.',
 				'panel.sandbox': 'Sandbox',
@@ -4747,6 +4771,16 @@ window.__ModuleLoader__.load({
 			const [busy, setBusy] = React.useState(false);
 			const [msg, setMsg] = React.useState('');
 			const [tab, setTab] = React.useState('global');
+			// auto tab 内部的**层子 Tab**：'global' | 'project'。
+			//
+			// 为什么需要它：外层 tab 栏的前两个是「层」（全局 / 项目），第三个是「主题」
+			// （自动审批）—— 两个轴并排。于是 auto tab 里又得按层分块，用户要配
+			// 「本项目的拒绝原因」得先点「自动审批」、再在卡片里找「本项目」，两层定位。
+			// 现在 auto tab 内也有一条层切换，每张卡片只服务一个层，卡内不再分块。
+			//
+			// 与外层 `tab` **完全独立**：它不参与任何 `tab === 'global'` 判断，
+			// 也不发给宿主（所有路由的 target 仍由各自的层参数决定）。
+			const [autoTab, setAutoTab] = React.useState('global');
 			const [cats, setCats] = React.useState({ global: {}, project: {} });
 			const [quickSel, setQuickSel] = React.useState({});
 			// 快捷工具的拒绝原因：{ [tool]: { g, p } }，与 quickSel 平行但独立编辑
@@ -4900,6 +4934,16 @@ window.__ModuleLoader__.load({
 			const [policyHighRiskTimeout, setPolicyHighRiskTimeout] = React.useState('deny');
 			const [policyProjectHighRisk, setPolicyProjectHighRisk] = React.useState('inherit');
 			const [policyProjectHighRiskTimeout, setPolicyProjectHighRiskTimeout] = React.useState('inherit');
+			// 拒绝时回给模型的那句话：两层各一对（模式 + 自定义文本）。
+			//
+			// 文本与模式分开存：切到 `default` 时**不清空**文本框里的内容 —— 用户切回来
+			// 时那句话应该还在（宿主侧同样不删键，见 normalizeAutoReview 的注释）。
+			// 把两者合成一个对象会让「草稿」与「已保存的模式」混在同一个 state 里，
+			// 每次提交都得整体重建，而中间态（模式已改、文本未提交）无法表达。
+			const [policyDenyMode, setPolicyDenyMode] = React.useState('default');
+			const [policyDenyText, setPolicyDenyText] = React.useState('');
+			const [policyProjectDenyMode, setPolicyProjectDenyMode] = React.useState('inherit');
+			const [policyProjectDenyText, setPolicyProjectDenyText] = React.useState('');
 			// 未保存草稿标记：`{ global: false, project: false }`，与 loopThDirty 同构。
 			//
 			// 为什么是「脏标记」而不是「焦点标记」：这一格用**保存按钮**而非 onBlur 提交
@@ -4911,6 +4955,11 @@ window.__ModuleLoader__.load({
 			// 再编项目、点项目「保存」时，全局草稿会在那次 applyStatus 里被服务端值覆盖。
 			// 每格由 savePolicy 在**保存本层策略文本**后单独清空，此后服务端值才会回填。
 			const policyDirty = React.useRef({ global: false, project: false });
+			// 自定义拒绝原因的草稿标记，与 policyDirty **分成两份**：
+			// 两者的清除时机不同（policyDirty 由「保存策略文本」清，这份由「提交自定义原因」清），
+			// 合成一份会让一次策略保存顺手把另一格的草稿标记也清掉 —— 紧接着的那次
+			// status 推送就会覆盖掉用户还没提交的原因文字。
+			const denyDirty = React.useRef({ global: false, project: false });
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
 			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
@@ -5356,6 +5405,12 @@ window.__ModuleLoader__.load({
 					setPolicyHighRiskTimeout(pol.highRiskTimeout || defs.highRiskTimeout || 'deny');
 					setPolicyProjectHighRisk(pol.projectHighRiskAction || 'inherit');
 					setPolicyProjectHighRiskTimeout(pol.projectHighRiskTimeout || 'inherit');
+					// 拒绝原因的模式与文本同样按层回填：全局行缺键用宿主下发的默认模式，
+					// 项目行缺键显示「继承全局」。文本有草稿时不覆盖（见 denyDirty 的说明）。
+					setPolicyDenyMode(pol.denyReasonMode === 'custom' ? 'custom' : (pol.denyReasonMode || defs.denyReasonMode || 'default'));
+					setPolicyProjectDenyMode(pol.projectDenyReasonMode || 'inherit');
+					if (!denyDirty.current.global) setPolicyDenyText(String(pol.denyReason || ''));
+					if (!denyDirty.current.project) setPolicyProjectDenyText(String(pol.projectDenyReason || ''));
 				}
 			};
 
@@ -6874,25 +6929,32 @@ window.__ModuleLoader__.load({
 					React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T(labelKey)),
 					...children,
 				);
-				// ── 第二张卡片：额外审批策略 + 高风险处置的两维 ──────────────────────────
+				// ── 第二张卡片：额外审批策略 ──────────────────────────────────────────────
 				//
 				// 与上面那张**并列**（见上面 return 处的说明）：那张配「评审机制怎么跑」，
-				// 这张配「怎么判定」——用户写的自然语言规则，以及模型给出「高风险放行」
-				// 这种结论时怎么办。策略与处置都**两层可写**（项目层可继承 / 追加 / 替换）。
+				// 这张配「给模型的规则」。策略文本**两层可写**（项目层可继承 / 追加 / 替换）。
 				//
 				// 定义在 `autoReviewCard` **内部**：它要读 `ar.policy` 与 `dflt`，而那两个
 				// 由本函数从 status 取出。为此传参进去只会多一层接口，没有别的收益。
 				// auto tab 的分流（`tab === 'auto' ? autoReviewCard() : null`）因此不用改 ——
 				// `tab='auto'` 不会流进下面 100+ 处 `tab === 'global' ? A : B`。
 				//
-				// ⚠️ 这里**不得有任何 hook**：hook 数量会随 tab 切换变化，React 抛 #310
+				// ⚠️ 这里**不得有任何 hook**：hook 数量会随 tab 变化，React 抛 #310
 				// 整页白屏。状态全部在组件层（见 policyGlobal / policyDirty 那一批）。
+				//
+				// ── 为什么按「设置项」分卡片，而不是按「层」分 ────────────────────────────
+				// 早先这里只有一张卡片，装了三件事（策略文本 / 高风险处置 / 拒绝时说什么），
+				// 内部再按「全局 / 本项目」分块。两个后果都已实测：
+				//   · 标题只覆盖第一件，用户找不到另外两件（「拒绝时说什么」尤其不可能
+				//     想到去「额外审批策略」里找）；
+				//   · 同一件事的两层被整块策略文本隔开，想对比「全局与本项目对高风险怎么处置」
+				//     要跨过中间几十行，且两层用的是不同的提交方式（textarea 要按钮、
+				//     下拉即时生效）—— 同一个设置项不该有两种交互。
+				// 现在每张卡片只装一件事，卡内两层紧挨着、交互一致。
 				const policyCard = () => {
 					const pol = ar.policy || {};
 					// 值域与上限都由宿主下发（见 statusView 的 policy 子对象）：
 					// 客户端不写死第二份 —— 否则「宿主加一档」与「面板能选什么」会分叉。
-					const actions = Array.isArray(pol.highRiskActions) ? pol.highRiskActions : ['deny', 'ask', 'allow'];
-					const timeouts = Array.isArray(pol.highRiskTimeouts) ? pol.highRiskTimeouts : ['wait', 'deny', 'allow'];
 					const modes = Array.isArray(pol.policyModes) ? pol.policyModes : ['append', 'replace'];
 					// 两个长度阈值，语义不同（见 statusView 的 policy 子对象）：
 					//   · `warnLen` 是**建议线**：超过只标红提示，照常保存、照常生效；
@@ -6901,27 +6963,16 @@ window.__ModuleLoader__.load({
 					// 就不让存」——而长度本来就是用户自己的判断。
 					const warnLen = typeof pol.warnLength === 'number' && pol.warnLength > 0 ? pol.warnLength : 4000;
 					const maxLen = typeof pol.maxLength === 'number' && pol.maxLength > 0 ? pol.maxLength : 20000;
-					// 第二维的显示条件看**生效**的第一维，不看本层原值：本层选「继承全局」
-					// 而全局是「询问」时，第二维仍然生效 —— 用本层原值判会把它藏起来。
-					//
-					// 但两层各自的「生效值」不同源，必须分开算：
-					//   · 项目行 → `effectiveHighRiskAction`（项目显式 → 全局显式 → 缺省），
-					//     这正是项目层实际会怎么处置；
-					//   · 全局行 → 全局显式值或宿主下发的默认值（`dflt`，与上面那张卡片同源）。
-					//     用项目优先的 effective 判，会在「项目设 deny、全局缺键」时把**全局**的
-					//     第二维整行藏起来 —— 用户无法配置全局的等待时长，且切个会话控件就
-					//     出现/消失。
-					const globalAction = pol.highRiskAction || dflt.highRiskAction || 'ask';
-					const effAction = pol.effectiveHighRiskAction || 'ask';
+					// 提交单点。三个下拉与本卡片的策略文本共用它，清脏标记的分支按 key 分。
 					const savePolicy = (target, key, value) => {
 						invoke('permgate:set-auto-policy', { target: target, [key]: value }, () => {
 							// 保存成功才清脏标记：失败时草稿必须留着，否则用户输入的文字
 							// 会被一次「没保存成功」的响应顺手清掉。
 							//
-							// **只清这次真正保存的那一格**，且只在提交的是策略文本时清：
-							// 处置下拉 / 用法下拉保存的不是 textarea 里的文字，清掉标记会让
-							// 下一次 status 推送（宿主 persist 成功必 broadcast）把另一格
-							// 未保存的草稿覆盖掉。
+							// **只清这次真正保存的那一格**：本卡片的 `policyMode` 下拉保存的
+							// 不是输入框里的文字，清掉标记会让下一次 status 推送（宿主 persist
+							// 成功必 broadcast）把 textarea 里未保存的草稿覆盖掉。
+							// 自定义拒绝原因的草稿标记由 `denyReasonCard` 自己清（那是另一张卡片）。
 							if (key === 'policy') policyDirty.current[target] = false;
 							setMsg(T('panel.autoPolicySaved'));
 						});
@@ -6959,8 +7010,79 @@ window.__ModuleLoader__.load({
 							React.createElement('div', {
 								style: { fontSize: 11, textAlign: 'right', color: color },
 							}, notice + T('panel.autoPolicyCount').replace('{n}', String(value.length)).replace('{max}', String(warnLen))),
+							// 保存按钮紧跟 textarea：它只管这一格。与数字框的失焦提交不同，
+							// 长文本编辑中途失焦极常见，所以这一格必须显式提交。
+							React.createElement('div', { style: { marginTop: 4 } },
+								React.createElement('button', {
+									className: 'pg-btn',
+									disabled: busy || disabled || value.length > maxLen,
+									onClick: () => savePolicy(which, 'policy', value),
+								}, T('panel.autoPolicySave')),
+							),
 						);
 					};
+					const modeLabel = (m) => T(m === 'append' ? 'panel.autoPolicyModeAppend' : (m === 'replace' ? 'panel.autoPolicyModeReplace' : 'panel.autoPolicyModeInherit'));
+					const projectRoot = status ? String(status.projectKey || '') : '';
+					// 只渲染**当前子 Tab 那一层**：全局子 Tab 没有「与全局的关系」这个下拉
+					// （没有可继承的对象），项目子 Tab 才有。
+					return React.createElement('div', { style: card },
+						React.createElement('div', { style: h() }, T('panel.autoPolicy')),
+						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T('panel.autoPolicyHint')),
+						autoTab === 'project'
+							? React.createElement(React.Fragment, null,
+								React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginBottom: 6 } },
+									T('panel.autoPolicyProject') + (projectRoot ? '  ' + projectRoot : '')),
+								React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' } },
+									React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T('panel.autoPolicyMode')),
+									React.createElement('select', {
+										className: 'pg-field',
+										style: { padding: '2px 6px' },
+										value: policyMode,
+										disabled: busy,
+										onChange: (e) => {
+											setPolicyMode(e.target.value);
+											savePolicy('project', 'policyMode', e.target.value);
+										},
+									}, ['inherit'].concat(modes).map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m)))),
+								),
+								// 两行提示互斥：「继承全局」说这段不发送，「替换全局」说全局那段不发送，
+								// 「追加到全局」两者都发送 → 都不显示。
+								policyMode === 'inherit'
+									? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T('panel.autoPolicyInheritHint'))
+									: (policyMode === 'replace'
+										? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.autoPolicyReplaceHint'))
+										: null),
+								// 继承态下 textarea 禁用并置灰：这时它写什么都不发送，可编辑会让用户
+								// 以为自己在改什么（面板说谎的另一种形态）。
+								area('project', policyProject, setPolicyProject, policyMode === 'inherit'),
+							)
+							: area('global', policyGlobal, setPolicyGlobal, false),
+					);
+				};
+				// ── 第三张卡片：模型判定高风险却放行时怎么办 ─────────────────────────────
+				//
+				// 独立成卡而不是塞进策略卡：它回答的是「结论已经出来了，但那个结论危险，
+				// 你信不信」——与「给模型什么规则」是两个问题。混在一起时标题只能覆盖前者。
+				//
+				// 卡内按**层**分行，两层紧挨着：这正是上一版按层分块丢掉的对照能力 ——
+				// 想知道「本项目是不是比全局更严」，现在一眼就能比。
+				const highRiskCard = () => {
+					const pol = ar.policy || {};
+					const actions = Array.isArray(pol.highRiskActions) ? pol.highRiskActions : ['deny', 'ask', 'allow'];
+					const timeouts = Array.isArray(pol.highRiskTimeouts) ? pol.highRiskTimeouts : ['wait', 'deny', 'allow'];
+					// 第二维的显示条件看**生效**的第一维，不看本层原值：本层选「继承全局」
+					// 而全局是「询问」时，第二维仍然生效 —— 用本层原值判会把它藏起来。
+					//
+					// 但两层各自的「生效值」不同源，必须分开算：
+					//   · 项目行 → `effectiveHighRiskAction`（项目显式 → 全局显式 → 缺省），
+					//     这正是项目层实际会怎么处置；
+					//   · 全局行 → 全局显式值或宿主下发的默认值（`dflt`）。
+					//     用项目优先的 effective 判，会在「项目设 deny、全局缺键」时把**全局**的
+					//     第二维整行藏起来 —— 用户无法配置全局的等待时长，且切个会话控件就
+					//     出现/消失。
+					const globalAction = pol.highRiskAction || dflt.highRiskAction || 'ask';
+					const effAction = pol.effectiveHighRiskAction || 'ask';
+					const save = (target, key, value) => invoke('permgate:set-auto-policy', { target: target, [key]: value }, () => setMsg(T('panel.autoPolicySaved')));
 					// 三/四态下拉。`inherit` 只在项目层出现（全局层没有可继承的对象）。
 					//
 					// `keyPrefix` 是 i18n 键前缀（`panel.autoHighRisk` / `panel.autoHighRiskTimeout`），
@@ -6980,86 +7102,189 @@ window.__ModuleLoader__.load({
 						),
 						hintKey ? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T(hintKey)) : null,
 					);
-					const modeLabel = (m) => T(m === 'append' ? 'panel.autoPolicyModeAppend' : (m === 'replace' ? 'panel.autoPolicyModeReplace' : 'panel.autoPolicyModeInherit'));
-					const projectRoot = status ? String(status.projectKey || '') : '';
 					return React.createElement('div', { style: card },
-						React.createElement('div', { style: h() }, T('panel.autoPolicy')),
-						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T('panel.autoPolicyHint')),
-						// ── 全局层 ────────────────────────────────────────────────────────
-						React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginTop: 6 } }, T('panel.autoPolicyGlobal')),
-						area('global', policyGlobal, setPolicyGlobal, false),
-						picker('panel.autoHighRisk', 'panel.autoHighRiskHint', policyHighRisk, (v) => {
-							setPolicyHighRisk(v);
-							savePolicy('global', 'highRiskAction', v);
-						}, actions, false),
-						// 第二维条件渲染：第一维（**全局层**的生效值）不是「询问」时它不起作用，藏起来。
-						// 判据用 globalAction 而不是 effAction —— 后者项目优先，会在项目设了
-						// deny 时把全局这一行整个藏掉（见 effAction 处的说明）。
-						globalAction === 'ask'
-							? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyHighRiskTimeout, (v) => {
-								setPolicyHighRiskTimeout(v);
-								savePolicy('global', 'highRiskTimeout', v);
-							}, timeouts, false)
-							: null,
-						React.createElement('div', { style: { marginTop: 8 } },
-							React.createElement('button', {
-								className: 'pg-btn',
-								disabled: busy || policyGlobal.length > maxLen,
-								onClick: () => savePolicy('global', 'policy', policyGlobal),
-							}, T('panel.autoPolicySave')),
-						),
-						// ── 项目层 ────────────────────────────────────────────────────────
-						React.createElement('div', { style: { borderTop: '1px solid rgba(128,128,128,0.25)', marginTop: 10, paddingTop: 8 } }),
-						React.createElement('div', { style: { fontSize: 12, fontWeight: 600 } },
-							T('panel.autoPolicyProject') + (projectRoot ? '  ' + projectRoot : '')),
-						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' } },
-							React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T('panel.autoPolicyMode')),
-							React.createElement('select', {
-								className: 'pg-field',
-								style: { padding: '2px 6px' },
-								value: policyMode,
-								disabled: busy,
-								onChange: (e) => {
-									setPolicyMode(e.target.value);
-									savePolicy('project', 'policyMode', e.target.value);
-								},
-							}, ['inherit'].concat(modes).map((m) => React.createElement('option', { key: m, value: m }, modeLabel(m)))),
-						),
-						// 两行提示互斥：「继承全局」说这段不发送，「替换全局」说全局那段不发送，
-						// 「追加到全局」两者都发送 → 都不显示。
-						policyMode === 'inherit'
-							? React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T('panel.autoPolicyInheritHint'))
-							: (policyMode === 'replace'
-								? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.autoPolicyReplaceHint'))
-								: null),
-						// 继承态下 textarea 禁用并置灰：这时它写什么都不发送，可编辑会让用户
-						// 以为自己在改什么（面板说谎的另一种形态）。
-						area('project', policyProject, setPolicyProject, policyMode === 'inherit'),
-						picker('panel.autoHighRisk', 'panel.autoHighRiskHint', policyProjectHighRisk, (v) => {
-							setPolicyProjectHighRisk(v);
-							savePolicy('project', 'highRiskAction', v);
-						}, actions, true),
-						effAction === 'ask'
-							? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyProjectHighRiskTimeout, (v) => {
-								setPolicyProjectHighRiskTimeout(v);
-								savePolicy('project', 'highRiskTimeout', v);
-							}, timeouts, true)
-							: null,
-						React.createElement('div', { style: { marginTop: 8 } },
-							React.createElement('button', {
-								className: 'pg-btn',
-								disabled: busy || policyMode === 'inherit' || policyProject.length > maxLen,
-								onClick: () => savePolicy('project', 'policy', policyProject),
-							}, T('panel.autoPolicySave')),
-						),
+						React.createElement('div', { style: h() }, T('panel.autoHighRiskTitle')),
+						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T('panel.autoHighRiskHint')),
+						// 只渲染当前子 Tab 那一层。两层的「生效值」不同源，故两个分支各自取自己的：
+						//   · 全局层 → 全局显式值或宿主下发的默认值（`dflt`）；
+						//   · 项目层 → `effectiveHighRiskAction`（项目显式 → 全局显式 → 缺省）。
+						autoTab === 'project'
+							? React.createElement(React.Fragment, null,
+								picker('panel.autoHighRisk', null, policyProjectHighRisk, (v) => {
+									setPolicyProjectHighRisk(v);
+									save('project', 'highRiskAction', v);
+								}, actions, true),
+								effAction === 'ask'
+									? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyProjectHighRiskTimeout, (v) => {
+										setPolicyProjectHighRiskTimeout(v);
+										save('project', 'highRiskTimeout', v);
+									}, timeouts, true)
+									: null,
+							)
+							: React.createElement(React.Fragment, null,
+								picker('panel.autoHighRisk', null, policyHighRisk, (v) => {
+									setPolicyHighRisk(v);
+									save('global', 'highRiskAction', v);
+								}, actions, false),
+								globalAction === 'ask'
+									? picker('panel.autoHighRiskTimeout', 'panel.autoHighRiskTimeoutHint', policyHighRiskTimeout, (v) => {
+										setPolicyHighRiskTimeout(v);
+										save('global', 'highRiskTimeout', v);
+									}, timeouts, false)
+									: null,
+							),
 					);
 				};
-				// 两张**并列**的卡片，不是一张套一张。两者是 auto tab 下的两类设置：
-				// 这张配「评审机制怎么跑」（超时 / 熔断 / 历史 / 模型），只有全局一份；
-				// `policyCard` 配「怎么判定」（自然语言规则 + 高风险处置），项目层也能写。
-				// 嵌套会让后者看起来是前者的一个参数，而它们的作用域并不相同。
+				// ── 第四张卡片：拒绝时回给模型哪句话 ─────────────────────────────────────
+				//
+				// 也独立成卡：它管的是**判定输出**（模型被拒后收到什么），前两张管判定输入
+				// 与处置。塞进策略卡时，标题「额外审批策略」完全覆盖不到它 —— 用户想改
+				// 「拒绝时说什么」不会想到去点「额外审批策略」。
+				//
+				// 卡内两层紧挨着，且都用同一个控件形状（左标签 + 右下拉），便于对照。
+				const denyReasonCard = () => {
+					const pol = ar.policy || {};
+					const modes = Array.isArray(pol.denyReasonModes) ? pol.denyReasonModes : ['default', 'custom'];
+					const maxLenText = typeof pol.denyReasonMaxLength === 'number' && pol.denyReasonMaxLength > 0
+						? pol.denyReasonMaxLength : 500;
+					const save = (target, key, value) => invoke('permgate:set-auto-policy', { target: target, [key]: value }, () => {
+						if (key === 'denyReason') denyDirty.current[target] = false;
+						setMsg(T('panel.autoPolicySaved'));
+					});
+					// 一层一块：下拉（改完即时生效）+ 仅在 custom 时出现的输入框（失焦提交）。
+					//
+					// 输入框**非受控**（defaultValue + key 重挂载），与 numInput 同构：
+					// 受控形态下每次按键都会被还原成 props 值，等于打不进字。
+					//
+					// 可见性看**本层**的模式而不是生效模式：项目层选「继承全局」时，
+					// 本层这段文本不发送，可编辑会让用户以为自己在改什么（面板说谎的另一种形态）。
+					const block = (which, mode, setMode, text, setText, withInherit) => {
+						const shown = mode === 'custom';
+						// 空值时显示**真实默认文案**（灰字），而不是一句示例。
+						//
+						// 为什么不能用占位符示例：用户要判断「要不要自定义」，前提是看得到
+						// 不自定义时到底发什么。示例既不是真实文案，也覆盖不了三种来源的差别
+						// （模型自己拒 / 模型放行被设置推翻 / 评审失败按设置拒绝）——
+						// 用户会以为默认只有一句话，而实际发出去的是三句里对应的那句。
+						//
+						// 三种并列显示：它们是同一设置在不同情形下的取值，只显示一种会让
+						// 用户在另外两种情形下以为「默认文案跟我看到的不一样」。
+						const defaults = (pol.denyReasonDefaults && typeof pol.denyReasonDefaults === 'object') ? pol.denyReasonDefaults : null;
+						const defaultLines = defaults
+							? [defaults.deny, defaults.denyHigh, defaults.fallback].filter((x) => typeof x === 'string' && x)
+							: [];
+						// ── 项目层留空时，实际发的是**全局那句**（不是默认文案）────────────
+						//
+						// 宿主的 denyReasonTextOf 在项目层 mode=custom 且无文本时穿透全局，
+						// 判据是「全局 mode=custom 且有文本」。这里用同两个字段复算同一条判据：
+						// 两个值都由 statusView 下发（本层显式值），客户端不另造继承链。
+						//
+						// 不显示这条提示时，面板会列出三句默认文案，而模型实际收到的是全局那句
+						// —— 面板说的与真实行为相反，用户按它理解「本项目留空 = 默认」。
+						const inheritsGlobal = withInherit && shown && !String(text || '').trim()
+							&& pol.denyReasonMode === 'custom'
+							&& typeof pol.denyReason === 'string' && !!pol.denyReason.trim()
+							? pol.denyReason : '';
+						return React.createElement('div', { style: { marginTop: 6 } },
+							React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+								React.createElement('span', { style: { fontSize: 12, minWidth: 130 } }, T('panel.autoDenyReason')),
+								React.createElement('select', {
+									className: 'pg-field',
+									style: { padding: '2px 6px' },
+									value: mode,
+									disabled: busy,
+									onChange: (e) => {
+										const v = e.target.value;
+										setMode(v);
+										save(which, 'denyReasonMode', v);
+									},
+								}, (withInherit ? ['inherit'] : []).concat(modes).map((m) => React.createElement('option', { key: m, value: m },
+									m === 'inherit' ? T('panel.autoPolicyInherit') : T('panel.autoDenyReason.' + m)))),
+							),
+							shown
+								? React.createElement('div', { style: { marginTop: 4 } },
+									React.createElement('input', {
+										className: 'pg-field',
+										// `boxSizing` 与策略 textarea 同一条理由：`.pg-field` 自带 padding 与
+										// border，content-box 下 `width:'100%'` 会让控件伸出卡片右边。
+										style: { width: '100%', boxSizing: 'border-box' },
+										type: 'text',
+										key: 'denyReason:' + which + ':' + text,
+										defaultValue: text,
+										// 占位符只说「留空会怎样」，不再拿示例冒充默认值 ——
+										// 真实默认文案在下面那块灰字里逐条列出。
+										//
+										// 会穿透全局时换成另一句：那时下面列的不是默认文案，
+										// 再写「用下面的默认文案」就指向了不存在的内容。
+										placeholder: inheritsGlobal ? T('panel.autoDenyReasonPhInherit') : T('panel.autoDenyReasonPh'),
+										maxLength: maxLenText,
+										disabled: busy,
+										// 失焦即提交：与数字框同一条纪律 —— 值没变就不写盘，
+										// 只是聚焦再离开不该把默认值物化成显式配置。
+										onBlur: (e) => {
+											const v = String(e.target.value || '').trim();
+											if (v === String(text || '').trim()) return;
+											denyDirty.current[which] = true;
+											setText(v);
+											save(which, 'denyReason', v);
+										},
+										onChange: () => { denyDirty.current[which] = true; },
+									}),
+									// 留空时逐条列出真实默认文案。有自定义文本时**不显示** ——
+									// 那时发出去的就是用户写的那句，再列出默认值只会让人以为两者会合并。
+									//
+									// 但项目层会穿透全局时**不列默认文案**：那时实际发的是全局那句，
+									// 列出默认值等于告诉用户一句不会发出的文本。改为明说沿用的是哪句。
+									!String(text || '').trim() && inheritsGlobal
+										? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.6 } },
+											T('panel.autoDenyReasonInherit').replace('{text}', inheritsGlobal))
+										: (!String(text || '').trim() && defaultLines.length
+											? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.6 } },
+												React.createElement('div', { style: { marginBottom: 2 } }, T('panel.autoDenyReasonDefaultsLabel')),
+												defaultLines.map((s, i) => React.createElement('div', { key: i, style: { paddingLeft: 8 } }, '· ' + s)))
+											: null),
+								)
+								: null,
+						);
+					};
+					return React.createElement('div', { style: card },
+						React.createElement('div', { style: h() }, T('panel.autoDenyReasonTitle')),
+						React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T('panel.autoDenyReasonHint')),
+						// 只渲染当前子 Tab 那一层。
+						autoTab === 'project'
+							? block('project', policyProjectDenyMode, setPolicyProjectDenyMode, policyProjectDenyText, setPolicyProjectDenyText, true)
+							: block('global', policyDenyMode, setPolicyDenyMode, policyDenyText, setPolicyDenyText, false),
+						React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 6 } }, T('panel.autoDenyReasonCustomHint')),
+					);
+				};
+				// auto tab 内的**层切换**：胶囊分段控件 + 前置标签，而不是第二条下划线 Tab 栏。
+				//
+				// 为什么不用 `pg-tab`（外层那套下划线）：两层下划线并排时，视觉上就是
+				// 「两条一模一样的导航」，只靠字号差一档区分 —— 用户第一眼会读成
+				// 「这里有两层 Tab，我到底在哪一层」。分段控件（segment）在原生设置界面里
+				// 表达的是「同一件事的两个取值」，与「切换页面」是两种语义，形状也完全不同
+				// （圆角填充 vs 下划线），不会与上面那条栏混为一谈。
+				//
+				// 前置标签「设置范围」是**必须的**：只有两个胶囊时用户仍要靠上下文猜
+				// 「全局 / 项目」指的是什么范围 —— 外层 tab 也叫这两个名字，但外层那份
+				// 是整个面板的范围，这份是自动审批内部的。
+				const autoTabBtn = (t, label) => React.createElement('button', {
+					className: 'pg-seg-btn' + (autoTab === t ? ' pg-seg-btn-on' : ''),
+					onClick: () => setAutoTab(t),
+				}, label);
 				return React.createElement(React.Fragment, null,
-				React.createElement('div', { style: card },
+				React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 } },
+					React.createElement('span', { style: { fontSize: 12, color: 'rgba(128,128,128,0.95)' } }, T('panel.autoScope')),
+					React.createElement('div', { className: 'pg-seg' },
+						autoTabBtn('global', T('panel.tabGlobal')),
+						autoTabBtn('project', T('panel.tabProject')),
+					),
+				),
+				// 「评审机制怎么跑」这四项**只有全局一份**（宿主侧 set-auto-review 明确拒绝
+				// target !== 'global'）。项目子 Tab 下整张卡片不渲染 —— 显示成置灰会让
+				// 用户以为「本项目暂时不能改」，而真相是它根本不按项目配置。
+				autoTab === 'global'
+					? React.createElement('div', { style: card },
 					React.createElement('div', { style: h() }, T('panel.autoReview')),
 					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 4 } }, T('panel.autoReviewHint')),
 					// 评审能力不可用时的醒目提示：用户看到「auto 一直在弹窗」时，
@@ -7183,12 +7408,15 @@ window.__ModuleLoader__.load({
 					// 恢复默认：一次性清掉**全局层**的全部显式配置（等价于「全局这块我没设过」）。
 					// 范围是 `config.global.autoReview` 的键；项目层那份落在
 					// `projects[root].autoReview`，按项目单独裁决，清掉它会波及一个只属于
-					// 当前项目的设置，故不在本按钮里（要改就走第二张卡片各自的下拉）。
+					// 当前项目的设置，故不在本按钮里。
 					// 只在确实有显式配置时出现 —— 没有可恢复的东西时给个按钮是误导。
 					// 会清掉全部显式配置且不可撤销，故必须有二次确认（复用 confirmDelete）。
 					resetAllButton(),
-				),
+					)
+					: null,
 				policyCard(),
+				highRiskCard(),
+				denyReasonCard(),
 				);
 			};
 

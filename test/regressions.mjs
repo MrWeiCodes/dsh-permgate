@@ -1795,7 +1795,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
-    // 宿主 AUTO_REVIEW_DEFAULTS 的 10 个键，每个都要有控件
+    // 宿主 AUTO_REVIEW_DEFAULTS 的 12 个键，每个都要有控件
     //
     // 曾经有第 8 个 `redactContentKeys`（「隐藏参数内容」），已删除：它**从未接线**
     // （`reviewUserText` 一次都没读过它），而它的设计前提也是错的 ——
@@ -1804,15 +1804,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     //
     // 还有第 7 个 `cacheEnabled`（「记住放行过的调用」），也已删除 —— 见下一条断言。
     //
-    // 后加的 `policy` / `highRiskAction` / `highRiskTimeout` 三个键的控件**不在本卡片里**
-    // （它们是第二张卡片 `policyCard` 的内容，见下方那条断言）。故这里的 `body` 判定
-    // 对它们改用「整张 auto tab 的输出」：本卡片 + 第二张卡片都算。
+    // 后加的 `policy` / `highRiskAction` / `highRiskTimeout` / `denyReasonMode` /
+    // `denyReason` 五个键的控件**不在本卡片里**（它们是 `policyCard` / `highRiskCard` /
+    // `denyReasonCard` 的内容，见下方那条断言）。故这里的 `body` 判定对它们改用
+    // 「整张 auto tab 的输出」：本卡片 + 后三张卡片都算。
     //
     // ⚠️ 这份清单必须与宿主 AUTO_REVIEW_DEFAULTS **逐键对齐**：多一个键而这里没加，
     // 那条设置就退化成「只能手改 config.json」；这里多一个而宿主没有，则面板会渲染
     // 一个提交了没人读的控件。两者都是本文件反复记录的面板说谎。
-    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model', 'reasoningEffort', 'policy', 'highRiskAction', 'highRiskTimeout']
-    // 后三个由第二张卡片（`policyCard`）负责，而它定义在本卡片内部，
+    const keys = ['timeoutMs', 'breakerThreshold', 'historyN', 'historyBudget', 'provider', 'model', 'reasoningEffort', 'policy', 'highRiskAction', 'highRiskTimeout', 'denyReasonMode', 'denyReason']
+    // 后五个由三张并列卡片负责，而它们都定义在本卡片内部，
     // 故 `body` 已经把它们包住了 —— 一次截取即可，不必再单独切一段。
     for (const k of keys) {
       if (body.indexOf("'" + k + "'") === -1) return false
@@ -1839,7 +1840,33 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // 提交走单一端点（不得各写一个路由）
     if (!/invoke\('permgate:set-auto-review'/.test(body)) return false
     // 卡片内**不再**判 tab（判据在调用点，见下一条断言）
-    return body.indexOf("if (tab !== 'global') return null") === -1
+    if (body.indexOf("if (tab !== 'global') return null") !== -1) return false
+    // ── 「保存」按钮必须紧跟它保存的那个 textarea ────────────────────────────────
+    //
+    // 该按钮只管策略文本。它若排在别的控件之后，用户会以为它保存的是整张卡片，
+    // 于是改完下拉就点它 —— 而下拉早已各自提交过，这一下点击只是重复写了一遍策略文本。
+    //
+    // 判据：`area(` 辅助函数**内部**就把按钮渲染出来（而不是由调用方在外部追加）。
+    // 这样「按钮紧跟 textarea」是结构性的，调用方无处插入别的控件。
+    {
+      const iArea = body.indexOf('const area = (which, value, onChange, disabled) => {')
+      if (iArea < 0) return false
+      let dA = 0
+      let areaBody = ''
+      for (let k = body.indexOf('{', iArea); k < body.length; k++) {
+        if (body[k] === '{') dA++
+        else if (body[k] === '}') { dA--; if (dA === 0) { areaBody = body.slice(iArea, k + 1); break } }
+      }
+      if (!areaBody) return false
+      // 按钮在 area 内部，且在 textarea 之后
+      const iTa = areaBody.indexOf("createElement('textarea'")
+      const iBtn = areaBody.indexOf("T('panel.autoPolicySave')")
+      if (iTa < 0 || iBtn < 0 || iBtn < iTa) return false
+      // 调用方**不得**再自己渲染第二个保存按钮（那说明按钮又跑到外面去了）
+      const callers = body.slice(body.indexOf('const projectRoot = '))
+      if (callers.indexOf("T('panel.autoPolicySave')") !== -1) return false
+    }
+    return true
   })())
   // ⑨a statusView 必须下发 reasoningEffort 的生效值（否则面板的推理强度下拉恒空）
   //
@@ -1934,7 +1961,15 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       }
       return ''
     }
-    const consts = grab('const POLICY_MODES = ')
+    // POLICY_MODES 按**行**抽：它是数组字面量、没有 `{`，花括号配平会一路找到后面
+    // 第一个对象的开括号，把那段代码整块吞进来 —— 于是「在它后面新增一个常量」会变成
+    // 被测函数里的未定义引用，报的错与本条断言要守的三态合并毫无关系。
+    const grabLine = (marker) => {
+      const j = src.indexOf(marker)
+      if (j < 0) return ''
+      return src.slice(j, src.indexOf('\n', j))
+    }
+    const consts = grabLine('const POLICY_MODES = ')
     const fnProj = grab('function normalizeProjectAutoReview(raw) {', true)
     const fnBlock = grab('function autoReviewBlockOf(block) {', true)
     const fnProject = grab('function projectAutoReviewOf(root) {', true)
@@ -2071,11 +2106,11 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     }
     return true
   })())
-  // ⑨a5 `normalizeProjectAutoReview` 只认四个键，其它一律丢弃
+  // ⑨a5 `normalizeProjectAutoReview` 只认六个键，其它一律丢弃
   //
   // 工程参数（timeoutMs / breakerThreshold / 模型覆盖）**仍只有全局一份**：
   // 项目层若也接受它们，同一个模型调用在不同项目里超时不同，而评审结论本身全局一致。
-  ok('★★ normalizeProjectAutoReview 只认四个键（工程参数不得下沉到项目层）', (function () {
+  ok('★★ normalizeProjectAutoReview 只认六个键（工程参数不得下沉到项目层）', (function () {
     const i = src.indexOf('function normalizeProjectAutoReview(raw) {')
     if (i < 0) return false
     let d = 0
@@ -2085,17 +2120,15 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
     }
     const consts = (function () {
+      // 按**行**抽，不用花括号配平：`POLICY_MODES` 是数组字面量、没有 `{`，
+      // 配平会一路找到下一个函数的开括号，把那个函数整个吞进来 ——
+      // 于是「新增一个同名前缀的常量」会变成重复声明，测试报的错与真实原因无关。
       const j = src.indexOf('const POLICY_MODES = ')
       if (j < 0) return ''
-      let d2 = 0
-      for (let k = src.indexOf('{', j); k < src.length; k++) {
-        if (src[k] === '{') d2++
-        else if (src[k] === '}') { d2--; if (d2 === 0) return src.slice(j, k + 1) }
-      }
-      return ''
+      return src.slice(j, src.indexOf('\n', j))
     })()
     if (!body || !consts) return false
-    // 上限常量与两个值域表也一起注入（函数体引用了它们）
+    // 上限常量与三个值域表也一起注入（函数体引用了它们）
     const grabLine = (marker) => {
       const j = src.indexOf(marker)
       if (j < 0) return ''
@@ -2106,28 +2139,33 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     const hardLine = grabLine('const AUTO_POLICY_HARD_MAX = ')
     const actLine = grabLine('const HIGH_RISK_ACTIONS = ')
     const tmoLine = grabLine('const HIGH_RISK_TIMEOUTS = ')
+    const denyLine = grabLine('const DENY_REASON_MODES = ')
     let fn = null
     try {
-      fn = new Function(warnLine + '\n' + hardLine + '\n' + actLine + '\n' + tmoLine + '\n' + consts + '\n' + body + '\n; return normalizeProjectAutoReview')()
+      fn = new Function(warnLine + '\n' + hardLine + '\n' + actLine + '\n' + tmoLine + '\n' + denyLine + '\n' + consts + '\n' + body + '\n; return normalizeProjectAutoReview')()
     } catch (e) { return false }
     if (typeof fn !== 'function') return false
-    // ① 四个合法键都保留
-    const okAll = fn({ policy: '规则', policyMode: 'replace', highRiskAction: 'deny', highRiskTimeout: 'wait' })
+    // ① 六个合法键都保留
+    const okAll = fn({ policy: '规则', policyMode: 'replace', highRiskAction: 'deny', highRiskTimeout: 'wait', denyReasonMode: 'custom', denyReason: '别动这个目录' })
     if (!okAll || okAll.policy !== '规则' || okAll.policyMode !== 'replace'
-      || okAll.highRiskAction !== 'deny' || okAll.highRiskTimeout !== 'wait') return false
+      || okAll.highRiskAction !== 'deny' || okAll.highRiskTimeout !== 'wait'
+      || okAll.denyReasonMode !== 'custom' || okAll.denyReason !== '别动这个目录') return false
     // ② 工程参数一律丢弃（不能因为「多存一份」就让项目层超时生效）
     const dropped = fn({ timeoutMs: 0, breakerThreshold: 3, historyN: 5, historyBudget: 999, provider: 'p', model: 'm', reasoningEffort: 'max' })
     if (dropped !== null) return false
     // ③ `'inherit'` 不落键（它正是缺键的含义）
-    const inh = fn({ policyMode: 'inherit', highRiskAction: 'inherit', highRiskTimeout: 'inherit' })
+    const inh = fn({ policyMode: 'inherit', highRiskAction: 'inherit', highRiskTimeout: 'inherit', denyReasonMode: 'inherit' })
     if (inh !== null) return false
     // ④ 非法值不落键
     if (fn({ highRiskAction: 'nonsense' }) !== null) return false
     if (fn({ highRiskTimeout: 'nonsense' }) !== null) return false
     if (fn({ policyMode: 'nonsense' }) !== null) return false
-    // ⑤ 空串 / 纯空白的 policy 不落键
+    if (fn({ denyReasonMode: 'nonsense' }) !== null) return false
+    // ⑤ 空串 / 纯空白的 policy 与 denyReason 不落键
     if (fn({ policy: '' }) !== null) return false
     if (fn({ policy: '   ' }) !== null) return false
+    if (fn({ denyReason: '' }) !== null) return false
+    if (fn({ denyReason: '   ' }) !== null) return false
     // ⑥ 超长**不再丢键**：加载侧丢弃会在下一次写盘时被永久抹掉（用户收不到任何提示），
     //    故 warn 线以上、硬上限以内必须原样保留 —— 长度是用户的判断，不是加载侧该拦的。
     //    超过提示线仍要能落盘，否则「4000 只是建议」在重启后就不成立了。
@@ -2135,6 +2173,159 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       const long = fn({ policy: 'x'.repeat(8000) })
       if (!long || long.policy.length !== 8000) return false
     }
+    return true
+  })())
+  // ⑨a6 `denyReasonModeOf` / `denyReasonTextOf` 的三层取值
+  //
+  // 两个函数的回落规则**不同**，这是本组最容易写错的地方：
+  //   · mode —— 项目层显式写下就生效，**不**因为全局是 custom 而穿透
+  //     （「本项目就是要说真话」是正当选择）；
+  //   · 文本 —— 项目层 mode=custom 且缺文本时**穿透全局**（「沿用全局那句话，
+  //     只是本项目改成 custom」），但每层的文本都只在该层 mode=custom 时取用。
+  // 合成一个函数就得在一个返回值里表达两种回落，调用方无法区分，故分两条断言。
+  //
+  // 判据同样走真实求值：只匹配源码里的键名无法区分「写了」与「回落方向反了」。
+  ok('★★ denyReasonModeOf / denyReasonTextOf 三层取值（mode 不穿透、文本按本层 mode 穿透）', (function () {
+    const grab = (marker) => {
+      const i = src.indexOf(marker)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = src.indexOf('{', i); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const grabLine = (marker) => {
+      const j = src.indexOf(marker)
+      if (j < 0) return ''
+      const end = src.indexOf('\n', j)
+      return src.slice(j, end)
+    }
+    const consts = grabLine('const DENY_REASON_MODES = ')
+    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+    if (iDef < 0) return false
+    let d0 = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d0++
+      else if (src[k] === '}') { d0--; if (d0 === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    const fnBlock = grab('function autoReviewBlockOf(block) {')
+    const fnProject = grab('function projectAutoReviewOf(root) {')
+    const fnMode = grab('function denyReasonModeOf(root) {')
+    const fnText = grab('function denyReasonTextOf(root) {')
+    if (!consts || !defBody || !fnBlock || !fnProject || !fnMode || !fnText) return false
+    const mk = (g, p) => {
+      const cfg = { global: g ? { autoReview: g } : {}, projects: {} }
+      const pb = p ? { autoReview: p } : {}
+      return new Function('config', 'projectBlock',
+        consts + '\n' + defBody + '\n' + fnBlock + '\n' + fnProject + '\n' + fnMode + '\n' + fnText
+        + '\n; return { denyReasonModeOf, denyReasonTextOf }')(cfg, () => pb)
+    }
+    // ① 两层都缺 → 缺省（default / 空文本 = 用默认文案）
+    {
+      const a = mk(null, null)
+      if (a.denyReasonModeOf('/x') !== 'default') return false
+      if (a.denyReasonTextOf('/x') !== '') return false
+    }
+    // ② 只有全局 → 用全局
+    {
+      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, null)
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+    }
+    // ③ 项目显式 → 项目优先
+    {
+      const a = mk({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom', denyReason: '项目那句' })
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '项目那句') return false
+    }
+    // ④ 项目显式 default + 全局 custom → **用默认**（mode 不穿透，这是本组的核心）
+    {
+      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'default' })
+      if (a.denyReasonModeOf('/x') !== 'default') return false
+    }
+    // ⑤ 项目 custom 但没写文本 + 全局 custom 且有文本 → 用全局文本（文本穿透）
+    {
+      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+    }
+    // ⑥ 两层都 custom 但都没文本 → 空串（调用方据此用默认文案）
+    {
+      const a = mk({ denyReasonMode: 'custom' }, { denyReasonMode: 'custom' })
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '') return false
+    }
+    // ⑦ 非法 mode 不生效（手改 config.json 塞进来的垃圾不能改变处置）
+    {
+      const a = mk({ denyReasonMode: 'nonsense', denyReason: '全局那句' }, { denyReasonMode: 'nonsense' })
+      if (a.denyReasonModeOf('/x') !== 'default') return false
+      // 非法 mode 下那一层的文本同样不生效：写入侧刻意保留文本（切回 custom 时还要用），
+      // 读取侧必须按本层 mode 判 —— 否则手改出来的非法 mode 会让一段谁也没启用的文本生效。
+      if (a.denyReasonTextOf('/x') !== '') return false
+    }
+    // ⑧ 全局切回 default 后残留的文本**不参与**：mode=default 就是「不要那句」
+    //    （写入侧刻意不删 denyReason，故这个组合是两条正常面板操作就能造出来的）
+    {
+      const a = mk({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '') return false
+    }
+    // ⑨ 项目层 mode 切回 inherit 后残留的文本**不得**盖住全局的：
+    //    inherit 只删 mode、保留文本，而面板在 inherit 下根本不渲染输入框 ——
+    //    不按本层 mode 判时，用户看不到的那句仍在生效。
+    {
+      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReason: '项目残留' })
+      if (a.denyReasonModeOf('/x') !== 'custom') return false
+      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+    }
+    return true
+  })())
+  // ⑨a7 拒绝默认文案：单一来源 + 面板显示真实值
+  //
+  // 两个缺陷一起钉，它们互相独立但都表现为「面板与真实行为不符」：
+  //   ① 三句默认文案原先就地写在 pre-execute 的三处。面板拿不到它们，只能显示一句
+  //      示例占位符 —— 用户判断「要不要自定义」的前提（不自定义时发什么）看不到。
+  //   ② 那句示例本身是错的：「这个目录不许动」在描述**某一次具体调用**，而本设置
+  //      对所有自动审批拒绝生效，它无法预知是哪次调用、哪个目录。而且模型本来就知道
+  //      自己在调什么，这句话等于没提供新信息。
+  ok('★★ 拒绝默认文案是单一来源常量，且面板显示真实默认值（不是示例占位符）', (function () {
+    // ① 常量存在且三句齐全
+    if (!/const DENY_REASON_DEFAULT_TEXT = \{/.test(src)) return false
+    const iDef = src.indexOf('const DENY_REASON_DEFAULT_TEXT = {')
+    let d = 0
+    let defBody = ''
+    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
+      if (src[k] === '{') d++
+      else if (src[k] === '}') { d--; if (d === 0) { defBody = src.slice(iDef, k + 1); break } }
+    }
+    if (!defBody) return false
+    for (const k of ['deny', 'denyHigh', 'fallback']) {
+      if (defBody.indexOf(k + ':') === -1) return false
+    }
+    // ② 三句中文文案**只在常量里出现一次**：pre-execute 必须引用它，不得再写字面量。
+    //    只数中文那半句 —— 英文译名可能出现在注释里，中文原文是最可靠的锚点。
+    for (const zh of ['自动审批：模型拒绝', '按你的设置拒绝', '按你的设置直接拒绝']) {
+      const hits = (src.match(new RegExp(zh.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length
+      // 允许 2 次：常量里一次 + 注释里引用一次（注释不参与行为）。
+      if (hits > 2) return false
+    }
+    // ③ 三处出口都引用常量（不是其中两处改了、一处漏掉）
+    if ((src.match(/DENY_REASON_DEFAULT_TEXT\./g) || []).length < 3) return false
+    // ④ statusView 下发三种默认文案，供面板显示
+    if (!/denyReasonDefaults: \{/.test(src)) return false
+    for (const k of ['deny:', 'denyHigh:', 'fallback:']) {
+      if (src.indexOf('denyReasonDefaults: {') !== -1
+        && src.slice(src.indexOf('denyReasonDefaults: {')).indexOf(k) === -1) return false
+    }
+    // ⑤ 面板读它并逐条渲染（空值时显示；有自定义文本时不显示）
+    if (cli.indexOf('pol.denyReasonDefaults') === -1) return false
+    if (cli.indexOf("T('panel.autoDenyReasonDefaultsLabel')") === -1) return false
+    // ⑥ 占位符不得再是一句冒充默认值的示例
+    if (cli.indexOf('例如：这个目录不许动') !== -1) return false
+    if (cli.indexOf("e.g. Don't touch this directory again") !== -1) return false
     return true
   })())
   // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后
@@ -2811,19 +3002,27 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (cli.indexOf("'panel.autoModelManual'") !== -1) return false
     // ② **模型选择那一部分**里不得再有原生 <select>
     //
-    // ⚠️ 判据要排除同卡片里的 `policyCard`：那是「额外审批策略」的第二张卡片，
-    // 它的几个三态下拉本来就是原生 select（选项只有三四个、没有 drill 层级，
+    // ⚠️ 判据要排除三张并列卡片（`policyCard` / `highRiskCard` / `denyReasonCard`）：
+    // 它们的几个三态下拉本来就是原生 select（选项只有三四个、没有 drill 层级，
     // 用浮层反而是过度设计）。本条守的是**模型选择**不得退回 select ——
     // 那条判据的理由（当前值只能塞进选项文字、表达不了 drill）只对它成立。
+    //
+    // 三张卡片各自都是 `const xxxCard = () => { ... }` 的独立块，逐个按花括号配平剔除。
+    // 只剔第一张（早先的写法）会让后两张里的 select 被算进来 —— 而那正是本条要放过的。
     const cardNoPolicy = (function () {
-      const a = card.indexOf('const policyCard = () => {')
-      if (a < 0) return card
-      let d4 = 0
-      for (let k = card.indexOf('{', a); k < card.length; k++) {
-        if (card[k] === '{') d4++
-        else if (card[k] === '}') { d4--; if (d4 === 0) return card.slice(0, a) + card.slice(k + 1) }
+      let out = card
+      for (const marker of ['const policyCard = () => {', 'const highRiskCard = () => {', 'const denyReasonCard = () => {']) {
+        const a = out.indexOf(marker)
+        if (a < 0) continue
+        let d4 = 0
+        let cut = -1
+        for (let k = out.indexOf('{', a); k < out.length; k++) {
+          if (out[k] === '{') d4++
+          else if (out[k] === '}') { d4--; if (d4 === 0) { cut = k; break } }
+        }
+        out = cut < 0 ? out.slice(0, a) : out.slice(0, a) + out.slice(cut + 1)
       }
-      return card.slice(0, a)
+      return out
     })()
     if (cardNoPolicy.indexOf("createElement('select'") !== -1) return false
     // ③ 卡片把这件事交给 ModelEffortPicker 组件（不是就地拼一堆 button）
@@ -4413,6 +4612,51 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // ⑤ auto 卡片**不在**那个 Fragment 里（否则它会被 `tab === 'auto' ? null` 挡掉，
     //    auto tab 就什么都不显示 —— 这是个静默的全空页面）
     return frag.indexOf('autoReviewCard()') === -1
+  })())
+  // ⑦ auto tab 内有**层切换**，且每张卡片只渲染当前层。
+  //
+  // 为什么需要它：外层 tab 栏的前两个是「层」（全局 / 项目），第三个是「主题」
+  // （自动审批）—— 两个轴并排。没有层切换时，auto tab 里只能按层分块，
+  // 用户要配「本项目的拒绝原因」得先点「自动审批」、再在卡片里找「本项目」，
+  // 两层定位；而且同一件事的两层被整块策略文本隔开，无法对照。
+  //
+  // 四条一起钉：
+  //   ① 层状态与外层 `tab` **独立**（不得复用，否则切外层 tab 会串）；
+  //   ② 三张分层卡片各自按 `autoTab` 分支，且两个分支都在；
+  //   ③ 只有全局才有的「评审机制」卡片在项目层下**不渲染**（不是置灰）；
+  //   ④ 层切换**不得复用 `pg-tab`** —— 两层下划线并排会被读成两条同级导航。
+  ok('★★ auto tab 内有层切换（分段控件，不复用外层下划线 Tab），三张分层卡片各只渲染当前层', (function () {
+    // ① 独立状态
+    if (!/const \[autoTab, setAutoTab\] = React\.useState\('global'\)/.test(cli)) return false
+    // ② 层切换在卡片之前
+    const iCard = cli.indexOf('const autoReviewCard = () => {')
+    if (iCard < 0) return false
+    const iEnd = cli.indexOf('const tabBtn = (t, label) =>', iCard)
+    if (iEnd < 0) return false
+    const card = cli.slice(iCard, iEnd)
+    const iBar = card.indexOf("autoTabBtn('global'")
+    if (iBar < 0) return false
+    if (card.indexOf("autoTabBtn('project'") < 0) return false
+    // ③ 三张卡片各自按 autoTab 分支（`autoTab === 'project' ? … : …`）
+    if ((card.match(/autoTab === 'project'/g) || []).length !== 3) return false
+    // ④ 「评审机制」卡片只在全局层渲染
+    if (!/autoTab === 'global'\s*\n\s*\? React\.createElement\('div', \{ style: card \}/.test(card)) return false
+    // ⑤ 不得再有「全局层 / 项目层」那种卡内**分块标题**（那是层切换之前的写法）。
+    //    判据取「标题 + 下方控件」的组合形态，而不是裸键名：项目层里仍要显示
+    //    当前项目路径（`autoPolicyProject + projectRoot`），那是定位信息、不是分块标题。
+    if (card.indexOf("T('panel.autoPolicyGlobal')") !== -1) return false
+    // ⑥ 层切换用**分段控件**（`pg-seg` / `pg-seg-btn`），不得复用外层那套下划线 Tab。
+    //    复用 `pg-tab` 时两层下划线并排、只差一档字号，用户第一眼读成「两条同级导航」。
+    if (!/className: 'pg-seg-btn' \+ \(autoTab === t \? ' pg-seg-btn-on' : ''\)/.test(card)) return false
+    if (/className: 'pg-tab' \+ \(autoTab === t/.test(card)) return false
+    // 分段控件外层容器（圆角填充）必须在
+    if (card.indexOf("className: 'pg-seg'") === -1) return false
+    // ⑦ 必须有前置标签说明这两个胶囊是什么范围（外层 tab 也叫「全局/项目」，
+    //    没有标签时用户分不清两份同名控件各指什么）
+    if (card.indexOf("T('panel.autoScope')") === -1) return false
+    // 项目路径那一行仍应在（切到本项目时用户要知道配的是哪个项目）
+    if (!/T\('panel\.autoPolicyProject'\) \+ \(projectRoot/.test(card)) return false
+    return true
   })())
   // ⑥ 评审能力不可用时必须显式提示：否则用户看到「auto 一直弹窗」无从判断原因。
   ok('★ 无 llm 服务时面板显式提示（否则 auto 一直弹窗无从解释）',
@@ -7058,6 +7302,17 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
     src.includes('function segmentSummary(')
     && !/reason: bi\('执行命令'[^\n]*segmentSummary/.test(src)
     && /reason: segmentSummary\(d\)/.test(src))
+  // ★ 自动审批的直接拒绝必须走**唯一出口** denialTextFor，不得在 pre-execute 里
+  //   直接 `L(segmentSummary(d2), uiLang)` —— 那样 denyReasonMode 就完全不生效，
+  //   而面板照常显示「已保存」（面板说谎的另一种形态）。
+  //
+  // 两条一起钉：① 出口函数存在且判 mode；② 那处不再有裸的 segmentSummary 调用
+  // （换个写法绕开也算回退）。三种 auto 拒绝的**行为**由 smoke A57 ②③④ 端到端覆盖，
+  // 这里不重复匹配出口的调用写法。
+  ok('★★ 自动审批的直接拒绝走 denialTextFor 唯一出口（denyReasonMode 才能生效）',
+    /function denialTextFor\(d, root\) \{/.test(src)
+    && /denyReasonModeOf\(root\) !== 'custom'/.test(src)
+    && !/return \{ kind: 'deny', reason: L\(segmentSummary\(d2\), uiLang\) \}/.test(src))
   // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
   // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次
   // （写成 `<=` 时，大分类 deny + 子设置 ask 不提示，反而在子设置更严时提示）。

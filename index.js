@@ -1677,6 +1677,8 @@ export default {
     //                    超过 AUTO_POLICY_WARN 只提示，超过 AUTO_POLICY_HARD_MAX 才拒收
     //   highRiskAction   deny / ask / allow（缺键 = ask）
     //   highRiskTimeout  wait / deny / allow（缺键 = deny）
+    //   denyReasonMode   default / custom（缺键 = default）
+    //   denyReason       非空字符串，超过 DENY_REASON_MAX 拒收（空串 = 没有自定义文案）
     //
     // 数字项的上下限**只有这一份**（AUTO_REVIEW_RANGES），normalizeAutoReview、
     // autoReviewTimeoutMs 与 statusView 都从它取：面板据此在提交前就拦住超范围值，
@@ -1726,6 +1728,52 @@ export default {
     const HIGH_RISK_TIMEOUTS = ['wait', 'deny', 'allow']
     // 项目层策略的合并方式。`'inherit'` 同样是默认值、不落键（见 normalizeProjectAutoReview）。
     const POLICY_MODES = ['append', 'replace']
+    // 拒绝时回给模型的那句话由谁决定（取值函数见 denyReasonModeOf / denyReasonTextOf）。
+    //
+    // 两档而不是三档：这里没有「不告诉模型」这一档 —— 拒绝时必须给模型一句理由，
+    // 否则它无从知道该改什么，只能原样重试。差别只在「说真话」还是「说你写的那句」。
+    //
+    // `'inherit'` 同样不在表里（项目层的继承标记，不是生效值），与 HIGH_RISK_ACTIONS 同一条判据。
+    const DENY_REASON_MODES = ['default', 'custom']
+    // 自定义原因的长度上限。与 /permgate/decide 的 `customReason`（同样 slice(0, 500)）
+    // 同口径：两者都是「用户写的一句话，回给模型」，一句话没有写 500 字以上的正当理由。
+    // 超出**拒绝保存**而不是截断 —— 截断后模型收到的是一句断掉的话，而面板显示的是完整的，
+    // 用户看不出自己写的后半句从未发出去。
+    const DENY_REASON_MAX = 500
+    // 写入侧要判长度上限的字符串项。**只有这一份清单**。
+    //
+    // `normalizeAutoReview` 作为加载侧不判长度（丢了会在下一次写盘时被
+    // `JSON.stringify(config)` 永久抹掉，用户全程无提示），故长度只能在写入侧拦。
+    // 而写入侧有两条路由 —— set-auto-policy 与 set-auto-review 的 patch —— 它们
+    // 必须对同一字段给出同一答案。逐条各写一遍 if 时，新增一个有上限的键必然漏掉
+    // 其中一条：denyReason 就漏在 set-auto-review 上，501 字符走那条路由能落盘，
+    // 走 set-auto-policy 却回 error。
+    //
+    // 表里带报错文案而不是在调用点拼：两条路由对同一个值必须给出同一种解释，
+    // 否则排查时看不出它们其实是同一道闸。
+    const AUTO_REVIEW_LENGTH_LIMITS = {
+      policy: { max: AUTO_POLICY_HARD_MAX, error: '策略过长（上限 ' + AUTO_POLICY_HARD_MAX + ' 字符）' },
+      denyReason: { max: DENY_REASON_MAX, error: '自定义原因过长（上限 ' + DENY_REASON_MAX + ' 字符）' },
+    }
+    // 按上面的表判长度，返回错误文案；没有超限返回 null。
+    //
+    // 纯空白值不参与判长度：两条路由对它的处置都不是「落一段超长文本」——
+    // set-auto-policy 折成删键，set-auto-review 走 normalizeAutoReview 时折成不落键。
+    // 判成超长会让「清空输入框」这个动作在一个恰好全是空格的输入上报错。
+    //
+    // 只判长度 —— 类型与「空串 = 清除」属于各路由自己的字段处置，放进来会让两条
+    // 路由的写法被迫一致（set-auto-review 走 normalizeAutoReview 的整体归一，
+    // set-auto-policy 是逐字段的四种语义）。
+    function autoReviewTooLong(src) {
+      if (!src || typeof src !== 'object') return null
+      for (const k of Object.keys(AUTO_REVIEW_LENGTH_LIMITS)) {
+        const v = src[k]
+        if (typeof v === 'string' && v.trim() && v.length > AUTO_REVIEW_LENGTH_LIMITS[k].max) {
+          return AUTO_REVIEW_LENGTH_LIMITS[k].error
+        }
+      }
+      return null
+    }
 
     function normalizeAutoReview(raw) {
       if (!raw || typeof raw !== 'object') return null
@@ -1781,17 +1829,27 @@ export default {
       // 默认值由读取侧推导，与 normalizeAutoReview 的其余键同口径。
       if (HIGH_RISK_ACTIONS.indexOf(raw.highRiskAction) !== -1) out.highRiskAction = raw.highRiskAction
       if (HIGH_RISK_TIMEOUTS.indexOf(raw.highRiskTimeout) !== -1) out.highRiskTimeout = raw.highRiskTimeout
+      // ── 拒绝时回给模型的那句话 ────────────────────────────────────────────────
+      // 与 policy 同口径：空串不落键（只承载用户显式写下的值），超长**不截断**。
+      // 加载侧不判长度上限的理由与 policy 相同：丢弃会在下一次写盘时被 JSON.stringify
+      // 永久抹掉、用户全程无提示。长度由写入侧（set-auto-policy）拦截。
+      //
+      // mode 切回 default 时**不删 denyReason**：用户切回去再切回来时那句话应该还在。
+      // 与 setCategoryMode 的「未传 reason = 保留」同一条纪律 —— 无关写入不得静默
+      // 清空用户写好的文字。生效与否由读取侧（denyReasonTextOf）判，不是靠删键表达。
+      if (DENY_REASON_MODES.indexOf(raw.denyReasonMode) !== -1) out.denyReasonMode = raw.denyReasonMode
+      if (typeof raw.denyReason === 'string' && raw.denyReason.trim()) out.denyReason = raw.denyReason
       return Object.keys(out).length ? out : null
     }
 
     // ── 额外审批策略：项目层 ────────────────────────────────────────────────────
-    // 只认四个键，其它一律丢弃：工程参数（超时 / 熔断 / 历史 / 模型覆盖）仍只有全局一份
+    // 只认六个键，其它一律丢弃：工程参数（超时 / 熔断 / 历史 / 模型覆盖）仍只有全局一份
     // （理由见 /permgate/set-auto-review 的注释）。
     //
-    // 与全局层不同，这里三个键的**缺省值是「继承」**而不是某个具体值：
+    // 与全局层不同，这里四个键的**缺省值是「继承」**而不是某个具体值：
     // `policyMode` 缺省 inherit（只用全局策略），`highRiskAction` / `highRiskTimeout`
-    // 缺省 inherit（穿透全局）。故 `'inherit'` 也不落键 —— 它正是缺键的含义，
-    // 落盘只会让「用户显式选了继承」与「用户没表态」变得不可区分。
+    // / `denyReasonMode` 缺省 inherit（穿透全局）。故 `'inherit'` 也不落键 —— 它正是缺键的
+    // 含义，落盘只会让「用户显式选了继承」与「用户没表态」变得不可区分。
     //
     // 项目层的 `policy` 与全局层同口径：空串不落键，超长不截断也不丢弃。
     // ⚠️ 但 `policyMode: 'replace'` + 空 `policy` 是一个**有意义的组合**（「本项目没有
@@ -1804,6 +1862,8 @@ export default {
       if (POLICY_MODES.indexOf(raw.policyMode) !== -1) out.policyMode = raw.policyMode
       if (HIGH_RISK_ACTIONS.indexOf(raw.highRiskAction) !== -1) out.highRiskAction = raw.highRiskAction
       if (HIGH_RISK_TIMEOUTS.indexOf(raw.highRiskTimeout) !== -1) out.highRiskTimeout = raw.highRiskTimeout
+      if (DENY_REASON_MODES.indexOf(raw.denyReasonMode) !== -1) out.denyReasonMode = raw.denyReasonMode
+      if (typeof raw.denyReason === 'string' && raw.denyReason.trim()) out.denyReason = raw.denyReason
       return Object.keys(out).length ? out : null
     }
 
@@ -5567,10 +5627,15 @@ export default {
     //
     // 总量上限：decisions 是 MAX_DECISIONS 条的环形缓冲，段数随命令行数线性增长，
     // 不截断时一条 2000 行的脚本会让单条 reason 达到 ~160 KB（中英各一份）。
+    //
+    // `baseOverride` 替换**结论那一句**（分类文案 + auto 的结论），分段摘要照旧拼在后面。
+    // 判据用 `!== undefined` 而不是 `||`：这个参数回答的是「调用方有没有指定结论」，
+    // 不是「结论是不是空」。写成 `||` 时传空串会静默退回原结论，而那正是本参数
+    // 存在意义的反面（调用方以为已替换，实际发出去的是原话）。
     const SEG_SUMMARY_MAX_PARTS = 5
     const SEG_SUMMARY_MAX_CHARS = 300
-    function segmentSummary(d) {
-      const base = d && d.reason
+    function segmentSummary(d, baseOverride) {
+      const base = baseOverride !== undefined ? baseOverride : (d && d.reason)
       // reason 是 bi() 对象（分类/例外分支）或裸字符串（超时补记那条）。
       // 后者没有 segments，也不需要摘要 —— 原样返回。
       if (!base || typeof base !== 'object') return base || ''
@@ -5600,6 +5665,50 @@ export default {
         return (lang === 'en' ? ' — segments: ' : ' —— 分段：') + joined + more
       }
       return bi(base.zh + partsOf('zh'), base.en + partsOf('en'))
+    }
+
+    // ── 拒绝时回给模型的默认文案（三种来源各一句）──────────────────────────────
+    //
+    // 为什么提成常量而不是就地写在 pre-execute 的三处：面板要让用户看到「不自定义
+    // 时长什么样」。写死在三处时面板拿不到它们，只能显示一句示例占位符 ——
+    // 而示例既不是真实文案，也无法覆盖三种来源的差别（用户以为默认只有一句话）。
+    //
+    // 三句分开而不是合并成一句：它们回答不同的问题，合并后模型分不清
+    // 「我自己拒的」与「我放行后被设置推翻」—— 后者说明用户的策略比模型更严，
+    // 是模型下次该调整判断方向的信号。
+    //
+    // ⚠️ 与 AUTO_REVIEW_DEFAULTS 里的 `denyReason: ''` 不同：那个是**配置默认值**
+    // （空串 = 没有自定义），这里是**配置为空时实际发出去的文本**。
+    const DENY_REASON_DEFAULT_TEXT = {
+      // 模型自己判定拒绝
+      deny: bi('自动审批：模型拒绝', 'Auto review: denied by model'),
+      // 模型判定高风险却给出放行，被 highRiskAction 拦下
+      denyHigh: bi('自动审批：模型判定高风险并放行，按你的设置拒绝', 'Auto review: model rated this high risk and allowed it; denied by your setting'),
+      // 评审失败（无 llm / 超时 / 协议非法 / 熔断）+ 回落值 deny + 等待时限 0
+      fallback: bi('自动审批未能给出结论，按你的设置直接拒绝', 'Auto review could not decide; denied by your fallback setting'),
+    }
+
+    // 拒绝时回给模型的那句话。
+    //
+    // 自定义原因替换的是**结论那一句**，分段摘要保留 —— 摘要回答「哪一段、哪一档被拦」，
+    // 与「为什么拒绝」是两个问题：只给后者时，一条多段命令（`git add .; rm -rf /`）
+    // 被拒后模型不知道是哪一段触发的，容易整条重试，或在无关的段上反复调整。
+    //
+    // 不改 `d.reason`：那个字段同时供决策记录（recordDecision / appendDecisionLog）与
+    // 弹窗使用，而本设置只管**回给模型的这句**。就地改写会让面板与日志里也变成用户
+    // 那句自定义文案 —— 事后追溯就再也看不到真实结论了。
+    //
+    // 三层取值全走 denyReasonModeOf / denyReasonTextOf（不在这里复算继承链）：
+    // 面板显示与裁决必须同源，两份继承链必然漂移。
+    function denialTextFor(d, root) {
+      if (denyReasonModeOf(root) !== 'custom') return L(segmentSummary(d), uiLang)
+      const custom = denyReasonTextOf(root)
+      // mode 是 custom 但文本为空（项目层切了 custom、全局也没写）：留空 = 用默认文案。
+      // 这与面板提示一致，也避免发出去一条空理由 —— 那会让模型收到一个空的拒绝原因。
+      if (!custom) return L(segmentSummary(d), uiLang)
+      // 自定义文案两种语言都用同一份：用户写什么就发什么，不跟界面语言走。
+      // 面板只有一个输入框，替用户按语言分叉等于替他改写了原文。
+      return L(segmentSummary(d, bi(custom, custom)), uiLang)
     }
 
     // 模型原始输出的留痕上限。协议本身限制了合法形态（最多 3 个成员、reason 是字符串），
@@ -8111,6 +8220,15 @@ export default {
       // 永久挂起而用户不知道。默认拒绝既不卡住、也不静默放行，与 autoFallback 的
       // 缺省值同方向。
       highRiskTimeout: 'deny',
+      // 拒绝时回给模型的那句话：`default` 说真话（模型拒绝 / 高风险放行被拦 / 没给出结论，
+      // 三种分开），`custom` 换成 denyReason 里用户写的那句。
+      //
+      // 默认 `default`：换掉真实原因会让模型失去「自己是不是被设置推翻」这条信息 ——
+      // 那正是它调整下次尝试的依据。要换是用户的主动选择。
+      denyReasonMode: 'default',
+      // 自定义文案。空串 = 没有，此时无论 mode 是什么都用默认文案（见 denyReasonTextOf）。
+      // 与 policy 同一条纪律：不物化默认值，落盘只承载用户显式写下的值。
+      denyReason: '',
     }
     // ── 评审调用的模型等待上限（毫秒）────────────────────────────────────────────
     // **与 AUTO_REVIEW_DEFAULTS.timeoutMs 是两件事，不复用同一个键**：
@@ -8209,6 +8327,39 @@ export default {
       const g = autoReviewBlockOf(config.global)
       if (HIGH_RISK_TIMEOUTS.indexOf(g.highRiskTimeout) !== -1) return g.highRiskTimeout
       return AUTO_REVIEW_DEFAULTS.highRiskTimeout
+    }
+    // ── 拒绝时回给模型的那句话：取值单点 ────────────────────────────────────────
+    // 三层：项目显式 → 全局显式 → 缺省。与 highRiskActionOf 同构。
+    //
+    // 与那两个维度的差别只有一处：项目层显式写 `default` 就是**真的要用默认文案**，
+    // 不会因为全局是 `custom` 而被穿透 —— 这正是「项目可以推翻全局」的含义。
+    // 故这里判的是「项目层有没有写这个键」，不是「项目层的值是不是 falsy」。
+    function denyReasonModeOf(root) {
+      const p = projectAutoReviewOf(root)
+      if (DENY_REASON_MODES.indexOf(p.denyReasonMode) !== -1) return p.denyReasonMode
+      const g = autoReviewBlockOf(config.global)
+      if (DENY_REASON_MODES.indexOf(g.denyReasonMode) !== -1) return g.denyReasonMode
+      return AUTO_REVIEW_DEFAULTS.denyReasonMode
+    }
+    // 生效的自定义文案；**空串 = 用默认文案**。
+    //
+    // 每一层的文本都**只在该层 mode 是 custom 时**才取用，两层各判各的：
+    //   · 项目层 mode=custom 且缺文本 → 穿透全局（「本项目沿用全局那句话，只是改成了
+    //     custom」是合理配置）；
+    //   · 全局层 mode=default → 它的文本**不参与**（哪怕磁盘上还留着）。
+    //
+    // 为什么必须判 mode 而不能「有文本就用」：写入侧刻意保留文本（切回 default 不删
+    // denyReason，切回 custom 时那句话应该还在），于是两条正常操作就能造出
+    // `{denyReasonMode:'default', denyReason:'G'}` 这种配置。不判 mode 时那段被用户
+    // 明确关掉的文本会在下一次经项目层穿透发出去 —— 用户以为已经不用它了。
+    // 项目层同理：`denyReasonMode:'inherit'` 只删 mode、保留文本，不判就会让项目残留
+    // 的那句盖住全局的，而面板在 inherit 下根本不渲染输入框，用户看不到它还在生效。
+    function denyReasonTextOf(root) {
+      const p = projectAutoReviewOf(root)
+      if (p.denyReasonMode === 'custom' && typeof p.denyReason === 'string' && p.denyReason.trim()) return p.denyReason
+      const g = autoReviewBlockOf(config.global)
+      if (g.denyReasonMode === 'custom' && typeof g.denyReason === 'string' && g.denyReason.trim()) return g.denyReason
+      return ''
     }
     // 拼进 system 的策略段。**无策略时返回空串** —— 请求逐字不变是硬要求：
     // provider 的 KV cache 前缀、以及 test/smoke.mjs 里以 `REVIEW_POLICY` 开头
@@ -9380,13 +9531,36 @@ export default {
               highRiskTimeout: HIGH_RISK_TIMEOUTS.indexOf(g.highRiskTimeout) !== -1 ? g.highRiskTimeout : null,
               projectHighRiskTimeout: HIGH_RISK_TIMEOUTS.indexOf(p.highRiskTimeout) !== -1 ? p.highRiskTimeout : null,
               effectiveHighRiskAction: highRiskActionOf(root),
-              // 三个值域一并下发：面板据此渲染下拉选项，**不在客户端写死第二份**。
+              // ── 拒绝时回给模型的那句话 ──────────────────────────────────────────
+              // 同样是**本层显式值**（缺键给 null）：全局行显示「我设过什么」，项目行缺键
+              // 显示「继承全局」。生效值的继承链只在宿主侧有一份（denyReasonModeOf /
+              // denyReasonTextOf），客户端不复算 —— 两份继承链必然漂移。
+              denyReasonMode: DENY_REASON_MODES.indexOf(g.denyReasonMode) !== -1 ? g.denyReasonMode : null,
+              projectDenyReasonMode: DENY_REASON_MODES.indexOf(p.denyReasonMode) !== -1 ? p.denyReasonMode : null,
+              denyReason: typeof g.denyReason === 'string' && g.denyReason.trim() ? g.denyReason : null,
+              projectDenyReason: typeof p.denyReason === 'string' && p.denyReason.trim() ? p.denyReason : null,
+              // 四个值域一并下发：面板据此渲染下拉选项，**不在客户端写死第二份**。
               // 与 quickPreset / commandSub.tiers 同一条纪律 —— 客户端硬编码一份会让
               // 「宿主加一档」与「面板能选什么」分叉，而分叉的形态是「面板选不了新档」
               // 或「选了一个宿主不认的档、提交后回 error」。
               highRiskActions: HIGH_RISK_ACTIONS,
               highRiskTimeouts: HIGH_RISK_TIMEOUTS,
               policyModes: POLICY_MODES,
+              denyReasonModes: DENY_REASON_MODES,
+              // 自定义原因的长度上限：面板据此设 maxLength 并在提交前拦住，
+              // 与 policy 的 warnLength/maxLength 同一条纪律（宿主加长时面板自动跟随）。
+              denyReasonMaxLength: DENY_REASON_MAX,
+              // 三种默认文案（按请求语言投影）：面板在输入框为空时**显示真实默认值**，
+              // 而不是一句示例占位符。用户要判断「要不要自定义」，前提是看得到不自定义
+              // 时到底发什么 —— 占位符示例既不是真实文案，也覆盖不了三种来源的差别。
+              //
+              // 三种分开下发而不是合成一句：它们回答不同的问题（模型自己拒 / 模型放行
+              // 被设置推翻 / 评审失败按设置拒绝），合成一句会让用户以为默认只有一种。
+              denyReasonDefaults: {
+                deny: L(DENY_REASON_DEFAULT_TEXT.deny, l),
+                denyHigh: L(DENY_REASON_DEFAULT_TEXT.denyHigh, l),
+                fallback: L(DENY_REASON_DEFAULT_TEXT.fallback, l),
+              },
               // 两个长度阈值与宿主校验同源：面板据此决定「标红提示」与「禁用保存」，
               // 而不是让宿主丢弃后仍回「已保存」（那正是面板说谎）。
               //
@@ -10290,19 +10464,21 @@ export default {
           }
           const patch = a && typeof a.patch === 'object' ? a.patch : null
           if (!patch && !(a && Array.isArray(a.clear))) return json(res, { error: '缺少 patch' })
-          // ── policy 的长度硬上限在这里也要查一遍 ────────────────────────────────
-          // `normalizeAutoReview` 作为**加载侧**不能丢超长策略（丢了会在下一次写盘时
+          // ── 长度硬上限在这里也要查一遍 ──────────────────────────────────────────
+          // `normalizeAutoReview` 作为**加载侧**不能丢超长文本（丢了会在下一次写盘时
           // 被 JSON.stringify(config) 永久抹掉，用户全程无提示），故它不判长度。
           // 但本路由是**写入侧**：同一个字段若只有 set-auto-policy 拦、这里不拦，
-          // 直接调本路由 `{patch:{policy:'x'.repeat(20001)}}` 就能绕过上限落盘，
-          // 两条路由对同一字段给出不同答案 —— 面板当前只走 set-auto-policy，
-          // 但这是对外 HTTP 路由，脚本调用同样算数。
+          // 直接调本路由就能绕过上限落盘，两条路由对同一字段给出不同答案 ——
+          // 面板当前只走 set-auto-policy，但这是对外 HTTP 路由，脚本调用同样算数。
+          //
+          // 判据取自 AUTO_REVIEW_LENGTH_LIMITS（与 set-auto-policy 同一份表）：
+          // 在这里逐字段写 if 正是 denyReason 漏掉的原因，下一个有上限的键还会漏。
           //
           // 放在写入之前：`config.global.autoReview` 的其它字段此刻还没动，
           // 早退不会留下「一半写进去」的状态（与 set-auto-policy 同一条纪律）。
-          if (patch && patch.policy !== undefined && typeof patch.policy === 'string'
-            && patch.policy.length > AUTO_POLICY_HARD_MAX) {
-            return json(res, { error: '策略过长（上限 ' + AUTO_POLICY_HARD_MAX + ' 字符）' })
+          {
+            const tooLong = autoReviewTooLong(patch)
+            if (tooLong) return json(res, { error: tooLong })
           }
           if (!config.global.autoReview || typeof config.global.autoReview !== 'object') config.global.autoReview = {}
           if (patch) {
@@ -10330,7 +10506,7 @@ export default {
         //
         // 四种写法的语义必须分开，不能折叠：
         //   · 字段缺席（undefined）—— 别动它；
-        //   · `policy === ''` —— **显式清除**（删键，回到「没有策略」）；
+        //   · `policy === ''` / `denyReason === ''` —— **显式清除**（删键，回到默认）；
         //   · `'inherit'` —— 项目层删键（回到继承全局）；
         //   · 非法值 / 超长 —— 回 `{ error }`，**不静默落某个值**。
         //     静默回落会让面板显示的值与实际裁决分叉（用户以为设了 deny，实际按 ask 走）。
@@ -10350,8 +10526,11 @@ export default {
             if (typeof a.policy !== 'string') return json(res, { error: 'policy 必须是字符串' })
             const t = a.policy.trim()
             if (!t) delete ar.policy
-            else if (a.policy.length > AUTO_POLICY_HARD_MAX) return json(res, { error: '策略过长（上限 ' + AUTO_POLICY_HARD_MAX + ' 字符）' })
-            else ar.policy = a.policy
+            else {
+              const tooLong = autoReviewTooLong({ policy: a.policy })
+              if (tooLong) return json(res, { error: tooLong })
+              ar.policy = a.policy
+            }
           }
           // 合并方式只在项目层有意义：全局层没有「继承谁」这回事。
           if (a.policyMode !== undefined) {
@@ -10361,7 +10540,7 @@ export default {
             else ar.policyMode = a.policyMode
           }
           // 两个处置维度。`'inherit'` 只对项目层有意义（全局层没有可继承的对象）。
-          const dims = [['highRiskAction', HIGH_RISK_ACTIONS], ['highRiskTimeout', HIGH_RISK_TIMEOUTS]]
+          const dims = [['highRiskAction', HIGH_RISK_ACTIONS], ['highRiskTimeout', HIGH_RISK_TIMEOUTS], ['denyReasonMode', DENY_REASON_MODES]]
           for (const [k, allowed] of dims) {
             if (a[k] === undefined) continue
             if (a[k] === 'inherit') {
@@ -10371,6 +10550,22 @@ export default {
             }
             if (allowed.indexOf(a[k]) === -1) return json(res, { error: '非法的 ' + k + ': ' + a[k] })
             ar[k] = a[k]
+          }
+          // 自定义拒绝原因：空串 = 显式清除（删键，回到「留空 = 默认文案」），
+          // 超长 = 报错。**不截断** —— 截断后模型收到的是一句断掉的话，而面板显示完整，
+          // 用户看不出后半句从未发出去（与 policy 的超长处置同一条理由）。
+          //
+          // 切换 denyReasonMode 时**不在这里删 denyReason**：那句话属于用户输入，
+          // 切回 custom 时应该还在。生效与否由读取侧 denyReasonTextOf 判。
+          if (a.denyReason !== undefined) {
+            if (typeof a.denyReason !== 'string') return json(res, { error: 'denyReason 必须是字符串' })
+            const t = a.denyReason.trim()
+            if (!t) delete ar.denyReason
+            else {
+              const tooLong = autoReviewTooLong({ denyReason: a.denyReason })
+              if (tooLong) return json(res, { error: tooLong })
+              ar.denyReason = a.denyReason
+            }
           }
           if (!Object.keys(ar).length) delete block.autoReview
           await persist(exec)
@@ -10881,8 +11076,8 @@ export default {
             d2 = Object.assign({}, carry, {
               action: 'deny',
               reason: rv.highRiskRefused
-                ? denyReason('自动审批：模型判定高风险并放行，按你的设置拒绝', 'Auto review: model rated this high risk and allowed it; denied by your setting')
-                : denyReason('自动审批：模型拒绝', 'Auto review: denied by model'),
+                ? denyReason(L(DENY_REASON_DEFAULT_TEXT.denyHigh, 'zh'), L(DENY_REASON_DEFAULT_TEXT.denyHigh, 'en'))
+                : denyReason(L(DENY_REASON_DEFAULT_TEXT.deny, 'zh'), L(DENY_REASON_DEFAULT_TEXT.deny, 'en')),
               via: rv.highRiskRefused ? 'auto-deny-high' : 'auto-deny',
               risk: rv.risk || null,
               modelReason: rv.reason || '',
@@ -10963,7 +11158,7 @@ export default {
               // 无人应答」，而这里是「用户预先说了别问」—— 混用会让审计记录说谎，
               // 用户看到 timeout-* 会以为「我设了 20 秒但没人理」，实际是他自己设了 0。
               d2 = Object.assign({}, carry, { action: fb, reason: fb === 'deny'
-                ? denyReason('自动审批未能给出结论，按你的设置直接拒绝', 'Auto review could not decide; denied by your fallback setting')
+                ? denyReason(L(DENY_REASON_DEFAULT_TEXT.fallback, 'zh'), L(DENY_REASON_DEFAULT_TEXT.fallback, 'en'))
                 : bi('自动审批未能给出结论，按你的设置直接放行', 'Auto review could not decide; allowed by your fallback setting'), note: bi('原因：' + why, 'reason: ' + why), via: 'auto-fallback-direct', fallbackReason: why, modelReason: mr })
               recordAction = fb === 'allow' ? 'fallback-allow' : 'fallback-deny'
             }
@@ -11133,7 +11328,23 @@ export default {
           // 故带上段摘要（「哪一段、命中哪一档」）。与决策日志同一份 segmentSummary，
           // 不是两处各拼一次：口径分叉时「AI 收到的理由」与「日志记的理由」会不一致，
           // 而两者本该回答同一个问题。
-          return { kind: 'deny', reason: L(segmentSummary(d2), uiLang) }
+          //
+          // 但**结论那一句**可以由 denyReasonMode 换成用户写的文案（见 denialTextFor）：
+          // 这条是自动审批的三种拒绝共同的出口，故一处生效即覆盖全部三种。
+          //
+          // ⚠️ 只对**自动审批**的拒绝生效。这个分支同时服务分类 / 例外 / doomloop /
+          // 工作区外等一切直接拒绝，它们的 reason 里带着路径、命中的规则和用户为该条
+          // 写的理由 —— 整句换成那句全局文案等于把「哪个操作、哪条规则」全抹掉，
+          // 而模型只能靠它决定下一步改什么。三种默认文案也全是自动审批场景，
+          // 本设置的存在意义就限于此。
+          //
+          // 判据用**原始判定 d**：来源信息只在这里有 —— d2 是消化后的判定，落成 deny 后
+          // 与非 auto 的拒绝完全同形，无法再区分。d.action === 'auto' 走到这个分支只有
+          // 三个出口（auto-deny / auto-deny-high / auto-fallback-direct），正是本设置覆盖的三种。
+          const text = d.action === 'auto'
+            ? denialTextFor(d2, rootOf(exec))
+            : L(segmentSummary(d2), uiLang)
+          return { kind: 'deny', reason: text }
         }
         // 放行（或询问允许）后：写类工具 + 工作区外 + 沙箱受限 → 原生升级审批 → 临时放开
         flushStaleUpgrades()
