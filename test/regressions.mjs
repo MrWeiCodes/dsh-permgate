@@ -2359,9 +2359,12 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
         break
       }
       // 收进来的必须整段都是声明；混进别的语句时求值会抛错，按失败处理。
+      // 失败原因必须打出来：求值不出结果时下游一律拿到 null，断言红在「颜色取不到」，
+      // 而真实原因（某个常量没被收集到、引用它成了 ReferenceError）指的方向完全相反。
       try {
         return new Function(picked.join('\n') + '\n' + metaBody + '\nreturn viaMeta;')()
       } catch (e) {
+        console.log('      求值 viaMeta 失败：' + (e && e.message ? e.message : e))
         return null
       }
     })()
@@ -2372,6 +2375,9 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
         const meta = viaMetaFn(via)
         return meta && typeof meta.color === 'string' ? meta.color : null
       } catch (e) {
+        // 与上面同一条纪律：调用期抛错（常量缺失 → ReferenceError）必须留下原因，
+        // 否则与「分支没写 color」在下游完全同形。
+        console.log('      调用 viaMeta(' + via + ') 失败：' + (e && e.message ? e.message : e))
         return null
       }
     }
@@ -2497,6 +2503,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
         const meta = viaMetaFn(via)
         return meta && typeof meta.weight === 'number' ? meta.weight : null
       } catch (e) {
+        console.log('      调用 viaMeta(' + via + ') 失败：' + (e && e.message ? e.message : e))
         return null
       }
     }
