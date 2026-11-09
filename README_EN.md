@@ -51,6 +51,10 @@ Tool calls are reviewed per category (directory access / command execution / fil
 
   ![Auto review records](assets/auto-review-en.png)
 
+- **Extra review rules**: project-specific requirements — "this directory is read-only", "never run this kind of command" — are one sentence in plain language, and categories set to Auto review follow it, which beats piling up exceptions. The same place adds a safety net for "the model rated it high risk but allowed it": deny it outright, or ask you first.
+
+  ![Extra review rules](assets/review-policy-en.png)
+
 - **Settings → Permission Gateway**: manage everything in one place — per-category defaults, allow/deny exceptions, quick tools, custom rules and the underlying sandbox, configured separately for global and project levels, plus a recent-decision log. No more editing configuration files by hand — adjust permissions quickly through the settings page.
 
   ![Permission Gateway settings](assets/settings-page-en.png)

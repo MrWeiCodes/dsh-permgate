@@ -2239,23 +2239,281 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     for (const k of ['flow.viaAllowHigh', 'flow.viaDenyHigh', 'flow.viaAskHigh']) {
       if (cli.indexOf("'" + k + "'") === -1) return false
     }
-    const iMeta = cli.indexOf('function viaMeta(via) {')
+    // 把注释与字符串抹成空格（长度与换行不变，故下标与原文一一对应）。
+    // 本断言里所有「在源码里找位置 / 判存在 / 读数值」都作用在它上面，原文只用来取
+    // 被抹掉的那部分（字符串字面量、以及交给 JS 引擎求值的代码切片）。
+    // 直接对原文做这些判断时，注释里的同款文本会冒充代码：注释写一个 `}` 就把函数体
+    // 截断在半路，注释里写一遍分支签名或 weight 也会被当成真的。
+    // 正则字面量与模板字符串的 `${}` 不在这层处理，遇到时按失败处理。
+    const codeOnly = (src) => {
+      let out = ''
+      let i = 0
+      while (i < src.length) {
+        const c = src[i]
+        if (c === '/' && (src[i + 1] === '/' || src[i + 1] === '*')) {
+          const line = src[i + 1] === '/'
+          const e = line ? src.indexOf('\n', i) : src.indexOf('*/', i + 2)
+          const end = e < 0 ? src.length : (line ? e : e + 2)
+          out += src.slice(i, end).replace(/[^\n]/g, ' ')
+          i = end
+          continue
+        }
+        if (c === "'" || c === '"' || c === '`') {
+          let j = i + 1
+          while (j < src.length) {
+            if (src[j] === '\\') { j += 2; continue }
+            if (src[j] === c) { j++; break }
+            j++
+          }
+          out += src.slice(i, j).replace(/[^\n]/g, ' ')
+          i = j
+          continue
+        }
+        out += c
+        i++
+      }
+      return out
+    }
+    const code = codeOnly(cli)
+    // 定位也必须在 code 上：注释或字符串里出现同款签名时，原文的 indexOf 会命中那里，
+    // 截出来的是注释而不是函数。
+    const iMeta = code.indexOf('function viaMeta(via) {')
     if (iMeta < 0) return false
     let dm = 0
     let metaBody = ''
-    for (let k = cli.indexOf('{', iMeta); k < cli.length; k++) {
-      if (cli[k] === '{') dm++
-      else if (cli[k] === '}') { dm--; if (dm === 0) { metaBody = cli.slice(iMeta, k + 1); break } }
+    for (let k = code.indexOf('{', iMeta); k < code.length; k++) {
+      if (code[k] === '{') dm++
+      else if (code[k] === '}') { dm--; if (dm === 0) { metaBody = cli.slice(iMeta, k + 1); break } }
     }
     if (!metaBody) return false
+    // 与 metaBody 同长度的「去注释」版本：判存在、读数值都用它。
+    // 只抹注释、保留字符串 —— 分支签名里的 `'auto-allow-high'` 是字符串字面量，
+    // 抹掉就再也匹配不到；需要抹掉字符串的只有花括号配对（字符串里的括号不是结构）。
+    const commentOnly = (src) => {
+      let out = ''
+      let i = 0
+      while (i < src.length) {
+        const c = src[i]
+        if (c === '/' && (src[i + 1] === '/' || src[i + 1] === '*')) {
+          const line = src[i + 1] === '/'
+          const e = line ? src.indexOf('\n', i) : src.indexOf('*/', i + 2)
+          const end = e < 0 ? src.length : (line ? e : e + 2)
+          out += src.slice(i, end).replace(/[^\n]/g, ' ')
+          i = end
+          continue
+        }
+        if (c === "'" || c === '"' || c === '`') {
+          let j = i + 1
+          while (j < src.length) {
+            if (src[j] === '\\') { j += 2; continue }
+            if (src[j] === c) { j++; break }
+            j++
+          }
+          out += src.slice(i, j)
+          i = j
+          continue
+        }
+        out += c
+        i++
+      }
+      return out
+    }
+    const metaCode = commentOnly(metaBody)
     // 三个新 via 各自单独一支（合成一支就无法给出各自的文案）
     for (const v of ['auto-allow-high', 'auto-deny-high', 'auto-ask-high']) {
-      if (metaBody.indexOf("via === '" + v + "'") === -1) return false
+      if (metaCode.indexOf("via === '" + v + "'") === -1) return false
     }
-    // 普通放行的颜色（橙）不得被高风险放行复用
-    const mAllow = metaBody.match(/via === 'auto-allow'\) return \{ k: 'allow', color: '([^']+)'/)
-    const mHigh = metaBody.match(/via === 'auto-allow-high'\) return \{ k: 'allowHigh', color: '([^']+)'/)
-    if (!mAllow || !mHigh || mAllow[1] === mHigh[1]) return false
+    // ⑤c 颜色**只分两个方向**：放行一支、否决一支（拒绝 / 弃权 / 回落同色）。
+    //
+    // 颜色可以写成字面量或指向常量的标识符，引号单双皆可；`var(--token, fallback)`
+    // 在主题变量生效与缺失时分别渲染成两种颜色。所以比较的既不是源码 token、也不是
+    // 原始字符串，而是**可能渲染出的取值集合**：
+    //   · 必须不同色 → 两个集合无交集（任何环境下都不同）；
+    //   · 必须同色   → 两个集合相等。
+    // 只比 token 时「字面量 vs 标识符」永远不等；只比字符串时，同一 token 的两种写法、
+    // 以及「字面量恰好等于对方的 fallback」都会被判成不同色 —— 而它们在某种环境下
+    // 渲染成同一颜色。
+    //
+    // 取值直接**求值** `viaMeta` 本身，而不是在源码里找 `color:` 再解析标识符：
+    // 注释里的同款文本、单双引号、const/let/var、标识符里的 `$` 都由 JS 引擎处理。
+    // 在这里复刻一套词法规则，每漏掉一种写法就要再补一次。求值失败按失败处理。
+    const viaMetaFn = (() => {
+      // 从 `function viaMeta(via) {` 往上收**连续的声明**，允许中间隔着空行与注释 ——
+      // 常量分组之间空一行是常见排版，不该被当成「声明到此为止」。
+      // 行性质用剥了注释与字符串的 `code` 判断：块注释的中间行在那里是空白，
+      // 行尾注释已被抹掉，故 `const X = '...'; // 说明` 仍被认成声明。
+      // 折行声明（`const X =` 换行接值）由 pending 承接：先遇到的续行不是声明开头，
+      // 但也不能就此中断，故先记下，等找到声明开头再一起合并。
+      const codeLines = code.slice(0, iMeta).split('\n')
+      const rawLines = cli.slice(0, iMeta).split('\n')
+      const picked = []
+      const pending = []
+      for (let k = codeLines.length - 1; k >= 0; k--) {
+        const c = codeLines[k].trim()
+        if (!c) { pending.unshift(rawLines[k]); continue }
+        if (/^(?:const|let|var)\s/.test(c)) {
+          picked.unshift(rawLines[k], ...pending)
+          pending.length = 0
+          continue
+        }
+        break
+      }
+      // 收进来的必须整段都是声明；混进别的语句时求值会抛错，按失败处理。
+      try {
+        return new Function(picked.join('\n') + '\n' + metaBody + '\nreturn viaMeta;')()
+      } catch (e) {
+        return null
+      }
+    })()
+    // `auto-fallback` 走默认分支，直接调用即可拿到；按分支行文本找会漏掉它。
+    const metaOf = (via) => {
+      if (!viaMetaFn) return null
+      try {
+        const meta = viaMetaFn(via)
+        return meta && typeof meta.color === 'string' ? meta.color : null
+      } catch (e) {
+        return null
+      }
+    }
+    // 解析一层 `var(--token[, fallback])`；不是 var() 或括号不配平返回 null。
+    // fallback 里可以有括号（rgba(...)）和嵌套 var()，故按括号配平扫描而不是正则：
+    // 正则版在 `rgba(...)` 上整条失配，集合退化成「整个字符串」，与任何值都无交集，
+    // 反而把「必须不同色」这条安全向检查变成了放行。
+    const parseVar = (v) => {
+      const s = String(v).trim()
+      if (!/^var\s*\(/i.test(s)) return null
+      const open = s.indexOf('(')
+      let depth = 0
+      let commaAt = -1
+      for (let k = open; k < s.length; k++) {
+        if (s[k] === '(') depth++
+        else if (s[k] === ')') { depth--; if (depth === 0 && k !== s.length - 1) return null }
+        else if (s[k] === ',' && depth === 1 && commaAt < 0) commaAt = k
+      }
+      if (depth !== 0) return null
+      const token = s.slice(open + 1, commaAt < 0 ? s.length - 1 : commaAt).trim()
+      if (!token) return null
+      return { token, fallback: commaAt < 0 ? null : (s.slice(commaAt + 1, s.length - 1).trim() || null) }
+    }
+    // 把颜色解析成**渲染出的 RGBA 数值**，而不是比较文本形态。
+    // 同一颜色有多种写法（十六进制大小写与缩写、rgb()/rgba()、颜色关键字），
+    // 只做格式归一的话，换一种表示法就被判成不同色 —— 那仍然是在比文本。
+    // 认不出具体颜色时返回 null（例如 CSS 变量名），调用方按「不是同一色」处理。
+    const NAMED = { red: [255, 0, 0, 1], black: [0, 0, 0, 1], white: [255, 255, 255, 1], transparent: [0, 0, 0, 0] }
+    const normColor = (v) => {
+      const s = String(v).trim().toLowerCase()
+      const hex = s.match(/^#([0-9a-f]{3,8})$/)
+      if (hex) {
+        let h = hex[1]
+        if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join('')
+        if (h.length !== 6 && h.length !== 8) return null
+        const n = (i) => parseInt(h.slice(i, i + 2), 16)
+        return 'rgba(' + n(0) + ',' + n(2) + ',' + n(4) + ',' + (h.length === 8 ? +(n(6) / 255).toFixed(3) : 1) + ')'
+      }
+      const fn = s.match(/^(rgba?)\((.*)\)$/)
+      if (fn) {
+        const parts = fn[2].split(/[,/]/).map((x) => x.trim()).filter(Boolean)
+        if (parts.length < 3 || parts.length > 4) return null
+        const ch = parts.slice(0, 3).map((x) => {
+          const n = parseFloat(x)
+          return isNaN(n) ? null : Math.max(0, Math.min(255, Math.round(x.indexOf('%') !== -1 ? n * 2.55 : n)))
+        })
+        if (ch.some((x) => x === null)) return null
+        let a = 1
+        if (parts[3] !== undefined) {
+          const n = parseFloat(parts[3])
+          if (isNaN(n)) return null
+          a = parts[3].indexOf('%') !== -1 ? n / 100 : n
+        }
+        return 'rgba(' + ch.join(',') + ',' + a + ')'
+      }
+      const named = NAMED[s]
+      return named ? 'rgba(' + named.join(',') + ')' : null
+    }
+    // 可能渲染出的取值集合；是 var() 却解析不出来、或颜色认不出时返回 null。
+    // 认不出就返回 null 而不是保留原文：两个认不出的值会「不相等」，于是
+    // 「必须不同色」被判成成立 —— 无法核对的情况必须按失败处理，不能当成放行。
+    const colorSet = (v) => {
+      const s = String(v).trim()
+      if (!/^var\s*\(/i.test(s)) {
+        const n = normColor(s)
+        return n ? new Set([n]) : null
+      }
+      const p = parseVar(s)
+      if (!p) return null
+      if (!p.fallback) return new Set([p.token])
+      const inner = colorSet(p.fallback)
+      return inner ? new Set([p.token, ...inner]) : null
+    }
+    const sameColor = (a, b) => {
+      const A = colorSet(a)
+      const B = colorSet(b)
+      if (!A || !B) return null
+      return A.size === B.size && [...A].every((x) => B.has(x))
+    }
+    const overlapColor = (a, b) => {
+      const A = colorSet(a)
+      const B = colorSet(b)
+      if (!A || !B) return null
+      return [...A].some((x) => B.has(x))
+    }
+    const cAllow = metaOf('auto-allow')
+    const cDeny = metaOf('auto-deny')
+    const cEscalate = metaOf('auto-escalate')
+    const cFallback = metaOf('auto-fallback')
+    const cAllowHigh = metaOf('auto-allow-high')
+    const cDenyHigh = metaOf('auto-deny-high')
+    const cAskHigh = metaOf('auto-ask-high')
+    if (!cAllow || !cDeny || !cEscalate || !cFallback || !cAllowHigh || !cDenyHigh || !cAskHigh) return false
+    // 放行与拒绝必须分色（放宽 vs 收紧，这是唯一必须区分的两向）。
+    // 只有「明确无交集」才算分色；解析失败（null）与有交集一样按失败处理。
+    if (overlapColor(cAllow, cDeny) !== false) return false
+    // 拒绝与两类异常同色：对用户它们是同一件事 —— 自动审批没给出可用结论，
+    // 需要人接手或按回落值执行。让拒绝比报错更淡是错的：紧邻其上的工具报错是红的，
+    // 读者会以为拒绝不算失败。
+    if (!sameColor(cDeny, cEscalate) || !sameColor(cDeny, cFallback)) return false
+    // 高风险三档与普通拒绝同色（危险度靠字重区分，见下一条）
+    if (!sameColor(cDenyHigh, cDeny) || !sameColor(cAllowHigh, cDeny) || !sameColor(cAskHigh, cDeny)) return false
+    // ⑤d 拒绝色必须取自**错误档**主题变量，不得写死十六进制
+    //
+    // 该变量在深浅两套主题下取值不同，写死其中一个会让另一种主题下的错误色糊进
+    // 背景。判据落在解析出的 token 上，故 `var( --x)`（var 后带空白）、常量声明与
+    // 分支内联都不影响结论；限定到 `state-error-` 一档而不是任意 `--dsw-alias-`：
+    // 换成 warning 档时前缀同样成立，而拒绝色会随主题变橙、与放行色混同。
+    // 橙色不受这条约束：它对应的主题变量在明暗下同值，且对比度略低于既有
+    // 字面量 —— 换成变量没有收益，故这里只核对拒绝色。
+    const denyVar = parseVar(cDeny)
+    if (!denyVar || denyVar.token.indexOf('--dsw-alias-state-error-') !== 0) return false
+    // ⑤e 危险度必须落在字重上：高风险三档加粗，普通结论不加粗。
+    //
+    // 不能继续用色阶分档：浅色底上能分出的两个红，在深色底上会一起变暗，
+    // 于是「最需要被看见」的那三档反而最看不见。
+    // weight 与颜色同源：直接求值 viaMeta，而不是在源码里找 `weight: N`。按文本读有两个
+    // 假绿面：注释里写一遍同款文本就能冒充真的分支；走默认分支的 auto-fallback 没有
+    // 分支行，按文本永远读不到。
+    const weightOf = (via) => {
+      if (!viaMetaFn) return null
+      try {
+        const meta = viaMetaFn(via)
+        return meta && typeof meta.weight === 'number' ? meta.weight : null
+      } catch (e) {
+        return null
+      }
+    }
+    // 普通结论（放行 / 拒绝 / 弃权 / 回落）必须同权重：只有高风险三档才该更粗。
+    // 只拿三档和其中一档比大小会漏掉「普通放行也被加粗」—— 那正是这条要拦的退化。
+    const wPlain = weightOf('auto-deny')
+    if (wPlain === null) return false
+    for (const v of ['auto-allow', 'auto-escalate', 'auto-fallback']) {
+      if (weightOf(v) !== wPlain) return false
+    }
+    for (const v of ['auto-allow-high', 'auto-deny-high', 'auto-ask-high']) {
+      const w = weightOf(v)
+      if (w === null || w <= wPlain) return false
+    }
+    // 渲染侧必须真的用上它，否则 weight 只是返回值里的死数据。
+    // 判存在作用在去注释的 code 上：注释里写一遍同款文本不能冒充渲染代码。
+    if (code.indexOf('fontWeight: meta.weight') === -1) return false
     return true
   })())
   // ⑨c2 轨迹页那一份 Definition：target 必须是 trajectory，且节点 data.kind 必须是 context

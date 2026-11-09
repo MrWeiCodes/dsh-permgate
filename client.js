@@ -7960,24 +7960,29 @@ window.__ModuleLoader__.load({
 		// （match 不带 exclusive 时互不排斥），它们只是落到不同的 target。
 		const DECISION_TRAJECTORY_KIND = 'permgate-auto-traj';
 		const DECISION_RECORD = 'plugin:permgate/decision';
-		// via → 展示档位。四类在**颜色与措辞**上都要能分开：
-		// 放行是放宽（橙）、拒绝是收紧（灰蓝）、弃权与失败是「没问成模型」（红）。
+		// via → 展示档位。**颜色只表达结果方向，字重表达危险度**：
+		//   · 放行（auto-allow）—— 橙：这是放宽，用户要知道，但不必当成错误；
+		//   · 拒绝与异常（auto-deny / auto-escalate / auto-fallback）—— 红：三者的
+		//     共同点是**自动审批没能给出可用结论**（模型否决 / 模型拿不准 / 模型没答
+		//     上来），需要人接手或按回落值执行。与紧邻其上的工具报错同源，扫一眼就能
+		//     认出这一行不是「模型判断通过」。拒绝尤其不能比报错更淡 —— 它同样让这次
+		//     调用什么都没做成。
+		//   · 明知高风险的三档在红的基础上加粗：模型与设置相互冲突的地方，也是事后
+		//     复查策略的唯一线索，与普通结论同权重会被划过去。
 		//
-		// 高风险放行的三档单独一套，**都是红色系**（比普通放行的橙更重）：
-		// 它们是「模型明知高风险仍放行」，是几类里最需要被看见的一种 ——
-		// 与普通放行同色会让用户在会话流里划过去。
-		//
-		//   auto-allow-high  红：模型说高风险、仍放行，且用户的设置允许
-		//   auto-deny-high   最深：模型想放行，被用户的设置拦下（说明策略比模型更严）
-		//   auto-ask-high    红：模型想放行，被高风险设置拦下来问人
+		// 红色取自主题变量而不是写死：该变量在深浅两套主题下取值不同
+		//（`state-error-primary` 分别是 red-600 与 red-400），写死其中任一个都会让
+		// 另一种主题下的错误色糊进背景。橙色没有这个问题 —— 它对应的变量在明暗下
+		// 同值，换成变量既无收益、对比度还略低于这里的字面量。
+		const VIA_ERR = 'var(--dsw-alias-state-error-primary, #c62828)';
 		function viaMeta(via) {
-			if (via === 'auto-allow-high') return { k: 'allowHigh', color: '#d93025', key: 'flow.viaAllowHigh' };
-			if (via === 'auto-deny-high') return { k: 'denyHigh', color: '#8b0000', key: 'flow.viaDenyHigh' };
-			if (via === 'auto-ask-high') return { k: 'askHigh', color: '#d93025', key: 'flow.viaAskHigh' };
-			if (via === 'auto-allow') return { k: 'allow', color: '#bf8700', key: 'flow.viaAllow' };
-			if (via === 'auto-deny') return { k: 'deny', color: '#57606a', key: 'flow.viaDeny' };
-			if (via === 'auto-escalate') return { k: 'escalate', color: '#c62828', key: 'flow.viaEscalate' };
-			return { k: 'fallback', color: '#c62828', key: 'flow.viaFallback' };
+			if (via === 'auto-allow-high') return { k: 'allowHigh', color: VIA_ERR, weight: 600, key: 'flow.viaAllowHigh' };
+			if (via === 'auto-deny-high') return { k: 'denyHigh', color: VIA_ERR, weight: 600, key: 'flow.viaDenyHigh' };
+			if (via === 'auto-ask-high') return { k: 'askHigh', color: VIA_ERR, weight: 600, key: 'flow.viaAskHigh' };
+			if (via === 'auto-allow') return { k: 'allow', color: '#bf8700', weight: 400, key: 'flow.viaAllow' };
+			if (via === 'auto-deny') return { k: 'deny', color: VIA_ERR, weight: 400, key: 'flow.viaDeny' };
+			if (via === 'auto-escalate') return { k: 'escalate', color: VIA_ERR, weight: 400, key: 'flow.viaEscalate' };
+			return { k: 'fallback', color: VIA_ERR, weight: 400, key: 'flow.viaFallback' };
 		}
 		// 折叠态一句话讲清「谁、对什么、做了什么」。
 		// chat 行与轨迹行共用这一份：同一件事在两个视图里措辞不一致，排查时就得先
@@ -8001,7 +8006,10 @@ window.__ModuleLoader__.load({
 					onClick: () => setOpen(!open),
 				},
 					React.createElement('span', { style: { flex: '0 0 auto', opacity: 0.7 } }, open ? '▾' : '▸'),
-					React.createElement('span', null, head),
+					// 字重来自 `viaMeta`：高风险三档加粗。颜色已经表达「放行/否决」，
+					// 危险度只能靠字重 —— 再靠色阶分档时，浅色底上分得出的两个红
+					// 在深色底上会一起糊成背景色。
+					React.createElement('span', { style: { fontWeight: meta.weight } }, head),
 					d.model ? React.createElement('span', { style: { color: 'rgba(128,128,128,0.85)', fontSize: 11 } }, d.model) : null,
 					// 实际派发的档位（模型自己的 id，如 low/high/max），样式与模型名同档。
 					// 只在实际派发过时显示：没派发是**异常**（降级或失败），
