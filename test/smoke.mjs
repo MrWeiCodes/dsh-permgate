@@ -8680,6 +8680,40 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       }
       releaseTmp(ws, home)
     }
+
+    // ⑨ 非 auto 的拒绝**不受**本设置影响。
+    //
+    // 这条守的是「本设置只管自动审批」这条边界。`act === 'deny'` 分支同时服务分类 /
+    // 例外 / doomloop / 工作区外等一切直接拒绝，它们的 reason 里带着路径、命中的规则
+    // 与用户为该条写的理由 —— 那是模型唯一的「下一步该改什么」线索。整句换成自定义
+    // 文案等于把它抹掉，而**没有任何断言会因此变红**：拒绝确实发生了，只是模型瞎了。
+    //
+    // 判据要能区分「分类理由还在」与「被换成自定义文案」：两者都是 deny，
+    // 故必须比对 reason 文本，不能只比 kind。
+    {
+      const ws = tmpdirFor('pg-deny-cat-ws-')
+      const home = tmpdirFor('pg-deny-cat-home-')
+      mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
+      writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
+        global: {
+          fallbackMode: 'ask',
+          doomloop: { mode: 'allow' },
+          // 分类直接 deny（不是 auto）：走的是同一条 deny 出口，但不经过评审段
+          command: { mode: 'deny', reason: '这条命令不许跑' },
+          autoReview: { denyReasonMode: 'custom', denyReason: '我的自定义文案' },
+        },
+        projects: {},
+      }, null, 2), 'utf8')
+      const h = createHost({ workspaceRoot: ws, dshHome: home, llm: mkLlm(verdict(MODEL_DENY)) })
+      // 用一条**非破坏性**命令：`rm -rf` 会落到 destructive 的档位合并里，各档缺键时
+      // 回落 ask，那样拿到的是「执行命令」这句 ask 理由，测不到 deny 出口。
+      const r = await probeDenyText(h, ws, 'a57nonauto', 'echo hi')
+      ok('★★ group24 A57: 非 auto 的拒绝保留自己的理由，不被自定义文案替换',
+        r.kind === 'deny' && r.reason.indexOf('这条命令不许跑') !== -1
+        && r.reason.indexOf('我的自定义文案') === -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home)
+    }
   }
 
   // ── A58：denyReasonMode / denyReason 的写入语义 ───────────────────────────────
@@ -8782,6 +8816,31 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
         explicit.indexOf('denyReasonMode') !== -1 && explicit.indexOf('denyReason') !== -1
         && !('denyReasonMode' in ar) && !('denyReason' in ar),
         JSON.stringify({ explicit, ar }))
+      releaseTmp(ws, home)
+    }
+
+    // ⑧ `set-auto-review` 的 patch 对 denyReason 同样受长度约束。
+    //
+    // 这条与 ③（set-auto-policy 的超长）**成对**：同一个字段有两条写入路由，
+    // 只有一条拦时限长就形同虚设 —— 直接调另一条即可绕过，而面板走的是前一条、
+    // 看不出后一条从未校验。原先正是这个形态：policy 两条都拦，denyReason 只拦一条。
+    //
+    // 判据取**磁盘**：本路由校验失败也回 error，只查 error 分不清「拦下了」与
+    // 「拦下了但前面已写进去」。
+    {
+      const { ws, home, h } = mkHostAuto({}, undefined)
+      const r = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { denyReason: 'x'.repeat(501) } })
+      const ar = readAR(home, 'global', ws)
+      ok('★★ group24 A58: set-auto-review 的 patch 同样拦住超长 denyReason（不能绕过 set-auto-policy）',
+        !!(r.data && r.data.error) && !('denyReason' in ar),
+        JSON.stringify({ err: r.data && r.data.error, diskLen: ar.denyReason ? ar.denyReason.length : 0 }))
+      // 对照：上限以内照常保存 —— 否则上面那条会被「一律拒绝」满足
+      const okText = 'w'.repeat(500)
+      const r2 = await callRoute(h.routes, 'POST', '/permgate/set-auto-review', { patch: { denyReason: okText } })
+      const ar2 = readAR(home, 'global', ws)
+      ok('★★ group24 A58: set-auto-review 的 patch 在 500 字符以内照常保存 denyReason',
+        !(r2.data && r2.data.error) && ar2.denyReason === okText,
+        JSON.stringify({ err: r2.data && r2.data.error, len: ar2.denyReason ? ar2.denyReason.length : 0 }))
       releaseTmp(ws, home)
     }
   }

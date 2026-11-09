@@ -2328,6 +2328,144 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (cli.indexOf("e.g. Don't touch this directory again") !== -1) return false
     return true
   })())
+  // ⑨a8 项目层会穿透全局时，面板必须说清「沿用哪句」，而不是列出默认文案
+  //
+  // 这是 ⑨a7 的另一半：项目层 mode=custom 但没写文本时，宿主按 denyReasonTextOf
+  // 穿透全局那句。面板若仍列三句默认文案，说的就与真实行为相反 —— 用户按它理解
+  // 「本项目留空 = 默认」，而实际发出的是全局那句。
+  //
+  // ⚠️ 引用用户文本必须走**函数**形态的 replace：字符串替换串里 `$&` / `` $` `` / `$$`
+  // 会被当作替换模式展开（`a$'b` 会变成 `a` + 模板尾部）。这条断言钉的正是形态，
+  // 因为被展开的只有显示文案，功能测试看不出来 —— 用户在面板上看到一句残缺的话，
+  // 而模型收到的是完整的。
+  ok('★★ 项目层穿透全局时面板说明沿用的是哪句，且用户文本不被 replace 展开', (function () {
+    // 判据走**真实求值**，不匹配源码子串。
+    //
+    // 子串匹配钉不住判据结构：`pol.denyReasonMode === 'custom'` 在 client.js 有多处
+    // 命中（applyStatus 的回填也读同样的字段），行首 `&&` 打成 `||`、判据后追加
+    // `|| pol.denyReason`、或把整条判据移入注释，子串都还在；`empty` 也只钉得住
+    // 定义、钉不住渲染门控。这些写法都会让面板在 `{denyReasonMode:'default',
+    // denyReason:'G'}` 下谎报「沿用全局 G」，或让已写文本的项目层重新列出默认文案。
+    //
+    // 故把 block 渲染函数原样抽出、用 React stub 真实渲染，断言落在**渲染结果**上：
+    // 面板说的必须与宿主实发的（denyReasonTextOf 口径，见 ★★ denyReasonModeOf /
+    // denyReasonTextOf 那条）一致。写法变体只要行为对就通过，行为错就红。
+    const mBlock = cli.match(/const block = \([^)]*\) => \{/)
+    if (!mBlock) return false
+    const iBlock = mBlock.index
+    const iParen = cli.indexOf('(', iBlock)
+    let pDepth = 0
+    let iArrow = -1
+    for (let k = iParen; k < cli.length; k++) {
+      if (cli[k] === '(') pDepth++
+      else if (cli[k] === ')') { pDepth--; if (pDepth === 0) { iArrow = cli.indexOf('=>', k); break } }
+    }
+    if (iArrow < 0) return false
+    let d = 0
+    let bodyEnd = -1
+    for (let k = cli.indexOf('{', iArrow); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { bodyEnd = k; break } }
+    }
+    if (bodyEnd < 0) return false
+    const blockExpr = cli.slice(iParen, bodyEnd + 1)
+    // 渲染树只留 type/props/kids：够判「说了什么」，不依赖真实 React。
+    const mkReact = () => ({
+      createElement: (type, props, ...kids) => ({ type, props: props || {}, kids: kids.flat(Infinity).filter((x) => x != null && x !== false) }),
+    })
+    const T = (k) => zhText(k) || k
+    // 每个场景重新构造：pol 是构造期注入的，不能跨场景复用。
+    const build = (polObj) => new Function('React', 'T', 'pol', 'modes', 'maxLenText', 'save', 'denyDirty', 'busy',
+      'return ' + blockExpr)(mkReact(), T, polObj, ['default', 'custom'], 500, () => {}, { current: {} }, false)
+    const textsOf = (n, out) => {
+      if (n == null || n === false) return out
+      if (typeof n === 'string') { out.push(n); return out }
+      if (Array.isArray(n)) { for (const x of n) textsOf(x, out); return out }
+      if (n.kids) for (const x of n.kids) textsOf(x, out)
+      return out
+    }
+    const placeholderOf = (n) => {
+      if (!n || typeof n !== 'object') return null
+      if (n.props && n.props.placeholder !== undefined) return n.props.placeholder
+      for (const x of (n.kids || [])) { const r = placeholderOf(x); if (r != null) return r }
+      return null
+    }
+    const INHERIT = T('panel.autoDenyReasonInherit')
+    const DEFAULTS_LABEL = T('panel.autoDenyReasonDefaultsLabel')
+    const PH_INHERIT = T('panel.autoDenyReasonPhInherit')
+    const PH_DEFAULT = T('panel.autoDenyReasonPh')
+    const iSlot = INHERIT.indexOf('{text}')
+    if (iSlot < 0 || !DEFAULTS_LABEL || !PH_INHERIT || !PH_DEFAULT) return false
+    const PREFIX = INHERIT.slice(0, iSlot)
+    // hostText：宿主 denyReasonTextOf 在该配置下返回的文本（'' = 回落到默认文案）。
+    // 期望全部由它推出 —— 面板说的必须与实际发出的一致，不再按分支各写一遍。
+    const check = (polObj, mode, text, withInherit, hostText) => {
+      let node
+      try {
+        node = build(polObj)('project', mode, () => {}, text, () => {}, withInherit)
+      } catch (e) { return false }
+      const joined = textsOf(node, []).join('\n')
+      const ph = placeholderOf(node)
+      const hasBox = mode === 'custom'
+      const blank = String(text).trim() === ''
+      // 面板该不该说「沿用全局」只由宿主口径决定：有输入框、本层留空、宿主会穿透。
+      const inheritShown = hasBox && blank && hostText !== ''
+      const defaultsShown = hasBox && blank && hostText === ''
+      // placeholder 与提示块是同一个判据的两处出口，必须一起验：
+      // 只验文本时，判据丢条件会让 placeholder 单独谎报（说「沿用全局」而实际发默认文案）。
+      if (ph !== (hasBox ? (inheritShown ? PH_INHERIT : PH_DEFAULT) : null)) return false
+      if (inheritShown) return joined.includes(PREFIX + hostText) && !joined.includes(DEFAULTS_LABEL)
+      return !joined.includes(PREFIX) && joined.includes(DEFAULTS_LABEL) === defaultsShown
+    }
+    const DEFS = { deny: 'D1', denyHigh: 'D2', fallback: 'D3' }
+    const polOf = (o) => Object.assign({ denyReasonDefaults: DEFS }, o)
+    // block 的输入是三个维度，按**各自的值域**交叉覆盖，而不是挑「看起来典型」的组合：
+    //   · pol.denyReasonMode / pol.denyReason —— 全局层的显式值（宿主下发，缺键为 null）
+    //   · mode / text —— **本层**的显式值与文本（项目层 tab 或全局层 tab）
+    //   · withInherit —— 当前是不是项目层 tab（决定下拉里有没有「继承全局」）
+    //
+    // 每漏一个取值，就有一类弱化写法与正确判据在样本上同形、断言照绿：
+    //   · 判据 `mode === 'custom'` 把 'inherit' 与 'default' 归为同一边，只测 inherit 时
+    //     `mode !== 'inherit'` / `mode === 'custom' || mode === 'default'` 分辨不出来；
+    //   · pol 两个字段只喂同号组合时，`mode !== 'default'` / `mode == null` 分辨不出来。
+    // 后者两种都真实可达：项目层下拉是 inherit/default/custom，用户选 default 后
+    // 5411 回填 'default' 并经 7265 传进 block；全局层缺键时 statusView 下发 null。
+    const POL_MODES = [null, 'default', 'custom']
+    const POL_TEXTS = [null, '', '   ', 'G']
+    const LAYER_TEXTS = ['', 'P']
+    const CASES = []
+    for (const pm of POL_MODES) {
+      for (const pt of POL_TEXTS) {
+        const pol = polOf({ denyReasonMode: pm, denyReason: pt })
+        // 全局层实际会发的那句：只有 mode=custom 且文本非空才发，否则回落默认文案。
+        const globalHost = pm === 'custom' && typeof pt === 'string' && pt.trim() ? pt : ''
+        for (const lm of ['inherit', 'default', 'custom']) {
+          // text 只在 custom 下渲染输入框，另外两个值不显示它，喂 '' 即可。
+          for (const lt of (lm === 'custom' ? LAYER_TEXTS : [''])) {
+            // 项目层：本层 custom 且留空才穿透全局；显式 default 就是「不要那句」。
+            const host = lm === 'custom' ? (lt.trim() ? lt : globalHost)
+              : (lm === 'inherit' ? globalHost : '')
+            CASES.push([pol, lm, lt, true, host])
+          }
+        }
+        // 全局层 tab：mode 由 5410 回填（custom 保持，缺键用默认），文本是**本层输入框**
+        // 的内容 —— 用户清空后它可以是空串，与 pol.denyReason 不必然相等。
+        // 故这里也要遍历 LAYER_TEXTS：只按 pol 的文本生成，就把
+        // 「withInherit=false 且本层留空」这个组合排除在外，而它正是唯一能区分
+        // 「判据里有没有 withInherit」的形态（全局层没有可继承的对象）。
+        //
+        // 期望值是 ''：全局层 tab 不穿透，留空就发默认文案 —— 与 denyReasonTextOf
+        // 在「项目层没写文本」时取全局那句是两回事，面板这一格说的是本层自己的设置。
+        for (const lt of LAYER_TEXTS) {
+          CASES.push([pol, pm === 'custom' ? 'custom' : 'default', lt, false, ''])
+        }
+      }
+    }
+    // 全局那句含 replace 替换模式：必须原样显示（字符串形态的 replace 会展开）
+    CASES.push([polOf({ denyReasonMode: 'custom', denyReason: 'a$&b$`c$$d' }), 'custom', '', true, 'a$&b$`c$$d'])
+    for (const c of CASES) { if (!check(c[0], c[1], c[2], c[3], c[4])) return false }
+    return true
+  })())
   // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后
   //
   // 判据走真实求值：把 ModelEffortPicker 的档位 pane 构造段抽出来跑，断言两组的
@@ -7306,13 +7444,16 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   //   直接 `L(segmentSummary(d2), uiLang)` —— 那样 denyReasonMode 就完全不生效，
   //   而面板照常显示「已保存」（面板说谎的另一种形态）。
   //
-  // 两条一起钉：① 出口函数存在且判 mode；② 那处不再有裸的 segmentSummary 调用
-  // （换个写法绕开也算回退）。三种 auto 拒绝的**行为**由 smoke A57 ②③④ 端到端覆盖，
-  // 这里不重复匹配出口的调用写法。
+  // 两个方向都要钉，缺一个就有一条回退能悄悄通过：
+  //   ① auto 分支必须调 denialTextFor —— 只断言「没有裸的 segmentSummary」时，
+  //      把 auto 分支改回裸调用正则**仍然不匹配**（那行是 `reason: text`），断言照绿；
+  //   ② 判据必须带 `d.action === 'auto'` —— 无条件替换会把分类 / 例外 / 工作区外
+  //      等拒绝的结论整句抹掉，而它们带路径与命中的规则，是模型唯一的下一步线索。
+  // 故钉的是**正向形态本身**，不是它的反面。
   ok('★★ 自动审批的直接拒绝走 denialTextFor 唯一出口（denyReasonMode 才能生效）',
     /function denialTextFor\(d, root\) \{/.test(src)
     && /denyReasonModeOf\(root\) !== 'custom'/.test(src)
-    && !/return \{ kind: 'deny', reason: L\(segmentSummary\(d2\), uiLang\) \}/.test(src))
+    && /d\.action === 'auto'\s*\n?\s*\?\s*denialTextFor\(d2, rootOf\(exec\)\)/.test(src))
   // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
   // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次
   // （写成 `<=` 时，大分类 deny + 子设置 ask 不提示，反而在子设置更严时提示）。

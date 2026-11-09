@@ -7181,9 +7181,13 @@ window.__ModuleLoader__.load({
 						//
 						// 不显示这条提示时，面板会列出三句默认文案，而模型实际收到的是全局那句
 						// —— 面板说的与真实行为相反，用户按它理解「本项目留空 = 默认」。
-						const inheritsGlobal = withInherit && shown && !String(text || '').trim()
+						//
+						// 存的是**文本**而不是布尔：提示里要原样引用那句，判据与文案在这里分开算
+						// 会让两处各判一次，而条件写两遍必然漂移。空串即「不穿透」。
+						const empty = !String(text || '').trim();
+						const globalText = withInherit && shown && empty
 							&& pol.denyReasonMode === 'custom'
-							&& typeof pol.denyReason === 'string' && !!pol.denyReason.trim()
+							&& typeof pol.denyReason === 'string' && pol.denyReason.trim()
 							? pol.denyReason : '';
 						return React.createElement('div', { style: { marginTop: 6 } },
 							React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
@@ -7216,7 +7220,7 @@ window.__ModuleLoader__.load({
 										//
 										// 会穿透全局时换成另一句：那时下面列的不是默认文案，
 										// 再写「用下面的默认文案」就指向了不存在的内容。
-										placeholder: inheritsGlobal ? T('panel.autoDenyReasonPhInherit') : T('panel.autoDenyReasonPh'),
+										placeholder: globalText ? T('panel.autoDenyReasonPhInherit') : T('panel.autoDenyReasonPh'),
 										maxLength: maxLenText,
 										disabled: busy,
 										// 失焦即提交：与数字框同一条纪律 —— 值没变就不写盘，
@@ -7235,14 +7239,20 @@ window.__ModuleLoader__.load({
 									//
 									// 但项目层会穿透全局时**不列默认文案**：那时实际发的是全局那句，
 									// 列出默认值等于告诉用户一句不会发出的文本。改为明说沿用的是哪句。
-									!String(text || '').trim() && inheritsGlobal
-										? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.6 } },
-											T('panel.autoDenyReasonInherit').replace('{text}', inheritsGlobal))
-										: (!String(text || '').trim() && defaultLines.length
+									//
+									// `replace` 的替换串走**函数**而不是字符串：用户写的那句可能含
+									// `$&` / `` $` `` / `$$`，字符串形态下它们会被当作替换模式展开
+									// （`a$'b` 直接变成 `a` + 模板尾部）。函数形态不做模式解析。
+									empty
+										? (globalText
 											? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.6 } },
-												React.createElement('div', { style: { marginBottom: 2 } }, T('panel.autoDenyReasonDefaultsLabel')),
-												defaultLines.map((s, i) => React.createElement('div', { key: i, style: { paddingLeft: 8 } }, '· ' + s)))
-											: null),
+												T('panel.autoDenyReasonInherit').replace('{text}', () => globalText))
+											: (defaultLines.length
+												? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.6 } },
+													React.createElement('div', { style: { marginBottom: 2 } }, T('panel.autoDenyReasonDefaultsLabel')),
+													defaultLines.map((s, i) => React.createElement('div', { key: i, style: { paddingLeft: 8 } }, '· ' + s)))
+												: null))
+										: null,
 								)
 								: null,
 						);
