@@ -5448,7 +5448,10 @@ export default {
           // 跟着换成 doom 的（否则弹窗照 base 的分类给候选，而写入用 entry.cat —— 用户
           // 点了按钮、配置一个字都没变），`segments` / `blast` 只有 base 有、必须留着
           // （拒绝出口正是用它拼「哪一段、命中哪一档」回给 AI）。
-          return Object.assign({}, base, { action: doom.action, autoFallback: doom.autoFallback, reason: doom.reason, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
+          // `userReason` / `denyHint` 同理必须跟着换：`cat` 已经是 doomloop，base 分类的
+          // 用户理由与本次拒绝无关；循环提醒只有 doom 有，漏带会让模型看到一条
+          // 「某个分类拒绝了你」却看不出自己陷入了循环。
+          return Object.assign({}, base, { action: doom.action, autoFallback: doom.autoFallback, reason: doom.reason, userReason: undefined, denyHint: doom.denyHint, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
         }
         // ── 唯一的例外：`base=ask` 不被 `doom=auto` 接管（§9B）──────────────────────
         // `ask` 与 `auto` 在 MODE_STRICTNESS 里同为 1，于是上面的「相等即接管」会把
