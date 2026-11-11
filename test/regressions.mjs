@@ -137,6 +137,65 @@ function setCommandSubOf(source) {
   }
 }
 
+/**
+ * 把 index.js 的拒绝原因取值链（`denyReasonModeOf` / `denyReasonTextOf`）抽出来并**实际求值**。
+ *
+ * 返回 `(globalAutoReview, projectAutoReview) => { mode, text }`，两层各传 `null` 表示缺块。
+ * 取不到任何一段（函数被改名、常量被删）时返回 null，调用方的断言随即失败 —— 不会静默跳过。
+ *
+ * 为什么提成模块级函数：⑨a6 验这两个函数的回落规则，⑨a8 验面板说的与它们一致。
+ * 各自抽一份就是给「宿主口径」造两个副本 —— 副本漂移时两条断言会同时绿，而真实行为已经变了。
+ */
+function denyReasonChainOf(source) {
+  const grab = (marker) => {
+    const i = source.indexOf(marker)
+    if (i < 0) return ''
+    let d = 0
+    for (let k = source.indexOf('{', i); k < source.length; k++) {
+      if (source[k] === '{') d++
+      else if (source[k] === '}') { d--; if (d === 0) return source.slice(i, k + 1) }
+    }
+    return ''
+  }
+  const grabLine = (marker) => {
+    const j = source.indexOf(marker)
+    if (j < 0) return ''
+    return source.slice(j, source.indexOf('\n', j))
+  }
+  const consts = grabLine('const DENY_REASON_MODES = ')
+  // AUTO_REVIEW_DEFAULTS 是对象字面量，按花括号配对取（不能按行截 —— 它是多行的）。
+  const iDef = source.indexOf('const AUTO_REVIEW_DEFAULTS = {')
+  if (iDef < 0) return null
+  let d0 = 0
+  let defBody = ''
+  for (let k = source.indexOf('{', iDef); k < source.length; k++) {
+    if (source[k] === '{') d0++
+    else if (source[k] === '}') { d0--; if (d0 === 0) { defBody = source.slice(iDef, k + 1); break } }
+  }
+  const fnBlock = grab('function autoReviewBlockOf(block) {')
+  const fnProject = grab('function projectAutoReviewOf(root) {')
+  const fnMode = grab('function denyReasonModeOf(root) {')
+  const fnUses = grab('function usesCustomText(mode) {')
+  const fnText = grab('function denyReasonTextOf(root) {')
+  if (!consts || !defBody || !fnBlock || !fnProject || !fnMode || !fnUses || !fnText) return null
+  const build = (g, p) => {
+    const cfg = { global: g ? { autoReview: g } : {}, projects: {} }
+    const pb = p ? { autoReview: p } : {}
+    try {
+      return new Function('config', 'projectBlock',
+        consts + '\n' + defBody + '\n' + fnBlock + '\n' + fnProject + '\n' + fnMode + '\n' + fnUses + '\n' + fnText
+        + '\n; return { denyReasonModeOf, denyReasonTextOf }')(cfg, () => pb)
+    } catch (e) { return null }
+  }
+  // 自检一次：函数被改坏时返回 null 让断言变红，而不是让调用方抛异常中断整个套件。
+  if (!build(null, null)) return null
+  return (g, p) => {
+    const a = build(g, p)
+    if (!a) return null
+    return { mode: a.denyReasonModeOf('/x'), text: a.denyReasonTextOf('/x') }
+  }
+}
+
 
 // ─────────────────────────────────────────────────────────────
 group('1. 模块级冒烟：头部（export default 之前的全部定义）在无 DSH 环境下可求值')
@@ -2185,101 +2244,68 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // 合成一个函数就得在一个返回值里表达两种回落，调用方无法区分，故分两条断言。
   //
   // 判据同样走真实求值：只匹配源码里的键名无法区分「写了」与「回落方向反了」。
+  // 抽取与求值走 `denyReasonChainOf`（模块级）：⑨a8 要用同一份宿主口径，
+  // 各抽一份就是给「宿主怎么取值」造两个副本，副本漂移时两条断言会同时绿。
   ok('★★ denyReasonModeOf / denyReasonTextOf 三层取值（mode 不穿透、文本按本层 mode 穿透）', (function () {
-    const grab = (marker) => {
-      const i = src.indexOf(marker)
-      if (i < 0) return ''
-      let d = 0
-      for (let k = src.indexOf('{', i); k < src.length; k++) {
-        if (src[k] === '{') d++
-        else if (src[k] === '}') { d--; if (d === 0) return src.slice(i, k + 1) }
-      }
-      return ''
-    }
-    const grabLine = (marker) => {
-      const j = src.indexOf(marker)
-      if (j < 0) return ''
-      const end = src.indexOf('\n', j)
-      return src.slice(j, end)
-    }
-    const consts = grabLine('const DENY_REASON_MODES = ')
-    const iDef = src.indexOf('const AUTO_REVIEW_DEFAULTS = {')
-    if (iDef < 0) return false
-    let d0 = 0
-    let defBody = ''
-    for (let k = src.indexOf('{', iDef); k < src.length; k++) {
-      if (src[k] === '{') d0++
-      else if (src[k] === '}') { d0--; if (d0 === 0) { defBody = src.slice(iDef, k + 1); break } }
-    }
-    const fnBlock = grab('function autoReviewBlockOf(block) {')
-    const fnProject = grab('function projectAutoReviewOf(root) {')
-    const fnMode = grab('function denyReasonModeOf(root) {')
-    const fnText = grab('function denyReasonTextOf(root) {')
-    if (!consts || !defBody || !fnBlock || !fnProject || !fnMode || !fnText) return false
-    const mk = (g, p) => {
-      const cfg = { global: g ? { autoReview: g } : {}, projects: {} }
-      const pb = p ? { autoReview: p } : {}
-      return new Function('config', 'projectBlock',
-        consts + '\n' + defBody + '\n' + fnBlock + '\n' + fnProject + '\n' + fnMode + '\n' + fnText
-        + '\n; return { denyReasonModeOf, denyReasonTextOf }')(cfg, () => pb)
-    }
+    const chain = denyReasonChainOf(src)
+    if (!chain) return false
     // ① 两层都缺 → 缺省（default / 空文本 = 用默认文案）
     {
-      const a = mk(null, null)
-      if (a.denyReasonModeOf('/x') !== 'default') return false
-      if (a.denyReasonTextOf('/x') !== '') return false
+      const a = chain(null, null)
+      if (a.mode !== 'default') return false
+      if (a.text !== '') return false
     }
     // ② 只有全局 → 用全局
     {
-      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, null)
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+      const a = chain({ denyReasonMode: 'custom', denyReason: '全局那句' }, null)
+      if (a.mode !== 'custom') return false
+      if (a.text !== '全局那句') return false
     }
     // ③ 项目显式 → 项目优先
     {
-      const a = mk({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom', denyReason: '项目那句' })
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '项目那句') return false
+      const a = chain({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom', denyReason: '项目那句' })
+      if (a.mode !== 'custom') return false
+      if (a.text !== '项目那句') return false
     }
     // ④ 项目显式 default + 全局 custom → **用默认**（mode 不穿透，这是本组的核心）
     {
-      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'default' })
-      if (a.denyReasonModeOf('/x') !== 'default') return false
+      const a = chain({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'default' })
+      if (a.mode !== 'default') return false
     }
     // ⑤ 项目 custom 但没写文本 + 全局 custom 且有文本 → 用全局文本（文本穿透）
     {
-      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+      const a = chain({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
+      if (a.mode !== 'custom') return false
+      if (a.text !== '全局那句') return false
     }
     // ⑥ 两层都 custom 但都没文本 → 空串（调用方据此用默认文案）
     {
-      const a = mk({ denyReasonMode: 'custom' }, { denyReasonMode: 'custom' })
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '') return false
+      const a = chain({ denyReasonMode: 'custom' }, { denyReasonMode: 'custom' })
+      if (a.mode !== 'custom') return false
+      if (a.text !== '') return false
     }
     // ⑦ 非法 mode 不生效（手改 config.json 塞进来的垃圾不能改变处置）
     {
-      const a = mk({ denyReasonMode: 'nonsense', denyReason: '全局那句' }, { denyReasonMode: 'nonsense' })
-      if (a.denyReasonModeOf('/x') !== 'default') return false
+      const a = chain({ denyReasonMode: 'nonsense', denyReason: '全局那句' }, { denyReasonMode: 'nonsense' })
+      if (a.mode !== 'default') return false
       // 非法 mode 下那一层的文本同样不生效：写入侧刻意保留文本（切回 custom 时还要用），
       // 读取侧必须按本层 mode 判 —— 否则手改出来的非法 mode 会让一段谁也没启用的文本生效。
-      if (a.denyReasonTextOf('/x') !== '') return false
+      if (a.text !== '') return false
     }
     // ⑧ 全局切回 default 后残留的文本**不参与**：mode=default 就是「不要那句」
     //    （写入侧刻意不删 denyReason，故这个组合是两条正常面板操作就能造出来的）
     {
-      const a = mk({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '') return false
+      const a = chain({ denyReasonMode: 'default', denyReason: '全局那句' }, { denyReasonMode: 'custom' })
+      if (a.mode !== 'custom') return false
+      if (a.text !== '') return false
     }
     // ⑨ 项目层 mode 切回 inherit 后残留的文本**不得**盖住全局的：
     //    inherit 只删 mode、保留文本，而面板在 inherit 下根本不渲染输入框 ——
     //    不按本层 mode 判时，用户看不到的那句仍在生效。
     {
-      const a = mk({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReason: '项目残留' })
-      if (a.denyReasonModeOf('/x') !== 'custom') return false
-      if (a.denyReasonTextOf('/x') !== '全局那句') return false
+      const a = chain({ denyReasonMode: 'custom', denyReason: '全局那句' }, { denyReason: '项目残留' })
+      if (a.mode !== 'custom') return false
+      if (a.text !== '全局那句') return false
     }
     return true
   })())
@@ -2307,7 +2333,13 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     }
     // ② 三句中文文案**只在常量里出现一次**：pre-execute 必须引用它，不得再写字面量。
     //    只数中文那半句 —— 英文译名可能出现在注释里，中文原文是最可靠的锚点。
-    for (const zh of ['自动审批：模型拒绝', '按你的设置拒绝', '按你的设置直接拒绝']) {
+    //    锚点从常量体里取，不在这里再抄一份字面量：抄的那份与常量一起改漏时，
+    //    计数恒为 0，断言永远通过（旧文案「按你的设置拒绝」就这么失效过）。
+    const zhLines = (defBody.match(/bi\('([^']+)', '[^']*'\)/g) || [])
+      .map((s) => s.slice(4, s.indexOf("',")))
+    // 取不到三句说明常量换了写法 —— 那种情况下下面的循环会空转，必须当失败。
+    if (zhLines.length < 3) return false
+    for (const zh of zhLines) {
       const hits = (src.match(new RegExp(zh.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length
       // 允许 2 次：常量里一次 + 注释里引用一次（注释不参与行为）。
       if (hits > 2) return false
@@ -2338,20 +2370,24 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // 会被当作替换模式展开（`a$'b` 会变成 `a` + 模板尾部）。这条断言钉的正是形态，
   // 因为被展开的只有显示文案，功能测试看不出来 —— 用户在面板上看到一句残缺的话，
   // 而模型收到的是完整的。
-  ok('★★ 项目层穿透全局时面板说明沿用的是哪句，且用户文本不被 replace 展开', (function () {
-    // 判据走**真实求值**，不匹配源码子串。
-    //
-    // 子串匹配钉不住判据结构：`pol.denyReasonMode === 'custom'` 在 client.js 有多处
-    // 命中（applyStatus 的回填也读同样的字段），行首 `&&` 打成 `||`、判据后追加
-    // `|| pol.denyReason`、或把整条判据移入注释，子串都还在；`empty` 也只钉得住
-    // 定义、钉不住渲染门控。这些写法都会让面板在 `{denyReasonMode:'default',
-    // denyReason:'G'}` 下谎报「沿用全局 G」，或让已写文本的项目层重新列出默认文案。
-    //
-    // 故把 block 渲染函数原样抽出、用 React stub 真实渲染，断言落在**渲染结果**上：
-    // 面板说的必须与宿主实发的（denyReasonTextOf 口径，见 ★★ denyReasonModeOf /
-    // denyReasonTextOf 那条）一致。写法变体只要行为对就通过，行为错就红。
+  //
+  // 判据走**真实求值**，不匹配源码子串：`pol.denyReasonMode === 'custom'` 在 client.js
+  // 有多处命中（applyStatus 的回填也读同样的字段），行首 `&&` 打成 `||`、判据后追加
+  // `|| pol.denyReason`、或把整条判据移入注释，子串都还在；`empty` 也只钉得住定义、
+  // 钉不住渲染门控。这些写法都会让面板在 `{denyReasonMode:'default', denyReason:'G'}`
+  // 下谎报「沿用全局 G」，或让已写文本的项目层重新列出默认文案。
+  //
+  // 故把 block 渲染函数原样抽出、用 React stub 真实渲染，断言落在**渲染结果**上：
+  // 面板说的必须与宿主实发的（denyReasonTextOf 口径）一致。
+  // 宿主口径走 `denyReasonChainOf`（与 ⑨a6 同一份），不在这里手算 —— 手算就是
+  // 给「宿主怎么取值」造第二个副本，副本漂移时两条断言会同时绿而真实行为已经变了。
+  //
+  // 返回 null = 全部通过；返回字符串 = 第一处失败的原因（进 `extra`，红了能直接定位）。
+  const denyReasonPanelVerdict = (function () {
+    const hostOf = denyReasonChainOf(src)
+    if (!hostOf) return '宿主取值链抽不出来（denyReasonChainOf 返回 null）'
     const mBlock = cli.match(/const block = \([^)]*\) => \{/)
-    if (!mBlock) return false
+    if (!mBlock) return '找不到 block 渲染函数'
     const iBlock = mBlock.index
     const iParen = cli.indexOf('(', iBlock)
     let pDepth = 0
@@ -2360,14 +2396,14 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       if (cli[k] === '(') pDepth++
       else if (cli[k] === ')') { pDepth--; if (pDepth === 0) { iArrow = cli.indexOf('=>', k); break } }
     }
-    if (iArrow < 0) return false
+    if (iArrow < 0) return 'block 的参数表解析失败'
     let d = 0
     let bodyEnd = -1
     for (let k = cli.indexOf('{', iArrow); k < cli.length; k++) {
       if (cli[k] === '{') d++
       else if (cli[k] === '}') { d--; if (d === 0) { bodyEnd = k; break } }
     }
-    if (bodyEnd < 0) return false
+    if (bodyEnd < 0) return 'block 的函数体解析失败'
     const blockExpr = cli.slice(iParen, bodyEnd + 1)
     // 渲染树只留 type/props/kids：够判「说了什么」，不依赖真实 React。
     const mkReact = () => ({
@@ -2376,7 +2412,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     const T = (k) => zhText(k) || k
     // 每个场景重新构造：pol 是构造期注入的，不能跨场景复用。
     const build = (polObj) => new Function('React', 'T', 'pol', 'modes', 'maxLenText', 'save', 'denyDirty', 'busy',
-      'return ' + blockExpr)(mkReact(), T, polObj, ['default', 'custom'], 500, () => {}, { current: {} }, false)
+      'return ' + blockExpr)(mkReact(), T, polObj, ['default', 'custom', 'both'], 500, () => {}, { current: {} }, false)
     const textsOf = (n, out) => {
       if (n == null || n === false) return out
       if (typeof n === 'string') { out.push(n); return out }
@@ -2395,27 +2431,47 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     const PH_INHERIT = T('panel.autoDenyReasonPhInherit')
     const PH_DEFAULT = T('panel.autoDenyReasonPh')
     const iSlot = INHERIT.indexOf('{text}')
-    if (iSlot < 0 || !DEFAULTS_LABEL || !PH_INHERIT || !PH_DEFAULT) return false
+    // PREFIX 为空时 `joined.includes(PREFIX + hostText)` 退化成 `includes(hostText)` ——
+    // 只要该串在别处出现就会通过，断言等于没了。当前文案有前缀，但把占位符挪到开头
+    // 同样会触发，故这里显式挡住。
+    if (iSlot <= 0) return 'panel.autoDenyReasonInherit 缺 {text} 占位符或占位符在开头'
+    if (!DEFAULTS_LABEL || !PH_INHERIT || !PH_DEFAULT) return '面板提示文案的 i18n 键缺失'
     const PREFIX = INHERIT.slice(0, iSlot)
-    // hostText：宿主 denyReasonTextOf 在该配置下返回的文本（'' = 回落到默认文案）。
-    // 期望全部由它推出 —— 面板说的必须与实际发出的一致，不再按分支各写一遍。
-    const check = (polObj, mode, text, withInherit, hostText) => {
+    // 期望值全部由宿主口径推出，不按分支各写一遍。
+    //
+    // ⚠️ 只有**项目层 tab** 能直接用宿主求值：它的输入是「全局块 + 项目块」两层。
+    // 全局层 tab 没有可继承的对象 —— 它就是全局层本身，留空意味着**即将清空**那个键
+    // （失焦提交时写空串 = 删键），此后必然落默认文案。拿宿主**此刻磁盘上**的值去判
+    // 会得出「沿用全局 G」，而 G 正是用户刚删掉的那句。
+    const check = (polObj, mode, text, withInherit, layerBlock, tag) => {
+      const host = hostOf(
+        polObj ? { denyReasonMode: polObj.denyReasonMode, denyReason: polObj.denyReason } : null,
+        withInherit ? layerBlock : null)
+      if (!host) return 'host ' + tag
+      // 全局层 tab 的留空语义：本层清空后落默认文案（不存在「沿用」这个选项）。
+      const hostText = withInherit ? host.text : ''
       let node
       try {
         node = build(polObj)('project', mode, () => {}, text, () => {}, withInherit)
-      } catch (e) { return false }
+      } catch (e) { return '渲染抛错 ' + tag + ': ' + e.message }
       const joined = textsOf(node, []).join('\n')
       const ph = placeholderOf(node)
-      const hasBox = mode === 'custom'
+      const hasBox = mode === 'custom' || mode === 'both'
       const blank = String(text).trim() === ''
       // 面板该不该说「沿用全局」只由宿主口径决定：有输入框、本层留空、宿主会穿透。
       const inheritShown = hasBox && blank && hostText !== ''
       const defaultsShown = hasBox && blank && hostText === ''
       // placeholder 与提示块是同一个判据的两处出口，必须一起验：
       // 只验文本时，判据丢条件会让 placeholder 单独谎报（说「沿用全局」而实际发默认文案）。
-      if (ph !== (hasBox ? (inheritShown ? PH_INHERIT : PH_DEFAULT) : null)) return false
-      if (inheritShown) return joined.includes(PREFIX + hostText) && !joined.includes(DEFAULTS_LABEL)
-      return !joined.includes(PREFIX) && joined.includes(DEFAULTS_LABEL) === defaultsShown
+      if (ph !== (hasBox ? (inheritShown ? PH_INHERIT : PH_DEFAULT) : null)) return 'placeholder ' + tag
+      if (inheritShown) {
+        if (!joined.includes(PREFIX + hostText)) return 'inherit text ' + tag + ' 期望含 ' + JSON.stringify(hostText)
+        if (joined.includes(DEFAULTS_LABEL)) return 'inherit 却列了默认文案 ' + tag
+        return null
+      }
+      if (joined.includes(PREFIX)) return '不该说沿用却说了 ' + tag
+      if (joined.includes(DEFAULTS_LABEL) !== defaultsShown) return '默认文案块 ' + tag + ' 期望 ' + defaultsShown
+      return null
     }
     const DEFS = { deny: 'D1', denyHigh: 'D2', fallback: 'D3' }
     const polOf = (o) => Object.assign({ denyReasonDefaults: DEFS }, o)
@@ -2428,44 +2484,47 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     //   · 判据 `mode === 'custom'` 把 'inherit' 与 'default' 归为同一边，只测 inherit 时
     //     `mode !== 'inherit'` / `mode === 'custom' || mode === 'default'` 分辨不出来；
     //   · pol 两个字段只喂同号组合时，`mode !== 'default'` / `mode == null` 分辨不出来。
-    // 后者两种都真实可达：项目层下拉是 inherit/default/custom，用户选 default 后
-    // 5411 回填 'default' 并经 7265 传进 block；全局层缺键时 statusView 下发 null。
-    const POL_MODES = [null, 'default', 'custom']
+    // 后者两种都真实可达：项目层下拉是 inherit/default/custom/both，用户选 default 后
+    // 回填 'default' 并经调用点传进 block；全局层缺键时 statusView 下发 null。
+    // `both` 同样会用到文本（与 custom 一起决定输入框与穿透提示），只测 custom 时
+    // 判据把 'both' 归到「不渲染输入框」那一边也不会变红。
+    const POL_MODES = [null, 'default', 'custom', 'both']
     const POL_TEXTS = [null, '', '   ', 'G']
     const LAYER_TEXTS = ['', 'P']
     const CASES = []
     for (const pm of POL_MODES) {
       for (const pt of POL_TEXTS) {
         const pol = polOf({ denyReasonMode: pm, denyReason: pt })
-        // 全局层实际会发的那句：只有 mode=custom 且文本非空才发，否则回落默认文案。
-        const globalHost = pm === 'custom' && typeof pt === 'string' && pt.trim() ? pt : ''
-        for (const lm of ['inherit', 'default', 'custom']) {
-          // text 只在 custom 下渲染输入框，另外两个值不显示它，喂 '' 即可。
-          for (const lt of (lm === 'custom' ? LAYER_TEXTS : [''])) {
-            // 项目层：本层 custom 且留空才穿透全局；显式 default 就是「不要那句」。
-            const host = lm === 'custom' ? (lt.trim() ? lt : globalHost)
-              : (lm === 'inherit' ? globalHost : '')
-            CASES.push([pol, lm, lt, true, host])
+        // 项目层 tab：本层 mode 由项目块的回填决定，四个值都可达（inherit 之外的三个
+        // 生效档位都来自宿主下发的 denyReasonModes）。
+        for (const lm of ['inherit', 'default', 'custom', 'both']) {
+          // text 只在 custom / both 下渲染输入框，另外两个值不显示它，喂 '' 即可。
+          for (const lt of (lm === 'custom' || lm === 'both' ? LAYER_TEXTS : [''])) {
+            const layer = lm === 'inherit' ? null
+              : { denyReasonMode: lm, denyReason: (lm === 'custom' || lm === 'both') && lt.trim() ? lt : undefined }
+            CASES.push([pol, lm, lt, true, layer, pm + '/' + pt + '/项目/' + lm + '/' + JSON.stringify(lt)])
           }
         }
-        // 全局层 tab：mode 由 5410 回填（custom 保持，缺键用默认），文本是**本层输入框**
-        // 的内容 —— 用户清空后它可以是空串，与 pol.denyReason 不必然相等。
-        // 故这里也要遍历 LAYER_TEXTS：只按 pol 的文本生成，就把
-        // 「withInherit=false 且本层留空」这个组合排除在外，而它正是唯一能区分
-        // 「判据里有没有 withInherit」的形态（全局层没有可继承的对象）。
-        //
-        // 期望值是 ''：全局层 tab 不穿透，留空就发默认文案 —— 与 denyReasonTextOf
-        // 在「项目层没写文本」时取全局那句是两回事，面板这一格说的是本层自己的设置。
+        // 全局层 tab：mode 由回填决定（`custom` / `both` 原样保持，缺键用默认），
+        // **不是**任意值 —— 回填式是 `pol.denyReasonMode || 默认 || 'default'`，
+        // 故 null 落成 'default'。喂其它组合的输入框根本不渲染（shown=false），测不到东西。
         for (const lt of LAYER_TEXTS) {
-          CASES.push([pol, pm === 'custom' ? 'custom' : 'default', lt, false, ''])
+          const gm = pm === 'custom' || pm === 'both' ? pm : 'default'
+          CASES.push([pol, gm, lt, false, null, pm + '/' + pt + '/全局/' + JSON.stringify(lt)])
         }
       }
     }
     // 全局那句含 replace 替换模式：必须原样显示（字符串形态的 replace 会展开）
-    CASES.push([polOf({ denyReasonMode: 'custom', denyReason: 'a$&b$`c$$d' }), 'custom', '', true, 'a$&b$`c$$d'])
-    for (const c of CASES) { if (!check(c[0], c[1], c[2], c[3], c[4])) return false }
-    return true
-  })())
+    CASES.push([polOf({ denyReasonMode: 'custom', denyReason: 'a$&b$`c$$d' }), 'custom', '', true, null, 'DOLLAR'])
+    for (const c of CASES) {
+      const r = check(c[0], c[1], c[2], c[3], c[4], c[5])
+      if (r) return r + '（共 ' + CASES.length + ' 组用例）'
+    }
+    return null
+  })()
+  ok('★★ 项目层穿透全局时面板说明沿用的是哪句，且用户文本不被 replace 展开',
+    denyReasonPanelVerdict === null,
+    denyReasonPanelVerdict || undefined)
   // ⑨b 推理等级 pane 分两组：通用（四个相对档）恒在，指定（模型公布的档位）随后
   //
   // 判据走真实求值：把 ModelEffortPicker 的档位 pane 构造段抽出来跑，断言两组的
@@ -4651,8 +4710,12 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //
   // 判据走**真实求值**：把 numInput 的 onBlur 抽出来，用真实实现跑一批输入，
   // 看它是否提交、提交了什么。只匹配源码里的正则无法区分「正则写对」与「正则写反」。
+  //
+  // 两套单位各跑一遍：`scale` 未传（显示值 = 存储值，整数语义）与 `scale: 1000`
+  // （面板填秒、存储毫秒）。两条路径的取整方式**不同**，只测一条会让另一条的
+  // 静默改值溜过去：秒那条若沿用 floor，`0.29 秒` 会落成 289 毫秒。
   ok('★★ auto 设置的数字框只接受纯十进制（0x10 / 0b11 / 1e3 不得被静默改值）', (function () {
-    const i = cli.indexOf('const numInput = (key, width, unit) => {')
+    const i = cli.indexOf('const numInput = (key, width, unit, scale) => {')
     if (i < 0) return false
     let d = 0
     let body = ''
@@ -4677,39 +4740,117 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
         { createElement: (tag, props, ...kids) => ({ tag, props: props || {}, kids: kids }) })
     } catch (e) { return false }
     if (typeof f !== 'function') return false
-    const el = f('timeoutMs', 90, 'ms')
-    // numInput 有单位时会包一层 span（children = [input, 单位标签]），无单位时直接是 input
-    const input = el && el.tag === 'span' && el.kids ? el.kids[0] : el
-    if (!input || !input.props || typeof input.props.onBlur !== 'function') return false
-    const fire = (text) => {
+    const mount = (scale) => {
       submitted.length = 0
-      const ev = { target: { value: text } }
-      input.props.onBlur(ev)
-      return { n: submitted.length, v: submitted.length ? submitted[0][1] : undefined, restored: ev.target.value }
+      const el = f('timeoutMs', 90, 'ms', scale)
+      // numInput 有单位时会包一层 span（children = [input, 单位标签]），无单位时直接是 input
+      const input = el && el.tag === 'span' && el.kids ? el.kids[0] : el
+      if (!input || !input.props || typeof input.props.onBlur !== 'function') return null
+      const fire = (text) => {
+        submitted.length = 0
+        const ev = { target: { value: text } }
+        input.props.onBlur(ev)
+        return { n: submitted.length, v: submitted.length ? submitted[0][1] : undefined, restored: ev.target.value }
+      }
+      return { input, fire }
     }
-    // ① 宽松语法一律拒绝（不提交），且把框里的文本归位成生效值
+
+    // ── ① 无 scale：显示值 = 存储值（既有语义，不得被本次改动带坏）──────────────
+    const plain = mount(undefined)
+    if (!plain) return false
+    // 显示值就是存储值：20000 原样显示，不是 20
+    if (plain.input.props.defaultValue !== '20000') return false
+    // 宽松语法一律拒绝（不提交），且把框里的文本归位成生效值
     for (const bad of ['0x10', '0b11', '0o17', '1e3', '1E3', '-5', '+3', '.5', '1.', '  0x10  ', 'abc']) {
-      const r = fire(bad)
+      const r = plain.fire(bad)
       if (r.n !== 0 || r.restored !== '20000') return false
     }
-    // ② 合法十进制照常提交（对照：不能靠「一律拒绝」通过 ①）
-    const okPlain = fire('5000')
+    // 合法十进制照常提交（对照：不能靠「一律拒绝」通过上面那条）
+    const okPlain = plain.fire('5000')
     if (okPlain.n !== 1 || okPlain.v !== 5000) return false
-    // ③ 小数被 floor（这是既有语义，改动不得顺手丢掉）
-    const okFrac = fire('5000.9')
+    // 小数被 floor（这是既有语义，改动不得顺手丢掉）
+    const okFrac = plain.fire('5000.9')
     if (okFrac.n !== 1 || okFrac.v !== 5000) return false
-    // ④ 0 < n < 1 仍拒绝（floor 成 0 是「禁用」语义，不是用户想要的）
-    const zeroish = fire('0.5')
-    if (zeroish.n !== 0) return false
-    // ⑤ 清空仍是唯一的 clear 入口
-    const cleared = fire('')
+    // 0 < n < 1 仍拒绝（floor 成 0 是「禁用」语义，不是用户想要的）
+    if (plain.fire('0.5').n !== 0) return false
+    // 清空仍是唯一的 clear 入口
+    const cleared = plain.fire('')
     if (cleared.n !== 1 || cleared.v !== null) return false
-    // ⑥ 超范围不提交（值域来自宿主下发的 ranges，不写死）
-    const over = fire('99999999999')
-    if (over.n !== 0) return false
-    // ⑦ 生效值没变就不写盘（只是聚焦再离开不该把默认值物化）
-    const same = fire('20000')
-    return same.n === 0
+    // 超范围不提交（值域来自宿主下发的 ranges，不写死）
+    if (plain.fire('99999999999').n !== 0) return false
+    // 生效值没变就不写盘（只是聚焦再离开不该把默认值物化）
+    if (plain.fire('20000').n !== 0) return false
+
+    // ── ② scale: 1000（面板填秒、存储毫秒）─────────────────────────────────────
+    const sec = mount(1000)
+    if (!sec) return false
+    // 存储 20000ms 显示成 20 秒，而不是 20000
+    if (sec.input.props.defaultValue !== '20') return false
+    // placeholder 也要按显示单位（清空后用户看到的是「会回到 20」而不是 20000）
+    if (sec.input.props.placeholder !== '20') return false
+    // 宽松语法同样拒绝，归位文本也是**显示单位**的
+    for (const bad of ['0x10', '1e3', '-5', '+3', '.5', '1.', 'abc']) {
+      const r = sec.fire(bad)
+      if (r.n !== 0 || r.restored !== '20') return false
+    }
+    // 整秒换算
+    const s5 = sec.fire('5')
+    if (s5.n !== 1 || s5.v !== 5000) return false
+    // 小数秒换算**必须四舍五入**，不能 floor。
+    //
+    // 用例取 1.001 而不是随便一个三位小数：二进制浮点下 `1.001 * 1000` 是
+    // 1000.9999999999999，floor 落成 1000（比用户填的少 1 毫秒，且与面板显示的
+    // 1.001 分叉），round 才是 1001。0.001~5.000 的三位小数里有 48 个这种分歧点，
+    // 随便挑一个（如 0.29、0.5）两边结果相同，测不出取整方式。
+    const s1001 = sec.fire('1.001')
+    if (s1001.n !== 1 || s1001.v !== 1001) return false
+    // 0.001 秒 = 1 毫秒，不该被「落成 0 就拒绝」误伤
+    const s001 = sec.fire('0.001')
+    if (s001.n !== 1 || s001.v !== 1) return false
+    // 0 秒仍是合法值（「不弹窗」语义），必须能提交
+    const s0 = sec.fire('0')
+    if (s0.n !== 1 || s0.v !== 0) return false
+    // 生效值没变就不写盘：20 秒 = 当前 20000ms
+    if (sec.fire('20').n !== 0) return false
+    // 手改出来的非整秒值必须能**原样往返**：2500ms 显示 2.5，用户点一下再离开
+    // 不产生写入。若显示时取整（2），那一次无意图的失焦就会提交 2000 —— 静默改值。
+    //
+    // 必须用 2500 而不是默认的 20000 构造：20000 是整秒，取整与否显示都是 20，
+    // 测不出显示侧有没有取整。
+    const halfSubmitted = []
+    const f2 = new Function('eff', 'explicit', 'dflt', 'ranges', 'setField', 'setNotice', 'T', 'busy', 'React',
+      body + '\n; return numInput;')(
+      { timeoutMs: 2500 }, ['timeoutMs'], { timeoutMs: 20000 }, { timeoutMs: { min: 0, max: 2147483647 } },
+      (k, v) => halfSubmitted.push([k, v]),
+      () => {},
+      (k) => k,
+      false,
+      { createElement: (tag, props, ...kids) => ({ tag, props: props || {}, kids: kids }) })
+    const el2 = f2('timeoutMs', 90, 'ms', 1000)
+    const inp2 = el2 && el2.tag === 'span' && el2.kids ? el2.kids[0] : el2
+    if (!inp2 || !inp2.props) return false
+    // 显示 2.5，不是 2 或 3
+    if (inp2.props.defaultValue !== '2.5') return false
+    // 原样提交 2.5 不写盘（生效值仍是 2500）
+    const ev2 = { target: { value: '2.5' } }
+    inp2.props.onBlur(ev2)
+    if (halfSubmitted.length !== 0) return false
+    // 提交 3 秒才写 3000
+    const ev3 = { target: { value: '3' } }
+    inp2.props.onBlur(ev3)
+    if (halfSubmitted.length !== 1 || halfSubmitted[0][1] !== 3000) return false
+
+    // ── ③ 调用点必须把 scale 传进去 ────────────────────────────────────────────
+    // 上面的用例直接调 `numInput(..., 1000)`，测的是**函数本身**对不对。调用点漏传
+    // scale 时函数会退化成「显示值 = 存储值」—— 面板把 20000 毫秒标成「20000 秒」，
+    // 而上面那些用例一条都不会红（它们自己传了 1000）。故必须单独钉调用点。
+    //
+    // 判据取「timeoutMs 那一行同时带秒单位与 1000」，而不是裸的 `1000`：
+    // 那个数字必须与单位标签成对出现，缺一个就是面板说谎。
+    if (!/numInput\('timeoutMs',\s*\d+,\s*T\('panel\.autoSecUnit'\),\s*1000\)/.test(cli)) return false
+    // 反向：不得再有把 timeoutMs 标成毫秒的调用点残留
+    if (/numInput\('timeoutMs'[^)]*panel\.autoMsUnit/.test(cli)) return false
+    return true
   })())
   // ⑥ auto 是独立的第三个 tab，且它**完全挡掉**其余设置卡片。
   //
@@ -7450,9 +7591,12 @@ group('3b. 命令判定：段级例外的单一来源与顺序（计划 §6.3）
   //   ② 判据必须带 `d.action === 'auto'` —— 无条件替换会把分类 / 例外 / 工作区外
   //      等拒绝的结论整句抹掉，而它们带路径与命中的规则，是模型唯一的下一步线索。
   // 故钉的是**正向形态本身**，不是它的反面。
+  //
+  // 出口内部拼了什么（自定义文案 / 模型原话 / 分段摘要）不在这里钉：那是行为，
+  // 由 smoke A57 端到端覆盖。在这里再加一串正则只会让换写法但行为正确的实现变红。
   ok('★★ 自动审批的直接拒绝走 denialTextFor 唯一出口（denyReasonMode 才能生效）',
     /function denialTextFor\(d, root\) \{/.test(src)
-    && /denyReasonModeOf\(root\) !== 'custom'/.test(src)
+    && /denyReasonModeOf\(root\)/.test(src)
     && /d\.action === 'auto'\s*\n?\s*\?\s*denialTextFor\(d2, rootOf\(exec\)\)/.test(src))
   // ★ 判据真值表**复算**（不只是匹配源码字符串）：从 client.js 抽出 MODE_RANK 与比较式，
   // 用真实的三态组合验证「何时该提示」。字符串断言挡不住方向写反 —— 实测踩过一次

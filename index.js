@@ -1730,11 +1730,14 @@ export default {
     const POLICY_MODES = ['append', 'replace']
     // 拒绝时回给模型的那句话由谁决定（取值函数见 denyReasonModeOf / denyReasonTextOf）。
     //
-    // 两档而不是三档：这里没有「不告诉模型」这一档 —— 拒绝时必须给模型一句理由，
-    // 否则它无从知道该改什么，只能原样重试。差别只在「说真话」还是「说你写的那句」。
+    // 三档：模型自己给的原因 / 用户写的那句 / 两者都发。
+    //   · `default` —— 只用判定自己的结论（分类 + 谁拍的板 + 模型原话）；
+    //   · `custom`  —— 整句换成用户写的，**不带**模型原话；
+    //   · `both`    —— 用户写的在前，模型原话在后。
+    // 「不告诉模型」这一档不存在：拒绝时必须给模型一句理由，否则它无从知道该改什么。
     //
     // `'inherit'` 同样不在表里（项目层的继承标记，不是生效值），与 HIGH_RISK_ACTIONS 同一条判据。
-    const DENY_REASON_MODES = ['default', 'custom']
+    const DENY_REASON_MODES = ['default', 'custom', 'both']
     // 自定义原因的长度上限。与 /permgate/decide 的 `customReason`（同样 slice(0, 500)）
     // 同口径：两者都是「用户写的一句话，回给模型」，一句话没有写 500 字以上的正当理由。
     // 超出**拒绝保存**而不是截断 —— 截断后模型收到的是一句断掉的话，而面板显示的是完整的，
@@ -5679,20 +5682,39 @@ export default {
     //
     // ⚠️ 与 AUTO_REVIEW_DEFAULTS 里的 `denyReason: ''` 不同：那个是**配置默认值**
     // （空串 = 没有自定义），这里是**配置为空时实际发出去的文本**。
+    //
+    // 三句都用**第三人称**指代用户（「用户设置」而不是「你的设置」）：同一份文本既
+    // 显示在面板上（读者是用户本人），也发给评审模型（读者是模型）。第二人称在两边
+    // 指的不是同一个人 —— 模型读到「你的设置」会以为是它自己的设置。
     const DENY_REASON_DEFAULT_TEXT = {
       // 模型自己判定拒绝
       deny: bi('自动审批：模型拒绝', 'Auto review: denied by model'),
       // 模型判定高风险却给出放行，被 highRiskAction 拦下
-      denyHigh: bi('自动审批：模型判定高风险并放行，按你的设置拒绝', 'Auto review: model rated this high risk and allowed it; denied by your setting'),
+      denyHigh: bi('自动审批：模型判定高风险并放行，用户设置要求拒绝', 'Auto review: model rated this high risk and allowed it; denied by user setting'),
       // 评审失败（无 llm / 超时 / 协议非法 / 熔断）+ 回落值 deny + 等待时限 0
-      fallback: bi('自动审批未能给出结论，按你的设置直接拒绝', 'Auto review could not decide; denied by your fallback setting'),
+      fallback: bi('自动审批未能给出结论，按用户设置直接拒绝', 'Auto review could not decide; denied by user fallback setting'),
     }
 
     // 拒绝时回给模型的那句话。
     //
-    // 自定义原因替换的是**结论那一句**，分段摘要保留 —— 摘要回答「哪一段、哪一档被拦」，
-    // 与「为什么拒绝」是两个问题：只给后者时，一条多段命令（`git add .; rm -rf /`）
-    // 被拒后模型不知道是哪一段触发的，容易整条重试，或在无关的段上反复调整。
+    // 两个来源拼成：**结论句**与**分段摘要**。
+    //
+    // 结论句就是 `d.reason` —— pre-execute 在 auto 的拒绝出口用 `denyReason` 把它拼成
+    // 「用户配置的拒绝理由；谁拍的板」。两句都要：前者回答「为什么这么配」，后者回答
+    // 「模型自己拒 / 模型放行被设置推翻 / 评审失败按设置拒」。这里若另选一句固定文案当
+    // 结论，用户填的那段就被整段顶掉 —— 而面板在最终动作是拒绝时渲染了那个理由框。
+    //
+    // 模型原话（`rv.reason`，模型自己写的那句）在 `default` / `both` 下附在结论句后面：
+    // 只给结论时，模型看到的是复述自己结论的机械文案，看不到自己刚写下的理由，
+    // 也就无从判断该改哪。
+    //
+    // 分段摘要单独一层：一条多段命令（`git add .; rm -rf /`）被拒后，模型需要知道
+    // 是哪一段触发的，否则容易整条重试，或在无关的段上反复调整。
+    //
+    // ── `custom` 档**恒不**拼模型原话 ─────────────────────────────────────────
+    // 用户选这一档就是要模型看不到自己的理由（面板的说明写着「免得它顺着理由换个方式
+    // 绕过去」）。文本留空只是「不自定义措辞」—— 退回默认结论句，不改变这一档的语义，
+    // 故同样不拼。分段摘要仍照旧：那是**位置信息**（哪一段），不是措辞，替换不掉。
     //
     // 不改 `d.reason`：那个字段同时供决策记录（recordDecision / appendDecisionLog）与
     // 弹窗使用，而本设置只管**回给模型的这句**。就地改写会让面板与日志里也变成用户
@@ -5701,14 +5723,62 @@ export default {
     // 三层取值全走 denyReasonModeOf / denyReasonTextOf（不在这里复算继承链）：
     // 面板显示与裁决必须同源，两份继承链必然漂移。
     function denialTextFor(d, root) {
-      if (denyReasonModeOf(root) !== 'custom') return L(segmentSummary(d), uiLang)
-      const custom = denyReasonTextOf(root)
-      // mode 是 custom 但文本为空（项目层切了 custom、全局也没写）：留空 = 用默认文案。
-      // 这与面板提示一致，也避免发出去一条空理由 —— 那会让模型收到一个空的拒绝原因。
-      if (!custom) return L(segmentSummary(d), uiLang)
-      // 自定义文案两种语言都用同一份：用户写什么就发什么，不跟界面语言走。
-      // 面板只有一个输入框，替用户按语言分叉等于替他改写了原文。
-      return L(segmentSummary(d, bi(custom, custom)), uiLang)
+      const mode = denyReasonModeOf(root)
+      const custom = mode === 'custom' || mode === 'both' ? denyReasonTextOf(root) : ''
+      // 结论句取 `d.reason`：pre-execute 的 `denyReason` 已经把「用户配置的拒绝理由」
+      // 与「谁拍的板」拼好。另选一句固定文案当结论会把用户理由整段顶掉，而面板在
+      // 最终动作是拒绝时渲染了那个理由框（见上方说明）。
+      // 缺失时（理论上只有非 auto 的补记路径）按 via 回退到对应的默认句。
+      const base = (d && d.reason) || (d && d.via === 'auto-deny-high' ? DENY_REASON_DEFAULT_TEXT.denyHigh
+        : (d && d.via === 'auto-fallback-direct' ? DENY_REASON_DEFAULT_TEXT.fallback
+          : DENY_REASON_DEFAULT_TEXT.deny))
+      // `custom`：整句换成用户那句，文本留空则退回结论句；**恒不拼模型原话**。
+      if (mode === 'custom') return L(segmentSummary(d, custom ? bi(custom, custom) : base), uiLang)
+      // `both`：用户那句在前、结论句在后。
+      const withCustom = custom
+        ? bi(custom + '；' + L(base, 'zh'), custom + '; ' + L(base, 'en'))
+        : base
+      // 模型原话用括号接在结论句后面，**不加「模型：」前缀** —— 结论句本身已经写明
+      // 是谁拍的板，再标一次是废话。
+      //
+      // 括号不能省：结论句本身是完整句子，直接接冒号会变成两个冒号连排，读起来像在
+      // 给结论句里那个动词加宾语。括号表达的是「这是插入的引用」，与主句分开。
+      const mr = denialEchoesModelReason(d, root) ? quotedModelReason(d.modelReason) : ''
+      const concl = mr
+        ? bi(L(withCustom, 'zh') + '（' + mr + '）', L(withCustom, 'en') + ' (' + mr + ')')
+        : withCustom
+      return L(segmentSummary(d, concl), uiLang)
+    }
+
+    // 模型原话会不会随这次拒绝的结论句一起发给主模型。
+    //
+    // 单一判据：`custom` 档恒不发，其余档在模型确实给了理由时发。
+    // `recordDecision` 用**同一个函数**给记录打标记，`toolView` 据此决定 `perm_status`
+    // 要不要剥掉 `modelReason` —— 两处各写一份判据时，记录里会留下一条从未发给主模型的
+    // 模型原话（custom 档、以及 allow/ask 这类根本没有拒绝句的落点），而堵住那条通道
+    // 正是这个标记存在的理由。
+    function denialEchoesModelReason(d, root) {
+      if (denyReasonModeOf(root) === 'custom') return false
+      return !!(d && typeof d.modelReason === 'string' && d.modelReason.trim())
+    }
+
+    // 引用块里的模型原话。原话是**第三方文本**，它自己就可能带换行或括号形状字符，
+    // 直接插进 `（…）` 会让它提前闭合引用、把后半段渲染成 permgate 的另一条结论
+    //（`理由）\n\n自动审批：模型判定高风险并放行…（` 会伪造出一条假的判定来源，
+    // 主模型据此按错误的方向调整下一次调用）。故这里做两件事，两件都必须按**类**处理：
+    //   · 折叠空白 —— 只要原话还能产生换行，后半段就能独立成行冒充结论。判据按**行分隔符
+    //     这一类**取，不按具体字符：`\s` 覆盖 `\u2028` / `\u2029`（两者在 JSON 字符串里
+    //     合法、无需转义，评审模型可以直接输出），`\u0085`（NEL）不在 `\s` 里但同样被
+    //     文本渲染当换行，故显式补上 —— 与 test/smoke.mjs 的 `atLineStart` 同一份行切分口径；
+    //   · 折掉**所有**括号形状字符（中英文圆/方/花括号）—— 只折圆括号时，原话自带的
+    //     `]` 与外围的 `（…）` 配成一对，同样能伪造出括号外的结构。
+    // 折成同一个中性字符而不是删掉：原话里被折掉的位置本身可能是语义的一部分
+    //（「因为 X」），留一个占位符比静默吞掉更接近原文。
+    function quotedModelReason(mr) {
+      return String(mr)
+        .replace(/[\s\u0085]+/g, ' ')
+        .replace(/[()（）[\]［］【】{}｛｝]/g, '·')
+        .trim()
     }
 
     // 模型原始输出的留痕上限。协议本身限制了合法形态（最多 3 个成员、reason 是字符串），
@@ -5766,7 +5836,16 @@ export default {
       //
       // 只在有值时写入，不给普通决策记录塞一堆 null 字段（那会让每条记录都变宽）。
       if (d.via) rec.via = String(d.via)
-      if (d.modelReason) rec.modelReason = String(d.modelReason).slice(0, REVIEW_REASON_MAX)
+      if (d.modelReason) {
+        rec.modelReason = String(d.modelReason).slice(0, REVIEW_REASON_MAX)
+        // ── 这句话到底有没有随拒绝句发出去，必须按**记录**标记 ────────────────────
+        // `toolView` 据此决定 `perm_status` 要不要剥掉它。不标记、按字段一刀切时，
+        // 两条路径上的模型原话会经 perm_status 原样回到主模型上下文：
+        //   · `custom` 档 —— 用户选这一档就是为了让模型看不到自己的理由；
+        //   · allow / ask 落点 —— 那些路径根本没有拒绝句，原话只该留在面板与审计里。
+        // 判据与 `denialTextFor` 共用 `denialEchoesModelReason`，两处不会漂移。
+        if (d.action === 'deny' && denialEchoesModelReason(d, rootOf(exec))) rec.modelReasonSent = true
+      }
       if (d.fallbackReason) rec.fallbackReason = String(d.fallbackReason)
       if (typeof d.rawOutput === 'string' && d.rawOutput) {
         rec.rawOutput = d.rawOutput.length > RAW_OUTPUT_MAX
@@ -5949,6 +6028,9 @@ export default {
     // 记录白做一次 L() 投影。不传 limit = 全量（展开通道用）。
     function projectDecisions(lang, limit) {
       const list = typeof limit === 'number' ? decisions.slice(-limit) : decisions
+      // `modelReasonSent` 是 `toolView` 的剥离判据（见其说明），随记录一起投影：
+      // 它必须活到工具出口才能判「这条记录的模型原话有没有发出去过」，而 `toolView`
+      // 拿到的正是投影后的列表。面板不读它，由 `toolView` 删掉。
       return list.map((d) => Object.assign({}, d, { reason: L(d.reason, lang) }))
     }
 
@@ -6478,9 +6560,8 @@ export default {
     ].join('\n')
 
     // ── 理由语言：策略恒为英文，只有 `reason` 跟界面语言走 ──────────────────────
-    // `reason` 的全部消费点都是**给人看**的界面（决策记录的会话行与轨迹行、
-    // 审批弹窗的 `modelReason`），它从不回传主模型 —— `toolView` 会把它剥掉。
-    // 故它跟界面语言走，而不是跟策略语言走。
+    // `reason` 的消费点都是**给人看**的界面（决策记录的会话行与轨迹行、审批弹窗的
+    // `modelReason`），故它跟界面语言走，而不是跟策略语言走。
     //
     // 只**追加一句**、不改主策略，两条理由：
     //   ① `REVIEW_POLICY` 的英文措辞有实测基线（见 test/smoke.mjs 的 A49 组），
@@ -6737,10 +6818,10 @@ export default {
       const needsReason = (risk === 'high' && decision === 'allow') || (risk === 'low' && decision === 'deny')
       // ── 为什么 allow 也收 reason ──────────────────────────────────────────
       // 旧实现把「allow + reason」判为协议错，理由是「模型想通过理由影响主模型，是注入通道」。
-      // 但 `reason` 只进 `rec.modelReason`（决策记录 + 面板），从不回传给主模型 ——
-      // 主模型只收到 permgate 自己生成的 bi() 文案。这道防线拦下的不是注入，而是
-      // 「模型顺手解释了一句」：模型在明确授权场景下常返回 allow + reason，
-      // 被判协议错后走 autoFallback 弹窗，在最该自动放行的场景里退回人工。
+      // 但放行路径没有拒绝句，`reason` 只进 `rec.modelReason`（决策记录 + 面板），
+      // 工具侧由 `toolView` 剥掉 —— 主模型只收到 permgate 自己生成的 bi() 文案。
+      // 这道防线拦下的不是注入，而是「模型顺手解释了一句」：模型在明确授权场景下常返回
+      // allow + reason，被判协议错后走 autoFallback 弹窗，在最该自动放行的场景里退回人工。
       if (hasReason && typeof obj.reason !== 'string') return { ok: false, code: 'protocol-error', detail: 'reason not a string' }
       // reason 过长**截断而不丢弃**：因为解释太长而丢掉一个决定性的 DENY，
       // 会把 DENY 变成回落动作，方向错误（§4.6）。
@@ -8343,10 +8424,13 @@ export default {
     }
     // 生效的自定义文案；**空串 = 用默认文案**。
     //
-    // 每一层的文本都**只在该层 mode 是 custom 时**才取用，两层各判各的：
-    //   · 项目层 mode=custom 且缺文本 → 穿透全局（「本项目沿用全局那句话，只是改成了
-    //     custom」是合理配置）；
+    // 每一层的文本都**只在该层 mode 会用到文本时**才取用，两层各判各的：
+    //   · 项目层写了自定义文本且缺 mode 生效值 → 穿透全局（「本项目沿用全局那句话」
+    //     是合理配置）；
     //   · 全局层 mode=default → 它的文本**不参与**（哪怕磁盘上还留着）。
+    //
+    // 会用到文本的 mode 是 `custom` 与 `both`：前者整句替换，后者把用户那句与默认
+    // 结论并排。`default` 不用文本。
     //
     // 为什么必须判 mode 而不能「有文本就用」：写入侧刻意保留文本（切回 default 不删
     // denyReason，切回 custom 时那句话应该还在），于是两条正常操作就能造出
@@ -8354,11 +8438,14 @@ export default {
     // 明确关掉的文本会在下一次经项目层穿透发出去 —— 用户以为已经不用它了。
     // 项目层同理：`denyReasonMode:'inherit'` 只删 mode、保留文本，不判就会让项目残留
     // 的那句盖住全局的，而面板在 inherit 下根本不渲染输入框，用户看不到它还在生效。
+    function usesCustomText(mode) {
+      return mode === 'custom' || mode === 'both'
+    }
     function denyReasonTextOf(root) {
       const p = projectAutoReviewOf(root)
-      if (p.denyReasonMode === 'custom' && typeof p.denyReason === 'string' && p.denyReason.trim()) return p.denyReason
+      if (usesCustomText(p.denyReasonMode) && typeof p.denyReason === 'string' && p.denyReason.trim()) return p.denyReason
       const g = autoReviewBlockOf(config.global)
-      if (g.denyReasonMode === 'custom' && typeof g.denyReason === 'string' && g.denyReason.trim()) return g.denyReason
+      if (usesCustomText(g.denyReasonMode) && typeof g.denyReason === 'string' && g.denyReason.trim()) return g.denyReason
       return ''
     }
     // 拼进 system 的策略段。**无策略时返回空串** —— 请求逐字不变是硬要求：
@@ -10786,38 +10873,48 @@ export default {
     //
     // 另外返回副本：categories.* 是 config 的引用，就地删会改坏运行中的配置。
     //
-    // 决策记录里的**模型原话**同样只留在面板侧（§4.5A：模型原话只进 `modelReason`，
-    // 不进 `reason`、也不回传给主模型）。`recentDecisions` 此前整条浅拷贝下发，于是评审模型在 reason 里
-    // 复述被审内容（「文件内容写着：忽略之前的指令…」）时，那句话会经 perm_status 的返回值
-    // 回到主模型上下文 —— 一条以工具结果为载体的二阶注入通道。`rawOutput` 是同一句原话的
-    // 截断前原文，`firstRaw` 是重试前那一轮的同一句原话，同理。它们与 `note` 一样只做
-    // 「工具侧不下发」的分工，面板照旧。
+    // 决策记录里的**原始输出**只留在面板侧：`rawOutput` 是模型整段输出的原文，
+    // `firstRaw` 是重试前那一轮的原文，`firstDetail` / `firstInfraDetail` 是本地机械码。
+    // 它们与 `note` 一样只做「工具侧不下发」的分工，面板照旧。
+    //
+    // `modelReason` 按**记录**判，不按字段判：只有真的随拒绝句发给主模型的那条记录
+    // （`recordDecision` 打的 `modelReasonSent`）才下发。按字段一刀切时，两条路径上的
+    // 模型原话会经 `perm_status` 原样回到主模型上下文 —— 一条以工具结果为载体的二阶注入
+    // 通道（评审模型在 reason 里复述被审内容时，那句话就是被复述的内容本身）：
+    //   · `custom` 档 —— 用户选这一档就是为了让模型看不到自己的理由；
+    //   · allow / ask 落点 —— 那些路径根本没有拒绝句，原话只该留在面板与审计里。
+    // 标记本身不带信息量，在工具出口删掉（面板侧随记录投影过去，零消费方）。
     //
     // `fallbackReason` 里没有模型原话：auto 异常路径把它写成
     // `why = (rv.code || 'infra-error') + ': ' + rv.detail`，而 escalate 的 `detail` 已固定为
     // `model escalated`（原话只走 `modelReason`），其余 `detail` 是本地机械码/异常消息。
-    // `firstDetail` 同样是 parseReviewDecision 产出的本地机械码。两者在本仓
-    // **没有任何工具侧消费方**（client.js 零引用），剥掉零影响；
+    // 两者在本仓**没有任何工具侧消费方**（client.js 零引用），剥掉零影响；
     // 弹窗排障靠 `note`（「原因：<why>」）照旧。
     //
     // ⚠️ `statusView.fallback.globalReason` / `projectReason` 是**配置侧用户自己写的**
     // 拒绝理由，不是模型原话，也不经这里 —— 不要一起删。
     //
-    // 清单只写这一份，判据与删除都从它派生：两处各写一遍字面量时，新增一个模型原话字段
+    // 清单只写这一份，判据与删除都从它派生：两处各写一遍字面量时，新增一个字段
     // 只补其中一处就会漏判，含该字段的记录会原样进入 perm_status 的返回值。
-    const PANEL_ONLY_DECISION_FIELDS = ['modelReason', 'rawOutput', 'firstRaw', 'fallbackReason', 'firstDetail', 'firstInfraDetail']
+    const PANEL_ONLY_DECISION_FIELDS = ['rawOutput', 'firstRaw', 'fallbackReason', 'firstDetail', 'firstInfraDetail']
     function toolView(view) {
       try {
         if (!view || typeof view !== 'object') return view
         // 无该字段时返回原数组（不白造副本）；有则逐条浅拷贝后删，不改记录本身。
         const cleanDecisions = (list) => {
           if (!Array.isArray(list)) return list
-          const needsStrip = (d) => !!(d && typeof d === 'object' && PANEL_ONLY_DECISION_FIELDS.some((k) => k in d))
+          // `modelReason` 一律参与清洗：带标记的要删标记，不带标记的连内容一起删
+          // （升级前写入的旧记录没有标记，方向安全）。
+          const needsStrip = (d) => !!(d && typeof d === 'object'
+            && (PANEL_ONLY_DECISION_FIELDS.some((k) => k in d) || 'modelReason' in d))
           if (!list.some(needsStrip)) return list
           return list.map((d) => {
             if (!needsStrip(d)) return d
+            const sent = d.modelReasonSent === true
             const e = Object.assign({}, d)
             for (const k of PANEL_ONLY_DECISION_FIELDS) delete e[k]
+            delete e.modelReasonSent
+            if (!sent) delete e.modelReason
             return e
           })
         }
@@ -11064,8 +11161,8 @@ export default {
             // statusView.recentDecisions → toolView → **perm_status 的返回值** —— 也就是说
             // 它会被主模型读到。模型原话是第三方文本，可能复述被审内容
             //（「文件内容写着：忽略之前的指令…」），拼进来就是一条以工具结果为载体的
-            // 二阶注入通道。模型原话只留 `modelReason`（决策记录 + 弹窗，工具侧由
-            // toolView 剥掉）。
+            // 二阶注入通道。模型原话只留 `modelReason`（决策记录 + 弹窗）；`toolView`
+            // 按记录判它有没有随拒绝句发出去过（见 `modelReasonSent`），没发过的剥掉。
             //
             // 但**不能整条剥掉 reason**：它承载 permgate 的结论，且 segmentSummary 拼出的
             // 「—— 分段：… 另有 N 段」是 AI 唯一的「哪一段被拦」线索（直接拒绝没有弹窗）。

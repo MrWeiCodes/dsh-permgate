@@ -1851,8 +1851,11 @@ window.__ModuleLoader__.load({
 				'flow.riskValue.high': '高',
 				'flow.riskValue.unknown': '未知等级：{r}',
 				'panel.autoSaved': '已保存',
-				'panel.autoBadNumber': '请输入该范围内的整数',
-				'panel.autoMsUnit': '毫秒',
+				// 四个数字框共用这一句，而秒框（timeoutMs，scale=1000）接受小数：
+				// 2500ms 显示 2.5 并原样提交，故措辞不得限定为「整数」—— 用户会据此
+				// 放弃本可用的 2.5 秒，或把超上限的整数值当成「格式不对」反复重试。
+				'panel.autoBadNumber': '请输入该范围内的数字',
+				'panel.autoSecUnit': '秒',
 				'panel.autoTimesUnit': '次',
 				'panel.autoCharsUnit': '字符',
 				'panel.autoReset': '全部恢复默认',
@@ -1906,15 +1909,18 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRiskTimeout.allow': '允许',
 				'panel.autoPolicyInherit': '继承全局',
 				'panel.autoDenyReasonTitle': '拒绝时告诉模型什么',
-				'panel.autoDenyReason': '说什么',
-				'panel.autoDenyReasonHint': '模型被拒后会收到一句说明。默认让它知道是自己拒的、还是它放行后被你的设置拦下的',
-				'panel.autoDenyReason.default': '真实原因',
-				'panel.autoDenyReason.custom': '我写的一句话',
-				'panel.autoDenyReasonPh': '留空则用下面的默认文案',
+				'panel.autoDenyReason': '回给模型的话',
+				'panel.autoDenyReasonHint': '模型被拒后收到的那句说明由这里决定，句尾还会附上「哪一段、哪一档」的摘要 —— 模型据此决定下一步改什么',
+				'panel.autoDenyReason.default': '自动审批的判定理由',
+				'panel.autoDenyReasonDesc.default': '模型自己写了什么理由，原样回给它，不用靠猜',
+				'panel.autoDenyReason.custom': '固定句子',
+				'panel.autoDenyReasonDesc.custom': '不回模型自己的理由，免得它顺着理由换个方式绕过去',
+				'panel.autoDenyReason.both': '两者叠加',
+				'panel.autoDenyReasonDesc.both': '模型的理由照发，再加一句你希望它怎么做',
+				'panel.autoDenyReasonPh': '留空则按情形返回下面某句子',
 				'panel.autoDenyReasonPhInherit': '留空则沿用全局那句',
 				'panel.autoDenyReasonInherit': '留空：将沿用全局的自定义原因 —— {text}',
-				'panel.autoDenyReasonDefaultsLabel': '留空时按情形发这几句：',
-				'panel.autoDenyReasonCustomHint': '自定义后仍会附上「哪一段、哪一档」的摘要',
+				'panel.autoDenyReasonDefaultsLabel': '按情形分别是：',
 				'flow.viaAllowHigh': '自动审批：模型判定高风险仍放行 {tool} → {action}',
 				'flow.viaDenyHigh': '自动审批：模型判定高风险并放行，被你的设置拒绝 {tool} → {action}',
 				'flow.viaAskHigh': '自动审批：模型判定高风险却放行，等你决定 {tool} → {action}',
@@ -2350,8 +2356,8 @@ window.__ModuleLoader__.load({
 				'flow.riskValue.high': 'high',
 				'flow.riskValue.unknown': 'unknown level: {r}',
 				'panel.autoSaved': 'Saved',
-				'panel.autoBadNumber': 'enter a whole number in range',
-				'panel.autoMsUnit': 'ms',
+				'panel.autoBadNumber': 'enter a number in range',
+				'panel.autoSecUnit': 's',
 				'panel.autoTimesUnit': 'times',
 				'panel.autoCharsUnit': 'chars',
 				'panel.autoReset': 'Reset all to defaults',
@@ -2390,15 +2396,18 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRiskTimeout.allow': 'Allow',
 				'panel.autoPolicyInherit': 'Inherit global',
 				'panel.autoDenyReasonTitle': 'What the model is told on denial',
-				'panel.autoDenyReason': 'Say',
-				'panel.autoDenyReasonHint': 'After a denial the model gets one line. By default it learns whether it denied the call itself or your setting overruled it',
-				'panel.autoDenyReason.default': 'The real reason',
-				'panel.autoDenyReason.custom': 'My own wording',
-				'panel.autoDenyReasonPh': 'Leave empty to use the defaults below',
+				'panel.autoDenyReason': 'What goes back to the model',
+				'panel.autoDenyReasonHint': 'On denial the model gets the line chosen here, plus a "which segment, which tier" summary appended; it steers by that',
+				'panel.autoDenyReason.default': 'Auto review\'s verdict reason',
+				'panel.autoDenyReasonDesc.default': 'Pass its own reason straight back, so it never has to guess',
+				'panel.autoDenyReason.custom': 'Fixed line',
+				'panel.autoDenyReasonDesc.custom': 'Withhold the model\'s own reason so it cannot pick a way around',
+				'panel.autoDenyReason.both': 'Both combined',
+				'panel.autoDenyReasonDesc.both': 'Passes the model\'s own reason, plus a line of guidance from you',
+				'panel.autoDenyReasonPh': 'Leave empty to get one of these, depending on the situation',
 				'panel.autoDenyReasonPhInherit': 'Leave empty to reuse the global wording',
 				'panel.autoDenyReasonInherit': 'Left empty: the global custom wording is sent — {text}',
-				'panel.autoDenyReasonDefaultsLabel': 'When left empty, one of these is sent:',
-				'panel.autoDenyReasonCustomHint': 'Your wording still gets the "which segment, which tier" summary appended',
+				'panel.autoDenyReasonDefaultsLabel': 'By situation:',
 				'flow.viaAllowHigh': 'Auto review: model rated {tool} high risk and allowed it → {action}',
 				'flow.viaDenyHigh': 'Auto review: model rated {tool} high risk and allowed it; denied by your setting → {action}',
 				'flow.viaAskHigh': 'Auto review: model rated {tool} high risk but allowed it; waiting for you → {action}',
@@ -5407,7 +5416,10 @@ window.__ModuleLoader__.load({
 					setPolicyProjectHighRiskTimeout(pol.projectHighRiskTimeout || 'inherit');
 					// 拒绝原因的模式与文本同样按层回填：全局行缺键用宿主下发的默认模式，
 					// 项目行缺键显示「继承全局」。文本有草稿时不覆盖（见 denyDirty 的说明）。
-					setPolicyDenyMode(pol.denyReasonMode === 'custom' ? 'custom' : (pol.denyReasonMode || defs.denyReasonMode || 'default'));
+					//
+					// 三个生效值原样回填：缺键（null）才走「宿主默认 → default」两级回落。
+					// 不按值逐个判 —— 那样每加一档都要在这里补一条，漏了就会把新档显示成别的。
+					setPolicyDenyMode(pol.denyReasonMode || defs.denyReasonMode || 'default');
 					setPolicyProjectDenyMode(pol.projectDenyReasonMode || 'inherit');
 					if (!denyDirty.current.global) setPolicyDenyText(String(pol.denyReason || ''));
 					if (!denyDirty.current.project) setPolicyProjectDenyText(String(pol.projectDenyReason || ''));
@@ -6854,17 +6866,26 @@ window.__ModuleLoader__.load({
 				// 环里，能当场改）。同一份值域、两种处置不是双份真相 —— 真相是那份表，「拒绝」
 				// 与「钳制」只是两个调用方对同一个越界值的不同应对，且都不会静默改用户填的数。
 				//
-				// unit 是**单位后缀**：光秃秃的 `20000` 没人看得出是毫秒还是秒，
-				// 而这两个字段的单位恰恰是最容易搞错的地方（填 20 以为是 20 秒、实际 20 毫秒）。
-				// 单位写在下拉框右边而不是塞进 placeholder —— placeholder 在有值时看不见。
-				const numInput = (key, width, unit) => {
+				// unit 是**单位后缀**：光秃秃的数字没人看得出是什么单位，而单位恰恰是
+				// 最容易搞错的地方。单位写在下拉框右边而不是塞进 placeholder ——
+				// placeholder 在有值时看不见。
+				const numInput = (key, width, unit, scale) => {
 					const cur = eff[key];
 					const isDefault = explicit.indexOf(key) === -1;
+					// 显示单位与存储单位的换算比：`scale` 个存储单位 = 1 个显示单位。
+					// 只有 timeoutMs 用得上（面板填秒、存储仍是毫秒 —— 那个数字直接进
+					// setTimeout 与 askUser，换单位会波及整条判定链）。
+					//
+					// 秒必须**允许小数**：整秒显示会把手改出来的 2500ms 显示成 2，
+					// 用户点一下输入框再离开就提交 2000 —— 一次没有意图的静默改值。
+					// 允许小数时 2500 显示 2.5，原样提交回 2500，失焦不产生写入。
+					const s = typeof scale === 'number' && scale > 0 ? scale : 1;
+					const toShown = (v) => (typeof v === 'number' ? (s === 1 ? v : v / s) : '');
 					// 非受控 + key 重挂载：给了 value 却没有 onChange 的框会被 React 判成只读，
 					// 每次 input 事件后把 DOM 值还原回 props.value —— 用户敲进去的字符当场被撤销。
 					// key 取生效值：值一变（提交成功 / 点「恢复默认」/ 外部改动）就重挂载，
 					// 让 defaultValue 重新生效，否则非受控框会一直显示旧值（另一种面板说谎）。
-					const curText = String(cur === undefined ? '' : cur);
+					const curText = String(cur === undefined ? '' : toShown(cur));
 					const input = React.createElement('input', {
 						className: 'pg-field',
 						// 用 text 而不是 number：number 的 value sanitization 会把 "-" / "1e" / "1."
@@ -6881,7 +6902,7 @@ window.__ModuleLoader__.load({
 						key: key + ':' + curText,
 						defaultValue: curText,
 						// placeholder 显示默认值：用户清空后知道会回到哪
-						placeholder: String(dflt[key]),
+						placeholder: String(toShown(dflt[key])),
 						// 用 onBlur 而不是 onChange：数字框每敲一个字符就提交会写入
 						// 一堆中间值（"2" → "20" → "200"），而每次都要走一遍 persist 写盘。
 						onBlur: (e) => {
@@ -6896,10 +6917,17 @@ window.__ModuleLoader__.load({
 							// 「floor 成 0」拦下，结果同样是拒绝，这里统一由格式判据负责）。
 							const n = /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : NaN;
 							if (!Number.isFinite(n)) { setNotice(T('panel.autoBadNumber')); e.target.value = curText; return; }
-							const v = Math.floor(n);
-							// 0 < n < 1 会被 floor 成 0，而 min=0 的两项（timeoutMs / breakerThreshold）
-							// 的 0 是「不弹窗直接按回落值执行」/「永不熔断」这种**禁用**语义 ——
-							// 用户填 0.5 不是要禁用，而是单位写错（把秒当毫秒）。拒绝并归位。
+							// 换算到存储单位。两条路径的取整方式不同，各有理由：
+							//   · s === 1 —— 显示值就是存储值，小数无意义，向下取整（既有语义）；
+							//   · s !== 1 —— 显示单位比存储单位大，换算后要保留精度。**不能**用
+							//     floor：二进制浮点下 `1.001 * 1000` 是 1000.9999999999999，
+							//     floor 会落成 1000（比用户填的少 1 毫秒，且与面板显示分叉）。
+							const v = s === 1 ? Math.floor(n) : Math.round(n * s);
+							// 换算后落成 0 但用户填的不是 0：min=0 的项（timeoutMs / breakerThreshold）
+							// 的 0 是「不弹窗直接按回落值执行」/「永不熔断」这种**禁用**语义。
+							// 用户填 0.5 次不是要禁用，而是单位写错 —— 拒绝并归位。
+							// 秒单位下本判据几乎不可达（0.5 秒 = 500 毫秒），保留它是为了
+							// 「输入小于半个存储单位」这种真正的无意义值。
 							if (v === 0 && n > 0) { setNotice(T('panel.autoBadNumber')); e.target.value = curText; return; }
 							// 超范围**不提交**：宿主对超范围值会自行钳制（负数则丢弃不落键），
 							// 不报错，面板照常弹「已保存」。故在这里按宿主下发的
@@ -7144,7 +7172,7 @@ window.__ModuleLoader__.load({
 				// 卡内两层紧挨着，且都用同一个控件形状（左标签 + 右下拉），便于对照。
 				const denyReasonCard = () => {
 					const pol = ar.policy || {};
-					const modes = Array.isArray(pol.denyReasonModes) ? pol.denyReasonModes : ['default', 'custom'];
+					const modes = Array.isArray(pol.denyReasonModes) ? pol.denyReasonModes : ['default', 'custom', 'both'];
 					const maxLenText = typeof pol.denyReasonMaxLength === 'number' && pol.denyReasonMaxLength > 0
 						? pol.denyReasonMaxLength : 500;
 					const save = (target, key, value) => invoke('permgate:set-auto-policy', { target: target, [key]: value }, () => {
@@ -7159,7 +7187,8 @@ window.__ModuleLoader__.load({
 					// 可见性看**本层**的模式而不是生效模式：项目层选「继承全局」时，
 					// 本层这段文本不发送，可编辑会让用户以为自己在改什么（面板说谎的另一种形态）。
 					const block = (which, mode, setMode, text, setText, withInherit) => {
-						const shown = mode === 'custom';
+						// `custom` 与 `both` 都要用户写那句；`default` 用不到输入框。
+						const shown = mode === 'custom' || mode === 'both';
 						// 空值时显示**真实默认文案**（灰字），而不是一句示例。
 						//
 						// 为什么不能用占位符示例：用户要判断「要不要自定义」，前提是看得到
@@ -7185,8 +7214,11 @@ window.__ModuleLoader__.load({
 						// 存的是**文本**而不是布尔：提示里要原样引用那句，判据与文案在这里分开算
 						// 会让两处各判一次，而条件写两遍必然漂移。空串即「不穿透」。
 						const empty = !String(text || '').trim();
+						// 与宿主 denyReasonTextOf 同一条判据：全局层的 mode 会用到文本
+						// （`custom` / `both`）且文本非空时，项目层留空才穿透。
+						const globalUses = pol.denyReasonMode === 'custom' || pol.denyReasonMode === 'both';
 						const globalText = withInherit && shown && empty
-							&& pol.denyReasonMode === 'custom'
+							&& globalUses
 							&& typeof pol.denyReason === 'string' && pol.denyReason.trim()
 							? pol.denyReason : '';
 						return React.createElement('div', { style: { marginTop: 6 } },
@@ -7205,6 +7237,17 @@ window.__ModuleLoader__.load({
 								}, (withInherit ? ['inherit'] : []).concat(modes).map((m) => React.createElement('option', { key: m, value: m },
 									m === 'inherit' ? T('panel.autoPolicyInherit') : T('panel.autoDenyReason.' + m)))),
 							),
+							// 说明只显示当前选中那一条：`<option>` 装不下第二行，三句一起列又会让
+							// 卡片比旁边两张高一截。选中后紧跟着说清「这样选会怎样」，读到的永远
+							// 是正在生效的那句。
+							//
+							// `inherit` 不显示：下拉本身已经写着「继承全局」，再补一句只是把同一个
+							// 事实说两遍；而全局层此刻选的是哪一档，这行字也说不出来 —— 写「跟随
+							// 全局层选的那句」时，全局选「自动审批的判定理由」就根本没有「那句」。
+							mode === 'inherit'
+								? null
+								: React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.95)', lineHeight: 1.5, marginTop: 2 } },
+									T('panel.autoDenyReasonDesc.' + mode)),
 							shown
 								? React.createElement('div', { style: { marginTop: 4 } },
 									React.createElement('input', {
@@ -7264,7 +7307,6 @@ window.__ModuleLoader__.load({
 						autoTab === 'project'
 							? block('project', policyProjectDenyMode, setPolicyProjectDenyMode, policyProjectDenyText, setPolicyProjectDenyText, true)
 							: block('global', policyDenyMode, setPolicyDenyMode, policyDenyText, setPolicyDenyText, false),
-						React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 6 } }, T('panel.autoDenyReasonCustomHint')),
 					);
 				};
 				// auto tab 内的**层切换**：胶囊分段控件 + 前置标签，而不是第二条下划线 Tab 栏。
@@ -7302,7 +7344,7 @@ window.__ModuleLoader__.load({
 					ar.llmAvailable === false
 						? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 4 } }, T('panel.autoNoLlm'))
 						: null,
-					row('panel.autoTimeout', numInput('timeoutMs', 110, T('panel.autoMsUnit')),
+					row('panel.autoTimeout', numInput('timeoutMs', 90, T('panel.autoSecUnit'), 1000),
 						// `whiteSpace: 'pre-line'` 是**必须的**：这条文案按行分点（见 i18n 处），
 						// 而默认的 `normal` 会把换行折叠成空格，三条并成一大段 ——
 						// 那正是它原本难读的原因。`pre-line` 保留换行、其余空白仍折叠。

@@ -5552,11 +5552,15 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       && r.entry.modelReason !== r.entry.note,
       JSON.stringify(r && r.entry ? { note: r.entry.note, modelReason: r.entry.modelReason } : r))
     // `fallbackReason`（`escalate: model escalated`，机械串、不含模型原话）面板要它排障，
-    // 主模型不能要（toolView 里与 modelReason/rawOutput 一起剥掉）。两处对照着看 ——
+    // 主模型不能要（toolView 里与 rawOutput 一起剥掉）。两处对照着看 ——
     // 只查工具侧时，场景哪天不再产出该字段，断言会退化成恒真。
     //
     // via 这里是 `auto-escalate`（模型诚实弃权），不是 `auto-fallback`（线路/协议失败）——
     // 两者在持久化日志与会话流里要分开显示，见 index.js 的 viaKind。
+    //
+    // 同一条记录上的 `modelReason` 反而**必须**剥掉：这是 ask 落点，根本没有拒绝句，
+    // 模型原话从未发给主模型（`recordDecision` 的 `modelReasonSent` 没被打上）。
+    // 两处对照着看，才钉得住「按记录判」而不是按字段一刀切。
     const fbDec = await callRoute(h.routes, 'GET', '/permgate/decisions')
     const fbPanel = ((fbDec.data && fbDec.data.decisions) || []).filter((x) => x.via === 'auto-escalate')
     const fbStv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
@@ -5565,6 +5569,10 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       fbPanel.length === 1 && String(fbPanel[0].fallbackReason || '').indexOf('escalate') === 0
       && fbTool.length === 1 && !('fallbackReason' in fbTool[0]),
       JSON.stringify({ panel: fbPanel.map((x) => x.fallbackReason), tool: fbTool.map((x) => 'fallbackReason' in x) }))
+    ok('★★ group24 A16b: ask 落点的模型原话只留面板，经 perm_status 返回时被剥掉',
+      fbPanel.length === 1 && String(fbPanel[0].modelReason || '').indexOf('无法确认') !== -1
+      && fbTool.length === 1 && !('modelReason' in fbTool[0]),
+      JSON.stringify({ panel: fbPanel.map((x) => x.modelReason), tool: fbTool.map((x) => 'modelReason' in x) }))
     releaseTmp(ws, home)
   }
   // ── A16c：失败路径没有可信理由时，弹窗不显示空的原话行 ────────────────────────
@@ -7191,12 +7199,14 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     ok('★★ group24 A43: 模型拒绝留下 via=auto-deny 且带模型理由',
       hit.length === 1 && hit[0].action === 'deny' && hit[0].modelReason === '不可逆删除',
       JSON.stringify(list.map((x) => ({ a: x.action, v: x.via, m: x.modelReason }))))
-    // 同一条记录经 perm_status 工具返回时必须仍不提模型原话：面板要它（上一条），
-    // 主模型不能要（评审模型在 reason 里复述被审内容 → 经工具结果二次注入）。
+    // 同一条记录经 perm_status 工具返回时，`modelReason` **照常下发** ——
+    // 它已经拼进直接拒绝时回给模型的那句（见 denialTextFor），剥掉会让
+    // 「决策记录」与「实际收到的拒绝理由」互相矛盾。
+    // `rawOutput` 仍必须剥掉：它是模型整段输出的原文，没有任何工具侧消费方。
     const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
     const dec2 = (Array.isArray(stv && stv.recentDecisions) ? stv.recentDecisions : []).filter((x) => x.via === 'auto-deny')
-    ok('★★ group24 A43: 同一条记录经 perm_status 返回时不带 modelReason/rawOutput（原话只留面板）',
-      dec2.length === 1 && !('modelReason' in dec2[0]) && !('rawOutput' in dec2[0]),
+    ok('★★ group24 A43: perm_status 下发 modelReason（与实际拒绝理由同源），但不下发 rawOutput',
+      dec2.length === 1 && 'modelReason' in dec2[0] && !('rawOutput' in dec2[0]),
       JSON.stringify({ n: dec2.length, recent: (stv && Array.isArray(stv.recentDecisions) ? stv.recentDecisions.length : null),
         got: dec2.map((x) => ({ v: x.via, m: 'modelReason' in x, r: 'rawOutput' in x })) }))
     releaseTmp(ws, home)
@@ -8525,6 +8535,14 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       if (!settled) throw new Error('probeDenyText 超时')
       return { kind: result && result.kind, reason: String((result && result.reason) || '') }
     }
+    // 拒绝句的**结论段** = 分段摘要之前那一截（`segmentSummary` 的分隔符，见 ① 的正向锚点）。
+    //
+    // `custom` 的语义是「整句换成用户那句」，判据因此按结构取结论段再与 CUSTOM 全等，
+    // 而不是 `indexOf(CUSTOM) === 0` 加一条「不含默认文案」的反向哨兵：后者一旦默认
+    // 文案改措辞就不再出现在任何输出里，`indexOf(...) === -1` 恒真，而它守的正是
+    // 「不得混入默认结论句」—— 实现若误拼成「用户句；默认句」会全部照绿。
+    // 结构判据的失效方向是变红：拼接后结论段不等于 CUSTOM。
+    const conclusionOf = (reason) => String(reason || '').split(/ —— 分段：| — segments: /)[0]
     // 命令分类设成 auto，且破坏性子设置也设成 auto（回落 deny）—— 这样 `rm -rf ./build`
     // 才会走评审段。
     //
@@ -8558,12 +8576,17 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     // ① 默认（不配两键）→ 模型收到真实原因 + 分段摘要。这是**回归基线**：
     //    下面每一条「自定义生效」都拿它做对照，少了它，一个「永远返回自定义」的实现
     //    也能让所有自定义用例变绿。
+    //
+    //    同时钉住**模型原话**：`MODEL_DENY` 里写的是「不可逆删除」，它必须出现在
+    //    回给模型的这句里。否则模型被拒后只看到复述自己结论的机械文案，看不到
+    //    自己刚写下的「为什么」—— 而那正是它决定下一步改什么的依据。
     {
       const llm = mkLlm(verdict(MODEL_DENY))
       const { ws, home, h } = mkDenyHost({}, llm)
       const r = await probeDenyText(h, ws, 'a57base', 'rm -rf ./build')
-      ok('★★ group24 A57: 默认模式回真实原因，且带分段摘要（回归基线）',
+      ok('★★ group24 A57: 默认模式回真实原因 + 模型原话 + 分段摘要（回归基线）',
         r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1
+        && r.reason.indexOf('不可逆删除') !== -1
         && r.reason.indexOf('分段：') !== -1 && r.reason.indexOf('rm -rf ./build') !== -1,
         JSON.stringify(r))
       releaseTmp(ws, home)
@@ -8574,9 +8597,11 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       const llm = mkLlm(verdict(MODEL_DENY))
       const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM }, llm)
       const r = await probeDenyText(h, ws, 'a57custom', 'rm -rf ./build')
-      ok('★★ group24 A57: 自定义原因替换结论那句，分段摘要仍附上',
-        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
-        && r.reason.indexOf('自动审批：模型拒绝') === -1
+      ok('★★ group24 A57: 自定义原因替换整句，分段摘要仍附上',
+        r.kind === 'deny' && conclusionOf(r.reason) === CUSTOM
+        // 自定义时**不拼**模型原话：用户选了「我写的一句话」，插件不再替他加料 ——
+        // 他没法从面板看出会多出什么。分段摘要仍保留（那是位置信息，不是措辞）。
+        && r.reason.indexOf('不可逆删除') === -1
         && r.reason.indexOf('分段：') !== -1,
         JSON.stringify(r))
       // 决策记录必须仍是真实结论 —— 本设置只管回给模型的那句，不改审计。
@@ -8586,6 +8611,49 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
         !!row && String(row.reason || '').indexOf('自动审批：模型拒绝') !== -1
         && String(row.reason || '').indexOf(CUSTOM) === -1,
         JSON.stringify({ reason: row && row.reason }))
+      // 同一批记录经 perm_status 回给主模型时，`modelReason` **必须剥掉** ——
+      // `custom` 档存在的理由就是「模型看不到自己的理由」（免得它顺着理由换个方式
+      // 绕过去），而 `toolView` 的剥离判据是 `denialEchoesModelReason` 打下的标记。
+      // 该判据被误改成恒真（或 `mode !== 'default'`）时，原话会经 recentDecisions
+      // 原样回到主模型上下文，而上面「回给模型的句子不含原话」这条**仍然全绿**：
+      // 两条是独立的取值路径。
+      //
+      // 正向对照（面板侧那条记录**有**原话）不能省：只查工具侧「没有」时，
+      // 「剥掉了」与「压根没记」同形，一刀切删掉 modelReason 的实现也能通过。
+      const stv = await h.registered.get('perm_status').execute({}, makeExec(ws, 'perm_status', {}))
+      const toolRows = (Array.isArray(stv && stv.recentDecisions) ? stv.recentDecisions : [])
+        .filter((x) => x.via === 'auto-deny')
+      ok('★★ group24 A57: custom 档的模型原话不随 perm_status 回到主模型（recentDecisions 剥掉）',
+        toolRows.length === 1 && !('modelReason' in toolRows[0])
+        && !!row && row.modelReason === '不可逆删除',
+        JSON.stringify({ n: toolRows.length, got: toolRows.map((x) => 'modelReason' in x),
+          panel: row && row.modelReason }))
+      releaseTmp(ws, home)
+    }
+
+    // ②b both 档：用户那句在前、默认结论句与模型原话在后，三者必须齐全。
+    //
+    // 这一档的两个误实现都不会让别的断言变红：`denialTextFor` 里
+    // `mode === 'custom' || mode === 'both'` 漏掉后半个条件时 both 静默退化成
+    // default（用户写的那句再也不发）；`denialEchoesModelReason` 的 `custom → false`
+    // 误写成 `mode !== 'default'` 时模型原话也一起丢。故这里按三者的**来源**分别判：
+    // 用户句取用例里的 CUSTOM，默认结论句取宿主下发的真实默认值（不抄文案字面量，
+    // 否则改措辞后哨兵恒真），模型原话取 MODEL_DENY 里的那句。
+    {
+      const llm = mkLlm(verdict(MODEL_DENY))
+      const { ws, home, h } = mkDenyHost({ denyReasonMode: 'both', denyReason: CUSTOM }, llm)
+      const st = await callRoute(h.routes, 'GET', '/permgate/status')
+      const defs = (st.data && st.data.autoReview && st.data.autoReview.policy
+        && st.data.autoReview.policy.denyReasonDefaults) || {}
+      const DEF_DENY = typeof defs.deny === 'string' ? defs.deny : ''
+      const r = await probeDenyText(h, ws, 'a57both', 'rm -rf ./build')
+      const concl = conclusionOf(r.reason)
+      ok('★★ group24 A57: both 档 = 用户那句 + 默认结论句 + 模型原话（三者齐全）',
+        r.kind === 'deny' && !!DEF_DENY
+        && concl.indexOf(CUSTOM) === 0
+        && concl.indexOf(DEF_DENY) !== -1
+        && concl.indexOf('不可逆删除') !== -1,
+        JSON.stringify({ concl, def: DEF_DENY }))
       releaseTmp(ws, home)
     }
 
@@ -8595,8 +8663,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM, highRiskAction: 'deny' }, llm)
       const r = await probeDenyText(h, ws, 'a57high', 'rm -rf ./build')
       ok('★★ group24 A57: 高风险放行被拦时也用自定义原因（三种拒绝共用出口）',
-        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
-        && r.reason.indexOf('按你的设置拒绝') === -1,
+        r.kind === 'deny' && conclusionOf(r.reason) === CUSTOM,
         JSON.stringify(r))
       releaseTmp(ws, home)
     }
@@ -8607,19 +8674,20 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom', denyReason: CUSTOM, timeoutMs: 0 }, llm)
       const r = await probeDenyText(h, ws, 'a57fb', 'rm -rf ./build')
       ok('★★ group24 A57: 异常回落直接拒绝时也用自定义原因（三种拒绝共用出口）',
-        r.kind === 'deny' && r.reason.indexOf(CUSTOM) === 0
-        && r.reason.indexOf('未能给出结论') === -1,
+        r.kind === 'deny' && conclusionOf(r.reason) === CUSTOM,
         JSON.stringify(r))
       releaseTmp(ws, home)
     }
 
-    // ⑤ custom 但文本为空 → 用默认文案（「留空 = 默认」）。
+    // ⑤ custom 但文本为空 → 用默认文案（「留空 = 默认」），且**仍不拼模型原话** ——
+    //    留空只表示不自定义措辞，`custom` 档「不回模型自己的理由」这条语义不变。
     {
       const llm = mkLlm(verdict(MODEL_DENY))
       const { ws, home, h } = mkDenyHost({ denyReasonMode: 'custom' }, llm)
       const r = await probeDenyText(h, ws, 'a57empty', 'rm -rf ./build')
-      ok('★★ group24 A57: 选自定义但文本为空 → 回默认文案（留空 = 默认）',
-        r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1,
+      ok('★★ group24 A57: 选自定义但文本为空 → 回默认文案（留空 = 默认），且不拼模型原话',
+        r.kind === 'deny' && r.reason.indexOf('自动审批：模型拒绝') !== -1
+        && r.reason.indexOf('不可逆删除') === -1,
         JSON.stringify(r))
       releaseTmp(ws, home)
     }
