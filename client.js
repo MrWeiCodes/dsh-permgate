@@ -1762,21 +1762,21 @@ window.__ModuleLoader__.load({
 				// 就知道「这是弹窗等多久」，后面两行只是例外清单，不必先理解两套流程。
 				//
 				// 两行都写「当 X 选成 A/B 时」，**不用否定式**（原先写「不是『一直等』时」）：
-				// 否定式要求读者先在脑中排除一个选项，而且「等你多久」是下拉标签、
+				// 否定式要求读者先在脑中排除一个选项，而且「没人应答时」是下拉标签、
 				// 「一直等」是它的选项 —— 两个层级的东西并排在一个否定句里，很难读。
 				// 正面列举该维度真正会用到本项的取值，读者不必做减法。
 				//
 				// 不受本项影响的情形必须单独写，否则会被读成「询问也受这个数字管」。
 				// 但两条路径的判据不同：模型失败那条看「失败后」是不是 ask，
-				// 高风险那条看「等你多久」是不是 wait —— 后者没有「询问」这个选项
+				// 高风险那条看「没人应答时」是不是 wait —— 后者没有「询问」这个选项
 				//（见 HIGH_RISK_TIMEOUTS），把两者并成一句「选『询问』时不起作用」
 				// 会让用户去一个不存在的位置找它；且只设了「失败后」= 询问 时，
 				// 高风险那条其实仍由本项倒计时。
 				// 故保持一条 bullet，但两个分句各带路径名与各自的取值。
 				'panel.autoTimeoutHint': '弹窗弹出后等你多久，超时就不等了。'
 					+ '\n· 模型判断失败、而「失败后」选成允许或拒绝：到点按那个动作执行。填 0 = 不弹窗，直接执行。'
-					+ '\n· 高风险放行、而「等你多久」选成拒绝或允许：到点按那个选择执行。填 0 = 一直等。'
-					+ '\n· 模型判断失败、而「失败后」选成「询问」，或高风险放行、而「等你多久」选成「一直等」：这两种情形不受本项影响，弹窗照常弹，一直等你决定。',
+					+ '\n· 高风险放行、而「没人应答时」选成拒绝或允许：到点按那个选择执行。填 0 = 一直等。'
+					+ '\n· 模型判断失败、而「失败后」选成「询问」，或高风险放行、而「没人应答时」选成「一直等」：这两种情形不受本项影响，弹窗照常弹，一直等你决定。',
 				'panel.autoBreaker': '连续拒绝上限',
 				'panel.autoBreakerHint': '模型连着拒绝这么多次，就暂停问模型，改按「失败后」的设置处理。填 0 = 不暂停，一直问模型',
 				'panel.autoHistory': '工具调用历史',
@@ -1899,7 +1899,7 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRisk': '模型判定高风险、却给出放行时',
 				'panel.autoHighRiskTitle': '高风险放行怎么办',
 				'panel.autoHighRiskHint': '模型可能既标了高风险、又给出放行。这里决定这种情况怎么办。它会先重新问一次模型，仍是高风险放行才按这里处置',
-				'panel.autoHighRiskTimeout': '等你多久',
+				'panel.autoHighRiskTimeout': '没人应答时',
 				'panel.autoHighRiskTimeoutHint': '选「询问」时才生效。一直等 = 弹窗不超时；拒绝/允许 = 到「等待人工的时限」后照做',
 				'panel.autoHighRisk.deny': '拒绝',
 				'panel.autoHighRisk.ask': '询问',
@@ -2307,8 +2307,8 @@ window.__ModuleLoader__.load({
 				'panel.autoTimeout': 'Wait for a human',
 				'panel.autoTimeoutHint': 'how long the dialog waits after it appears; when it runs out, waiting stops.'
 					+ '\n· model failed and "if it fails" is Allow or Deny: run that action when it runs out. 0 = no dialog, run it right away.'
-					+ '\n· high-risk allow and "How long to wait" is Deny or Allow: follow that choice when it runs out. 0 = wait forever.'
-					+ '\n· "if it fails" is Ask, or high-risk allow and "How long to wait" is Wait: this setting does nothing; the dialog still appears and waits for you.',
+					+ '\n· high-risk allow and "When unanswered" is Deny or Allow: follow that choice when it runs out. 0 = wait forever.'
+					+ '\n· "if it fails" is Ask, or high-risk allow and "When unanswered" is Wait: this setting does nothing; the dialog still appears and waits for you.',
 				'panel.autoBreaker': 'Consecutive denials',
 				'panel.autoBreakerHint': 'after this many denials in a row, stop asking the model and use the "if it fails" setting instead. 0 = never stop',
 				'panel.autoHistory': 'Tool call history',
@@ -2386,7 +2386,7 @@ window.__ModuleLoader__.load({
 				'panel.autoHighRisk': 'Model rates it high risk but allows it',
 				'panel.autoHighRiskTitle': 'When a high-risk call is allowed',
 				'panel.autoHighRiskHint': 'The model may mark a call high risk and still allow it. This decides what happens then. It asks the model once more first; only a second high-risk allow is handled here',
-				'panel.autoHighRiskTimeout': 'How long to wait',
+				'panel.autoHighRiskTimeout': 'When unanswered',
 				'panel.autoHighRiskTimeoutHint': 'only used when the setting above is Ask. Wait = the dialog never times out; Deny/Allow = follow that once "Wait for a human" elapses',
 				'panel.autoHighRisk.deny': 'Deny',
 				'panel.autoHighRisk.ask': 'Ask',
