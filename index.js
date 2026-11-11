@@ -1677,7 +1677,7 @@ export default {
     //                    超过 AUTO_POLICY_WARN 只提示，超过 AUTO_POLICY_HARD_MAX 才拒收
     //   highRiskAction   deny / ask / allow（缺键 = ask）
     //   highRiskTimeout  wait / deny / allow（缺键 = deny）
-    //   denyReasonMode   default / custom（缺键 = default）
+    //   denyReasonMode   default / custom / both（缺键 = default）
     //   denyReason       非空字符串，超过 DENY_REASON_MAX 拒收（空串 = 没有自定义文案）
     //
     // 数字项的上下限**只有这一份**（AUTO_REVIEW_RANGES），normalizeAutoReview、
@@ -5355,6 +5355,9 @@ export default {
           const d = resolveCategory('doomloop', null, null, root)
           // d.action === 'allow' = 用户知情关闭（L-3/L-5），此时 doom 保持 null，完全不参与合并
           if (d.action !== 'allow') {
+            // 循环提醒产生一次、两处共用同一个只读 bi 对象（`reason` 与 `denyHint`），
+            // 免得两份文案各自演化后漂移。
+            const loopText = bi('重复操作(Doom Loop)：' + name + ' 已连续放行 ' + streak + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' silently allowed ' + streak + ' identical calls in a row' + exReasonEn(d))
             doom = {
               action: d.action,
               // `autoFallback` 与其余七个出口同口径一并带出（`d` 来自 resolveCategory，
@@ -5364,7 +5367,24 @@ export default {
               autoFallback: d.autoFallback,
               // L-10：doomloop 触发时理由优先。N 取**实际连续次数**（正常等于阈值；
               // 若用户在计数途中调低了阈值，它可能已经更大 —— 报真实值比报配置值准确）。
-              reason: bi('重复操作(Doom Loop)：' + name + ' 已连续放行 ' + streak + ' 次相同调用' + exReason(d), 'Doom Loop: ' + name + ' silently allowed ' + streak + ' identical calls in a row' + exReasonEn(d)),
+              reason: loopText,
+              // ── 回给模型的那句必须带循环提醒（`denyHint`）──────────────────────
+              // 它回答的是「这次为什么被拦」，而模型的唯一线索就是这个：没有它，
+              // 模型只会按用户为某个**分类**填的理由去调整行为，看不出自己陷入了循环。
+              //
+              // 为什么不能只靠 `reason` 送达：`reason` 是给决策记录的（含分类前缀），
+              // pre-execute 的 auto 拒绝出口会用 `denyReason` 把结论句整句换掉，
+              // 而 `denialTextFor` 只认 `userReason` —— 故循环提醒必须单独带一个字段。
+              //
+              // 为什么不能塞进 `userReason`：那个字段的契约是「用户为该分类填的拒绝理由」，
+              // 由各出口单列、`denialTextFor` 直接拼进句首。把系统文案混进去会让
+              // 「用户理由」这个语义在两条通道上分叉，也让 `cat`/`ruleId` 指向 doomloop
+              // 时句子里出现 base 分类的理由 —— 记录里没有、模型却收到了。
+              denyHint: loopText,
+              // 这里**不设** `userReason`：用户为 doomloop 分类填的理由已由 `exReason`
+              // 拼进上面的循环提醒（`…相同调用（R2）`），单列一次会在回给模型的句子里
+              // 重复同一句话。doom 接管后 `cat` 是 doomloop，base 分类的理由与本次拒绝
+              // 无关 —— 双 auto 分支显式把它清掉（见那里的 `userReason: undefined`）。
               note: exNote(d),
               ruleId: d.ruleId,
               cat: 'doomloop',
@@ -5456,11 +5476,16 @@ export default {
         // `cat` 变成 `doomloop` 后两者不再配对，弹窗会照 base 的分类给出「允许此项」候选，
         // 而候选写入用的是 `entry.cat` = `doomloop` —— 该分类没有例外列表（EXC_CATS 不含它），
         // addProjectException 返回 null，用户点了按钮、弹窗关闭，配置一个字都没变。
+        // `userReason` 同理必须跟着 `reason` 换，而且**必须清成 undefined**：
+        // pre-execute 的 carry 把它原样带进 d2，`denialTextFor` 据此拼回给模型的那句。
+        // 留着 base 的值 = 模型收到另一个分类的理由（记录里没有、`cat` 也已不是它）；
+        // 留着 doom 的值 = 与 `reason` 里 `exReason` 拼的括号重复同一句话。
+        // 循环提醒本身走 `denyHint`（doom 自带），不靠 userReason 这条用户理由通道。
         if (doom.action === 'auto' && base.action === 'auto') {
           const afOf = (v) => (v === 'allow' || v === 'deny' ? v : 'ask')
           const worst = AF_STRICTNESS[afOf(doom.autoFallback)] > AF_STRICTNESS[afOf(base.autoFallback)]
             ? afOf(doom.autoFallback) : afOf(base.autoFallback)
-          return Object.assign({}, base, { autoFallback: worst, reason: doom.reason, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
+          return Object.assign({}, base, { autoFallback: worst, reason: doom.reason, userReason: undefined, denyHint: doom.denyHint, note: doom.note, ruleId: doom.ruleId, cat: doom.cat, value: doom.value, kind: doom.kind })
         }
         // ── 最后一关：doom 不得把**最终动作**放宽（§9B 的另一半）──────────────────────
         // 上面按 `MODE_STRICTNESS` 比的是**动作**，而 auto 的最终动作由它自己的回落值决定：
@@ -5511,7 +5536,7 @@ export default {
       // reorderEntries 这一个原语：面板只报「把 id 放到 anchor 之前/之后」，宿主不做任何推断。
       for (const rule of rules) {
         if (ruleMatches(rule, name, args)) {
-          return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), cat: 'custom', value: null, kind: 'rule', autoFallback: rule.autoFallback })
+          return out({ action: rule.action, ruleId: rule.id, reason: rule.reason || bi('自定义规则 ' + rule.id + ' 命中', 'Custom rule ' + rule.id + ' matched'), userReason: rule.reason, cat: 'custom', value: null, kind: 'rule', autoFallback: rule.autoFallback })
         }
       }
       if (isFileRead(name, args)) {
@@ -5522,15 +5547,15 @@ export default {
           // 与 image/edit/undo 同口径：工作区外先过**区外读闸**（工作区外读取），再过「读取文件」闸。
           // 只取区外闸的动作，会让 read 分类的 mode 与 deny 例外在跨工作区时完全不生效。
           const m = outsideMatrix('read', fp, root, cwd)
-          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外文件 ' + fp + exReason(m.src), m.pe + 'read outside workspace denied ' + fp + exReasonEn(m.src)), userReason: m.src && m.src.reason, ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
-          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), userReason: m.src && m.src.reason, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('read', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取权限' + (fp ? '：' + fp : '') + exZh, 'Read permission' + (fp ? ': ' + fp : '') + exEn), userReason: d.reason, note: exNote(d), ruleId: d.ruleId, cat: 'read', value: fp, kind: 'path' })
       }
       // 读图与读文件同一条判定链（工作区外先过**区外读闸**，再落本分类 + 路径例外），
       // 只是分类从 read 换成 image：两边的默认动作与例外各自独立配置。
@@ -5540,30 +5565,30 @@ export default {
           // 工作区外读图：区外读闸 + image 合并矩阵（不能用区外闸的动作短路，
           // 否则 image 默认 ask 与 image 的 deny/路径例外在跨工作区场景下全部失效）。
           const m = outsideMatrix('image', fp, root, cwd)
-          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝读取工作区外图片 ' + fp + exReason(m.src), m.pe + 'image read outside workspace denied ' + fp + exReasonEn(m.src)), userReason: m.src && m.src.reason, ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
-          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), userReason: m.src && m.src.reason, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '读取工作区外图片 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'read image outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('image', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('读取图片权限' + (fp ? '：' + fp : '') + exZh, 'Read image permission' + (fp ? ': ' + fp : '') + exEn), userReason: d.reason, note: exNote(d), ruleId: d.ruleId, cat: 'image', value: fp, kind: 'path' })
       }
       if (isFileWrite(name, args)) {
         const fp = absTargetOf(pathArg(args), cwd)
         if (fp && isOutside(fp, root, cwd)) {
           // 工作区外写入：区外写闸 + edit 合并矩阵（与读图/撤销同口径，单点在 outsideMatrix）。
           const m = outsideMatrix('edit', fp, root, cwd)
-          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝写入工作区外 ' + fp + exReason(m.src), m.pe + 'write to outside workspace denied ' + fp + exReasonEn(m.src)), userReason: m.src && m.src.reason, ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '（写入需确认）'), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (write requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
-          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), userReason: m.src && m.src.reason, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '访问工作区外 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'access outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('edit', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('编辑权限' + (fp ? '：' + fp : '') + exZh, 'Edit permission' + (fp ? ': ' + fp : '') + exEn), userReason: d.reason, note: exNote(d), ruleId: d.ruleId, cat: 'edit', value: fp, kind: 'path' })
       }
       // 撤销：会写盘但不是「编辑」——恢复既有内容、不接受调用方提供的新内容，故单列一类（默认询问）。
       // 与写类一致：工作区外仍先过**区外写闸**（区外写闸 + undo 合并矩阵）。
@@ -5571,22 +5596,22 @@ export default {
         const fp = absTargetOf(pathArg(args), cwd)
         if (fp && isOutside(fp, root, cwd)) {
           const m = outsideMatrix('undo', fp, root, cwd)
-          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'deny') return out({ action: 'deny', reason: bi(m.pz + '拒绝撤销工作区外 ' + fp + exReason(m.src), m.pe + 'undo outside workspace denied ' + fp + exReasonEn(m.src)), userReason: m.src && m.src.reason, ruleId: m.src.ruleId, cat: m.cat, value: fp, kind: 'path' })
           if (m.action === 'ask') return out({ action: 'ask', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '（需确认）'), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : ' (requires confirmation)')), note: m.src ? exNote(m.src) : null, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
-          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
+          if (m.action === 'auto') return out({ action: 'auto', autoFallback: m.autoFallback, reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : '') + '（交给模型判断）', m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '') + ' (decided by model)'), userReason: m.src && m.src.reason, ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
           return out({ action: 'allow', reason: bi(m.pz + '撤销工作区外文件 ' + fp + (m.src ? exReason(m.src) : ''), m.pe + 'undo outside workspace ' + fp + (m.src ? exReasonEn(m.src) : '')), ruleId: m.src ? m.src.ruleId : null, cat: m.cat, value: fp, kind: 'path' })
         }
         const d = resolveCategory('undo', fp, 'path', root, cwd)
         const exZh = exReason(d)
         const exEn = exReasonEn(d)
-        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('撤销权限' + (fp ? '：' + fp : '') + exZh, 'Undo permission' + (fp ? ': ' + fp : '') + exEn), userReason: d.reason, note: exNote(d), ruleId: d.ruleId, cat: 'undo', value: fp, kind: 'path' })
       }
       if (COMMAND_TOOLS[name]) {
         return out(commandDecision(exec, root, cwd, exReason, exReasonEn, exNote))
       }
       if (SUBAGENT_TOOLS[name]) {
         const d = resolveCategory('subagent', null, null, root)
-        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null })
+        return out({ action: d.action, autoFallback: d.autoFallback, reason: bi('启动子代理' + exReason(d), 'Spawn subagent' + exReasonEn(d)), userReason: d.reason, note: exNote(d), ruleId: d.ruleId, cat: 'subagent', value: null, kind: null })
       }
       const q = quickAction(name, root)
       if (q) {
@@ -5598,7 +5623,7 @@ export default {
         const qDeny = finalActionOf(q.action, q.autoFallback) === 'deny'
         const qr = qDeny && q.reason ? '（' + q.reason + '）' : ''
         const qrEn = qDeny && q.reason ? ' (' + q.reason + ')' : ''
-        return out({ action: q.action, autoFallback: q.autoFallback, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), ruleId: null, cat: 'quick', value: name, kind: 'tool' })
+        return out({ action: q.action, autoFallback: q.autoFallback, reason: bi(label + '：' + name + ' → ' + q.action + qr, labelEn + ': ' + name + ' → ' + q.action + qrEn), userReason: qDeny ? q.reason : undefined, ruleId: null, cat: 'quick', value: name, kind: 'tool' })
       }
       const fb = fallbackSetting(root)
       if (fb.mode === 'allow') return out({ action: 'allow', reason: bi('未匹配任何规则，放行', 'No rule matched, allowed'), cat: null, value: null, kind: null })
@@ -5607,7 +5632,7 @@ export default {
       const fbDeny = finalActionOf(fb.mode, fb.autoFallback) === 'deny'
       const fr = fbDeny && fb.reason ? '（' + fb.reason + '）' : ''
       const frEn = fbDeny && fb.reason ? ' (' + fb.reason + ')' : ''
-      return out({ action: fb.mode, autoFallback: fb.autoFallback, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
+      return out({ action: fb.mode, autoFallback: fb.autoFallback, reason: bi('未匹配任何规则，按兜底策略处理：' + fb.mode + fr, 'No rule matched; handled by fallback policy: ' + fb.mode + frEn), userReason: fbDeny ? fb.reason : undefined, ruleId: null, cat: 'fallback', value: name, kind: 'tool' })
     }
 
     // 段级判定摘要：把「哪一段被拦、命中哪一档」讲清楚。
@@ -5725,13 +5750,35 @@ export default {
     function denialTextFor(d, root) {
       const mode = denyReasonModeOf(root)
       const custom = mode === 'custom' || mode === 'both' ? denyReasonTextOf(root) : ''
-      // 结论句取 `d.reason`：pre-execute 的 `denyReason` 已经把「用户配置的拒绝理由」
-      // 与「谁拍的板」拼好。另选一句固定文案当结论会把用户理由整段顶掉，而面板在
-      // 最终动作是拒绝时渲染了那个理由框（见上方说明）。
-      // 缺失时（理论上只有非 auto 的补记路径）按 via 回退到对应的默认句。
-      const base = (d && d.reason) || (d && d.via === 'auto-deny-high' ? DENY_REASON_DEFAULT_TEXT.denyHigh
+      // ── 结论句只取「谁拍的板」，不取 `d.reason` 的分类前缀 ──────────────────────
+      // `d.reason` 是给决策记录用的（分类名 + 用户理由 + 谁拍的板），记录要靠分类名
+      // 回答「哪条闸拦的」。但模型自己刚发起的调用，不需要被告知属于哪一类 ——
+      // 那半句对它没有任何可执行信息。
+      //
+      // 用户为该分类填的拒绝理由则**必须**保留：它是「为什么这么配」的唯一载体，面板
+      // 在最终动作是拒绝时渲染了那个理由框。它由各出口单列在 `userReason` 上，
+      // 与 `reason` 里的括号标注同源，故这里不需要从 `reason` 里切。
+      //
+      // ── `denyHint`：不归任何分类的「这次为什么被拦」────────────────────────────
+      // 目前唯一的产出方是 doomloop（`重复操作(Doom Loop)：… 已连续放行 N 次`）。
+      // 它必须到模型手里：那是模型判断自己陷入循环的唯一线索，而它既不是某个分类的
+      // 用户理由（不能塞进 `userReason`），也不会随 `reason` 到达（auto 的拒绝出口
+      // 会把结论句整句换成「谁拍的板」）。故单列一个字段，由产生方与 `reason` 同源给出。
+      const hint = d && d.denyHint ? L(d.denyHint, 'zh') : ''
+      const hintEn = d && d.denyHint ? L(d.denyHint, 'en') : ''
+      const who = d && d.via === 'auto-deny-high' ? DENY_REASON_DEFAULT_TEXT.denyHigh
         : (d && d.via === 'auto-fallback-direct' ? DENY_REASON_DEFAULT_TEXT.fallback
-          : DENY_REASON_DEFAULT_TEXT.deny))
+          : DENY_REASON_DEFAULT_TEXT.deny)
+      const ur = d && typeof d.userReason === 'string' ? d.userReason.trim() : ''
+      // 三段顺序固定：用户理由 → 循环提醒 → 谁拍的板。前半句回答「为什么这么配」，
+      // 中间回答「这次为什么被拦」，结尾回答「谁拍的板」。
+      const lead = (h, u) => [u, h].filter(Boolean).join('；')
+      const leadEn = (h, u) => [u, h].filter(Boolean).join('; ')
+      const zhParts = lead(hint, ur)
+      const enParts = leadEn(hintEn, ur)
+      const base = zhParts
+        ? bi(zhParts + '；' + L(who, 'zh'), enParts + '; ' + L(who, 'en'))
+        : who
       // `custom`：整句换成用户那句，文本留空则退回结论句；**恒不拼模型原话**。
       if (mode === 'custom') return L(segmentSummary(d, custom ? bi(custom, custom) : base), uiLang)
       // `both`：用户那句在前、结论句在后。
@@ -6207,7 +6254,7 @@ export default {
         const fbDeny = finalActionOf(fb.mode, fb.autoFallback) === 'deny'
         const fr = fbDeny && fb.reason ? '（' + fb.reason + '）' : ''
         const frEn = fbDeny && fb.reason ? ' (' + fb.reason + ')' : ''
-        return { action: fb.mode, autoFallback: fb.autoFallback, reason: bi('执行命令：未配置判定，按兜底策略处理：' + fb.mode + fr, 'Run command: no verdict configured; handled by fallback policy: ' + fb.mode + frEn), ruleId: null, cat: 'command', value: cmd, kind: 'command', segments: a.segments }
+        return { action: fb.mode, autoFallback: fb.autoFallback, reason: bi('执行命令：未配置判定，按兜底策略处理：' + fb.mode + fr, 'Run command: no verdict configured; handled by fallback policy: ' + fb.mode + frEn), userReason: fbDeny ? fb.reason : undefined, ruleId: null, cat: 'command', value: cmd, kind: 'command', segments: a.segments }
       }
       const exZh = exReason(a)
       const exEn = exReasonEn(a)
@@ -6222,6 +6269,7 @@ export default {
         // 动作不是 auto 时它是 undefined —— 与其它出口同口径，调用方据此不建键。
         autoFallback: a.action === 'auto' ? (a.autoFallback || 'ask') : undefined,
         reason: bi('执行命令' + exZh, 'Run command' + exEn),
+        userReason: a.reason,
         note: exNote(a),
         ruleId: a.matched,
         cat: 'command',
@@ -10915,6 +10963,10 @@ export default {
             for (const k of PANEL_ONLY_DECISION_FIELDS) delete e[k]
             delete e.modelReasonSent
             if (!sent) delete e.modelReason
+            // 发出去过的那句也按**实际发出的形态**下发：`denialTextFor` 用
+            // `quotedModelReason` 折叠了空白与括号形状字符，原样下发会让两条通道
+            // 对「模型实际收到了什么」给出两个答案。这里用同一个函数，不另写一份。
+            else e.modelReason = quotedModelReason(e.modelReason)
             return e
           })
         }
@@ -11089,7 +11141,7 @@ export default {
           //
           // `rawOutput` 是模型的**原始输出**（§7.3 第二条）：出问题时可复现它到底说了什么，
           // 而不是只看我们解析出来的 risk/decision。截断在 recordDecision 里做。
-          const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, blast: d.blast, rawOutput: rv.raw }
+          const carry = { ruleId: d.ruleId, cat: d.cat, value: d.value, kind: d.kind, code: d.code, segments: d.segments, blast: d.blast, rawOutput: rv.raw, userReason: d.userReason, denyHint: d.denyHint }
           // 推理强度：`effortWant` 是配置原值（归一后不可能是空串），`effort` 是
           // 实际派发的档位（允许为空 = 这次一个字节都没派发）。
           //
@@ -11137,6 +11189,10 @@ export default {
           // 「这次是谁拍的板」，两句都要（§4.5A 只禁拼**模型原话**，不禁拼用户理由）。
           // allow / ask 出口不合并 —— 那两格存储侧本就不保留 reason，拼上去只会是
           // 「执行命令」这类无信息量的前缀。
+          //
+          // 合并结果只进 `reason`（决策记录与弹窗），**不再进回给模型的那句**：
+          // 那半句的分类前缀对模型没有可执行信息，由 `denialTextFor` 改用 `userReason`
+          // 单独取用户理由。两处同源（都来自 `d.reason` / `d.userReason`），不会漂移。
           const denyReason = (zh, en) => {
             const uz = L(d.reason, 'zh')
             const ue = L(d.reason, 'en')

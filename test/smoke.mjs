@@ -8508,10 +8508,14 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
   {
     // 探测一次直接拒绝，返回回给模型的那句 reason（不是 'deny' 这个字符串）。
     // 与 probeAuto 分开：那个把结果压成 'deny'/'allow'/'ask'，拿不到文本。
-    const probeDenyText = async (h, ws, sess, cmd) => {
+    //
+    // `tool` / `args` 缺省是 bash + 命令文本。换成文件工具是为了走到**另一条**判定链：
+    // 工作区外路径先过 outsideMatrix，它的 auto 出口与 commandDecision 是两个独立的装配点。
+    const probeDenyText = async (h, ws, sess, cmd, tool, args) => {
+      const name = tool || 'bash'
       const pre = h.hooks.get('tools/pre-execute')
       const exec = {
-        name: 'bash', arguments: { command: cmd }, callId: 'c1', token: 't1',
+        name, arguments: args || { command: cmd }, callId: 'c1', token: 't1',
         agent: { cwd: ws, session: { id: sess, requestHeader: () => ({ config: { provider: 'test-provider', model: 'test-model' } }) } },
         signal: undefined,
       }
@@ -8523,7 +8527,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       const t0 = Date.now()
       while (Date.now() - t0 < 15000 && !nexted && !settled) {
         const list = await callRoute(h.routes, 'GET', '/permgate/pending')
-        const items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === 'bash')
+        const items = (Array.isArray(list.data) ? list.data : []).filter((x) => x.tool === name)
         if (items.length) {
           for (const it of items) await callRoute(h.routes, 'POST', '/permgate/decide', { id: it.id, action: 'deny', lang: 'zh' })
           await Promise.race([p, new Promise((r) => setTimeout(r, 1000))])
@@ -8549,12 +8553,12 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     // ⚠️ **两个都要设**：`destructive` 缺键时 destructiveTiers 对每一档回落 `ask`，
     // 而 ask 比大分类的 auto 更严（strictest 合并），于是命令停在弹窗、根本到不了评审段。
     // 只设大分类时本组所有用例都会拿到「执行命令」这句 ask 理由，看起来像实现没生效。
-    const mkDenyHost = (autoExtra, llm) => {
+    const mkDenyHost = (autoExtra, llm, globalExtra) => {
       const ws = tmpdirFor('pg-deny-ws-')
       const home = tmpdirFor('pg-deny-home-')
       mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
       writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify({
-        global: {
+        global: Object.assign({
           fallbackMode: 'ask',
           doomloop: { mode: 'allow' },
           command: {
@@ -8564,7 +8568,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
             destructive: { action: 'auto', autoFallbacks: { inside: 'deny' } },
           },
           autoReview: Object.assign({}, autoExtra || {}),
-        },
+        }, globalExtra || {}),
         projects: {},
       }, null, 2), 'utf8')
       return { ws, home, h: createHost({ workspaceRoot: ws, dshHome: home, llm }) }
@@ -8781,6 +8785,35 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
         && r.reason.indexOf('我的自定义文案') === -1,
         JSON.stringify(r))
       releaseTmp(ws, home)
+    }
+
+    // ⑩ 分类配了拒绝理由时，那句理由**必须**随默认结论句回给模型。
+    //
+    // 前面九条全跑在 mkDenyHost 的配置下：command 与 destructive 都没配 reason，
+    // 于是 `d2.userReason` 恒为 undefined，`denialTextFor` 里「用户理由 + 分号 + 结论句」
+    // 那一支从未被求值。判据换成分类前缀（`d.reason`）或整段丢掉 userReason，九条全绿。
+    //
+    // 走**工作区外**而不是 command：它同时是 outsideMatrix 的 auto 出口，与「auto + 回落
+    // deny 时用户理由要保留」是同一条装配链（denialTextFor 只认 d2.userReason，不认来源）；
+    // 文件路径也避开了 destructive 的档位合并，判定只由那一道闸作出。
+    {
+      const outDir = tmpdirFor('pg-deny-out-')
+      const OUT_REASON = '这个目录别碰'
+      const { ws, home, h } = mkDenyHost({}, mkLlm(verdict(MODEL_DENY)), {
+        // 区外读闸设 auto + 回落 deny + 理由；read 分类保持默认 allow，
+        // 判定因此只由区外闸作出（outsideMatrix 的 src 指向它）。
+        outsideRead: { mode: 'auto', autoFallback: 'deny', reason: OUT_REASON, exceptions: [] },
+      })
+      const r = await probeDenyText(h, ws, 'a57reason', null, 'read', { file_path: join(outDir, 'r.txt') })
+      ok('★★ group24 A57: 分类的拒绝理由随默认结论句回给模型（且不拼分类前缀）',
+        r.kind === 'deny'
+        && r.reason.indexOf(OUT_REASON) !== -1
+        && r.reason.indexOf('自动审批：模型拒绝') !== -1
+        // 分类前缀是给决策记录用的（「哪条闸拦的」），对模型没有可执行信息 ——
+        // 它若被拼回来，模型会把「工作区外读取权限」当成一条它能改的配置名。
+        && r.reason.indexOf('工作区外读取权限') === -1,
+        JSON.stringify(r))
+      releaseTmp(ws, home, outDir)
     }
   }
 
