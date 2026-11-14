@@ -1983,7 +1983,7 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': '底层沙箱已保存（{t}）：{v}',
 				'panel.fallbackSaved': '兜底策略已保存（{t}）：{v}',
 				'panel.fallback': '兜底策略（未匹配任何规则）',
-				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、cordis_run）如何处理。',
+				'panel.fallbackHint': '以上各分类之外、且不在快捷工具清单里的调用（如 mcp__*、插件注册的工具）如何处理。',
 				'panel.needValue': '请先输入例外匹配',
 				'panel.excRemaining': '该路径仍有 {n} 条同值例外，可继续逐条删除',
 				'panel.delFailed': '删除失败',
@@ -2149,17 +2149,22 @@ window.__ModuleLoader__.load({
 				'quick.update_goal': '更新目标状态',
 				'quick.send_message': '给子代理发消息',
 				'quick.interrupt_agent': '打断子代理',
+				// wait_agent 等的是「自己的下一步收件箱」，不消费输入也不启动 agent —— 文案要说清
+				// 它等什么，否则用户会以为放行它等于允许 AI 无限期卡住。
+				'quick.wait_agent': '等子代理的消息或完成通知（只等自己那一步，不启动任何子代理）',
+				// team_task_* 四条共用一句前提：改的是共享任务板，不是文件也不是别的 agent 的状态。
+				'quick.team_task_create': '在共享任务板上建一条任务',
+				'quick.team_task_list': '列出共享任务',
+				'quick.team_task_get': '按 id 读一条共享任务',
+				'quick.team_task_update': '认领、编辑、完成或删除共享任务（不唤醒空闲的子代理）',
 				'quick.present': '声明交付文件',
 				'quick.exit_plan_mode': '退出计划模式',
-				'quick.cordis_define': '定义动态插件',
 				'quick.cordis_inspect_list': '检视能力清单',
 				'quick.cordis_inspect_query': '执行只读检视',
-				'quick.cordis_inspect_self': '检视本会话插件',
 				'quick.perm_status': '查看权限状态',
-				'quick.cordis_run': '运行动态插件',
-				'quick.cordis_stop': '停用动态插件',
-				'quick.cordis_undefine': '移除动态插件',
 				'quick.plugin_manager': '管理插件与插件包',
+				// plugin_market 只列市场里有什么、版本号多少，真正的安装走 plugin_manager。
+				'quick.plugin_market': '浏览插件市场（只读；安装仍走「管理插件与插件包」）',
 				// 工具自身没有文件/命令语义，说明文字要让用户看懂「放行/拒绝它意味着什么」。
 				// working_directory 的关键不是读写（它不写盘），而是**换基准**：改完 cwd，
 				// 后续相对路径全部落到新目录下，故文案点出「后续相对路径」而不是只说「切换目录」。
@@ -2177,7 +2182,7 @@ window.__ModuleLoader__.load({
 				// 真正的删除权限在 schedule_edit 那一行，不写清楚就是面板说谎。
 				'quick.schedule_update': '修改定时提醒（仅旧版 DSH 生效；新版请改 schedule_edit）',
 				'quick.schedule_delete': '删除定时提醒（仅旧版 DSH 生效；新版请改 schedule_edit）',
-				// run_code 的关键不是「执行代码」这件事本身（cordis_run 也会），而是
+				// run_code 的关键不是「执行代码」这件事本身，而是
 				// **执行面有一半在本插件视野之外**：程序内对 tools.* 的调用会逐条过闸，
 				// 但直接调 Node API 的部分只有 DSH 原生沙箱管得住。文案点出这层区别，
 				// 避免用户把它读成「和 pwsh 一样的命令审查」而放心设成 allow。
@@ -2468,7 +2473,7 @@ window.__ModuleLoader__.load({
 				'panel.sandboxSaved': 'Sandbox saved ({t}): {v}',
 				'panel.fallbackSaved': 'Fallback policy saved ({t}): {v}',
 				'panel.fallback': 'Fallback policy (no rule matched)',
-				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, cordis_run) are handled.',
+				'panel.fallbackHint': 'How calls outside the categories above and not listed as quick tools (e.g. mcp__*, plugin-registered tools) are handled.',
 				'panel.needValue': 'Enter a match value first',
 				'panel.excRemaining': '{n} exception(s) with the same value remain on this path; delete them individually if not wanted',
 				'panel.delFailed': 'Delete failed',
@@ -2563,17 +2568,18 @@ window.__ModuleLoader__.load({
 				'quick.update_goal': 'update goal state',
 				'quick.send_message': 'message a subagent',
 				'quick.interrupt_agent': 'interrupt a subagent',
+				'quick.wait_agent': 'wait for subagent messages or completion (waits its own step only; starts nothing)',
+				'quick.team_task_create': 'create a task on the shared board',
+				'quick.team_task_list': 'list shared tasks',
+				'quick.team_task_get': 'read one shared task by id',
+				'quick.team_task_update': 'claim, edit, complete, or delete a shared task (wakes no idle subagent)',
 				'quick.present': 'present deliverable files',
 				'quick.exit_plan_mode': 'exit plan mode',
-				'quick.cordis_define': 'define a dynamic plugin',
 				'quick.cordis_inspect_list': 'list inspect capabilities',
 				'quick.cordis_inspect_query': 'run a read-only inspect query',
-				'quick.cordis_inspect_self': 'inspect session plugins',
 				'quick.perm_status': 'view permission status',
-				'quick.cordis_run': 'run a dynamic plugin',
-				'quick.cordis_stop': 'stop a dynamic plugin',
-				'quick.cordis_undefine': 'remove a dynamic plugin',
 				'quick.plugin_manager': 'manage plugins and bundles',
+				'quick.plugin_market': 'browse the plugin market (read-only; installing still goes through plugin_manager)',
 				// See the Chinese entries for the reasoning. The point of working_directory is not
 				// reading or writing (it touches no files) but the baseline: after a cd, every
 				// later relative path resolves against the new directory.
@@ -2591,7 +2597,7 @@ window.__ModuleLoader__.load({
 				// on a current DSH these rows change nothing, and delete lives on schedule_edit.
 				'quick.schedule_update': 'change a timed reminder (older DSH only; use schedule_edit on current DSH)',
 				'quick.schedule_delete': 'delete a timed reminder (older DSH only; use schedule_edit on current DSH)',
-				// The point is not "it runs code" (cordis_run does too) but that half its
+				// The point is not "it runs code" but that half its
 				// execution surface is outside this review: tools.* sub-calls pass through
 				// the gate one by one, while direct Node API use is bounded only by the
 				// platform sandbox. Saying so keeps it from reading like command review.

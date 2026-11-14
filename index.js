@@ -258,11 +258,11 @@ const REASONING_TAIL_CHARS = 100
 const INTENT_LOOKBACK_STEPS = 6
 // 快捷工具预设：无文件/命令语义、只能按工具名设默认动作的清单（设置页据此展示，新配置按 QUICK_DEFAULTS 落默认）
 // 低风险观测/会话类工具默认放行，避免每次都弹窗；
-// 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及管理动态插件的 cordis_run/stop/undefine
-// —— perm_* 曾经被 decide 无条件放行，等于「AI 可自我提权、且全程无弹窗」；纳入本清单后
-// 统一按 ask 裁决；要放行得由用户显式改成 allow（面板快捷工具、自定义规则、手写 config.json
-// 均可），清单内的项预设默认优先于兜底策略，改兜底也不会漏。权限写工具已整体移除，本清单里的
-// perm_* 只剩只读的 perm_status（allow）。
+// 其余工具默认询问（ask）：mcp__*（外装 MCP）、以及能执行代码或装包的元操作（run_code /
+// plugin_manager）—— perm_* 曾经被 decide 无条件放行，等于「AI 可自我提权、且全程无弹窗」；
+// 纳入本清单后统一按 ask 裁决；要放行得由用户显式改成 allow（面板快捷工具、自定义规则、
+// 手写 config.json 均可），清单内的项预设默认优先于兜底策略，改兜底也不会漏。
+// 权限写工具已整体移除，本清单里的 perm_* 只剩只读的 perm_status（allow）。
 const QUICK_DEFAULTS = {
   web_search: 'ask', skill: 'allow', grep: 'allow', glob: 'allow', web_fetch: 'ask',
   ask_user_question: 'allow', todo_write: 'allow', list_agents: 'allow',
@@ -275,15 +275,11 @@ const QUICK_DEFAULTS = {
   get_goal: 'allow', create_goal: 'allow', update_goal: 'allow',
   send_message: 'allow', interrupt_agent: 'allow',
   present: 'allow', exit_plan_mode: 'allow',
-  // cordis_define 默认 ask（曾为 allow）：它在宿主进程内定义并执行任意代码，
-  // 能力等价于 cordis_run（后者本就是 ask），而它比 run 更靠前——定义阶段即可
-  // 执行模块顶层代码。allow 意味着这条路径全程无弹窗，是本清单里**当时唯一**「可执行代码
-  // 却默认放行」的项，与「元操作一律先问」的口径自相矛盾，故收紧为 ask。
-  // 注意：只改这一行对**存量配置**是无效的 —— 旧版 freshConfig 已把当时的 allow
-  // seed 落盘，显式键优先于预设默认。真正让收紧生效的是 QUICK_RETIRED_DEFAULTS
-  // 那次一次性收敛，改本表时必须同步考虑它（否则等于没改）。
-  // 三个 inspect_* 是只读检视，维持 allow。
-  cordis_define: 'ask', cordis_inspect_list: 'allow', cordis_inspect_query: 'allow', cordis_inspect_self: 'allow',
+  // cordis_inspect_* 是只读检视，维持 allow。
+  // 同族的 cordis_define / cordis_run / cordis_stop / cordis_undefine / cordis_inspect_self
+  // 曾在本表里，但 DSH 0.1.7-rc.1 起 dsh-tool-cordis 只注册这两个 inspect_*，动态插件的
+  // 定义与生命周期不再有模型工具（见 REMOVED_STALE_TOOLS）—— 留在表里就是改不动任何东西的行。
+  cordis_inspect_list: 'allow', cordis_inspect_query: 'allow',
   // 改权限配置类工具（已整体移除）曾一律先问；现仅 perm_status 只读查询，默认放行（想看随时能看）
   // 其余 9 个写工具（perm_set_category / perm_set_fallback / perm_set_editor_kernel /
   // perm_add_exception / perm_remove_exception / perm_set_quick / perm_add_rule /
@@ -303,9 +299,7 @@ const QUICK_DEFAULTS = {
   // 保留 perm_status：只读、不改配置（下发内容含例外 reason/note 与绝对路径，属既有设计），
   // 提供 UI 给不了的对话价值（AI 能回答「为什么这次被拦」「现在是什么配置」）。
   perm_status: 'allow',
-  // cordis_run 在宿主进程里执行代码、stop/undefine 管理（可移除）动态插件 —— 同属元操作，一律先问
-  cordis_run: 'ask', cordis_stop: 'ask', cordis_undefine: 'ask',
-  // plugin_manager 与上面三个 cordis_* 同属「管插件」的元操作，且是这一类里权限最大的一个：
+  // plugin_manager 与 cordis_* 同属「管插件」的元操作，且是这一类里权限最大的一个：
   // 它能装包（install_bundle 会执行包自带的 install 脚本）、卸包、改插件的启用状态，
   // 还能 set_version_exemption 跳过 DSH 的 peer 兼容校验（工具描述原文即「可能崩溃和数据丢失」）。
   //
@@ -317,14 +311,14 @@ const QUICK_DEFAULTS = {
   // allow，它就会静默放行。
   // 一个能执行安装脚本的工具不该在面板上没有一行自己的设置，故纳入本表。
   //
-  // 注册条件与 cordis_* 同构 —— 它是 DSH 自带的核心依赖（@deepseek-ai/dsh-plugin-manager，
+  // 注册条件与 cordis_inspect_* 同构 —— 它是 DSH 自带的核心依赖（@deepseek-ai/dsh-plugin-manager，
   // 被 dsh/dsh-base/dsh-web-app 直接依赖），但注册行 tool-plugin-manager 同样受 agent preset
   // 约束：dsh-base、standard、ptc 三个预设里均为 disabled: true，只有 cordis 预设启用。
-  // 即它在非 cordis 预设下与 cordis_* 一样是命不中的死键 —— 这既不构成纳入的理由，
+  // 即它在非 cordis 预设下与 cordis_inspect_* 一样是命不中的死键 —— 这既不构成纳入的理由，
   // 也不构成排除的理由（本表是静态清单、不感知会话选中的 preset）。
   //
   // 存量配置无需迁移：新键缺席时按预设默认值 ask 裁决，与本条加入前的行为完全一致
-  // （区别只在于面板上多了一行、用户可以改它）—— 故**不**进 QUICK_RETIRED_DEFAULTS。
+  // （区别只在于面板上多了一行、用户可以改它）。
   plugin_manager: 'ask',
   // ── DSH 0.2.1 新增的常驻工具 ────────────────────────────────────────────
   // working_directory：读或**切换**本会话的当前目录。纳入本表的理由不是它危险，
@@ -365,8 +359,8 @@ const QUICK_DEFAULTS = {
   //   · 只留新键：DSH 回退到 0.2.2-alpha.2 及更早时，schedule_update / schedule_delete
   //     落不到本表（旧版另两个工具名与新版相同，仍命中），改走兜底策略（默认 ask）。
   //     后果分两种，别把后者当成前者的普遍结果：全新配置里这两个键没有落盘值，
-  //     于是按兜底 ask 裁决、面板上也没有它们的行；存量配置里它们早被 freshConfig
-  //     seed 落盘（见下方 QUICK_RETIRED_DEFAULTS 处关于「落盘值压过预设默认」的说明），
+  //     于是按兜底 ask 裁决、面板上也没有它们的行；存量配置里它们早被旧版 freshConfig
+  //     seed 落盘（落盘的显式值压过预设默认，见 quickAction 的取值链），
   //     仍按落盘值裁决、面板也仍有行 —— 落不到表只改变**该键没有落盘值**的那部分配置。
   //   · 只留旧键：新版下 schedule_edit 走兜底 ask、schedule_view 走兜底 ask ——
   //     前者碰巧方向安全，后者则是把只读操作也弹窗。
@@ -387,7 +381,7 @@ const QUICK_DEFAULTS = {
   // 本 profile 的默认预设是 standard（无 tool-presentation 行 → native），故当前不可达；
   // 纳入本表的目的是**切到 ptc 时面板上已有这一行**，而不是等它冒出来再补。
   //
-  // 为什么是 ask（与 cordis_run 同口径）：它的 code 参数是**模型写的程序**，里面可以
+  // 为什么是 ask（与已移除的 cordis_run 同口径）：它的 code 参数是**模型写的程序**，里面可以
   // 直接 `await import('node:fs')` —— 这条路径**不经任何工具调用**，因此也不经
   // tools/pre-execute（本插件的判定链挂在那里）。程序内对 tools.write(...) 的子调用
   // 确实会逐条过闸（binding → scheduler.prepare → prepareExecution → pre-execute），
@@ -407,6 +401,36 @@ const QUICK_DEFAULTS = {
   // 本表不设硬编码排除 —— 那会让面板显示与实际裁决分叉（面板说谎）。
   // 存量配置无需迁移：上一发布版没有这个键，不会落盘（理由同 schedule_* 那条）。
   run_code: 'ask',
+  // ── 子代理协作：等待与共享任务板 ──────────────────────────────────────────
+  // 五个都只操作 subagent 树内的协作状态：不碰文件系统、不执行命令、不改本插件配置。
+  //
+  // wait_agent 等的是**当前调用者自己的**下一步收件箱。它既不消费输入（待处理输入仍在
+  // 代码执行结束后交给模型），也不启动任何 agent、不改变树结构 —— 排队的下一轮消息、
+  // 其他收件箱、任务板变化都不结束等待。唯一后果是本次工具调用最多占住 timeout_ms
+  // （上限 1 小时），而它占的是**模型自己的**一步，不是别人的。故 allow。
+  //
+  // team_task_* 是共享任务板：create 建一条无主任务、list/get 只读、update 按 revision
+  // 做 compare-and-set（认领/编辑/完成/重开/删除）。它不写盘、不发消息、不唤醒空闲 agent
+  // （官方策略原文：「Task readiness never starts an owner」，任务变化也不结束 wait_agent）。
+  // 授权面在 Team 服务内部：只有根能 reassign，其余 agent 只能认领自己的；工具本身不提供
+  // 越过树权限的路径。默认 allow 与 list_agents / send_message 同口径 —— 若每次协作都要
+  // 弹窗，Team 模式基本不可用，而用户被问的又只是「要不要让 AI 记一条任务」。
+  //
+  // 注册条件：wait_agent 与 list_agents / send_message / interrupt_agent 同属
+  // dsh-tool-subagent-control（默认 interrupt: true）；team_task_* 来自 dsh-tool-agent-team，
+  // 只在根 Session 开启 Team 模式时可见。本表是静态清单、不感知这些开关，命不中的键与
+  // plugin_manager 在非 cordis 预设下同属死键。
+  //
+  // 存量配置无需迁移：新键缺席时按预设默认值 allow 裁决 —— 与本条加入前**不同**（此前
+  // 它们落兜底策略，默认 ask），故升级后行为确实变宽。这方向由用户可见：面板上多出五行，
+  // 每行都能单独改回 ask / deny，且自定义规则（tool: 'wait_agent'）仍先于本表生效。
+  wait_agent: 'allow',
+  team_task_create: 'allow', team_task_list: 'allow', team_task_get: 'allow', team_task_update: 'allow',
+  // plugin_market 只读浏览插件市场索引（列出可安装的 bundle 与版本），真正的安装仍走
+  // plugin_manager（默认 ask）。市场标题/描述/作者是第三方文本，但工具本身不改本机状态。
+  // 与 plugin_manager 同一条理由：不在这张表里它就走兜底，面板上没有预设行，
+  // 兜底一放宽就静默放行 —— 一个能列出「装什么」的工具该有自己的一行。
+  plugin_market: 'allow',
 }
 // 单一来源：预设清单由 QUICK_DEFAULTS 的键派生（顺序即键的插入顺序），
 // 避免「清单」与「默认值」两份定义在新增工具时漂移（设置页展示与 locked 迁移共用这一份）
@@ -422,29 +446,25 @@ const REMOVED_WRITE_TOOLS = ['perm_set_category', 'perm_set_fallback', 'perm_set
   'perm_add_exception', 'perm_remove_exception', 'perm_set_quick', 'perm_add_rule',
   'perm_remove_rule', 'perm_reload']
 const REMOVED_WRITE_TOOL_SET = new Set(REMOVED_WRITE_TOOLS)
+// 上游已不再注册的工具名：键留在配置里毫无用处，且会让面板出现一行改不动任何东西的设置。
+// 与 REMOVED_WRITE_TOOLS 同一条处置（加载时丢弃残留键），但**理由不同** —— 这一组不是
+// 本插件主动移除的，而是 DSH 那边不再注册：
+//   · dsh-tool-cordis 在 0.1.0-rc.2 里注册过 cordis_define / cordis_run / cordis_stop /
+//     cordis_undefine / cordis_inspect_self；0.1.7-rc.1 起只剩 cordis_inspect_list 与
+//     cordis_inspect_query，动态插件的定义与生命周期改为只经 Plugin Manager 与程序调用方，
+//     不再有模型工具（dsh-cordis-host-runner 的 README 原文即「没有模型工具创建动态定义」）。
+//   · 故在 0.1.7-rc.1 及之后的 DSH 上这五个键都命不中，quickAction 永远走不到它们。
+// 丢弃而不是留着「万一回退到旧 DSH」：这几个工具的能力是「在宿主进程内定义并执行任意代码」，
+// 让一个已经失效的 allow 在回退后复活，正是 issue #3 那条老路；回退到 0.1.0-rc.2 这类
+// 仍注册它们的版本时改走兜底策略（默认 ask），方向安全。代价是有意接受的：那种回退场景下
+// 需要在设置页重新设置这五行。
+const REMOVED_STALE_TOOLS = ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self']
+const REMOVED_STALE_TOOL_SET = new Set(REMOVED_STALE_TOOLS)
 // 这里曾有一张 QUICK_LEGACY_ALIASES（旧键 → 新键，写入侧单向同步），已删除。
 // 它建立在「两代键是同一个工具、只是改名」这个错误前提上：新版 schedule_edit 的
 // update 与 delete 两个 action 分别来自旧版两个**不同**工具，任一旧键的值都推不出它的值。
 // 复刻旧键的值因此必然改变授权面（allow 扩大、deny 越界），而不再只是「让面板不说谎」。
 // 面板那一半改由旧键的用途标签承担（见 client.js 的 quick.schedule_update / _delete）。
-// 预设默认值的历史值：旧版 freshConfig 会把**当时**的 QUICK_DEFAULTS 全量 seed 进配置并落盘
-// （1.5.1–1.5.8 一直如此），而 quickAction 的优先级是「项目键 → 全局键 → 预设默认 → 兜底」，
-// 落盘的显式值会永久压过新默认 —— 于是「只改 QUICK_DEFAULTS」对存量配置零效果：
-// 面板显示新默认（quickDefaults 下发的是新值），实际裁决却仍按旧值走，且此后任何一次
-// persist 都会把旧值固化。cordis_define 由 allow 收紧为 ask 正是这种情况。
-// 故加载时按「精确名单 + 精确旧值」做一次性收敛：值恰好等于历史默认、且新默认已不同时丢弃该键，
-// 使其回落新默认。与 REMOVED_WRITE_TOOLS 同一口径，只删这份精确名单，用户手填的自定义工具名不受影响。
-// 代价（有意接受）：升级前**特意**把该工具设为旧默认值的用户，需在设置页重设一次；
-// 否则收紧等于白改，而「以为收紧了、其实没有」比「需要重设一次」危险得多。
-// 仅作用于全局层：旧版 freshConfig 只 seed 全局，项目层出现该键必是用户显式设置，不动。
-const QUICK_RETIRED_DEFAULTS = { cordis_define: 'allow' }
-// 该收敛的迁移 ID：写进配置的 migrations 名单，表示「这条迁移已经评估过」。
-// 为什么需要它（而不是只比一个全局版本号）：收敛判据是「值等于历史默认」，而用户升级后
-// 完全可能主动把 cordis_define 设回 allow（那是他的明确意图）。若只看值，每次加载都会
-// 把这次显式设置再删一遍；若只看**全局**版本号，则将来为别的迁移把版本从 1 升到 2 时，
-// 本条会被判为「未跑过」而重新执行，同样静默回滚用户设置（已实测复现）。
-// 故按「迁移 ID 是否已在名单里」判断，各条迁移互不牵连。
-const RETIRE_QUICK_DEFAULTS_MIGRATION = 'retire-quick-defaults-cordis_define'
 // eslint-disable-next-line no-unused-vars -- 有意保留：记录「审批已改为永不超时」前的历史口径
 const ASK_TIMEOUT_MS = 300000 // 保留常量（历史/文档用途）；审批已改为永不超时
 const DECIDE_CHOICES = ['allow', 'deny', 'allow-global', 'allow-project', 'deny-global', 'deny-project']
@@ -1053,10 +1073,6 @@ export default {
     let dshHomeFailAt = 0
     const HOME_FAIL_TTL_MS = 200
     let config = freshConfig()
-    // 本次加载收敛掉的历史预设默认值键数（见 QUICK_RETIRED_DEFAULTS）：由 buildConfig 的
-    // 返回值经 load 写入。刻意放在 config 之外——config 会被 JSON.stringify 整体落盘，
-    // 把该计数挂在 config 上会让它变成配置文件里的一个字段，被下次加载读回并原样写下去。
-    let retiredQuickDefaults = 0
     let loadError = null
     let saveError = null
     const decisions = []
@@ -1243,9 +1259,7 @@ export default {
       const g = { quickTools: {}, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask' }
       for (const c of CATS) g[c] = freshCategory(c, false)
       for (const k of Object.keys(QUICK_DEFAULTS)) g.quickTools[k] = { action: QUICK_DEFAULTS[k] }
-      // 新建配置：历史默认值收敛无对象可收敛（本来就用新默认值 seed），
-      // 直接把它标记为已跑过，避免首次加载白跑一次迁移判定。
-      return { migrations: [RETIRE_QUICK_DEFAULTS_MIGRATION], global: g, projects: {} }
+      return { global: g, projects: {} }
     }
 
     function freshProject() {
@@ -1535,7 +1549,7 @@ export default {
     // 为什么非法值「丢弃」而不是落一个默认值：normalizeCategory 的产物会被 persist 整体序列化
     // 落盘，落一个 6 就等于把**推导值**变成**用户表态** —— 日后把默认阈值从 6 改成 8 时，
     // 这些配置不会跟随，且此后任何一次无关写盘都会把 6 固化。这与 destructive 子设置
-    // 踩过的坑完全同构（见 normalizeCategory 的注释与 QUICK_RETIRED_DEFAULTS 的历史）。
+    // 踩过的坑完全同构（见 normalizeCategory 的注释）。
     // 「关闭检测」不是把阈值写 0，而是把 mode 设为 allow —— 语义明确且在面板上有提示（G2-3）。
     function normalizeThreshold(v, inheritDefault) {
       if (inheritDefault && v === 'inherit') return 'inherit'
@@ -1622,27 +1636,20 @@ export default {
       return out
     }
 
-    // applyRetiredDefaults 仅对**全局层**为真：项目层的同名键必是用户显式设置（旧版 freshConfig
-    // 只 seed 全局），收敛它等于篡改用户的项目级意图。
-    // stats.retired 记录本次收敛掉的键数，供 load 判断是否需要落盘（判据只此一处，不在别处重写）。
-    function normalizeQuick(q, applyRetiredDefaults, stats) {
+    // 丢弃已移除工具名的残留键（理由见 REMOVED_WRITE_TOOLS / REMOVED_STALE_TOOLS）。
+    // 只删这两份精确名单，用户手填的自定义工具名不受影响。
+    // stats.dropped 累计丢弃的键数，供 load 判断是否需要落盘 —— 不落盘的话磁盘上一直留着
+    // 这些键，而下次加载又要再丢一遍；且任何一次无关写盘都会把它们原样写回去。
+    function normalizeQuick(q, stats) {
       const out = {}
       if (!q || typeof q !== 'object') return out
       for (const k of Object.keys(q)) {
-        // 已移除的权限写工具：丢弃残留键（理由见 REMOVED_WRITE_TOOLS 处注释）。
-        // 只删这份精确名单，用户手填的自定义工具名不受影响。
-        if (REMOVED_WRITE_TOOL_SET.has(k)) continue
-        const e = normalizeQuickEntry(q[k])
-        if (e) {
-          // 历史预设默认值的收敛（理由见 QUICK_RETIRED_DEFAULTS 处注释）：仅当落盘值恰好等于
-          // 该键的历史默认、且当前默认已不同时才丢弃，使其回落新默认。值被用户改过就不动。
-          if (applyRetiredDefaults && Object.prototype.hasOwnProperty.call(QUICK_RETIRED_DEFAULTS, k) &&
-            QUICK_RETIRED_DEFAULTS[k] === e.action && QUICK_DEFAULTS[k] !== e.action) {
-            if (stats) stats.retired++
-            continue
-          }
-          out[k] = e
+        if (REMOVED_WRITE_TOOL_SET.has(k) || REMOVED_STALE_TOOL_SET.has(k)) {
+          if (stats) stats.dropped++
+          continue
         }
+        const e = normalizeQuickEntry(q[k])
+        if (e) out[k] = e
       }
       return out
     }
@@ -1870,9 +1877,9 @@ export default {
       return Object.keys(out).length ? out : null
     }
 
-    // stats 由调用方传入（形如 { retired: 0 }），normalizeQuick 往里累加本次收敛掉的键数
-    // （见 QUICK_RETIRED_DEFAULTS）。刻意走独立参数而不是返回值：返回值是 config 本体，
-    // 会被 JSON.stringify 整体落盘，把计数挂上去就会变成配置文件里的一个字段。
+    // stats 由调用方传入（形如 { dropped: 0 }），normalizeQuick 往里累加本次丢弃的残留键数。
+    // 刻意走独立参数而不是返回值：返回值是 config 本体，会被 JSON.stringify 整体落盘，
+    // 把计数挂上去就会变成配置文件里的一个字段。
     function buildConfig(parsed, stats) {
       const g = parsed.global && typeof parsed.global === 'object' ? parsed.global : {}
       // 兜底与分类 mode / 例外 / 规则 / 快捷工具 / 子设置**同一条判据**（actionAllowed）：
@@ -1883,15 +1890,7 @@ export default {
       // 未匹配任何规则的调用就被放行）；全局层的默认值是 `ask`，虽然方向安全，但同样
       // 会把用户写下的值从磁盘上抹掉。两处都按 actionAllowed 保留，判据与 1497 行同源。
       const gFb = actionAllowed(g.fallbackMode, MODES) ? g.fallbackMode : 'ask'
-      // 迁移闸门：按「该迁移 ID 是否已在本配置的 migrations 名单里」判断，而不是比一个全局版本号。
-      // 全局版本号会让「为别的迁移升版本」连带把本条重新执行一遍，从而静默回滚用户的显式设置
-      // （已实测复现）。名单式判定下各条迁移互不牵连。
-      const doneMigrations = Array.isArray(parsed.migrations) ? parsed.migrations.filter((m) => typeof m === 'string') : []
-      const needRetire = doneMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1
-      // 名单本身需要更新（本次首次评估该迁移）时也要落盘：否则下次加载会再判定一遍，
-      // 而那时用户可能已显式设回旧值——又会被当成「待收敛」删掉。
-      if (stats && needRetire) stats.pending = true
-      const global = { quickTools: normalizeQuick(g.quickTools, needRetire, stats), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
+      const global = { quickTools: normalizeQuick(g.quickTools, stats), custom: Array.isArray(g.custom) ? g.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access'].indexOf(g.sandboxMode) !== -1 ? g.sandboxMode : 'danger-full-access', fallbackMode: gFb }
       // 兜底拒绝原因：与分类同口径，只在**最终会拒绝**时保留（判据 finalActionOf）。
       // 故必须先算回落值再判 —— 顺序不能反。
       //
@@ -1918,7 +1917,7 @@ export default {
       for (const key of Object.keys(rawProjects)) {
         const p = rawProjects[key] && typeof rawProjects[key] === 'object' ? rawProjects[key] : {}
         const pFb = actionAllowed(p.fallbackMode, ALL_MODES) ? p.fallbackMode : 'inherit'
-        const pb = { quickTools: normalizeQuick(p.quickTools, false), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
+        const pb = { quickTools: normalizeQuick(p.quickTools, stats), custom: Array.isArray(p.custom) ? p.custom.map(normalizeRule).filter(Boolean) : [], sandboxMode: ['workspace-write', 'danger-full-access', 'inherit'].indexOf(p.sandboxMode) !== -1 ? p.sandboxMode : 'inherit', fallbackMode: pFb }
         // 项目层兜底的 auto 回落值：与全局层同口径（只在 fallbackMode 是 auto 时存）。
         // `inherit` 时 normalizeAutoFallback 返回 undefined → 不建键，符合「整体继承、
         // 项目层无 fallback 字段」的语义（§2.3）。
@@ -1936,11 +1935,7 @@ export default {
         if (pAuto) pb.autoReview = pAuto
         projects[key] = pb
       }
-      // migrations 落盘：把本次评估过的迁移 ID 记入名单，使各条迁移都只跑一次
-      // （理由见 RETIRE_QUICK_DEFAULTS_MIGRATION）。保留原有名单项，只补不删。
-      const nextMigrations = doneMigrations.slice()
-      if (nextMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1) nextMigrations.push(RETIRE_QUICK_DEFAULTS_MIGRATION)
-      return { migrations: nextMigrations, global, projects }
+      return { global, projects }
     }
 
     function migrateOld(parsed) {
@@ -2992,8 +2987,8 @@ export default {
     // doomloop 阈值的读取单点（与 destructiveTiers 同构）：项目显式 → 全局显式 → 默认。    // **推导在这里做，不在 normalizeCategory/freshCategory 里做** —— 那边的产物会经 persist
     // 落盘成显式键，于是「推导值」与「用户表态」在磁盘上不可区分：日后把默认阈值从 6 调成 8 时，
     // 存量配置里那条固化的 6 会永久压过新默认（面板显示 8、实际按 6 裁决），
-    // 且此后任何一次无关写盘都会把 6 固化 —— 这正是 QUICK_RETIRED_DEFAULTS 当年要造
-    // 一次性收敛迁移的原因，不值得再犯一次。
+    // 且此后任何一次无关写盘都会把 6 固化 —— 固化的推导值只能靠一次性收敛迁移纠正，
+    // 不值得为此再造一条迁移。
     // 优先级：
     //   ① 项目层显式数字 → 用它
     //   ② 全局层显式数字 → 用它
@@ -9411,21 +9406,22 @@ export default {
         const parsed = JSON.parse(text)
         if (!parsed || typeof parsed !== 'object') throw new Error('根节点必须是对象')
         const isOld = parsed.global && typeof parsed.global === 'object' && parsed.global.mode !== undefined && parsed.global.directory === undefined
-        // retired 收集本次收敛的历史预设默认值键数与「名单是否需更新」（见 QUICK_RETIRED_DEFAULTS）
-        const retired = { retired: 0, pending: false }
-        config = isOld ? migrateOld(parsed) : buildConfig(parsed, retired)
-        retiredQuickDefaults = retired.retired
+        // dropped 收集本次丢弃的残留键数（见 REMOVED_WRITE_TOOLS / REMOVED_STALE_TOOLS）
+        const dropped = { dropped: 0 }
+        config = isOld ? migrateOld(parsed) : buildConfig(parsed, dropped)
         lastDiskJson = String(text).trim()
         loadError = null
         saveError = null
         // 配置整体换了一份 → 例外爆炸半径的缓存作废（世代失效，见 blastPatternMemo 的注释）。
         // 必须在下面那次可能的 persist() 之前也生效：那份 persist 只处理迁移落盘。
         invalidateBlastMemo()
-        // 历史预设默认值被收敛过就必须落盘（理由见 QUICK_RETIRED_DEFAULTS）：
-        // 只改内存会让「面板显示 / 磁盘值 / 生效值」三者长期不一致，且下次加载还要再算一遍。
-        // 落盘失败也不阻断加载——内存里已是收敛后的值，本次运行行为正确，persist 会设
+        // 以下三种情况都必须落盘：
+        //   · 老配置（v1 扁平格式）或从项目残留文件迁来的 —— 不落盘下次加载还要再迁一遍；
+        //   · 本次丢弃了残留键 —— 不落盘的话磁盘上一直留着它们，面板行仍来自磁盘旧值。
+        // 只改内存会让「面板显示 / 磁盘值 / 生效值」三者长期不一致。
+        // 落盘失败也不阻断加载——内存里已是归一后的值，本次运行行为正确，persist 会设
         // saveError 供面板显示（与既有写盘失败路径同口径）。
-        if (isOld || migratedFromProject || retiredQuickDefaults > 0 || retired.pending) {
+        if (isOld || migratedFromProject || dropped.dropped > 0) {
           const saved = await persist(exec)
           // 迁移成功落盘后才删除项目残留文件，避免写盘失败导致配置丢失
           if (saved && migratedFromPath) removeMigratedSource(migratedFromPath, rootOf(exec))

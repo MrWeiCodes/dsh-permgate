@@ -1680,12 +1680,19 @@ ok('decide 不再硬编码放行 perm_*', !src.includes("name.indexOf('perm_') =
   // plugin_manager 是这一类里权限最大的：能装包（会执行包自带 install 脚本）、卸包、改启用状态，
   // 还能跳过 DSH 的 peer 兼容校验。它曾长期不在本表里、只靠兜底策略（默认 ask）兜着 ——
   // 行为上会弹窗，但**面板上看不见**，用户没法单独把它设成 deny，兜底一放宽就静默放行。
-  const ASK_TOOLS = ['cordis_run', 'cordis_stop', 'cordis_undefine', 'plugin_manager']
-  const missing = ASK_TOOLS.filter((t) => !new RegExp('\\b' + t + ": 'ask'").test(src))
-  ok('管插件的元操作仍纳入快捷预设且默认 ask', missing.length === 0, JSON.stringify(missing))
+  // cordis_define / cordis_run / cordis_stop / cordis_undefine 已随 DSH 停止注册而移出本表
+  // （见 REMOVED_STALE_TOOLS），它们的「不许静默放行」由下面的兜底断言继续守住。
+  ok('★ plugin_manager 仍纳入快捷预设且默认 ask（能执行安装脚本的元操作必须先问）',
+    /\bplugin_manager: 'ask'/.test(src))
   // 用途标签必须一并存在：清单里有、面板上没有说明文字时，那一行就成了没有用途说明的孤儿行
-  const noLabel = ASK_TOOLS.filter((t) => !cli.includes("'quick." + t + "':"))
-  ok('★ 管插件的元操作都有中英用途标签', noLabel.length === 0, JSON.stringify(noLabel))
+  ok('★ plugin_manager 有中英用途标签', cli.includes("'quick.plugin_manager':"))
+  // 已失效的 cordis 键：既不该在 QUICK_DEFAULTS 里，也不该有 i18n 标签 —— 否则面板多出改不动的行
+  const STALE = ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self']
+  const staleQuick = STALE.filter((t) => new RegExp('\\b' + t + ": '").test(src))
+  ok('★★ QUICK_DEFAULTS 不含 DSH 已不注册的 cordis 键（面板不出现改不动的行）',
+    staleQuick.length === 0, JSON.stringify(staleQuick))
+  const staleI18n = STALE.filter((t) => cli.includes("'quick." + t + "'"))
+  ok('★ 客户端不含失效 cordis 键的用途标签（中英）', staleI18n.length === 0, JSON.stringify(staleI18n))
   // perm_status 只读查询：明确放宽为 allow，防止被顺手改回 ask
   ok('perm_status 默认 allow（只读查询不弹窗）', src.includes("perm_status: 'allow'"))
   // 写工具的快捷预设项与 i18n 标签都必须一并清掉，不留死键
@@ -11994,19 +12001,17 @@ group('23. 路由信任栅栏：两层结构 + 迁移一次性（防回退）')
   ok('★ 栅栏：Host/Origin 共用一套 WHATWG authority 规范化（不再两套写法互相打架）',
     src.includes('function parseAuthority(hostHeader)') && src.includes('new URL(origin).host.toLowerCase() !== authority.host') &&
     !src.includes('function hostOfHeader'))
-  // 历史默认值收敛必须带**迁移名单**闸门（而不是全局版本号）：否则用户升级后主动设回旧值
-  // 会被每次加载静默回滚；而若用全局版本号，将来为别的迁移升版本又会把本条重新执行一遍
-  // （实测复现过）。按迁移 ID 判定才能让各条迁移互不牵连。
-  ok('★★ 迁移：历史预设默认值收敛带迁移名单闸门（只跑一次，不回滚用户显式设置）',
-    src.includes('RETIRE_QUICK_DEFAULTS_MIGRATION') &&
-    src.includes('doneMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1') &&
-    !src.includes('CONFIG_VERSION'))
-  ok('★ 迁移：收敛只作用于全局层（项目层同名键是用户显式设置，不得动）',
-    src.includes('normalizeQuick(g.quickTools, needRetire, stats)') &&
-    src.includes('normalizeQuick(p.quickTools, false)'))
-  ok('★ 迁移：收敛结果与迁移名单都落盘（否则每次加载重算、面板与生效值不一致）',
-    src.includes('retired.pending') && src.includes('return { migrations: nextMigrations, global, projects }') &&
-    src.includes("if (nextMigrations.indexOf(RETIRE_QUICK_DEFAULTS_MIGRATION) === -1) nextMigrations.push"))
+  // 上游已不再注册的工具名：残留键必须在加载时丢弃，且丢弃结果要落盘
+  // （不落盘的话磁盘上一直留着它们，面板行仍来自磁盘旧值）。
+  ok('★★ 失效工具：两份移除名单都在加载时丢弃（写工具 + DSH 已不注册的 cordis 键）',
+    src.includes('REMOVED_WRITE_TOOL_SET.has(k) || REMOVED_STALE_TOOL_SET.has(k)') &&
+    /const REMOVED_STALE_TOOLS = \['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self'\]/.test(src))
+  ok('★ 失效工具：丢弃计数驱动落盘（否则磁盘残留键永不被清除）',
+    src.includes('stats.dropped++') && src.includes('dropped.dropped > 0'))
+  // 清理必须只认精确名单：一刀切删未知键会连用户手填的自定义工具名一起删掉
+  ok('★ 失效工具：不做「未知键一律清理」（用户手填的工具名必须保留）',
+    !src.includes('REMOVED_STALE_TOOL_SET.has(k) || !QUICK_DEFAULTS') &&
+    src.includes('// 只删这两份精确名单，用户手填的自定义工具名不受影响'))
   // 客户端必须能识别栅栏错误：非 2xx 转 reject，且不丢宿主给的错误文案
   ok('★ 客户端：非 2xx 转 reject（不再把错误体当 status/pending 数据渲染）',
     cli.includes('if (!r.ok)') && cli.includes('fenceErrorOf(body)'))
@@ -14612,6 +14617,19 @@ group('30. 边界根与相对路径解析基准分离（DSH 0.2.1 的 workingDir
     ok('★ 30 run_code 在预设清单里（面板默认有该行，可单独设 deny）',
       /const QUICK_PRESET = Object\.keys\(QUICK_DEFAULTS\)/.test(src)
       && qdSrc.indexOf('run_code:') !== -1)
+    // 子代理协作五项：只操作协作状态（等待自己的收件箱 / 共享任务板），不碰文件、命令、配置，
+    // 也不产生无人值守触发。默认 ask 会让 Team 模式下每次协作都弹窗 —— 而用户被问的只是
+    // 「要不要让 AI 记一条任务」。plugin_market 同理：只读浏览市场，安装仍走 plugin_manager。
+    // 逐个钉住而不是只断言「都在表里」：把其中任一项改成 ask / deny 都必须变红。
+    const collabDefs = ['wait_agent', 'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'plugin_market']
+    const collabBad = collabDefs.filter((k) => defOf(k) !== 'allow')
+    ok('★★ 30 子代理协作与插件市场默认 allow（只读/协作状态，不碰文件与命令）',
+      collabBad.length === 0, JSON.stringify(collabBad.map((k) => k + '=' + defOf(k))))
+    // 放宽 plugin_market 不得连带放宽安装路径：两者是不同工具名，这里钉住那张表里仍然只有
+    // plugin_manager 是 ask —— 若有人把 plugin_market 的动作复用给 plugin_manager 就会变红。
+    ok('★★ 30 plugin_market 放行不连带放宽 plugin_manager（安装仍须先问）',
+      defOf('plugin_manager') === 'ask' && defOf('plugin_market') === 'allow',
+      'manager=' + defOf('plugin_manager') + ' market=' + defOf('plugin_market'))
     // 用途标签与清单**同进同出**：清单里有、面板上没有说明文字时，那一行就是没有用途说明的
     // 孤儿行（group11 已对管插件的元操作单独断言过，但那是点名清单，新增工具容易漏）。
     // 这里改成对**整张表**机械核对：每个键必须在中英两个 i18n 块里各有一条 'quick.<键>'。

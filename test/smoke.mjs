@@ -336,28 +336,36 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
   process.env.DSH_HOME = dshHome
 }
 
-// ── 历史预设默认值的收敛（QUICK_DEFAULTS 变更对存量配置必须生效）────────────
-// 背景：旧版 freshConfig 会把当时的 QUICK_DEFAULTS 全量 seed 落盘，而 quickAction 的优先级是
-// 「项目键 → 全局键 → 预设默认 → 兜底」—— 落盘的显式值会永久压过新默认。于是 cordis_define
-// 由 allow 收紧为 ask 时，存量配置里那个显式 allow 会让收紧**完全失效**（面板显示 ask、
-// 实际裁决 allow，且此后每次 persist 都把 allow 固化）。这里钉住收敛行为：
-// 仅当「值恰好等于历史默认」且「当前默认已不同」时才丢弃该键，让新默认接管。
+// ── 上游已不再注册的工具名：残留键必须在加载时丢弃 ─────────────────────────────
+// 背景：旧版 freshConfig 会把当时的 QUICK_DEFAULTS 全量 seed 落盘，于是存量配置里留有
+// cordis_define / cordis_run 这类键。DSH 0.1.7-rc.1 起 dsh-tool-cordis 只注册两个 inspect_*，
+// 这些键永远命不中：留在配置里就是设置页上一行改不动任何东西的设置（面板说谎），
+// 且残留的 allow 会在将来同名工具复活时绕过兜底策略被静默放行。
 {
-  const ws = tmpdirFor('pg-retired-ws-')
-  const home = tmpdirFor('pg-retired-home-')
+  const ws = tmpdirFor('pg-stale-ws-')
+  const home = tmpdirFor('pg-stale-home-')
   mkdirSync(join(home, 'dsh-permgate'), { recursive: true })
-  // 存量配置：cordis_define 显式 allow（旧默认）、cordis_run 显式 deny（用户改过的值，不得动）、
-  // 以及一个用户手填的自定义工具名（同样不得动）
+  // 存量配置：cordis_define 显式 allow、cordis_run 显式 deny、cordis_inspect_self 显式 allow，
+  // 以及一个用户手填的自定义工具名（不得动）。项目层也塞一个 stale 键，验证项目层同样清理。
   const legacy = {
     global: {
       quickTools: {
         cordis_define: { action: 'allow' },
         cordis_run: { action: 'deny' },
+        cordis_inspect_self: { action: 'allow' },
+        cordis_inspect_list: { action: 'allow' },
         my_custom_tool: { action: 'allow' },
       },
       custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask',
     },
-    projects: {},
+    // key 必须跟随宿主根：init 在 load 之后跑 cleanupStaleProjects，keep 集合只有本会话根，
+    // 硬编码的目录一旦在机器上不存在，整块会被当成失效工作区删除并落盘，断言随之恒假。
+    projects: {
+      [ws]: {
+        quickTools: { cordis_stop: { action: 'allow' }, my_project_tool: { action: 'deny' } },
+        custom: [], sandboxMode: 'inherit', fallbackMode: 'inherit',
+      },
+    },
   }
   writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(legacy, null, 2))
   const h = createHost({ workspaceRoot: ws, dshHome: home })
@@ -369,79 +377,35 @@ ok('apply 注册了 tools/pre-execute 钩子', typeof host.hooks.get('tools/pre-
     await Promise.race([Promise.resolve(p).catch(() => {}), new Promise((r) => setTimeout(r, 1500))])
     return nexted
   }
-  // 收敛发生在 load 期，先触一次路由让配置加载完成
+  // 清理发生在 load 期，先触一次路由让配置加载完成
   await callRoute(h.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' })
 
-  ok('★ 收敛：存量配置的 cordis_define=allow 被丢弃，回落新默认 ask（不再静默放行）',
+  // 残留的 allow 不得让已失效的工具被静默放行：键被丢弃后走兜底策略（默认 ask）
+  ok('★★ 失效工具：残留的 cordis_define=allow 被丢弃，回落兜底 ask（不再静默放行）',
     (await probe('cordis_define')) === false)
-  ok('★ 收敛：用户改过的值不受影响（cordis_run 仍按其显式 deny 裁决）',
-    (await probe('cordis_run')) === false)
-  ok('★ 收敛：手填的自定义工具名不被清理（my_custom_tool 仍按显式 allow 放行）',
+  ok('★ 失效工具：残留的 cordis_inspect_self=allow 同样被丢弃',
+    (await probe('cordis_inspect_self')) === false)
+  ok('★ 失效工具：用户手填的自定义工具名不被清理（my_custom_tool 仍按显式 allow 放行）',
     (await probe('my_custom_tool')) === true)
-  // 收敛必须落盘：否则每次加载都要重算，面板行仍来自磁盘旧值
+  // 仍被 DSH 注册的 inspect_* 必须留下 —— 这是「只删失效名单」而不是「一刀切」的对照
+  ok('★ 失效工具：仍被注册的 cordis_inspect_list 未被误删（键还在，仍按 allow 裁决）',
+    (await probe('cordis_inspect_list')) === true)
+
+  // 清理必须落盘：否则每次加载都要重算，面板行仍来自磁盘旧值
   const savedCfg = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
-  ok('★ 收敛：结果已落盘（磁盘上不再有 cordis_define 的显式 allow）',
-    !(savedCfg.global.quickTools && savedCfg.global.quickTools.cordis_define),
-    JSON.stringify(savedCfg.global.quickTools))
-  ok('★ 收敛：落盘内容不含内部计数字段（retiredQuickDefaults 不得写进配置）',
-    savedCfg.retiredQuickDefaults === undefined && Object.keys(savedCfg).sort().join(',') === 'global,migrations,projects',
+  const gq = (savedCfg.global && savedCfg.global.quickTools) || {}
+  const staleLeft = ['cordis_define', 'cordis_run', 'cordis_inspect_self'].filter((k) => Object.prototype.hasOwnProperty.call(gq, k))
+  ok('★★ 失效工具：残留键已落盘清除（磁盘上不再有这三个键）',
+    staleLeft.length === 0, JSON.stringify(staleLeft))
+  ok('★ 失效工具：项目层的失效键同样被清除，同层用户键保留',
+    !(savedCfg.projects && savedCfg.projects[ws] && savedCfg.projects[ws].quickTools &&
+      savedCfg.projects[ws].quickTools.cordis_stop) &&
+    !!(savedCfg.projects && savedCfg.projects[ws] && savedCfg.projects[ws].quickTools &&
+      savedCfg.projects[ws].quickTools.my_project_tool),
+    JSON.stringify(savedCfg.projects && savedCfg.projects[ws] && savedCfg.projects[ws].quickTools))
+  ok('★ 失效工具：落盘内容不含内部计数字段（配置根只有 global/projects）',
+    Object.keys(savedCfg).sort().join(',') === 'global,projects',
     Object.keys(savedCfg).join(','))
-  ok('★ 收敛：落盘写入迁移名单（供后续加载判断该迁移是否已跑过）',
-    Array.isArray(savedCfg.migrations) && savedCfg.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
-    JSON.stringify(savedCfg.migrations))
-
-  // ★ 收敛必须**只跑一次**：用户升级后完全可能主动把 cordis_define 设回 allow，那是他的明确意图。
-  // 若判据只看「值是否等于历史默认」，每次加载都会把这次显式设置再删一遍 ——
-  // 表现为「用户改完、一重新加载就被静默回滚」，比不收敛更糟。故用迁移名单钉住。
-  await callRoute(h.routes, 'POST', '/permgate/set-quick', { target: 'global', tool: 'cordis_define', action: 'allow', lang: 'zh' })
-  const afterSet = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
-  ok('★ 一次性：用户显式设回 allow 能正常落盘',
-    !!(afterSet.global.quickTools && afterSet.global.quickTools.cordis_define && afterSet.global.quickTools.cordis_define.action === 'allow'),
-    JSON.stringify(afterSet.global.quickTools && afterSet.global.quickTools.cordis_define))
-  await callRoute(h.routes, 'POST', '/permgate/reload', { lang: 'zh' })
-  const afterReload = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
-  ok('★★ 一次性：重新加载后该显式 allow 不被静默回滚（收敛已跑过就不再动它）',
-    !!(afterReload.global.quickTools && afterReload.global.quickTools.cordis_define && afterReload.global.quickTools.cordis_define.action === 'allow'),
-    JSON.stringify(afterReload.global.quickTools && afterReload.global.quickTools.cordis_define))
-
-  // ★ 闸门必须按**迁移 ID** 判定，而不是全局版本号：否则将来为别的迁移升版本时，
-  // 本条会被判为「未跑过」而重新执行，把用户的显式 allow 再删一次（已实测复现）。
-  // 这里直接在磁盘配置里追加一个「别的迁移」的名单项，模拟那种升级，再加载一次。
-  const other = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
-  other.migrations = (other.migrations || []).concat(['some-future-migration'])
-  writeFileSync(join(home, 'dsh-permgate', 'config.json'), JSON.stringify(other, null, 2))
-  await callRoute(h.routes, 'POST', '/permgate/reload', { lang: 'zh' })
-  const afterFuture = JSON.parse(readFileSync(join(home, 'dsh-permgate', 'config.json'), 'utf8'))
-  ok('★★ 一次性：新增别的迁移名单项后，用户的显式 allow 仍不被回滚（按 ID 判定，不牵连）',
-    !!(afterFuture.global.quickTools && afterFuture.global.quickTools.cordis_define && afterFuture.global.quickTools.cordis_define.action === 'allow'),
-    JSON.stringify(afterFuture.global.quickTools && afterFuture.global.quickTools.cordis_define))
-  ok('★ 一次性：原有迁移名单项不被覆盖丢弃（只补不删）',
-    Array.isArray(afterFuture.migrations) && afterFuture.migrations.indexOf('some-future-migration') !== -1 &&
-    afterFuture.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
-    JSON.stringify(afterFuture.migrations))
-
-  // ★ 名单必须在**首次加载**时就落盘，而不是等用户后续某次写操作顺带补上。
-  // 否则「加载 → 用户把 cordis_define 设为 allow → 再次加载」这条链上，第二次加载时
-  // 名单仍为空 → 该显式 allow 会被当成待收敛值删掉。上面各用例都带写操作，
-  // 写操作会顺带落盘而掩盖这个缺陷，故这里用「只加载、不写任何东西」的干净场景单独钉住。
-  {
-    const ws2 = tmpdirFor('pg-gate-ws-')
-    const home2 = tmpdirFor('pg-gate-home-')
-    mkdirSync(join(home2, 'dsh-permgate'), { recursive: true })
-    // 配置里该键已是新默认 ask（无需收敛），但 migrations 名单为空 —— 升级后的真实形态
-    writeFileSync(join(home2, 'dsh-permgate', 'config.json'), JSON.stringify({
-      global: { quickTools: { cordis_define: { action: 'ask' } }, custom: [], sandboxMode: 'danger-full-access', fallbackMode: 'ask' },
-      projects: {},
-    }, null, 2))
-    const h2 = createHost({ workspaceRoot: ws2, dshHome: home2 })
-    await callRoute(h2.routes, 'GET', '/permgate/status', undefined, { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:3080' })
-    const g = JSON.parse(readFileSync(join(home2, 'dsh-permgate', 'config.json'), 'utf8'))
-    ok('★★ 一次性：首次加载（无任何写操作）就把迁移名单落盘，不必等后续写操作顺带补',
-      Array.isArray(g.migrations) && g.migrations.indexOf('retire-quick-defaults-cordis_define') !== -1,
-      JSON.stringify(g.migrations))
-    process.env.DSH_HOME = dshHome
-  }
-  // 同栅栏块：本块也用了独立宿主，收尾时把 DSH_HOME 复位回主 host 的 home，避免测试串台
   process.env.DSH_HOME = dshHome
 }
 
@@ -779,7 +743,9 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   // 32 → 33：run_code（PTC 模式的保留传输工具，默认 ask）
   // 33 → 36：list_subagent_models，以及 schedule 改名的两代键并存
   //          （schedule_edit/schedule_view 新增，schedule_update/schedule_delete 保留）
-  ok('group5: status 下发 quickPreset（36 项：含 schedule 两代键名与 list_subagent_models）', presetList.length === 36, 'len=' + presetList.length)
+  // 36 → 37：减去 DSH 不再注册的 5 个 cordis 键（define/run/stop/undefine/inspect_self），
+  //          加上 wait_agent、team_task_* 四个、plugin_market —— 净 +1
+  ok('group5: status 下发 quickPreset（37 项：含 schedule 两代键名、子代理协作与插件市场）', presetList.length === 37, 'len=' + presetList.length)
   ok('group5: quickPreset 与 quickDefaults 键一致', presetList.length > 0 && presetList.every((t) => Object.prototype.hasOwnProperty.call(defaults, t)), JSON.stringify(presetList.filter((t) => !Object.prototype.hasOwnProperty.call(defaults, t))))
   // 9 个权限写工具已移除：它们既不该在预设清单里，也不再是可调用的工具
   const permWrites = presetList.filter((t) => /^perm_/.test(t) && t !== 'perm_status')
@@ -788,9 +754,26 @@ group('5. 快捷工具：预设默认值参与裁决、显式配置优先、删�
   // perm_status 是只读查询，默认放行（想看随时能看）
   const rp1 = await probe('perm_status')
   ok('group5: perm_status 默认放行（只读）', rp1.nexted === true, JSON.stringify(rp1.out))
-  const rp3 = await probe('cordis_run')
-  ok('group5: cordis_run 默认不被静默放行', rp3.nexted === false, JSON.stringify(rp3.out))
-  // run_code 走的是与 cordis_run 同一条理由（执行任意代码），但多一层：程序内直接调
+  // DSH 不再注册的 cordis 键必须从清单里消失：留着就是一行改不动任何东西的设置
+  const stalePreset = ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self']
+    .filter((t) => presetList.indexOf(t) !== -1)
+  ok('★★ group5: 预设清单不含 DSH 已不注册的 cordis 键（面板不出现改不动的行）',
+    stalePreset.length === 0, JSON.stringify(stalePreset))
+  // 子代理协作与插件市场：新增项默认放行（只操作协作状态 / 只读浏览市场）
+  const collab = ['wait_agent', 'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'plugin_market']
+  const collabMissing = collab.filter((t) => presetList.indexOf(t) === -1)
+  ok('★ group5: 子代理协作与插件市场都在预设清单里（面板默认有这些行）',
+    collabMissing.length === 0, JSON.stringify(collabMissing))
+  const rwa = await probe('wait_agent')
+  ok('★ group5: wait_agent 默认放行（只等自己那一步，不消费输入也不启动子代理）', rwa.nexted === true, JSON.stringify(rwa.out))
+  const rtt = await probe('team_task_update')
+  ok('★ group5: team_task_update 默认放行（改共享任务板，不唤醒空闲子代理）', rtt.nexted === true, JSON.stringify(rtt.out))
+  const rpm = await probe('plugin_market')
+  ok('★ group5: plugin_market 默认放行（只读浏览市场，安装仍走 plugin_manager）', rpm.nexted === true, JSON.stringify(rpm.out))
+  // 安装路径本身仍必须先问：plugin_market 的 allow 不得顺带放宽 plugin_manager
+  const rpmg = await probe('plugin_manager')
+  ok('★★ group5: plugin_manager 仍默认 ask（放宽 plugin_market 不连带放宽安装）', rpmg.nexted === false, JSON.stringify(rpmg.out))
+  // run_code 走的是与已移除的 cordis_run 同一条理由（执行任意代码），但多一层：程序内直接调
   // Node API 的部分**不经** tools/pre-execute，只有原生沙箱管得住。故它必须弹窗。
   // 「能否被用户单独设成 deny」那一半不在这里验 —— 它由 regressions 的 group30 断言
   // （QUICK_PRESET 由 QUICK_DEFAULTS 的键派生，故「在表里」即「在清单里」）。
