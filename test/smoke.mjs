@@ -112,6 +112,8 @@ function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm, setti
   const app = new Context()
   // LocalFileSystem.Config 负责填默认值（cwd / diffBasisMaxBytes），构造函数会自我注册为 ctx 服务
   const fs = new LocalFileSystem(app, LocalFileSystem.Config({ cwd: workspaceRoot }))
+  // webServer 桩：插件经 ctx.webServer.register 挂 /permgate 路由。
+  const webServerStub = { register: (r) => { routes.push(r); return () => {} } }
   const ctx = {
     fs,
     sandboxPolicy: { workspaceRoot, resolve: () => null, overrideOf: () => 'danger-full-access', setMode: () => {} },
@@ -119,7 +121,7 @@ function createHost({ workspaceRoot, dshHome, fsEncoding, connection, llm, setti
       register: (def) => { registered.set(def.name, def); return () => {} },
       get: () => null,
     },
-    webServer: { register: (r) => { routes.push(r); return () => {} } },
+    webServer: webServerStub,
     // timer 桩：**记录**回调与延迟，但**不自动触发**（由用例手动调用 —— 见 group24 A7b）。
     // 自动触发会让启动对齐（1200ms）、弹窗倒计时（A16 的 5000ms）在用例中途自行结案，
     // 把「弹窗不自动结案」变成时序抽奖。返回的 disposer 摘掉条目，与真 timer 的取消同义。
@@ -8927,6 +8929,227 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
         JSON.stringify({ err: r2.data && r2.data.error, len: ar2.denyReason ? ar2.denyReason.length : 0 }))
       releaseTmp(ws, home)
     }
+  }
+
+  // ── A59：审批提醒的两组设置（/permgate/set-notify）───────────────────────────
+  //
+  // 这组钉的是「面板说了什么，磁盘上就是什么」。最典型的坏形态：
+  //   · 「面板显示开、磁盘上没这个键」（重启后又变回默认，用户莫名其妙）；
+  //   · 「一次改一个把另一个冲掉」（逐字段语义丢了）；
+  //   · 「数字项被静默钳制」（面板显示 3601 被改成 3600，用户看不出）。
+  {
+    // ① 默认值：两组 × 三键，且 statusView 把 defaults/ranges 一并下发
+    //    （客户端硬编码第二份会让「宿主改默认值」与「面板显示」分叉）。
+    const { ws, home, h } = mkHostAuto({}, undefined)
+    const st0 = await callRoute(h.routes, 'GET', '/permgate/status', null)
+    const nt0 = st0.data && st0.data.notify
+    ok('★ group24 A59: statusView 下发 notify（effective/defaults/ranges/explicit）',
+      !!(nt0 && nt0.effective && nt0.defaults && nt0.ranges && Array.isArray(nt0.explicit)),
+      JSON.stringify(nt0))
+    ok('★★ group24 A59: 默认值 —— 两组提示音都开、桌面通知都关、秒数 0/10',
+      nt0 && nt0.effective.bgSound === true && nt0.effective.bgDesktop === false && nt0.effective.bgDelaySec === 0
+      && nt0.effective.idleSound === true && nt0.effective.idleDesktop === false && nt0.effective.idleDelaySec === 10
+      && nt0.explicit.length === 0,
+      JSON.stringify(nt0 && { e: nt0.effective, x: nt0.explicit }))
+    ok('★ group24 A59: ranges 下发两个数字项的值域（面板据此在提交前拦截）',
+      nt0 && nt0.ranges.bgDelaySec && nt0.ranges.bgDelaySec.max === 3600
+      && nt0.ranges.idleDelaySec && nt0.ranges.idleDelaySec.max === 3600,
+      JSON.stringify(nt0 && nt0.ranges))
+
+    // ② 打开一个开关：回带新值 + 真的落盘。
+    const r1 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgDesktop: true })
+    ok('★ group24 A59: set-notify 写盘成功且回带新值',
+      !!(r1.data && r1.data.notify && r1.data.notify.effective.bgDesktop === true
+        && r1.data.notify.explicit.indexOf('bgDesktop') !== -1),
+      JSON.stringify(r1.data && r1.data.notify))
+    const d1 = readCfgAuto(home)
+    ok('★★ group24 A59: 开关真的写进 config.json（不是只在内存）',
+      !!(d1.global.notify && d1.global.notify.bgDesktop === true),
+      JSON.stringify(d1.global.notify))
+
+    // ③ 逐字段：再改另一组的键，前一个必须还在（整体替换会让「两组都配」永远只能配一组）。
+    await callRoute(h.routes, 'POST', '/permgate/set-notify', { idleDelaySec: 25 })
+    const d2 = readCfgAuto(home)
+    ok('★★ group24 A59: 逐字段写入（改 idleDelaySec 不会把 bgDesktop 冲掉）',
+      !!(d2.global.notify && d2.global.notify.idleDelaySec === 25 && d2.global.notify.bgDesktop === true),
+      JSON.stringify(d2.global.notify))
+
+    // ④ 关掉：显式写 false 而不是删键 —— 删键会让「我主动关掉」与「从没设过」
+    // 变得不可区分，日后改默认值时用户的选择会被静默推翻。
+    await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSound: false })
+    const d3 = readCfgAuto(home)
+    const st3 = await callRoute(h.routes, 'GET', '/permgate/status', null)
+    ok('★★ group24 A59: 关掉后 effective 为 false，且键仍在磁盘上（显式关 ≠ 没设过）',
+      !!(d3.global.notify && d3.global.notify.bgSound === false)
+      && st3.data && st3.data.notify.effective.bgSound === false
+      && st3.data.notify.explicit.indexOf('bgSound') !== -1,
+      JSON.stringify({ disk: d3.global.notify, x: st3.data && st3.data.notify.explicit }))
+
+    // ⑤ 非布尔回 error 且磁盘不变：静默丢弃会让面板把开关弹回原位却显示「已保存」。
+    const before = JSON.stringify(readCfgAuto(home).global.notify)
+    const r5 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSound: 'yes' })
+    ok('★★ group24 A59: 非布尔值回 error 且磁盘不变（不静默丢弃）',
+      !!(r5.data && r5.data.error) && JSON.stringify(readCfgAuto(home).global.notify) === before,
+      JSON.stringify({ err: r5.data && r5.data.error }))
+
+    // ⑥ 数字项越界：回 error 且**不钳制落盘** —— 钳制后落盘的值与用户填的不同，
+    // 而面板会显示钳制值，看起来像「自己变了」。
+    const r6 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgDelaySec: 3601 })
+    ok('★★ group24 A59: 秒数越界回 error 且磁盘不变（不静默钳制）',
+      !!(r6.data && r6.data.error) && JSON.stringify(readCfgAuto(home).global.notify) === before,
+      JSON.stringify({ err: r6.data && r6.data.error }))
+
+    // ⑦ 数字项非数字：同样回 error（'10' 这种字符串是面板传错的典型形态）。
+    const r7 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { idleDelaySec: '10' })
+    ok('★ group24 A59: 秒数非数字回 error 且磁盘不变',
+      !!(r7.data && r7.data.error) && JSON.stringify(readCfgAuto(home).global.notify) === before,
+      JSON.stringify({ err: r7.data && r7.data.error }))
+
+    // ⑧ 秒数 0 是合法值（`bgDelaySec=0` 就是默认语义「一切到后台就提醒」）——
+    // 不能被「0 = 空/未设」的判据误拦。
+    const r8 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { idleDelaySec: 0 })
+    ok('★★ group24 A59: 秒数 0 是合法值（不是「空」，必须能落盘）',
+      !(r8.data && r8.data.error) && readCfgAuto(home).global.notify.idleDelaySec === 0,
+      JSON.stringify({ err: r8.data && r8.data.error, disk: readCfgAuto(home).global.notify }))
+
+    // ⑨ 只认全局层：项目层请求必须被拒 —— 否则「换个项目提醒就变」且用户看不出是谁在起作用。
+    const r9 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { target: 'project', bgSound: true })
+    ok('★ group24 A59: 项目层请求被拒（提醒是全局偏好，不按项目配置）',
+      !!(r9.data && r9.data.error),
+      JSON.stringify(r9.data))
+    releaseTmp(ws, home)
+  }
+
+  // ── A60：音效预设与自定义音频 ────────────────────────────────────────────────
+  //
+  // 这组钉两件事：
+  //   ① 六个预设是**宿主下发的清单**，面板不另排一份（加预设时只改一处）；
+  //   ② 自定义音频**不进 statusView**，只报「有没有 + 多大」，播放时按需取 ——
+  //      那份 base64 最多 80KB，而 statusView 会被面板反复取。
+  {
+    const { ws, home, h } = mkHostAuto({}, undefined)
+    const st0 = await callRoute(h.routes, 'GET', '/permgate/status', null)
+    const nt0 = st0.data && st0.data.notify
+
+    // ① 两组各有自己的音效，默认都是 triple；六个预设按序下发
+    ok('★★ group24 A60: 两组各有独立音效，默认都是 triple',
+      nt0 && nt0.effective.bgSoundStyle === 'triple' && nt0.effective.idleSoundStyle === 'triple'
+      && nt0.defaults.bgSoundStyle === 'triple' && nt0.defaults.idleSoundStyle === 'triple',
+      JSON.stringify({ bg: nt0 && nt0.effective.bgSoundStyle, idle: nt0 && nt0.effective.idleSoundStyle }))
+    ok('★★ group24 A60: 六个预设按序下发（面板不另排一份，加预设只改宿主一处）',
+      nt0 && Array.isArray(nt0.soundStyles)
+      && nt0.soundStyles.join(',') === 'chime,single,triple,low,deepdeep,jingjing',
+      JSON.stringify(nt0 && nt0.soundStyles))
+    ok('★ group24 A60: 未配置自定义音频时两组路径都是空串',
+      nt0 && nt0.effective.bgSoundPath === '' && nt0.effective.idleSoundPath === '',
+      JSON.stringify({ bg: nt0 && nt0.effective.bgSoundPath, idle: nt0 && nt0.effective.idleSoundPath }))
+    ok('★ group24 A60: 下发了音频文件的体积上限（面板据此提示）',
+      nt0 && typeof nt0.customMaxBytes === 'number' && nt0.customMaxBytes === 61440,
+      String(nt0 && nt0.customMaxBytes))
+
+    // ② 切换**其中一组**的音效：只改那一组，另一组不受影响。
+    // 这条是「两组独立」的核心判据 —— 若实现里两组共用一个键，这里会红。
+    const r1 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundStyle: 'jingjing' })
+    ok('★★ group24 A60: 改第一组音效不影响第二组（两组独立）',
+      !(r1.data && r1.data.error)
+      && r1.data.notify.effective.bgSoundStyle === 'jingjing'
+      && r1.data.notify.effective.idleSoundStyle === 'triple',
+      JSON.stringify(r1.data && r1.data.notify && r1.data.notify.effective))
+    ok('★ group24 A60: 音效真的写进 config.json',
+      readCfgAuto(home).global.notify.bgSoundStyle === 'jingjing'
+      && !('idleSoundStyle' in readCfgAuto(home).global.notify),
+      JSON.stringify(readCfgAuto(home).global.notify))
+
+    // ③ 未知音效回 error 且磁盘不变 —— 静默丢弃会让面板显示旧值却回「已保存」
+    const beforeStyle = readCfgAuto(home).global.notify.bgSoundStyle
+    const r2 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundStyle: 'bogus' })
+    ok('★★ group24 A60: 未知音效回 error 且磁盘不变（不静默丢弃）',
+      !!(r2.data && r2.data.error) && readCfgAuto(home).global.notify.bgSoundStyle === beforeStyle,
+      JSON.stringify({ err: r2.data && r2.data.error }))
+
+    // ④ 自定义音频**存路径**：写一个真实音频文件，填它的路径。
+    //
+    // 这里刻意用工作区**外**的临时目录：音频与工作区无关，路径方案不得套工作区闸。
+    // 若实现里误加了「必须在工作区内」的限制，这条会红。
+    const soundDir = tmpdirFor('pg-sound-')
+    const soundFile = join(soundDir, 'custom.mp3')
+    const fakeBytes = Buffer.alloc(1000, 7)
+    writeFileSync(soundFile, fakeBytes)
+    const r3 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: soundFile, bgSoundStyle: 'custom' })
+    // 取值要防空：保存失败时 `notify` 整个不存在，直接点下去会让断言崩成 TypeError，
+    // 那样报错信息只剩「不能读 undefined 的 bgSoundPath」，看不出真正原因。
+    const nt3 = (r3.data && r3.data.notify) || {}
+    ok('★★ group24 A60: 自定义音频按**路径**保存（不限工作区）',
+      !(r3.data && r3.data.error)
+      && nt3.effective && nt3.effective.bgSoundStyle === 'custom'
+      && nt3.effective.bgSoundPath === soundFile,
+      JSON.stringify({ err: r3.data && r3.data.error, p: nt3.effective && nt3.effective.bgSoundPath }))
+    // 配置里只存路径，**不存内容** —— 否则 config.json 会随音频膨胀
+    const cfgAfter = readCfgAuto(home).global.notify
+    ok('★★ group24 A60: config.json 只存路径（不把音频内容塞进配置）',
+      cfgAfter.bgSoundPath === soundFile && !('soundCustom' in cfgAfter),
+      JSON.stringify(Object.keys(cfgAfter)))
+
+    // ⑤ 按需取音频的路由：按 group 读对应组的文件
+    const r4 = await callRoute(h.routes, 'GET', '/permgate/notify-sound?group=bg', null)
+    ok('★★ group24 A60: /permgate/notify-sound 按 group 读文件并返回 base64',
+      r4.data && r4.data.ok === true && r4.data.data === fakeBytes.toString('base64'),
+      JSON.stringify({ ok: r4.data && r4.data.ok, len: r4.data && r4.data.data ? r4.data.data.length : 0 }))
+    // 第二组没配路径 → 回 no-path，而不是错读第一组的文件。
+    // 失败详情只报长度不报内容：真的串用时会把 1000 字节 base64 整个打进报告，
+    // 真正的判据（ok/code）反而被挤到看不见。
+    const r4b = await callRoute(h.routes, 'GET', '/permgate/notify-sound?group=idle', null)
+    ok('★★ group24 A60: 取音频按 group 隔离（第二组没配路径时回 no-path，不串用第一组）',
+      r4b.data && r4b.data.ok === false && r4b.data.code === 'no-path',
+      JSON.stringify({ ok: r4b.data && r4b.data.ok, code: r4b.data && r4b.data.code, len: r4b.data && r4b.data.data ? r4b.data.data.length : 0 }))
+
+    // ⑥ 路径不存在：保存时当场回 error（不是等下次提醒静默不响）
+    const beforePath = readCfgAuto(home).global.notify.bgSoundPath
+    const r5 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: join(soundDir, 'nope.mp3'), bgSoundStyle: 'custom' })
+    ok('★★ group24 A60: 路径不存在时保存当场回 error（不静默接受）',
+      !!(r5.data && r5.data.error) && readCfgAuto(home).global.notify.bgSoundPath === beforePath,
+      JSON.stringify({ err: r5.data && r5.data.error }))
+
+    // ⑦ 超上限拒收：写一个超过 60KB 的文件
+    const bigFile = join(soundDir, 'big.mp3')
+    writeFileSync(bigFile, Buffer.alloc(70 * 1024, 1))
+    const r7 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: bigFile, bgSoundStyle: 'custom' })
+    ok('★★ group24 A60: 超上限的音频回 error 且磁盘不变（不静默截断）',
+      !!(r7.data && r7.data.error) && readCfgAuto(home).global.notify.bgSoundPath === beforePath,
+      JSON.stringify({ err: r7.data && r7.data.error }))
+
+    // ⑧ 改**别的**字段时不得校验音频：用户调一个秒数，不该因为「另一组的音频文件
+    // 恰好被移到离线盘」而整条请求失败 —— 更不该连带把那个组已存的路径清掉。
+    // 判据按行为：删掉文件后改 idleDelaySec，必须成功且路径还在。
+    rmSync(soundFile, { force: true })
+    const r8 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { idleDelaySec: 33 })
+    ok('★★ group24 A60: 改无关字段时不校验音频（文件失效也不该连带清掉已存路径）',
+      !(r8.data && r8.data.error)
+      && readCfgAuto(home).global.notify.idleDelaySec === 33
+      && readCfgAuto(home).global.notify.bgSoundPath === soundFile,
+      JSON.stringify({ err: r8.data && r8.data.error, disk: readCfgAuto(home).global.notify }))
+
+    // ⑨ 换路径填错时回滚到**原来那个**，而不是删键 —— 删键会让「换个文件填错了」
+    // 变成「原来那个也没了」，用户还得重新找一遍路径。
+    writeFileSync(soundFile, fakeBytes)
+    await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: soundFile, bgSoundStyle: 'custom' })
+    const r9 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: join(soundDir, 'typo.mp3'), bgSoundStyle: 'custom' })
+    ok('★★ group24 A60: 换路径填错时回滚到原路径（不是一律删键）',
+      !!(r9.data && r9.data.error)
+      && readCfgAuto(home).global.notify.bgSoundPath === soundFile,
+      JSON.stringify({ err: r9.data && r9.data.error, disk: readCfgAuto(home).global.notify.bgSoundPath }))
+
+    // ⑩ 清除：`*SoundPath: null` = 显式删键，回到「没有自定义音频」
+    const r10 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: null, bgSoundStyle: 'triple' })
+    ok('★★ group24 A60: 清除自定义音频 = 删键（不落空串）',
+      !(r10.data && r10.data.error)
+      && !('bgSoundPath' in readCfgAuto(home).global.notify)
+      && r10.data.notify.effective.bgSoundPath === '',
+      JSON.stringify(readCfgAuto(home).global.notify))
+    // 清理临时音频文件
+    try { rmSync(soundFile, { force: true }) } catch (e) {}
+    try { rmSync(bigFile, { force: true }) } catch (e) {}
+    releaseTmp(ws, home)
   }
 }
 

@@ -516,6 +516,12 @@ window.__ModuleLoader__.load({
 			// 自动审批的工程参数（超时/熔断/缓存/模型覆盖）：**只有全局层**，
 			// 故不传 target（理由见宿主路由处注释：这些参数不该跟着项目变）。
 			'permgate:set-auto-review': ['POST', '/permgate/set-auto-review'],
+			// 审批提醒的两个开关（桌面通知 / 提示音）。**只有全局层**：
+			// 提醒是本机操作员的偏好，与打开哪个项目无关。
+			'permgate:set-notify': ['POST', '/permgate/set-notify'],
+			// 自定义音效的 base64 载荷。**按需取**，不进 statusView ——
+			// 那份数据最多 80KB，而 statusView 会被面板反复取。
+			'permgate:notify-sound': ['GET', '/permgate/notify-sound'],
 			// 额外审批策略 + 高风险处置的两维。与上面那条分开：这条**两层都能写**
 			// （项目层可以有一套与全局不同的规则），故 target 由调用方显式给。
 			'permgate:set-auto-policy': ['POST', '/permgate/set-auto-policy'],
@@ -1531,6 +1537,11 @@ window.__ModuleLoader__.load({
 		// 落盘后宿主会回带新 status，故「调整顺序后重新处理标注」是自动的 ——
 		// 前提是这里不能像缓存那样只在首次赋值。
 		let EXCEPTION_SHADOW = {};
+		// 审批提醒的生效开关（宿主下发）。默认空对象 = 两项都关，
+		// 与宿主 NOTIFY_DEFAULTS 同向：没有配置时不提醒。
+		let PG_NOTIFY_CFG = {};
+		// 配置变化的订阅者（提醒的到期定时器据此重排，见 pgSetNotifyCfg）。
+		const PG_NOTIFY_CFG_SUBS = new Set();
 		// 取某层某条例外的爆炸半径。层名非法或缺失时返回 undefined（渲染处据此不标注）。
 		function exceptionBlastOf(layer, id) {
 			const t = layer === 'project' ? 'project' : 'global';
@@ -1556,6 +1567,31 @@ window.__ModuleLoader__.load({
 			// 遮蔽关系：与上面同理**每次 status 都整体替换**（含清空）—— 用户把条目拖到前面
 			// 或删掉遮蔽者之后，旧标注必须立刻消失，否则界面会继续说「未生效」而实际已生效。
 			EXCEPTION_SHADOW = (s && s.exceptionShadow && typeof s.exceptionShadow === 'object') ? s.exceptionShadow : {};
+			pgSetNotifyCfg(s);
+		}
+		// 审批提醒开关的**唯一写入点**。两个消费方各调一次：设置面板（applyStatusLists）
+		// 与始终挂载的 OverlayRoot（它才是提醒逻辑真正依赖的那条路径 —— 面板可能
+		// 从未被打开过）。两处各写一遍赋值语句会让「面板改了、提醒没跟上」成为可能。
+		//
+		// **每次整体替换（含清空）**：只写不读式的「有值才赋值」会让用户在面板关掉
+		// 提醒后，这里还按旧值响铃，而面板已经显示「关」了。
+		//
+		// 值真的变了才通知订阅者（见 PG_NOTIFY_CFG_SUBS）：提醒的到期定时器按这里的
+		// 窗口与通道排，而这些值不在 React state 里 —— 没有这条通知链，改完设置后
+		// 已排的定时器仍按旧窗口算：改大时那次求值不命中且无人续排（漏提醒），
+		// 改小时不生效，「先关掉所有通道、之后打开」也永远等不到重排。
+		function pgSetNotifyCfg(s) {
+			const prev = PG_NOTIFY_CFG;
+			// `typeof null === 'object'`：半截响应里 `effective: null` 会让下面读它的
+			// 调用方全部炸掉，故显式判空，落成 {}。
+			const eff = s && s.notify && s.notify.effective;
+			PG_NOTIFY_CFG = (eff && typeof eff === 'object') ? eff : {};
+			// 值没变就不通知：status 会随各种写盘操作反复到达，每次重排定时器
+			// 都是白白 clear/set 一次（结果相同）。
+			const a = Object.keys(prev);
+			const b = Object.keys(PG_NOTIFY_CFG);
+			if (a.length === b.length && a.every((k) => prev[k] === PG_NOTIFY_CFG[k])) return;
+			for (const fn of Array.from(PG_NOTIFY_CFG_SUBS)) { try { fn(); } catch (e) {} }
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
 		const EXC_COLLAPSE_THRESHOLD = 6;
@@ -1851,6 +1887,48 @@ window.__ModuleLoader__.load({
 				'flow.riskValue.high': '高',
 				'flow.riskValue.unknown': '未知等级：{r}',
 				'panel.autoSaved': '已保存',
+				// ── 审批提醒：两组设置 ──────────────────────────────────────────
+				// 两组共用「提示音 / 桌面通知 / 拒绝授权」这几条文案 —— 它们是**通道**的
+				// 名字，不是某一组的功能，各写一份会让两处的措辞漂移。
+				'panel.notifyBgTitle': '切后台时提醒',
+				'panel.notifyBgHint': '页面切到后台时，审批卡片仍在原处但看不见。',
+				'panel.notifyBgDelayLabel': '切到后台',
+				'panel.notifyBgDelayAfter': '秒后仍未处理则提醒',
+				'panel.notifyBgDelayHint': '0 = 一切到后台就提醒。切回前台会重新计时。',
+				'panel.notifyIdleTitle': '超时未处理提醒',
+				'panel.notifyIdleHint': '无论在前台还是后台，审批等太久都会提醒。',
+				'panel.notifyIdleDelayLabel': '审批超过',
+				'panel.notifyIdleDelayAfter': '秒未处理则提醒',
+				'panel.notifyIdleDelayHint': '从审批弹出的那一刻开始算。',
+				'panel.notifyDesktop': '桌面通知',
+				'panel.notifyDesktopHint': '浏览器弹出系统通知，点击回到本页面。',
+				'panel.notifySound': '提示音',
+				'panel.notifySoundHint': '到点响一声。',
+				'panel.notifyOnceNote': '同一个审批只会提醒一次，两组不会重复响。',
+				// ── 音效选择（每组各一份，渲染在各自的卡片里）─────────────────────
+				'panel.notifySoundStyleLabel': '音效',
+				'panel.notifyPreview': '试听',
+				'panel.notifyStyle.chime': '两音上行',
+				'panel.notifyStyle.single': '单音',
+				'panel.notifyStyle.triple': '三连音',
+				'panel.notifyStyle.low': '低音双响',
+				'panel.notifyStyle.deepdeep': 'deep deep',
+				'panel.notifyStyle.jingjing': '鲸鲸',
+				'panel.notifyStyle.custom': '自定义音频',
+				'panel.notifyCustomPathLabel': '音频文件',
+				'panel.notifyCustomPathPh': '例如 D:\\sounds\\deep.mp3',
+				'panel.notifyCustomSave': '保存',
+				'panel.notifyCustomClear': '清除',
+				'panel.notifyCustomCleared': '已清除自定义音频',
+				'panel.notifyCustomSaved': '已保存并启用',
+				'panel.notifyCustomHint': '填本机音频文件的完整路径（任意目录，不限工作区）。支持 mp3 / wav 等浏览器能解码的格式，上限 {max} KB。',
+				'panel.notifyDenied': '浏览器已拒绝通知权限。需在浏览器的站点设置里重新允许，本页才能弹出通知。',
+				'panel.notifyDefault': '首次打开会请求浏览器授权。',
+				'panel.notifyNeedGesture': '提示音要等你先在本页面点一下或按一下键才会生效（浏览器的自动播放限制）。',
+				// 通知文案。{tool} 是工具名，{n} 是待审批条数。
+				'notify.titleOne': '需要审批：{tool}',
+				'notify.titleMany': '有 {n} 条待审批',
+				'notify.bodyMany': '打开页面查看并处理',
 				// 四个数字框共用这一句，而秒框（timeoutMs，scale=1000）接受小数：
 				// 2500ms 显示 2.5 并原样提交，故措辞不得限定为「整数」—— 用户会据此
 				// 放弃本可用的 2.5 秒，或把超上限的整数值当成「格式不对」反复重试。
@@ -1940,6 +2018,8 @@ window.__ModuleLoader__.load({
 				'panel.tabGlobal': '全局',
 				'panel.tabProject': '项目',
 				'panel.tabAuto': '自动审批',
+				'panel.tabOther': '其他设置',
+				'panel.otherHint': '这里是与权限裁决无关的设置。',
 				'panel.autoScope': '设置范围',
 				'panel.editGlobal': '正在编辑全局设置（所有项目的默认）。',
 				'panel.editProject': '正在编辑当前项目（{p}），项目设置优先于全局。',
@@ -2361,6 +2441,43 @@ window.__ModuleLoader__.load({
 				'flow.riskValue.high': 'high',
 				'flow.riskValue.unknown': 'unknown level: {r}',
 				'panel.autoSaved': 'Saved',
+				'panel.notifyBgTitle': 'Alert when in background',
+				'panel.notifyBgHint': 'When the page is in the background the approval cards are still there, but you cannot see them.',
+				'panel.notifyBgDelayLabel': 'After',
+				'panel.notifyBgDelayAfter': 'seconds in the background, still unhandled',
+				'panel.notifyBgDelayHint': '0 means alert as soon as the page goes to the background. Returning to the page restarts the count.',
+				'panel.notifyIdleTitle': 'Alert when left waiting',
+				'panel.notifyIdleHint': 'An approval that waits too long alerts you whether the page is in front or not.',
+				'panel.notifyIdleDelayLabel': 'Waiting longer than',
+				'panel.notifyIdleDelayAfter': 'seconds',
+				'panel.notifyIdleDelayHint': 'Counted from the moment the approval appeared.',
+				'panel.notifyDesktop': 'Desktop notification',
+				'panel.notifyDesktopHint': 'The browser raises a system notification; click it to return to this page.',
+				'panel.notifySound': 'Sound',
+				'panel.notifySoundHint': 'Play a chime when the time comes.',
+				'panel.notifyOnceNote': 'Each approval alerts once; the two groups never ring twice for the same one.',
+				'panel.notifySoundStyleLabel': 'Sound',
+				'panel.notifyPreview': 'Preview',
+				'panel.notifyStyle.chime': 'Two-tone rise',
+				'panel.notifyStyle.single': 'Single tone',
+				'panel.notifyStyle.triple': 'Three tones',
+				'panel.notifyStyle.low': 'Low double',
+				'panel.notifyStyle.deepdeep': 'deep deep',
+				'panel.notifyStyle.jingjing': '鲸鲸',
+				'panel.notifyStyle.custom': 'Custom audio',
+				'panel.notifyCustomPathLabel': 'Audio file',
+				'panel.notifyCustomPathPh': 'e.g. D:\\sounds\\deep.mp3',
+				'panel.notifyCustomSave': 'Save',
+				'panel.notifyCustomClear': 'Clear',
+				'panel.notifyCustomCleared': 'Custom audio cleared',
+				'panel.notifyCustomSaved': 'Saved and enabled',
+				'panel.notifyCustomHint': 'Full path to an audio file on this machine (any directory). Any format the browser can decode, up to {max} KB.',
+				'panel.notifyDenied': 'The browser has denied notification permission. Allow it in the site settings before this page can raise notifications.',
+				'panel.notifyDefault': 'The browser asks for permission the first time you turn this on.',
+				'panel.notifyNeedGesture': 'Sound starts working after you click or press a key on this page (browser autoplay restriction).',
+				'notify.titleOne': 'Approval needed: {tool}',
+				'notify.titleMany': '{n} approvals waiting',
+				'notify.bodyMany': 'Open the page to review them',
 				'panel.autoBadNumber': 'enter a number in range',
 				'panel.autoSecUnit': 's',
 				'panel.autoTimesUnit': 'times',
@@ -2430,6 +2547,8 @@ window.__ModuleLoader__.load({
 				'panel.tabGlobal': 'Global',
 				'panel.tabProject': 'Project',
 				'panel.tabAuto': 'Auto review',
+				'panel.tabOther': 'Other',
+				'panel.otherHint': 'Settings here do not affect permission decisions.',
 				'panel.autoScope': 'Scope',
 				'panel.editGlobal': 'Editing global settings (default for all projects).',
 				'panel.editProject': 'Editing current project ({p}); project settings override global.',
@@ -3001,6 +3120,423 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		// ════════════════════════════════════════════════════════════════════════════
+		// 审批提醒：桌面通知 + 提示音
+		// ════════════════════════════════════════════════════════════════════════════
+		//
+		// 解决的问题：审批卡片挂在 shell.overlay 里，页面在后台时它照样渲染，但用户看不见。
+		// 宿主广播的 `pending` 事件照常到达（后台标签页不断 EventSource），所以数据通路
+		// 一直是通的 —— 缺的只是「把这件事告诉页面之外的我」。
+		//
+		// ── 触发判据：只看「是否真的响过」，不看事件本身 ────────────────────────────
+		// 不能每收到一次 `pending` 事件就提醒：`cleanup()`（结案）与 `cancelTimeout()`
+		// （停止倒计时）**也**广播 `pending`。按事件提醒会让每次点按钮都响一声，
+		// 用户第一反应是关掉提醒。故只对还没响过的 id 提醒（判据见 pgDueNow）。
+		//
+		// 多个审批同时进来时合并成一次提醒：连续三声铃与一声铃表达的是同一件事，
+		// 而三声会让用户以为系统出了问题。
+		const PG_ANNOUNCED = new Set();
+		// 进入后台的时刻（毫秒）。前台时为 null。
+		// 第一组的「连续后台时长」由它算：切回前台置 null，下次切走重新取 ——
+		// 这就是「切走→看一眼→再切走」不会立刻响的原因。
+		let pgBgSince = null;
+		// 当前是否在后台。**同时**看 visibilityState 与焦点：只判前者会让
+		// 「双屏时在另一个窗口打字」也算前台（那正是该提醒的情形）。
+		//
+		// 注意：这个函数只服务第一组的判据；`pgDueNow` 收的是它的结果，
+		// 不自己去读 document（那样判定就没法被测试直接求值）。
+		function pgIsHidden() {
+			try {
+				if (typeof document === 'undefined') return false;
+				if (document.visibilityState !== 'visible') return true;
+				if (typeof document.hasFocus === 'function') return !document.hasFocus();
+				return false;
+			} catch (e) { return false; }
+		}
+		// 后台累计时长的读取单点。`pgBgSince` 由 visibilitychange 维护，
+		// 但窗口从没切过时它是 null —— 此时若当前已在后台（页面加载时就不可见），
+		// 按「刚开始」算，避免一个 null 让第一组永远不成立。
+		//
+		// 反过来，前台时也必须把起点清掉：`pgIsHidden` 同时看焦点，而焦点变化
+		// 不触发 visibilitychange —— 用户在另一个窗口打字后回来，起点会残留成
+		// 一个早已过去的时刻，按它算出的「已后台时长」是假的（下一次排定时器
+		// 会把它当成早就到期的后台窗口，定时器空转一次后再无触发源）。
+		function pgBgElapsedMs(now) {
+			if (!pgIsHidden()) { pgBgSince = null; return 0; }
+			if (pgBgSince === null) pgBgSince = now;
+			return Math.max(0, now - pgBgSince);
+		}
+		// 用户是否已与页面交互过。浏览器的自动播放策略要求音频在**用户手势**中解锁，
+		// 页面刚加载时 AudioContext 处于 suspended，直接 play 会静默失败。
+		// 置位后不再复查（一次性事实，且监听器自身要移除）。
+		let pgAudioUnlocked = false;
+		let pgAudioCtx = null;
+		let pgGestureHooked = false;
+		function pgHookGestureOnce() {
+			if (pgGestureHooked || typeof document === 'undefined' || !document.addEventListener) return;
+			pgGestureHooked = true;
+			const unlock = () => {
+				pgAudioUnlocked = true;
+				// 已创建的 context 要显式 resume：用户可能在上次会话里建过它，
+				// 那时还是 suspended，而它不会因为一次点击自动恢复。
+				if (pgAudioCtx && pgAudioCtx.state === 'suspended' && typeof pgAudioCtx.resume === 'function') {
+					try { pgAudioCtx.resume() } catch (e) {}
+				}
+				try {
+					document.removeEventListener('pointerdown', unlock, true);
+					document.removeEventListener('keydown', unlock, true);
+				} catch (e) {}
+			};
+			document.addEventListener('pointerdown', unlock, true);
+			document.addEventListener('keydown', unlock, true);
+		}
+		// ── 内嵌语音音效（base64 mp3）──────────────────────────────────────────────
+		//
+		// 为什么内嵌而不是引用文件：插件是 npm 包，运行时没有可靠的资源目录；而相对
+		// 路径在两个载体（http:// 与 dsh-app://）下的解析规则不同。内嵌成 base64 后
+		// 两者走同一条解码路径（decodeAudioData），行为完全一致。
+		//
+		// 为什么是 mp3 而不是合成音：这两段是「念出 deep deep / 鲸鲸」的人声，
+		// 合成音做不出语音。其余四个预设仍是现场合成的，不占体积。
+		//
+		// 体积：两段各约 5.9KB，base64 后各约 7.9KB，合计约 16KB。
+		const PG_VOICE_SRC = {
+			deepdeep: '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',
+			jingjing: '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',
+		}
+		// 提示音：用 WebAudio 现场合成一个两音上行，不打包音频文件。
+		//
+		// 为什么不带 mp3/wav：插件包体积与「一个听起来不像系统错误的提示」之间没有
+		// 正比关系，而合成音的频率、时长、包络全在这里可读、可调。三行 oscillator
+		// 也避免了「音频文件在 npm 包里被某些打包器丢掉」这类与代码无关的故障。
+		//
+		// 音效预设。**顺序即面板下拉的顺序**，与宿主 `SOUND_STYLES` 同序。
+		//
+		// 这里只放合成音与语音两类的**播放参数**；预设清单本身由宿主下发
+		// （`statusView.notify.soundStyles`），面板不另排一份。
+		//
+		// ── 音效预设：四个合成音 ────────────────────────────────────────────────────
+		// 每个预设是一组 `[频率, 起始偏移]` + 每音时长 + 波形。频率 0 表示休止。
+		//
+		// 全部用 sine：提示音要「听出是这件事」，而方波/锯齿在低音量下会带刺耳的
+		// 谐波，用户第一反应是关掉提醒。人声那两段走 mp3，不在这里。
+		const PG_TONES = {
+			// 两音上行：最早的那个音效。C6 → E6，中性清晰。
+			chime: { notes: [[1047, 0], [1319, 0.14]], len: 0.34, peak: 0.18 },
+			// 单音：最短、最不打扰。一响就完。
+			single: { notes: [[1319, 0]], len: 0.30, peak: 0.18 },
+			// 三连音：更明显，适合容易错过的人。C6 → E6 → G6。
+			triple: { notes: [[1047, 0], [1319, 0.13], [1568, 0.26]], len: 0.30, peak: 0.16 },
+			// 低音双响：沉稳不刺耳。A4 两次。
+			low: { notes: [[440, 0], [440, 0.26]], len: 0.34, peak: 0.20 },
+		}
+		// 音效的**客户端兜底默认**。
+		//
+		// 只在宿主没下发时用（`statusView.notify.defaults` 缺席，如旧宿主或半截响应）。
+		// 正常路径下默认值由宿主 `NOTIFY_DEFAULTS` 单点决定 —— 面板不另立一份，
+		// 否则「默认值」会有两个来源，改一处另一处就静默漂移。
+		const PG_DEFAULT_SOUND_STYLE = 'triple'
+		// 「取字符串，空/非字符串回落 d」。
+		//
+		// 模块级而不是 `applyStatus` 里的局部函数：`soundPicker`（渲染期）与
+		// `applyStatus`（回填期）都要用它，写成局部会让渲染期取到 undefined ——
+		// 表现是点「清除」时抛 ReferenceError，用户看不到任何反馈。
+		function pgStr(v, d) {
+			return typeof v === 'string' && v ? v : d
+		}
+		// 语音预设的解码缓存：`{ [style]: AudioBuffer | 'pending' | null }`。
+		//
+		// 解码一次要几毫秒且是异步的，而提醒可能连续触发。缓存住避免每次都重新解码；
+		// `null` 表示解不开（坏音频），记成 null 是为了**不反复重试** ——
+		// 每次提醒都尝试解码一段坏 mp3 只会白费 CPU，而结果永远是失败。
+		const pgVoiceCache = {}
+		// 自定义音频的解码缓存，按 base64 长度做键的粗校验（同一份数据只解一次）。
+		let pgCustomCache = { key: '', buf: null }
+		// 自定义音频的 base64 载荷。由宿主按需下发（不在 statusView 里，见宿主侧说明）。
+		let pgCustomB64 = null
+		// 缓存对应的路径。用户改了 `soundPath` 就该重新取 —— 只按「有没有缓存」判
+		// 会让换了文件还在放旧声音。
+		let pgCustomKey = ''
+
+		// 把 base64 mp3 解码成 AudioBuffer。异步，故返回 Promise。
+		// 失败返回 null（并缓存 null，见上）。
+		function pgDecodeVoice(ctx, b64) {
+			return new Promise((resolve) => {
+				try {
+					// atob 在浏览器里是全局的；把 base64 转成 Uint8Array 再交给 decodeAudioData。
+					const bin = atob(b64)
+					const bytes = new Uint8Array(bin.length)
+					for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+					// 老版 Safari 只支持回调形式，故同时用两种写法。
+					const p = ctx.decodeAudioData(bytes.buffer, (buf) => resolve(buf), () => resolve(null))
+					if (p && typeof p.then === 'function') p.then((buf) => resolve(buf), () => resolve(null))
+				} catch (e) { resolve(null) }
+			})
+		}
+
+		// 播放一段已解码的 AudioBuffer。返回是否真的排进了播放队列。
+		function pgPlayBuffer(ctx, buf, peak) {
+			try {
+				const src = ctx.createBufferSource()
+				src.buffer = buf
+				const gain = ctx.createGain()
+				gain.gain.setValueAtTime(peak, ctx.currentTime)
+				src.connect(gain)
+				gain.connect(ctx.destination)
+				src.start()
+				return true
+			} catch (e) { return false }
+		}
+
+		// 提示音：按当前音效设置播放。**返回是否真的响了**。
+		//
+		// 调用方据此决定要不要把该审批记进「已提醒」集合 —— 返回 void 时
+		// 「尝试过」与「响过了」无法区分，未解锁的静默失败会被当成响过，
+		// 那条审批就永久哑掉（见 pgDispatchDue 的说明）。
+		//
+		// `style` 是音效 id；`customB64` 是自定义音频的 base64（仅 style === 'custom' 时用）。
+		// 两者都由调用方从 status 取，本函数不读全局配置 —— 那样就没法在设置面板里试听。
+		function pgPlayChime(style, customB64) {
+			if (!pgAudioUnlocked) return false;
+			try {
+				const AC = typeof window !== 'undefined' ? (window.AudioContext || window.webkitAudioContext) : null;
+				if (!AC) return false;
+				if (!pgAudioCtx || pgAudioCtx.state === 'closed') pgAudioCtx = new AC();
+				if (pgAudioCtx.state === 'suspended' && typeof pgAudioCtx.resume === 'function') {
+					try { pgAudioCtx.resume(); } catch (e) {}
+				}
+				const ctx = pgAudioCtx;
+				const s = typeof style === 'string' && style ? style : PG_DEFAULT_SOUND_STYLE;
+				// ── 语音预设：走 mp3 解码 ──────────────────────────────────────────
+				if (PG_VOICE_SRC[s]) {
+					const cached = pgVoiceCache[s];
+					if (cached === null) return false;          // 已知解不开，别再试
+					if (cached) return pgPlayBuffer(ctx, cached, 0.9);
+					// 首次：异步解码。**先返回 true** —— 解码失败的概率很低，而
+					// 这里返回 false 会让「已提醒」集合不记，导致同一审批反复重试解码。
+					// 真解码失败时缓存成 null，下一次就不会再响（诚实降级）。
+					pgVoiceCache[s] = 'pending';
+					pgDecodeVoice(ctx, PG_VOICE_SRC[s]).then((buf) => {
+						pgVoiceCache[s] = buf;
+						if (buf) pgPlayBuffer(ctx, buf, 0.9);
+					});
+					return true;
+				}
+				// ── 自定义音频：同样走 mp3 解码，但载荷由调用方给 ─────────────────
+				if (s === 'custom') {
+					if (!customB64) return false;
+					if (pgCustomCache.key === customB64 && pgCustomCache.buf === null) return false;
+					if (pgCustomCache.key === customB64 && pgCustomCache.buf) {
+						return pgPlayBuffer(ctx, pgCustomCache.buf, 0.9);
+					}
+					pgCustomCache = { key: customB64, buf: null };
+					pgDecodeVoice(ctx, customB64).then((buf) => {
+						pgCustomCache = { key: customB64, buf: buf };
+						if (buf) pgPlayBuffer(ctx, buf, 0.9);
+					});
+					return true;
+				}
+				// ── 合成音 ────────────────────────────────────────────────────────
+				const tone = PG_TONES[s] || PG_TONES.chime;
+				const now = ctx.currentTime;
+				// 每个音**各自一条包络**，不能所有音共用一条。
+				//
+				// 共用一条时，包络从第一个音起音、到整段结束衰减 —— 后续音落在已经衰减
+				// 下去的同一根曲线上，音量由「它排第几个」决定而不是由设计决定：
+				// `low` 的第二个音落在 0.26s，那里只剩峰值的 2.2%（约 -33 dB），
+				// 与第一个音差 33 dB，听感上就是一个音而不是两个。
+				//
+				// 包络两端都收：不淡出会在音尾爆一声「咔」，不淡入则起音过于尖锐。
+				const peak = tone.peak;
+				const attack = 0.02;
+				const release = 0.16;
+				tone.notes.forEach(([hz, at]) => {
+					const osc = ctx.createOscillator();
+					osc.type = 'sine';
+					osc.frequency.setValueAtTime(hz, now + at);
+					osc.start(now + at);
+					osc.stop(now + at + tone.len);
+					const gain = ctx.createGain();
+					gain.gain.setValueAtTime(0.0001, now + at);
+					gain.gain.exponentialRampToValueAtTime(peak, now + at + attack);
+					gain.gain.exponentialRampToValueAtTime(0.0001, now + at + tone.len + release);
+					osc.connect(gain);
+					gain.connect(ctx.destination);
+				});
+				return true;
+			} catch (e) { return false; }
+		}
+		// 系统通知。权限请求**必须**在用户手势里发起（Chrome/Firefox/Safari 一致），
+		// 故这里只读当前状态：真正申请授权发生在设置面板的开关点击里
+		// （见 otherTab 的 toggleDesktop）。
+		//
+		// 与 pgPlayChime 同理，**返回是否真的弹了**：未授权时的静默返回不能算作
+		// 「已提醒」，否则那条审批会在用户授权前就被标记成响过。
+		function pgShowNotification(title, body) {
+			try {
+				if (typeof window === 'undefined' || typeof window.Notification !== 'function') return false;
+				if (window.Notification.permission !== 'granted') return false;
+				// `tag` 让同一条审批覆盖上一条而不是堆叠：用户处理完一堆审批回来时，
+				// 通知中心里应该是「最新那条」，不是二十条各自独立的弹窗。
+				const n = new window.Notification(title, { body: body, tag: 'permgate-approval', renotify: true });
+				// 点击回到本页面：`window.focus()` 在后台标签页里有效，且不需要额外权限。
+				n.onclick = () => { try { window.focus() } catch (e) {} try { n.close() } catch (e) {} };
+				return true;
+			} catch (e) { return false; }
+		}
+		// 某组是否至少开了一条通道。判据层与调度层共用这一个判据：
+		//   · 判据层据此跳过「响了也没人收到」的组 —— 否则它每轮都占住命中位置，
+		//     另一组永远轮不到，而它自己又响不了；
+		//   · 调度层据此不为一组全关的窗口排定时器 —— 那种到期点求值后必然不派发，
+		//     而 bg 的默认窗口是 0 秒，排上去就是 0ms 定时器自旋。
+		function pgGroupOn(cfg, group) {
+			const c = cfg && typeof cfg === 'object' ? cfg : {};
+			return group === 'bg'
+				? (c.bgSound === true || c.bgDesktop === true)
+				: (c.idleSound === true || c.idleDesktop === true);
+		}
+		// ── 提醒判定的唯一实现：两组判据各算各的，返回「该响的那几条 + 用哪组通道」──
+		//
+		// 两组**计时起点不同**，这是它们不能合并的全部原因：
+		//   · `idle`：审批创建后多久（`now - p.ts`）—— 不分前后台；
+		//   · `bg`  ：切入后台后多久（`bgElapsedMs`）—— 只在后台成立。
+		//
+		// 参数用**纯数据**（`hidden` / `bgElapsedMs` / `now`）而不是直接读 document，
+		// 这样判定可以被测试直接求值 —— 读全局状态的实现只能靠 mock document 测，
+		// 而那种测试验的是 mock 而不是判据。
+		//
+		// 返回 `{ group, entries }`：group 决定用哪组通道，entries 是本次该响的。
+		// 两组同时成立时取 `bg`：后台场景下那组的秒数（默认 0）更贴近用户意图，
+		// 而 `idle` 的命中只是「它也够老了」的附带结论。
+		function pgDueNow(allPending, cfg, env) {
+			if (!Array.isArray(allPending) || !allPending.length) return null;
+			const c = cfg && typeof cfg === 'object' ? cfg : {};
+			const now = env && typeof env.now === 'number' ? env.now : Date.now();
+			const hidden = !!(env && env.hidden);
+			const bgElapsedMs = env && typeof env.bgElapsedMs === 'number' && Number.isFinite(env.bgElapsedMs)
+				? Math.max(0, env.bgElapsedMs) : 0;
+			// 秒 → 毫秒。缺键/非法值按 0 = 不等（宁可多提醒，不要在配置读不到时永不提醒）。
+			const secToMs = (v) => Math.max(0, Number(v) || 0) * 1000;
+			const bgMs = secToMs(c.bgDelaySec);
+			const idleMs = secToMs(c.idleDelaySec);
+			// 各审批的年龄。ts 缺失/非法时按「刚到」处理：宁可晚一个窗口，
+			// 也不要凭一个坏字段判成「等了很久」而立刻响铃。
+			const ageOf = (p) => {
+				const ts = p && typeof p.ts === 'number' && Number.isFinite(p.ts) ? p.ts : now;
+				return now - ts;
+			};
+			// ① 第一组：在后台且已连续后台够久。
+			//
+			// 通道全关的组必须跳过：默认 `bgDelaySec=0` 使它在后台恒成立，
+			// 若照样命中，第二组（「我在前台但走神了 / 在看别的窗口」）在后台
+			// 永远轮不到，而第一组自己又响不了。
+			if (hidden && bgElapsedMs >= bgMs && pgGroupOn(c, 'bg')) {
+				const hit = allPending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id));
+				if (hit.length) return { group: 'bg', entries: hit };
+			}
+			// ② 第二组：审批年龄够久（不分前后台）
+			const idle = pgGroupOn(c, 'idle')
+				? allPending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id) && ageOf(p) >= idleMs)
+				: [];
+			if (idle.length) return { group: 'idle', entries: idle };
+			return null;
+		}
+		// 派发：按命中组选通道，并把 id 记进 `PG_ANNOUNCED`（**同一审批全局只响一次**）。
+		//
+		// 为什么「只响一次」是全局的而不是每组各一次：两组回答的是同一个问题
+		// （「有东西等你处理」），同一张卡片响两声会让用户以为来了两个审批。
+		// 这也是第二组在后台场景轮不到的原因 —— 第一组默认 0 秒先命中。
+		//
+		// `loadCustom` 是「按组取自定义音频 base64」的回调（异步）。由调用方注入而不是
+		// 直接在这里 `call(...)`：本函数要在测试里被直接求值，内联一个网络调用会让它
+		// 不可测（而它承载着「只响一次」与「真响了才记」两条关键判据）。
+		function pgDispatchDue(due, cfg, loadCustom) {
+			if (!due || !due.entries || !due.entries.length) return;
+			const c = cfg && typeof cfg === 'object' ? cfg : {};
+			const bg = due.group === 'bg';
+			const wantSound = bg ? c.bgSound === true : c.idleSound === true;
+			const wantDesktop = bg ? c.bgDesktop === true : c.idleDesktop === true;
+			// 两条通道都关时**不记入已提醒集合**：没响过就不算提醒过，
+			// 用户之后打开通道仍应收到这一条。若此时就记进去，那条审批会被永久吞掉。
+			if (!wantSound && !wantDesktop) return;
+			const one = due.entries.length === 1 ? due.entries[0] : null;
+			const title = one
+				? T('notify.titleOne').replace('{tool}', String(one.tool || ''))
+				: T('notify.titleMany').replace('{n}', String(due.entries.length));
+			const body = one ? String(one.intent || one.reason || '') : T('notify.bodyMany');
+			// ── 「记录」的判据是**真的响了**，不是「尝试过」──────────────────────────
+			// 两条通道都可能静默失败：提示音在用户手势解锁前不出声（浏览器自动播放策略），
+			// 桌面通知在未授权时不弹。若无论成败都记进 PG_ANNOUNCED，那条审批就被
+			// 永久标记成「已提醒」—— 用户之后解锁/授权了也再不会响，而他完全看不出原因。
+			//
+			// 这正是「超时未处理提醒不生效」的成因：页面加载后用户还没点过任何东西，
+			// 提示音静默失败，但集合照样记上，于是那一条再也不提醒。
+			//
+			// 两条都试（开关各自独立），任一成功即视为已提醒：
+			// 只开提示音时它必须响；只开桌面通知时它必须弹；两个都开时任一生效即可。
+			//
+			// 音效按**命中组**取（两组各有自己的 style 与 path）。
+			const style = bg ? c.bgSoundStyle : c.idleSoundStyle;
+			const shown = wantDesktop ? pgShowNotification(title, body) === true : false;
+			// 自定义音频要异步取（读文件），故「响没响」分两条路径处理：
+			//   · 预设：同步就能知道结果；
+			//   · 自定义：先记「已提醒」（避免同一条在取文件期间被重复派发），
+			//     播完按 `pgPlayChime` 的返回值定论；**没响就撤销记录** —— 没响过就不该算响过。
+			const finish = (sounded) => {
+				if (!sounded && !shown) return;
+				for (const p of due.entries) PG_ANNOUNCED.add(p.id);
+			};
+			if (wantSound && style === 'custom') {
+				if (typeof loadCustom !== 'function') { finish(false); return; }
+				// 先记「已提醒」只为挡住取文件期间的重复派发；**响没响要按返回值判**，
+				// 没响就撤销。只看 b64 在不在会把「取到了但播不出来」当成响过 ——
+				// 未解锁、解码失败（缓存为 null）、没有 AudioContext 都走这条。
+				for (const p of due.entries) PG_ANNOUNCED.add(p.id);
+				const undo = () => { if (!shown) for (const p of due.entries) PG_ANNOUNCED.delete(p.id); };
+				Promise.resolve(loadCustom(bg ? 'bg' : 'idle')).then((b64) => {
+					if (b64 && pgPlayChime('custom', b64) === true) return;
+					undo();
+				}).catch(undo);
+				return;
+			}
+			const sounded = wantSound ? pgPlayChime(style, null) === true : false;
+			finish(sounded);
+		}
+		// 一次完整的「求值 + 派发」。三个触发源（新事件 / 可见性变化 / 到期定时器）
+		// 都调它，避免各写一遍判据 —— 各写一遍时必然有一处漏掉「只响一次」的过滤。
+		//
+		// `pool` 必须传**整个待审批池**，不是「新入池的那几条」：在前台入池的审批
+		// 走开后就再也不在 fresh 里，只按 fresh 判会让它永远得不到提醒。
+		function pgAnnouncePending(pool, notifyCfg, env) {
+			if (!Array.isArray(pool) || !pool.length) return;
+			// 已提醒集合随池子收缩：审批结案后同 id 若再来（理论上不会）应当重新提醒。
+			const alive = new Set();
+			for (const p of pool) if (p && p.id) alive.add(p.id);
+			for (const id of Array.from(PG_ANNOUNCED)) if (!alive.has(id)) PG_ANNOUNCED.delete(id);
+			pgDispatchDue(pgDueNow(pool, notifyCfg, env), notifyCfg, pgLoadCustomSound);
+		}
+		// 按组取自定义音频的 base64，带缓存。
+		//
+		// 缓存键是 `组 + 路径`：两组各有自己的路径，且用户改了路径就该重新取 ——
+		// 只按「有没有缓存」判会让换了文件还在放旧声音。
+		// 取失败时把宿主给的错误文案显示出来：「文件不存在」是用户能处置的，
+		// 不该只让声音静默不响。
+		function pgLoadCustomSound(group) {
+			const g = group === 'idle' ? 'idle' : 'bg';
+			const key = g + ':' + String((PG_NOTIFY_CFG && PG_NOTIFY_CFG[g + 'SoundPath']) || '');
+			if (pgCustomB64 && pgCustomKey === key) return Promise.resolve(pgCustomB64);
+			return call('permgate:notify-sound', { group: g }).then((r) => {
+				if (r && r.ok === true && typeof r.data === 'string') {
+					pgCustomB64 = r.data;
+					pgCustomKey = key;
+					return r.data;
+				}
+				pgCustomB64 = null;
+				pgCustomKey = '';
+				return null;
+			}).catch(() => null);
+		}
+
 		function ApprovalOverlay(props) {
 			const [pending, setPending] = React.useState([]);
 			const [busyId, setBusyId] = React.useState(null);
@@ -3013,16 +3549,132 @@ window.__ModuleLoader__.load({
 			const [denySaved, setDenySaved] = React.useState({});
 			const [, setTick] = React.useState(0);
 			useLocaleTick();
+			// 首次 poll 只**登记**已有 id、不提醒：页面刚打开时用户就看着这些卡片，
+			// 再响一声只是噪音。之后才按「还没响过」的判据提醒（见 pgDueNow）。
+			const seeded = React.useRef(false);
 			const poll = () => {
-				call('permgate:pending', {}).then((r) => setPending(Array.isArray(r) ? r : [])).catch(() => {});
+				call('permgate:pending', {}).then((r) => {
+					const list = Array.isArray(r) ? r : [];
+					setPending(list);
+					// 首次 poll 只登记、不提醒：页面刚打开时那些审批就在眼前。
+					if (!seeded.current) { seeded.current = true; return; }
+					const now = Date.now();
+					pgAnnouncePending(list, PG_NOTIFY_CFG, { hidden: pgIsHidden(), bgElapsedMs: pgBgElapsedMs(now), now: now });
+				}).catch(() => {});
 			};
 			React.useEffect(() => {
+				// 音频解锁必须尽早挂钩：用户可能一直不打开设置面板，
+				// 而提示音只在他与页面交互过之后才允许播放。
+				pgHookGestureOnce();
 				poll();
 				const off = subscribeEvents((ev) => {
 					if (ev.type === 'pending' || ev.type === 'refresh') poll();
 				});
 				return () => off();
 			}, []);
+			// 等待窗口到期与「刚切到后台」这两件事都**不产生新事件**，故必须有本 effect
+			// 兜住 —— 否则提醒只在「审批入池」的那一刻被求值一次，而那一刻多半还在窗口内：
+			//   · 审批在前台到达 → 不提醒（正确），随后你走开 → 没有事件触发，永不提醒；
+			//   · 审批在后台到达但还没等够 → 不提醒，等够了 → 同样没有事件。
+			// 三个触发源合在同一个 effect 里，因为它们做的是同一件事（重新求值一次）。
+			React.useEffect(() => {
+				let timer = null;
+				const secToMs = (v) => Math.max(0, Number(v) || 0) * 1000;
+				// 距最近一个**仍然有效**的到期点还有多久。三件事必须同时在这里判：
+				//   · 通道全关的组不参与 —— 那种到期点求值后必然不派发（见 pgGroupOn），
+				//     排上去只会空转一次，而 bg 的默认窗口是 0 秒（等于 0ms 定时器）；
+				//   · bg 的到期点只在真的在后台时存在 —— 前台时按「后台起点 + 窗口」
+				//     会算出早已过去的时刻（焦点变化不触发 visibilitychange，起点会残留）；
+				//   · 已提醒的条目不参与。
+				//
+				// `futureOnly` 用于「刚触发过一次之后的续排」：已过去的到期点不再排，
+				// 否则播不出声（未解锁 / 解码失败）时会退化成 1ms 一次的无限重试。
+				const nextWait = (futureOnly) => {
+					if (!pending.length) return Infinity;
+					const now = Date.now();
+					const open = pending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id));
+					if (!open.length) return Infinity;
+					const cands = [];
+					if (pgGroupOn(PG_NOTIFY_CFG, 'idle')) {
+						const idleMs = secToMs(PG_NOTIFY_CFG.idleDelaySec);
+						for (const p of open) {
+							const ts = typeof p.ts === 'number' && Number.isFinite(p.ts) ? p.ts : now;
+							cands.push(ts + idleMs - now);
+						}
+					}
+					if (pgGroupOn(PG_NOTIFY_CFG, 'bg') && pgIsHidden()) {
+						// pgBgElapsedMs 同时负责「前台清残留起点」：窗口从哪一刻算起
+						// 只有一个来源，不能在这里另算一份。
+						cands.push(secToMs(PG_NOTIFY_CFG.bgDelaySec) - pgBgElapsedMs(now));
+					}
+					const live = futureOnly ? cands.filter((v) => v > 0) : cands;
+					return live.length ? Math.min.apply(null, live) : Infinity;
+				};
+				const arm = (futureOnly) => {
+					if (timer) { clearTimeout(timer); timer = null; }
+					const wait = nextWait(futureOnly === true);
+					if (!Number.isFinite(wait)) return;
+					// +1ms 让「刚好等于窗口」的那次求值落在 `>=` 的成立侧。
+					timer = setTimeout(() => {
+						timer = null;
+						const t = Date.now();
+						pgAnnouncePending(pending, PG_NOTIFY_CFG, { hidden: pgIsHidden(), bgElapsedMs: pgBgElapsedMs(t), now: t });
+						// 响过之后必须续排：下一张审批、或另一组的窗口可能还在未来。
+						arm(true);
+					}, Math.max(0, wait) + 1);
+				};
+				// ① 可见性 / 焦点变化：切后台时记起点，切回前台时清起点。
+				//
+				// 「清起点」是第一组语义的核心：切回前台即重置，下次切走重新计。
+				// 不清的话，「切走 → 回来看一眼 → 再切走」会在第二次切走时立刻响。
+				const onVis = () => {
+					if (pgIsHidden()) {
+						if (pgBgSince === null) pgBgSince = Date.now();
+						// 立刻求值一次：窗口早就过了的审批该马上提醒，而不是等下一次 SSE
+						// （那时可能已经过了几分钟）。
+						const t = Date.now();
+						pgAnnouncePending(pending, PG_NOTIFY_CFG, { hidden: true, bgElapsedMs: pgBgElapsedMs(t), now: t });
+					} else {
+						pgBgSince = null;
+					}
+					// 进出后台都必须重排：进后台多出一个 bg 到期点，回前台它消失（只剩
+					// idle 那条）。只求值不重排时，bg 的窗口永远不会到点 —— 默认 0 秒
+					// 掩盖了这个缺口，调大后该组就完全不生效。
+					arm(false);
+				};
+				// 后台判据同时看 visibilityState 与焦点（见 pgIsHidden），故两个来源
+				// 都要听：只挂 visibilitychange 时，「在另一个窗口打字」这类失焦
+				// 永远不产生事件，bg 组的窗口也就永远排不上。焦点事件挂在 window 上
+				// ——`focus` / `blur` 不冒泡，挂在 document 上收不到。
+				const win = (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') ? window : null;
+				if (typeof document !== 'undefined' && document.addEventListener) {
+					document.addEventListener('visibilitychange', onVis);
+				}
+				if (win) {
+					win.addEventListener('blur', onVis);
+					win.addEventListener('focus', onVis);
+				}
+				// ② 设置变化也要重排：窗口与通道都不在 React state 里，改完设置后
+				// 已排的定时器仍按旧值算 —— 改大时那次求值不命中且无人续排（漏提醒），
+				// 改小时不生效。
+				PG_NOTIFY_CFG_SUBS.add(onVis);
+				arm(false);
+				return () => {
+					if (timer) clearTimeout(timer);
+					PG_NOTIFY_CFG_SUBS.delete(onVis);
+					try {
+						if (typeof document !== 'undefined' && document.removeEventListener) {
+							document.removeEventListener('visibilitychange', onVis);
+						}
+					} catch (e) {}
+					if (win) {
+						try {
+							win.removeEventListener('blur', onVis);
+							win.removeEventListener('focus', onVis);
+						} catch (e) {}
+					}
+				};
+			}, [pending]);
 			// 懒加载对比数据：详情默认展开的编辑/写入审批按需拉取（缓存按审批 id 复用）。
 			// 注意：必须在 `if (!pending.length) return null` 提前返回之前声明（hooks 顺序约束）。
 			React.useEffect(() => {
@@ -3698,6 +4350,11 @@ window.__ModuleLoader__.load({
 						pgBeginReviewSession(sessionId);
 						pgSetReviewState(sessionId, s, seq);
 					} else pgSetDefaultView(s);
+					// 审批提醒的开关也在这里回填。**不能只靠设置面板的 applyStatus** ——
+					// 那个面板只在用户点进设置页时才挂载，而提醒逻辑挂在始终存在的
+					// ApprovalOverlay 上：只靠面板回填时，从未打开过设置页的用户
+					// 永远拿不到开关值，配了「开」也不会响，且没有任何报错可循。
+					pgSetNotifyCfg(s);
 				};
 				// 带 sessionId 查询：宿主据它按会话解析项目根（index.js 的 ensureTarget），
 				// 不带会让宿主回退到 agentRef/末位会话并就地改写全局 root，使 defaultView
@@ -4975,6 +5632,21 @@ window.__ModuleLoader__.load({
 			// 合成一份会让一次策略保存顺手把另一格的草稿标记也清掉 —— 紧接着的那次
 			// status 推送就会覆盖掉用户还没提交的原因文字。
 			const denyDirty = React.useRef({ global: false, project: false });
+			// 审批提醒的两个开关。初值 false，真正的值由 applyStatus 从 status.notify 回填 ——
+			// 与 policyHighRisk 等同一套写法（先给安全初值，再用服务端值收敛）。
+			// 审批提醒：两组设置 × (提示音 / 桌面通知 / 秒数)。
+			// 初值取宿主 NOTIFY_DEFAULTS 的同向值（布尔 false、数字 0），真正的值由
+			// applyStatus 从 status.notify 回填 —— 与 policyHighRisk 等同一套写法。
+			const [notifyBgSound, setNotifyBgSound] = React.useState(false);
+			const [notifyBgDesktop, setNotifyBgDesktop] = React.useState(false);
+			const [notifyIdleSound, setNotifyIdleSound] = React.useState(false);
+			const [notifyIdleDesktop, setNotifyIdleDesktop] = React.useState(false);
+			// 音效与自定义路径：**每组各一份**（`bg*` / `idle*`）。
+			// 只存路径字符串 —— 音频内容按需从宿主取，不进 state。
+			const [notifyBgStyle, setNotifyBgStyle] = React.useState(PG_DEFAULT_SOUND_STYLE);
+			const [notifyBgPath, setNotifyBgPath] = React.useState('');
+			const [notifyIdleStyle, setNotifyIdleStyle] = React.useState(PG_DEFAULT_SOUND_STYLE);
+			const [notifyIdlePath, setNotifyIdlePath] = React.useState('');
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
 			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
@@ -5430,6 +6102,24 @@ window.__ModuleLoader__.load({
 					if (!denyDirty.current.global) setPolicyDenyText(String(pol.denyReason || ''));
 					if (!denyDirty.current.project) setPolicyProjectDenyText(String(pol.projectDenyReason || ''));
 				}
+				// 审批提醒：开关是纯布尔，没有草稿态（点一下就提交），故直接回填。
+				// 缺 `notify` 块时保持 false —— 与宿主 NOTIFY_DEFAULTS 同向。
+				// 审批提醒：两组 × 三个键，逐个回填。缺 `notify` 块时保持初值 ——
+				// 与宿主 NOTIFY_DEFAULTS 同向（布尔 false / 数字 0）。
+				const nt = (s.notify && s.notify.effective) || {};
+				const asBool = (v) => v === true;
+				setNotifyBgSound(asBool(nt.bgSound));
+				setNotifyBgDesktop(asBool(nt.bgDesktop));
+				setNotifyIdleSound(asBool(nt.idleSound));
+				setNotifyIdleDesktop(asBool(nt.idleDesktop));
+				// 两组各一份音效与路径。音频**内容**不在这里 ——
+				// 它按需走 /permgate/notify-sound（理由见宿主 statusView 处的说明）。
+				// 默认值取宿主下发的 `defaults`，缺席时才用客户端兜底常量 ——
+				// 这样「默认音效是什么」只有宿主 `NOTIFY_DEFAULTS` 一个来源。
+				setNotifyBgStyle(pgStr(nt.bgSoundStyle, pgStr(nt.defaults && nt.defaults.bgSoundStyle, PG_DEFAULT_SOUND_STYLE)));
+				setNotifyBgPath(pgStr(nt.bgSoundPath, ''));
+				setNotifyIdleStyle(pgStr(nt.idleSoundStyle, pgStr(nt.defaults && nt.defaults.idleSoundStyle, PG_DEFAULT_SOUND_STYLE)));
+				setNotifyIdlePath(pgStr(nt.idleSoundPath, ''));
 			};
 
 			const refresh = () => {
@@ -5457,6 +6147,7 @@ window.__ModuleLoader__.load({
 				'permgate:set-category', 'permgate:set-categories', 'permgate:set-quick',
 				'permgate:set-fallback', 'permgate:set-sandbox', 'permgate:set-command-sub',
 				'permgate:set-doomloop', 'permgate:set-auto-review', 'permgate:set-auto-policy',
+				'permgate:set-notify',
 				'permgate:add-exception', 'permgate:set-exception', 'permgate:remove-exception',
 				'permgate:add-rule', 'permgate:remove-rule',
 				'permgate:reorder',
@@ -7478,6 +8169,354 @@ window.__ModuleLoader__.load({
 				);
 			};
 
+			// ═══════════════════════════════════════════════════════════════════════
+			// 「其他设置」tab
+			// ═══════════════════════════════════════════════════════════════════════
+			//
+			// ── 为什么名字取容器语义，而不是「提醒」──────────────────────────────────
+			// 目前这里只装审批提醒，但把 tab 名钉死在当前唯一的内容上，加第二项时
+			// 就要连 tab 名、id、以及下面所有 `tab === 'other'` 判断一起重写。
+			// 「其他设置」与 DSH 官方设置页的 `general.nav`（通用设置）同一类容器语义。
+			//
+			// ── 为什么提醒不能挂在「自动审批」里 ─────────────────────────────────────
+			// 两者是**正交**的两件事：auto 回答「这次调用要不要问模型」，提醒回答
+			// 「有东西等我处理时怎么通知到人」。把提醒塞进 auto tab 会说出两句错话：
+			//   · 让人以为只有开了自动审批才会提醒 —— 普通 ask 审批同样需要提醒，
+			//     而「切到后台就看不见」这个问题跟评审机制一点关系都没有；
+			//   · auto tab 里有一套「设置范围：全局 / 项目」的层切换，而提醒只有
+			//     全局一份（宿主 set-notify 明确拒绝 target=project）—— 用户在那个
+			//     层切换下面看到提醒，会以为它也能按项目配。
+			//
+			// ── 为什么不是第四张卡片留在 global tab ──────────────────────────────────
+			// global tab 回答的是「权限怎么定」（分类 / 例外 / 快捷工具 / 兜底），
+			// 提醒不改变任何裁决结果，只是通知渠道。混进去会让人在调权限时
+			// 顺手看到一个与权限无关的开关。
+			//
+			// ⚠️ 本函数**不得有任何 hook**（与 autoReviewCard 同一条纪律）：它只在
+			// `tab === 'other'` 时被调用，hook 数量会随 tab 变化 → React #310 整页白屏。
+			// 开关状态全部在组件层（notifyBg* / notifyIdle*）。
+			const otherTab = () => {
+				// 浏览器授权状态是**客户端事实**，宿主下发的配置里没有它。
+				// 每次渲染现读：用户可能在另一个标签页里改过站点设置。
+				const perm = (typeof window !== 'undefined' && window.Notification) ? window.Notification.permission : null;
+				// 没有 Notification API（极少数嵌入环境）时整个桌面通知行不渲染 ——
+				// 显示一个永远打不开的开关比不显示更糟。
+				const canDesktop = perm !== null;
+				const nt = (status && status.notify) || {};
+				const dflt = nt.defaults || {};
+				const ranges = nt.ranges && typeof nt.ranges === 'object' ? nt.ranges : {};
+				// 提交单点。与 setField 同形（invoke + setMsg），但走 set-notify。
+				const save = (key, value) => {
+					invoke('permgate:set-notify', { [key]: value }, () => setMsg(T('panel.autoSaved')));
+				};
+				// 打开桌面通知时**先申请授权**，拿到 granted 才写配置。
+				//
+				// 顺序不能反：先写配置再申请，用户在权限弹窗上点「拒绝」后，
+				// 配置里是「开」、浏览器里是「拒」—— 面板显示开、实际永远不响，
+				// 而用户看不出哪一步没成。申请必须在**用户手势**里发起（点击处理函数），
+				// 这也是这里不能用 effect 的原因。
+				//
+				// 两组各有一个桌面开关，但它们**共用同一个浏览器权限** ——
+				// 授权一次即对两者有效，故这里是同一个申请函数。
+				const toggleDesktop = (cur, setLocal, key) => {
+					const next = !cur;
+					if (!next) { setLocal(false); save(key, false); return; }
+					if (perm === 'denied') {
+						// 已被拒绝：再申请不会有弹窗，只能引导用户去站点设置。
+						// 不写配置 —— 写了就是「面板说开、实际不响」。
+						setMsg(T('panel.notifyDenied'));
+						return;
+					}
+					if (perm === 'granted') { setLocal(true); save(key, true); return; }
+					// 'default' = 还没问过：申请授权，结果决定写不写配置。
+					try {
+						window.Notification.requestPermission().then((res) => {
+							if (res === 'granted') { setLocal(true); save(key, true); }
+							else setMsg(T('panel.notifyDenied'));
+						}).catch(() => setMsg(T('panel.notifyDenied')));
+					} catch (e) {
+						// 老浏览器只支持回调形式；连回调都不支持时按「申请不了」处理，
+						// 不写配置（否则同样是面板说谎）。
+						setMsg(T('panel.notifyDenied'));
+					}
+				};
+				// `grp` 决定试听用哪一组的音效 —— 两组各有自己的 style/path。
+				const toggleSound = (cur, setLocal, key, grp) => {
+					const next = !cur;
+					setLocal(next);
+					save(key, next);
+					// 打开时**立刻试响一声**：这是用户验证「我的音量/输出设备对不对」
+					// 的唯一机会，否则要等到下一次真实审批才知道没声音。
+					if (!next) return;
+					const g = grp === 'idle' ? 'idle' : 'bg';
+					const style = g === 'idle' ? notifyIdleStyle : notifyBgStyle;
+					if (style === 'custom') {
+						call('permgate:notify-sound', { group: g }).then((r) => {
+							if (r && r.ok === true && typeof r.data === 'string') pgPlayChime('custom', r.data);
+							else if (r && r.error) setMsg(String(r.error));
+						}).catch(() => {});
+					} else pgPlayChime(style, null);
+				};
+				const toggleRow = (labelKey, hintKey, checked, onChange) => React.createElement('div', { style: { marginTop: 6 } },
+					React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' } },
+						React.createElement('input', {
+							type: 'checkbox',
+							checked: checked,
+							disabled: busy,
+							onChange: onChange,
+						}),
+						T(labelKey),
+					),
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginLeft: 20 } }, T(hintKey)),
+				);
+				// 秒数输入框：与 auto 卡片的 numInput 同构（非受控 + 失焦提交 + 只收纯十进制），
+				// 但**不复用那个函数** —— 它闭包在 autoReviewCard 里，读的是 autoReview 的
+				// eff/explicit/ranges，拿不到 notify 的。复制一份比把它的依赖全部改造成参数
+				// 更安全：那个函数服务 6 个字段，为了一处复用去改它的签名会波及全部调用点。
+				const secInput = (key, cur) => {
+					const isDefault = !nt.explicit || nt.explicit.indexOf(key) === -1;
+					const curText = String(typeof cur === 'number' ? cur : '');
+					// 只返回输入框本身：单位由同一行的后半句承载（见 groupCard 的说明），
+					// 这里再包一层 flex 容器只会多一层无用的布局盒。
+					return React.createElement('input', {
+						className: 'pg-field',
+						// text 而非 number：number 的 value sanitization 会把 "-" / "1e" 这类
+						// 中间态吞成空串，与「用户清空」不可区分 —— 那样一次误输入 + 失焦就会
+						// 走 clear 分支把显式配置（如 bgDelaySec=0）静默删掉、回落默认值。
+						type: 'text',
+						inputMode: 'numeric',
+						style: Object.assign({ width: 70 }, isDefault ? { color: 'rgba(128,128,128,0.95)' } : null),
+						// 非受控 + key 重挂载：给了 value 却没有 onChange 会被 React 判成只读，
+						// 每次 input 事件后把 DOM 值还原回 props.value，用户敲的字符当场被撤销。
+						key: key + ':' + curText,
+						defaultValue: curText,
+						// placeholder 显示默认值：用户清空后知道会回到哪
+						placeholder: String(typeof dflt[key] === 'number' ? dflt[key] : ''),
+						onBlur: (e) => {
+							const raw = String(e.target.value || '').trim();
+							if (raw === '') { save(key, typeof dflt[key] === 'number' ? dflt[key] : 0); return; }
+							// 只接受纯十进制整数：`Number()` 还认 0x10 / 0b11 / 1e3，
+							// 那些写法会静默改值。秒数没有小数的正当用法（宿主按秒取整）。
+							const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
+							if (!Number.isFinite(n)) { setNotice(T('panel.autoBadNumber')); e.target.value = curText; return; }
+							// 超范围不提交：宿主会回 error，但在这里先拦能立刻给出提示，
+							// 且把文本归位（非受控框不会自动还原）。
+							const rg = ranges[key];
+							if (rg && ((typeof rg.min === 'number' && n < rg.min) || (typeof rg.max === 'number' && n > rg.max))) {
+								setNotice(T('panel.autoBadNumber'));
+								e.target.value = curText;
+								return;
+							}
+							// 生效值没变就不写盘（只是聚焦再离开不该物化默认值）
+							if (n === cur) { e.target.value = curText; return; }
+							save(key, n);
+						},
+						disabled: busy,
+					});
+				};
+				// 一张卡片 = 一组设置。两组结构完全相同，只有文案与键名不同 ——
+				// 用同一个构造函数保证两组的交互一致（各写一遍必然漂移）。
+				const groupCard = (o) => React.createElement('div', { style: card },
+					React.createElement('div', { style: h() }, T(o.titleKey)),
+					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 6 } }, T(o.hintKey)),
+					// ── 秒数那一行是一整句话，**三段必须同一样式** ──────────────────────
+					// 「切到后台 [0] 秒后仍未处理则提醒」读起来是一句，若把标签、单位、
+					// 后半句分别给 13px 主色 / 11px 灰 / 12px 灰，视觉上就是三块拼贴 ——
+					// 同一个字（「秒」）还会以两种颜色出现两次。故统一到行级样式，
+					// 只有输入框本身保持控件外观。
+					React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 13, color: 'var(--dsw-alias-label-primary, #24292f)' } },
+						React.createElement('span', null, T(o.delayLabelKey)),
+						secInput(o.delayKey, o.delayCur),
+						React.createElement('span', null, T(o.delayAfterKey)),
+					),
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 2 } }, T(o.delayHintKey)),
+					toggleRow(o.soundKey, o.soundHintKey, o.soundCur, o.onSound),
+					// 音效选择器紧跟「提示音」开关之后：它只在提示音开着时才有意义，
+					// 放在两组的公共位置会让人以为它独立于开关。
+					o.soundCur ? o.soundPicker() : null,
+					canDesktop ? toggleRow(o.desktopKey, o.desktopHintKey, o.desktopCur, o.onDesktop) : null,
+					// 授权状态的两句提示互斥，且都与「我开了没」正交，故单独成行 ——
+					// 塞进 hint 会让「开关的含义」与「现在为什么没生效」混成一句话。
+					canDesktop && perm === 'denied'
+						? React.createElement('div', { style: { fontSize: 11, color: '#c62828', marginTop: 8 } }, T('panel.notifyDenied'))
+						: null,
+					canDesktop && o.desktopCur && perm === 'default'
+						? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 8 } }, T('panel.notifyDefault'))
+						: null,
+					// 提示音要用户交互过才响（浏览器自动播放限制）。只在开着提示音时提示 ——
+					// 关着的时候说这句话，用户会以为「这功能坏了」。
+					o.soundCur && !pgAudioUnlocked
+						? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 8 } }, T('panel.notifyNeedGesture'))
+						: null,
+				);
+				// ── 音效选择器：**每组各一份**，作为 groupCard 的一部分渲染 ────────────
+				//
+				// `grp` 是 `'bg'` / `'idle'`，决定读哪个键（`bgSoundStyle` / `idleSoundStyle`）。
+				// 两组各有自己的音效与路径 —— 音效是让人**不看屏幕就知道是哪一种提醒**的
+				// 唯一手段，共用就等于放弃这条信息。
+				//
+				// 路径输入**只在选中 custom 时才渲染**：它不是独立设置，而是那个选项的参数。
+				// 常驻显示会让界面看起来像「音效 + 文件」两个并列设置，而实际只有一个。
+				const soundPicker = (grp) => {
+					const styles = Array.isArray(nt.soundStyles) && nt.soundStyles.length ? nt.soundStyles : [PG_DEFAULT_SOUND_STYLE];
+					const maxBytes = typeof nt.customMaxBytes === 'number' && nt.customMaxBytes > 0 ? nt.customMaxBytes : 61440;
+					const style = grp === 'bg' ? notifyBgStyle : notifyIdleStyle;
+					const path = grp === 'bg' ? notifyBgPath : notifyIdlePath;
+					const setStyle = grp === 'bg' ? setNotifyBgStyle : setNotifyIdleStyle;
+					const setPath = grp === 'bg' ? setNotifyBgPath : setNotifyIdlePath;
+					const styleKey = grp + 'SoundStyle';
+					const pathKey = grp + 'SoundPath';
+					// 从宿主取该组自定义音频的 base64（按需，按「组+路径」缓存）。
+					const fetchSound = () => {
+						const cacheKey = grp + ':' + String(path || '');
+						if (pgCustomB64 && pgCustomKey === cacheKey) return Promise.resolve(pgCustomB64);
+						return call('permgate:notify-sound', { group: grp }).then((r) => {
+							if (r && r.ok === true && typeof r.data === 'string') {
+								pgCustomB64 = r.data;
+								pgCustomKey = cacheKey;
+								return r.data;
+							}
+							pgCustomB64 = null;
+							pgCustomKey = '';
+							if (r && r.error) setMsg(String(r.error));
+							return null;
+						}).catch(() => null);
+					};
+					// 试听当前选中的音效。
+					const preview = () => {
+						if (style === 'custom') fetchSound().then((b64) => { if (b64) pgPlayChime('custom', b64); });
+						else pgPlayChime(style, null);
+					};
+					// 切换音效：先本地生效（试听要立刻反映选择），再写盘。
+					const pick = (v) => {
+						setStyle(v);
+						// 丢缓存：换了音效（含换到 custom）就不该再放上一次的声音。
+						pgCustomB64 = null;
+						pgCustomKey = '';
+						save(styleKey, v);
+						// 选完立刻试听 —— 选音效这个动作本身就是要听。
+						if (v === 'custom') {
+							// 切到 custom 时若已有路径，宿主会读它；没路径则不响（正常，
+							// 因为下面会立刻展开路径输入框让用户填）。
+							call('permgate:notify-sound', { group: grp }).then((r) => {
+								if (r && r.ok === true && typeof r.data === 'string') {
+									pgCustomB64 = r.data;
+									pgCustomKey = grp + ':' + String(path || '');
+									pgPlayChime('custom', r.data);
+								} else if (r && r.error) setMsg(String(r.error));
+							}).catch(() => {});
+						} else pgPlayChime(v, null);
+					};
+					// 清除该组的自定义音频：路径置空 + 音效回落默认，两件事必须一起提交。
+					//
+					// 宿主按「这次请求之后的生效音效」校验路径：只发 path=null 时它读到
+					// 磁盘上仍是 custom，于是拿 null 去读文件、回「还没有填写音频文件路径」
+					// ——整条请求被拒，路径没删掉，而面板已经显示空输入框。回落目标取
+					// 宿主下发的默认值，不写死预设 id。
+					const clearPath = () => {
+						pgCustomB64 = null;
+						pgCustomKey = '';
+						const fallbackStyle = grp === 'bg'
+							? pgStr(nt.defaults && nt.defaults.bgSoundStyle, PG_DEFAULT_SOUND_STYLE)
+							: pgStr(nt.defaults && nt.defaults.idleSoundStyle, PG_DEFAULT_SOUND_STYLE);
+						invoke('permgate:set-notify', { [pathKey]: null, [styleKey]: fallbackStyle }, () => {
+							setPath('');
+							setStyle(fallbackStyle);
+							setMsg(T('panel.notifyCustomCleared'));
+						});
+					};
+					// 保存该组路径。空路径与「清除」是同一件事 —— 清空输入框后「清除」
+					// 按钮已经不渲染，用户只剩保存与回车两条路，故必须走同一条提交。
+					const savePath = () => {
+						const p = String(path || '').trim();
+						if (!p) { clearPath(); return; }
+						pgCustomB64 = null;
+						pgCustomKey = '';
+						invoke('permgate:set-notify', { [pathKey]: p }, () => {
+							setMsg(T('panel.notifyCustomSaved'));
+						});
+					};
+					return React.createElement('div', { style: { marginTop: 8 } },
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 } },
+							React.createElement('span', { style: { minWidth: 60, color: 'rgba(128,128,128,0.9)', fontSize: 12 } }, T('panel.notifySoundStyleLabel')),
+							React.createElement('select', {
+								className: 'pg-field',
+								style: { padding: '2px 6px', minWidth: 150 },
+								value: style,
+								disabled: busy,
+								onChange: (e) => pick(e.target.value),
+							},
+								styles.map((s) => React.createElement('option', { key: s, value: s }, T('panel.notifyStyle.' + s))),
+								// 「自定义音频」始终列出：先选它、再填路径是自然的顺序。
+								// 选中但没填路径时，试听会报「还没有填写音频文件路径」，
+								// 而不是静默不响。
+								React.createElement('option', { value: 'custom' }, T('panel.notifyStyle.custom')),
+							),
+							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: preview }, T('panel.notifyPreview')),
+						),
+						// 路径输入**只在选中 custom 时出现** —— 它是那个选项的参数，不是并列设置。
+						style === 'custom'
+							? React.createElement('div', { style: { marginTop: 6, fontSize: 12 } },
+								React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+									React.createElement('span', { style: { minWidth: 60, color: 'rgba(128,128,128,0.9)' } }, T('panel.notifyCustomPathLabel')),
+									React.createElement('input', {
+										className: 'pg-field',
+										type: 'text',
+										style: { flex: '1 1 220px', minWidth: 150, fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12 },
+										placeholder: T('panel.notifyCustomPathPh'),
+										value: path,
+										disabled: busy,
+										onChange: (e) => setPath(e.target.value),
+										// 回车即保存：填路径通常一次到位，不必再去点按钮。
+										onKeyDown: (e) => { if (e.key === 'Enter') savePath(); },
+									}),
+									React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: savePath }, T('panel.notifyCustomSave')),
+									path
+										? React.createElement('button', {
+											className: 'pg-btn pg-btn-danger',
+											disabled: busy,
+											onClick: clearPath,
+										}, T('panel.notifyCustomClear'))
+										: null,
+								),
+								React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 4 } },
+									T('panel.notifyCustomHint').replace('{max}', String(Math.round(maxBytes / 1024)))),
+							)
+							: null,
+					);
+				};
+				return React.createElement('div', { style: { maxWidth: 760, fontFamily: FONT, color: 'var(--dsw-alias-label-primary, #24292f)' } },
+					// 页面级说明：这个 tab 是**容器**，将来会装不止一项。写在最上面一句，
+					// 让用户知道「这里的东西与权限裁决无关」，而不是以为漏看了什么设置。
+					React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 8 } }, T('panel.otherHint')),
+					groupCard({
+						titleKey: 'panel.notifyBgTitle', hintKey: 'panel.notifyBgHint',
+						delayLabelKey: 'panel.notifyBgDelayLabel', delayKey: 'bgDelaySec',
+						delayCur: typeof nt.effective === 'object' && nt.effective ? nt.effective.bgDelaySec : undefined,
+						delayAfterKey: 'panel.notifyBgDelayAfter', delayHintKey: 'panel.notifyBgDelayHint',
+						soundKey: 'panel.notifySound', soundHintKey: 'panel.notifySoundHint',
+						soundCur: notifyBgSound, onSound: () => toggleSound(notifyBgSound, setNotifyBgSound, 'bgSound', 'bg'),
+						desktopKey: 'panel.notifyDesktop', desktopHintKey: 'panel.notifyDesktopHint',
+						desktopCur: notifyBgDesktop, onDesktop: () => toggleDesktop(notifyBgDesktop, setNotifyBgDesktop, 'bgDesktop'),
+						soundPicker: () => soundPicker('bg'),
+					}),
+					groupCard({
+						titleKey: 'panel.notifyIdleTitle', hintKey: 'panel.notifyIdleHint',
+						delayLabelKey: 'panel.notifyIdleDelayLabel', delayKey: 'idleDelaySec',
+						delayCur: typeof nt.effective === 'object' && nt.effective ? nt.effective.idleDelaySec : undefined,
+						delayAfterKey: 'panel.notifyIdleDelayAfter', delayHintKey: 'panel.notifyIdleDelayHint',
+						soundKey: 'panel.notifySound', soundHintKey: 'panel.notifySoundHint',
+						soundCur: notifyIdleSound, onSound: () => toggleSound(notifyIdleSound, setNotifyIdleSound, 'idleSound', 'idle'),
+						desktopKey: 'panel.notifyDesktop', desktopHintKey: 'panel.notifyDesktopHint',
+						desktopCur: notifyIdleDesktop, onDesktop: () => toggleDesktop(notifyIdleDesktop, setNotifyIdleDesktop, 'idleDesktop'),
+						soundPicker: () => soundPicker('idle'),
+					}),
+					// 「同一张卡片只响一次」是行为契约，不是设置项 —— 但用户看到两组开关
+					// 会自然地问「两个都开会响两次吗」。这一行回答它，省掉一次困惑。
+					React.createElement('div', { style: { fontSize: 11, color: 'rgba(128,128,128,0.9)', marginTop: 4 } }, T('panel.notifyOnceNote')),
+				);
+			};
+
 			const tabBtn = (t, label) => React.createElement('button', { className: 'pg-tab' + (tab === t ? ' pg-tab-on' : ''), onClick: () => setTab(t) }, label);
 			// 拒绝原因控件：四处（分类默认值 / 快捷工具 / 兜底 / 快捷工具新增行）共用一个渲染函数，
 			// 保证文案、宽度与交互一致；只有当前动作是 deny 时才显示。
@@ -8030,7 +9069,10 @@ window.__ModuleLoader__.load({
 					status && status.loadError ? React.createElement('div', { style: { color: '#c62828', fontSize: 12 } }, T('panel.loadErr') + status.loadError) : null,
 					status && status.saveError ? React.createElement('div', { style: { color: '#c62828', fontSize: 12 } }, T('panel.saveErr') + status.saveError) : null,
 				),
-				React.createElement('div', { style: { display: 'flex', marginBottom: 12, borderBottom: '1px solid rgba(128,128,128,0.35)' } },
+				// `flexWrap` 不能省：四个 tab 在窄面板（右栏可拖到 300px）里放不下，
+				// 不换行会被压扁或溢出到边框外 —— 而每个按钮都有 16px 内边距，
+				// 压缩后文字先被裁掉，用户看到的是一排残缺的字。
+				React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', marginBottom: 12, borderBottom: '1px solid rgba(128,128,128,0.35)' } },
 					tabBtn('global', T('panel.tabGlobal')),
 					tabBtn('project', T('panel.tabProject')),
 					// ── 第三个 tab：自动审批（auto）的工程参数 ────────────────────────
@@ -8042,22 +9084,36 @@ window.__ModuleLoader__.load({
 					//     （原先放在兜底卡片之后，读起来像「兜底的一部分」）。
 					//
 					// ⚠️ 这个 tab **不参与** `tab === 'global' / 'project'` 的任何判断：
-					// 下面在 tab 栏之后立刻分流（`tab === 'auto'` 时直接渲染这张卡片并返回），
+					// 下面在 tab 栏之后立刻分流（非层 tab 各自渲染自己的内容），
 					// 故 100+ 处依赖 tab 的代码一行都不用改、也不会被误触。
 					tabBtn('auto', T('panel.tabAuto')),
+					// ── 第四个 tab：其他设置 ───────────────────────────────────────────
+					// 目前只装审批提醒，但名字取**容器语义**而不是当前唯一的内容：
+					// 往里加第二项时不必再改一次名，也不必把已有的 `tab === 'other'`
+					// 判断全部重写。DSH 官方设置页的 `general.nav`（通用设置）同理。
+					//
+					// ── 为什么提醒不挂在 auto tab 里 ─────────────────────────────────────
+					// 两者**正交**：auto 回答「这次调用要不要问模型」，提醒回答
+					// 「有东西等我处理时怎么通知到人」。普通 ask 审批同样需要提醒 ——
+					// 「切到后台就看不见」这个问题跟评审机制没有任何关系。
+					//
+					// 它也不是 global tab 里的第四张卡片：global tab 回答「权限怎么定」，
+					// 而提醒不改变任何裁决结果，只是通知渠道。
+					tabBtn('other', T('panel.tabOther')),
 				),
-				// ── auto tab：只渲染自动审批的设置，**不渲染任何项目层设置** ──────────
+				// ── 非层 tab：auto / other 各自只渲染自己的内容 ────────────────────────
 				// 分流必须在这里（tab 栏之后、所有设置卡片之前）：下面的卡片全部按
-				// `tab === 'global' ? 全局 : 项目` 取数，若让 `tab='auto'` 流下去，
-				// 它们会集体走「项目层」分支 —— 那是 100+ 处同时出错，且会向宿主发
-				// `{ target: 'auto' }` 这种它不认识的值。
-				// 用一个三元的 Fragment 把它们整体挡住，那一片代码对 auto tab **完全不可达**。
+				// `tab === 'global' ? 全局 : 项目` 取数，若让 `tab='auto'` / `tab='other'`
+				// 流下去，它们会集体走「项目层」分支 —— 那是 100+ 处同时出错，
+				// 且会向宿主发 `{ target: 'auto' }` / `{ target: 'other' }` 这种它不认识的值。
+				// 用一个三元的 Fragment 把它们整体挡住，那一片代码对这两个 tab **完全不可达**。
 				//
 				// 为什么不用 `if (tab === 'auto') return ...`：那样会提前返回、连带把下面
-				// 的 `notice` / `msg` 状态提示也跳过（用户在 auto tab 里改设置就看不到「已保存」）。
+				// 的 `notice` / `msg` 状态提示也跳过（用户在这些 tab 里改设置就看不到「已保存」）。
 				// 用三元挡板可以把提示留在外面，让任何 tab 都能看到。
 				tab === 'auto' ? autoReviewCard() : null,
-				tab === 'auto' ? null : React.createElement(React.Fragment, null,
+				tab === 'other' ? otherTab() : null,
+				tab === 'auto' || tab === 'other' ? null : React.createElement(React.Fragment, null,
 				React.createElement('div', { style: { fontSize: 12, color: 'rgba(128,128,128,0.85)', marginBottom: 8 } },
 					tab === 'global' ? T('panel.editGlobal') : T('panel.editProject').replace('{p}', status ? status.projectKey : ''),
 				),
@@ -8214,7 +9270,8 @@ window.__ModuleLoader__.load({
 					// 与 expandedList 的判据一致 —— 该态**不算展开**，故按钮仍是可重试的「展开」。
 					(decisionsExpanded && decisionsExpanded.error) ? React.createElement('div', { style: { fontSize: 12, color: '#c62828', marginTop: 6 } }, T('panel.decisionsFailed') + '：' + decisionsExpanded.error) : null,
 				),
-				// 闭合上面 `tab === 'auto' ? null : <Fragment>` 的 Fragment（global/project 的全部设置卡片）
+				// 闭合上面 `tab === 'auto' || tab === 'other' ? null : <Fragment>` 的 Fragment
+				// （global/project 的全部设置卡片）
 				),
 				// ── 状态提示：**在所有 tab 之外**（不在上面那个 Fragment 里）────────────
 				// `notice` 与 `msg` 是「上一次操作的结果」，任何 tab 都要能看到 ——

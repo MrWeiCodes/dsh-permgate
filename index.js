@@ -1877,6 +1877,155 @@ export default {
       return Object.keys(out).length ? out : null
     }
 
+    // ── 审批提醒的设置项 ────────────────────────────────────────────────────────
+    // 审批卡片挂在页面里，切到别的标签页或窗口后**没有任何页面外提示** —— 这是本组设置
+    // 存在的唯一理由，不是「加个好看的音效」。
+    //
+    // ── 为什么分两组 ────────────────────────────────────────────────────────────
+    // 两组回答两个不同的问题，**计时起点不同**，不能合成一组：
+    //   · `bg*`   问「你走了多久还没处理」—— 起点是**切入后台那一刻**。
+    //     它服务「我不在的时候来了审批」。
+    //   · `idle*` 问「这条审批等了多久」—— 起点是**审批创建那一刻**。
+    //     它服务「我在前台但走神了 / 在看别的窗口」，那种情况切后台判据永远不触发。
+    //
+    // 合成一组时必须二选一：用审批年龄就分不清「我刚切走」与「它等很久了」；
+    // 用后台时长就永远覆盖不到前台走神。两个都算又会退化成「同一张卡片响两次」。
+    //
+    // ── 默认值 ──────────────────────────────────────────────────────────────────
+    // 提示音默认**开**，桌面通知默认**关**：
+    //   · 提示音在「提醒」这件事上是必需的载体 —— 两组都关等于设置项存在但不生效，
+    //     那种死设置比没有更糟（用户以为开了会响）；
+    //   · 桌面通知默认关，因为它会抢焦点、进通知中心、在共享屏幕上泄露正在做什么。
+    //     要它得用户主动表态。
+    //
+    // `bgDelaySec` 默认 0（在后台有审批就提醒）：想避开「切走就响」的人自己调大。
+    // `idleDelaySec` 默认 10：审批等 10 秒还没人理，已经值得提醒一次。
+    //
+    // 音效**每组各一份**（`bgSoundStyle` / `idleSoundStyle`），不共用。
+    //
+    // 为什么不是共用：两组回答的场景不同（「你走了」vs「它等了太久」），
+    // 而音效正是让人**不看屏幕就知道是哪一种**的唯一手段 —— 共用就等于放弃这条信息。
+    // 默认值两组相同（都是 triple），因为首次配置时用户还没形成区分习惯；
+    // 想区分的人自己改第二组即可。
+    const NOTIFY_DEFAULTS = {
+      // ── 第一组：切后台提醒 ──
+      bgSound: true,
+      bgDesktop: false,
+      // 切入后台后连续多少秒仍未处理才提醒。0 = 立刻。
+      //
+      // 「连续」是判据的一部分：切回前台即重置，下次切走重新计。
+      // 不这样算的话，「切走 → 回来看一眼 → 再切走」会在第二次切走时立刻响 ——
+      // 而那正是本组要避免的打断。
+      bgDelaySec: 0,
+      // 第一组的音效与自定义音频路径。
+      bgSoundStyle: 'triple',
+      bgSoundPath: '',
+      // ── 第二组：超时未处理提醒 ──
+      idleSound: true,
+      idleDesktop: false,
+      // 审批创建后多少秒仍未处理就提醒。**不分前后台**。
+      idleDelaySec: 10,
+      // 第二组的音效与自定义音频路径。
+      idleSoundStyle: 'triple',
+      idleSoundPath: '',
+    }
+
+    // 自定义音频的**文件路径**。只在对应组的 `*SoundStyle === 'custom'` 时有意义。
+    //
+    // 为什么存路径而不是把音频内容塞进配置：
+    //   · config.json 每次 persist 都整体重写、每次 statusView 都读 —— 塞 80KB base64
+    //     进去会让这两个高频路径都跟着变重；
+    //   · 用户能直接用自己的编辑器/播放器换掉那个文件，不必回来重传；
+    //   · 同一段音频可以给多个地方复用，不存在「存了两份」。
+    //
+    // **不限工作区**：音频是用户自己的资源，与「权限网关管哪个目录」无关。
+    // 限制它只会让「我把提示音放在 D:\sounds」这种正常用法失效。
+    //
+    // 空串 = 没有自定义音频（与缺键同义，不落键）。
+
+    // 音效预设。**顺序即面板下拉的顺序**，客户端不另排一份。
+    //
+    // 每个预设的 id 是落盘值，改名即 breaking change（存量配置会回落默认）。
+    // 前四个是**合成音**（WebAudio 现场生成，零文件），后两个是**语音**（内嵌 base64）。
+    //
+    // 为什么语音要内嵌而不是引用文件：插件是 npm 包，运行时没有可靠的资源目录；
+    // 而 `fetch` 一个相对路径在 `dsh-app://` 与 `http://` 两个载体下的解析规则不同。
+    // 内嵌成 base64 后两种载体走同一条解码路径（decodeAudioData），行为完全一致。
+    const SOUND_STYLES = ['chime', 'single', 'triple', 'low', 'deepdeep', 'jingjing']
+    // 自定义音效的 id：用户上传自己的音频时用。**不在预设列表里**（面板上单列一项）。
+    //
+    // 单独一个 id 而不是「把路径直接当 style 存」：后者会让 `soundStyle` 的取值
+    // 既可能是短 id 又可能是路径，每个消费点都要先判断类型。
+    const SOUND_STYLE_CUSTOM = 'custom'
+    // 自定义音频文件的大小上限（字节）。
+    //
+    // 60KB 的依据：两个内嵌语音各约 5.9KB，而 60KB 的单声道 mp3 约 10 秒 48kbps ——
+    // 提示音没有超过 10 秒的正当用途，再长用户自己都听不完就响下一次了。
+    //
+    // 这个上限**不限制配置文件体积**（配置里只存路径），它限制的是「一次读多少字节
+    // 进内存」：提醒可能连续触发，读一个几百 MB 的文件只为播 1 秒是荒谬的。
+    const SOUND_PATH_MAX_BYTES = 60 * 1024
+
+    // 数字项的上下限。与 AUTO_REVIEW_RANGES 同一条纪律：**只有这一份**，
+    // normalizeNotify 与 statusView 都从它取 —— 面板据此在提交前拦住超范围值，
+    // 而不是让宿主钳制后仍回「已保存」（两份字面量必然漂移，那时面板就会说谎）。
+    //
+    // 上限取 3600（1 小时）：再长的窗口已经失去「提醒」的意义 ——
+    // 那等于不提醒，用户要的是「别烦我」而不是「一小时后再烦我」。
+    const NOTIFY_RANGES = {
+      bgDelaySec: { min: 0, max: 3600 },
+      idleDelaySec: { min: 0, max: 3600 },
+    }
+
+    // 与 normalizeAutoReview 同一条纪律：**只保留用户显式写下的、合法的值**，
+    // 不补默认值（默认值由 notifySetting 在读取时推导）。
+    // 类型不对一律丢弃而不是折成默认 —— 折默认会经 persist 变成「用户表态」，
+    // 此后改默认值对存量配置零效果（理由见 normalizeThreshold 的注释）。
+    //
+    // 这里**不校验浏览器是否已授权**：那是浏览器侧的事实，不是配置。
+    // 配置回答「我想不想收到提醒」，权限回答「浏览器让不让」。把两者混进一个键，
+    // 面板就无法解释「我开了却没响」—— 而那正是用户最需要看到的那句话。
+    function normalizeNotify(raw) {
+      if (!raw || typeof raw !== 'object') return null
+      const out = {}
+      for (const k of Object.keys(NOTIFY_DEFAULTS)) {
+        const dflt = NOTIFY_DEFAULTS[k]
+        if (typeof dflt === 'boolean') {
+          if (typeof raw[k] === 'boolean') out[k] = raw[k]
+          continue
+        }
+        if (typeof dflt === 'string') {
+          // 两组各有一对（`bgSoundStyle`/`bgSoundPath`、`idleSoundStyle`/`idleSoundPath`），
+          // 语义按**后缀**分派而不是按 key 逐个写 —— 加第三组时不用再改这里。
+          if (k.endsWith('SoundStyle')) {
+            // 预设之一，或自定义标记。未知值**丢弃**（回落默认）——
+            // 保留它会让面板渲染一个没有对应音频的选项，点了没声音。
+            if (raw[k] === SOUND_STYLE_CUSTOM || SOUND_STYLES.indexOf(raw[k]) !== -1) out[k] = raw[k]
+            continue
+          }
+          // `*SoundPath`：空串不落键（与「没设过」同义，与 provider / model 同一条纪律）。
+          // **不校验路径是否存在**：加载侧校验会让「文件暂时被移走」变成「配置被抹掉」，
+          // 而用户只是拔了个移动硬盘。存在性由读取侧（读音频时）与面板的试听按钮报错。
+          if (typeof raw[k] === 'string' && raw[k].trim()) out[k] = raw[k]
+          continue
+        }
+        const v = raw[k]
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue
+        const rg = NOTIFY_RANGES[k] || {}
+        const min = typeof rg.min === 'number' ? rg.min : 0
+        const max = rg.max
+        // 判据用**取整后**的值：负数一律丢弃，与 normalizeThreshold 一样不把误输入
+        // 落成用户表态 —— 把 -3 钳成 0 会让面板显示「已配置」，磁盘上却是别的值。
+        const n = Math.floor(v)
+        if (n < 0) continue
+        out[k] = max === undefined ? Math.max(n, min) : Math.min(Math.max(n, min), max)
+      }
+      // 自定义音频的 base64 载荷**不再落盘**（改成存路径）。
+      // 存量配置里若有 `soundCustom` 键，这里不再认它 —— 它会在下一次任意写盘时
+      // 被 JSON.stringify 整体抹掉。版本未发布，不需要迁移。
+      return Object.keys(out).length ? out : null
+    }
+
     // stats 由调用方传入（形如 { dropped: 0 }），normalizeQuick 往里累加本次丢弃的残留键数。
     // 刻意走独立参数而不是返回值：返回值是 config 本体，会被 JSON.stringify 整体落盘，
     // 把计数挂上去就会变成配置文件里的一个字段。
@@ -1911,6 +2060,11 @@ export default {
       // 这正是本文件反复警告的「面板说谎」，而且它只在异常路径上才暴露，日常跑不出来。
       const gAuto = normalizeAutoReview(g.autoReview)
       if (gAuto) global.autoReview = gAuto
+      // 审批提醒：与 autoReview 同一条纪律（只承载显式值）。这一行同样**不能省** ——
+      // `global` 是白名单构造，没列进来的键在加载时就被丢弃，表现为「面板上开了、
+      // 重启后又变回关」，而配置文件里那个键明明还在。
+      const gNotify = normalizeNotify(g.notify)
+      if (gNotify) global.notify = gNotify
       for (const c of CATS) global[c] = normalizeCategory(g[c], c, false)
       const projects = {}
       const rawProjects = parsed.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
@@ -8402,6 +8556,93 @@ export default {
       return Math.min(Math.floor(v), AUTO_REVIEW_RANGES.timeoutMs.max)
     }
 
+    // 审批提醒设置项的生效值。与 autoReviewSetting 同形，但**只有全局一层**：
+    // 「要不要提醒我」是本机操作员的偏好，与打开哪个项目无关。按项目配会让同一个
+    // 浏览器在不同对话里表现不一致，而用户看不出是项目在起作用。
+    //
+    // 按默认值的类型分派（布尔 / 数字 / 字符串），而不是给每个键写一条 if ——
+    // 后者在新增键时必然漏掉一处，而漏掉的表现是「配了不生效」。
+    function notifySetting(key) {
+      const g = config.global && config.global.notify
+      const v = g && typeof g === 'object' ? g[key] : undefined
+      const dflt = NOTIFY_DEFAULTS[key]
+      if (typeof dflt === 'boolean') return typeof v === 'boolean' ? v : dflt
+      if (typeof dflt === 'string') {
+        // 两组各有一对 `*SoundStyle` / `*SoundPath`，按后缀分派（与 normalizeNotify 同口径）。
+        if (key.endsWith('SoundStyle')) {
+          return (v === SOUND_STYLE_CUSTOM || SOUND_STYLES.indexOf(v) !== -1) ? v : dflt
+        }
+        return typeof v === 'string' && v ? v : dflt
+      }
+      // 数字项：非法值回落默认，与 autoReviewSetting 同口径。
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return dflt
+      const rg = NOTIFY_RANGES[key] || {}
+      const max = rg.max
+      return max === undefined ? Math.floor(v) : Math.min(Math.floor(v), max)
+    }
+    // 自定义音频的读取错误 → 一句给人看的话。
+    // 三种失败分开说，因为它们对用户的处置完全不同（见 readCustomSound 的说明）。
+    function soundErrorText(code, lang) {
+      const en = normLang(lang) === 'en'
+      if (code === 'no-path') return en ? 'No audio file path set' : '还没有填写音频文件路径'
+      if (code === 'too-big') {
+        const kb = Math.round(SOUND_PATH_MAX_BYTES / 1024)
+        return en ? `Audio file is too large (limit ${kb} KB)` : `音频文件过大（上限 ${kb} KB）`
+      }
+      return en ? 'Cannot read that audio file (missing or not a file)' : '读不到这个音频文件（不存在或不是文件）'
+    }
+
+    // 自定义音频的**读取**单点：按某一组的 `*SoundPath` 读文件，
+    // 返回 `{ ok, b64, size }` 或 `{ ok:false, error }`。
+    //
+    // `group` 是 `'bg'` 或 `'idle'` —— 两组各有自己的路径，读哪个由调用方指定。
+    // `pathOverride` 给了就按它读（**不再看 config**）：保存路由要在写盘前校验候选路径，
+    // 若从 config 读，校验的就是旧值而不是用户刚填的那个。`null` 表示「显式没有路径」，
+    // 与 `undefined`（没给 override）必须分开 —— 混为一谈会让「清空路径」通过校验。
+    // 三个失败分支分开报，因为它们对用户的处置完全不同：
+    //   · `no-path`  —— 还没填；
+    //   · `missing`  —— 填错了，或文件被移走；
+    //   · `too-big`  —— 选了个几 MB 的音频。
+    // 合成一句「读取失败」会让用户不知道是自己填错还是插件坏了。
+    //
+    // **不限工作区**：音频与「权限网关管哪个目录」无关，见 NOTIFY_DEFAULTS 处的说明。
+    // 用 `fs.resolve` 而非 `node:fs`：`resolve` 接受任意绝对/相对路径，不套工作区闸；
+    // 而 `readBytes` 自带 maxBytes 上限，超限时由它拒绝，不必先 stat 一次。
+    async function readCustomSound(group, pathOverride) {
+      const g = config.global && config.global.notify
+      const key = (group === 'idle' ? 'idle' : 'bg') + 'SoundPath'
+      let p
+      if (pathOverride !== undefined) {
+        p = typeof pathOverride === 'string' ? pathOverride.trim() : ''
+      } else {
+        p = g && typeof g === 'object' && typeof g[key] === 'string' ? g[key].trim() : ''
+      }
+      if (!p) return { ok: false, error: 'no-path' }
+      try {
+        // 相对路径按进程 cwd 解析 —— 与用户「在面板里填了一个相对路径」的直觉一致，
+        // 且不依赖当前会话的工作区（提醒是全局设置，不该随项目变）。
+        const target = await fs.resolve(p, { cwd: process.cwd() })
+        if (!target) return { ok: false, error: 'missing' }
+        // `readBytes` 的第三个参数是硬上限：超过时它拒绝而不是先读进来再判，
+        // 故这里传 SOUND_PATH_MAX_BYTES 就等于「超限即拒」。
+        const bytes = await fs.readBytes(target, undefined, SOUND_PATH_MAX_BYTES)
+        if (!bytes || !bytes.length) return { ok: false, error: 'unreadable' }
+        const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        return { ok: true, b64: buf.toString('base64'), size: buf.length }
+      } catch (e) {
+        // 读不了（不存在 / 无权限 / 超上限）统一归为 missing / too-big 二选一。
+        // `readBytes` 超限时的错误文案由实现决定，这里按体积无法判断，
+        // 故用 stat 补一次判定 —— 只在异常路径上多这一次调用。
+        try {
+          const t = await fs.resolve(p, { cwd: process.cwd() })
+          const info = t ? await fs.stat(t) : undefined
+          const size = info && typeof info.size === 'number' ? info.size : null
+          if (size !== null && size > SOUND_PATH_MAX_BYTES) return { ok: false, error: 'too-big' }
+        } catch (e2) {}
+        return { ok: false, error: 'missing' }
+      }
+    }
+
     // ── 额外审批策略与高风险处置：取值单点 ──────────────────────────────────────
     // 三个函数都走同一条链：**项目层显式值 → 全局层显式值 → 缺省**。
     // 不各写一份，因为「哪一层优先」这件事一旦分叉，面板显示的值与裁决用的值就会
@@ -9720,6 +9961,45 @@ export default {
           // 处决定「面板上能不能选 auto」（见其定义处的注释），那是它真正的用途 ——
           // 与「要不要把同一个布尔值再下发一遍」是两件事。
         },
+        // ── 审批提醒（桌面通知 / 提示音）─────────────────────────────────────────
+        // 下发形状与 autoReview 同构：effective + defaults + explicit。
+        //   · `effective` 是生效值，面板据此渲染开关的初始状态；
+        //   · `defaults` 一并下发 —— 客户端硬编码一份会让「宿主改默认值」与
+        //     「面板显示」分叉（与 autoReview 处同一条纪律）；
+        //   · `explicit` 让面板区分「我设过」与「跟随默认」。
+        //
+        // 浏览器侧的授权状态**不在**这里：那是客户端自己的事实（Notification.permission），
+        // 宿主无从得知，也无法替浏览器表态。
+        notify: {
+          effective: {
+            bgSound: notifySetting('bgSound'),
+            bgDesktop: notifySetting('bgDesktop'),
+            bgDelaySec: notifySetting('bgDelaySec'),
+            idleSound: notifySetting('idleSound'),
+            idleDesktop: notifySetting('idleDesktop'),
+            idleDelaySec: notifySetting('idleDelaySec'),
+            // 两组各一份音效与路径（见 NOTIFY_DEFAULTS 处的说明）。
+            bgSoundStyle: notifySetting('bgSoundStyle'),
+            bgSoundPath: notifySetting('bgSoundPath'),
+            idleSoundStyle: notifySetting('idleSoundStyle'),
+            idleSoundPath: notifySetting('idleSoundPath'),
+          },
+          defaults: NOTIFY_DEFAULTS,
+          // 数字项的值域：面板据此在提交前拦住超范围值，而不是让宿主钳制后仍回
+          // 「已保存」（与 autoReview.ranges 同一条纪律，那里写着完整的理由）。
+          ranges: NOTIFY_RANGES,
+          // 音效预设清单：**顺序即下拉顺序**，面板不在客户端另排一份 ——
+          // 加一个预设时只改宿主这一处，面板自动跟上。
+          soundStyles: SOUND_STYLES,
+          // 不下发文件内容：面板只在**试听/播放时**按需走 `/permgate/notify-sound` 取，
+          // 且取到的 base64 缓存在客户端内存里。statusView 会被面板反复取
+          // （SSE 通知后重查、各写盘路由回带、perm_status 每次调用），
+          // 每次都带一份 80KB 的 base64 会让面板体积随配置膨胀。
+          customMaxBytes: SOUND_PATH_MAX_BYTES,
+          explicit: (config.global.notify && typeof config.global.notify === 'object')
+            ? Object.keys(config.global.notify).filter((k) => Object.prototype.hasOwnProperty.call(NOTIFY_DEFAULTS, k))
+            : [],
+        },
         // 首屏只带 DECISIONS_PREVIEW 条（见其定义处）：本视图会被面板反复取（SSE 通知后重查、
         // 各写盘路由回带、perm_status 每次调用），全量下发会让每次下发都跟着内存窗口变重。
         // 展开走 /permgate/decisions。投影与展开通道共用 projectDecisions（见其说明）。
@@ -10628,6 +10908,121 @@ export default {
           if (!Object.keys(config.global.autoReview).length) delete config.global.autoReview
           await persist(exec)
           return json(res, statusView(exec))
+        }
+        // ── /permgate/set-notify：审批提醒的开关与等待窗口 ──────────────────────────
+        //
+        // 只认全局层，理由与 set-auto-review 相同：提醒是本机操作员的偏好，
+        // 按项目配置会让同一个浏览器在不同对话里表现不一致，而用户看不出是谁在起作用。
+        //
+        // 逐字段处理，**缺席 = 不动**（与 set-auto-policy 同一条纪律）：面板一次只改
+        // 一个控件，整体替换会让另一个被未提交的默认值覆盖。
+        //
+        // 类型/值域不对**回 error 而不是静默丢弃** —— 静默丢弃会让面板把控件弹回原位
+        // 却显示「已保存」，用户看不出这次修改从未生效。类型按默认值的类型分派，
+        // 新增键时不会漏掉一条判据（逐键写 if 正是这类漏检的来源）。
+        if (pathname === '/permgate/set-notify' && method === 'POST') {
+          await init(exec)
+          if (a && a.target !== undefined && a.target !== 'global') {
+            return json(res, { error: '该路由只支持全局层（target=global）：审批提醒不按项目配置' })
+          }
+          // 先把全部字段校验完再写：逐字段「校验一个写一个」会在第 3 个字段报错时
+          // 留下前两个已改、后两个未改的半改状态，而响应是 error —— 用户以为没生效。
+          const next = {}
+          for (const k of Object.keys(NOTIFY_DEFAULTS)) {
+            if (a[k] === undefined) continue
+            if (typeof NOTIFY_DEFAULTS[k] === 'boolean') {
+              if (typeof a[k] !== 'boolean') return json(res, { error: k + ' 必须是布尔值' })
+              next[k] = a[k]
+              continue
+            }
+            if (typeof NOTIFY_DEFAULTS[k] === 'string') {
+              // 两组各有一对，语义按**后缀**分派（与 normalizeNotify 同口径）：
+              //   · `*SoundStyle` 是枚举（预设 id 或 custom）；
+              //   · `*SoundPath`  是任意路径，`null` 表示显式清除。
+              // 混在一起写会让填路径时报「未知的音效: D:\a.mp3」——
+              // 这正是「按默认值类型分派」这条纪律的边界：类型相同不等于语义相同。
+              if (k.endsWith('SoundStyle')) {
+                // 音效 id：只认预设与自定义标记。未知值回 error 而不是静默丢弃 ——
+                // 丢弃会让面板显示旧值却回「已保存」，用户以为选上了。
+                if (a[k] !== SOUND_STYLE_CUSTOM && SOUND_STYLES.indexOf(a[k]) === -1) {
+                  return json(res, { error: '未知的音效: ' + a[k] })
+                }
+              } else {
+                // `*SoundPath`：`null` 表示**显式清除**（删键），由下面那段单独处理，
+                // 故这里放行 null —— 否则「清除」会被类型校验拦下，
+                // 而面板会收到一个 error、看起来像保存失败。
+                if (a[k] !== null && typeof a[k] !== 'string') {
+                  return json(res, { error: k + ' 必须是字符串或 null' })
+                }
+                if (a[k] === null) continue
+              }
+              next[k] = a[k]
+              continue
+            }
+            // 数字项：必须是有限数、非负、不超上限。**不在这里静默钳制** ——
+            // 钳制后落盘的值与用户填的不同，而面板会显示钳制值，看起来像「自己变了」。
+            const rg = NOTIFY_RANGES[k] || {}
+            const max = rg.max
+            if (typeof a[k] !== 'number' || !Number.isFinite(a[k]) || a[k] < 0) {
+              return json(res, { error: k + ' 必须是非负数' })
+            }
+            const n = Math.floor(a[k])
+            if (max !== undefined && n > max) return json(res, { error: k + ' 不能超过 ' + max })
+            next[k] = n
+          }
+          // ── 自定义音频路径：**先校验、后写入** ─────────────────────────────────
+          //
+          // 顺序不能反。若先把路径写进 config 再读文件、失败时删键回滚，回滚只修了
+          // 磁盘、修不了内存里已改过的 config —— 于是一次 error 之后，任何别的写盘
+          // 请求（改个秒数就行）都会把这个脏值 persist 出去：用户看到「保存失败」，
+          // 磁盘上却是改过的值。校验必须在赋值之前完成。
+          //
+          // 只校验这次请求**真的提交了路径**的那一组：
+          //   · 用户改一个秒数时，不该因为「另一组的音频恰好被移到离线盘」而整条失败；
+          //   · 刚把音效切到 custom、还没填路径时也不该校验 —— 否则选完就弹一句红字，
+          //     而路径输入框正是这一步之后才出现的。
+          for (const grp of ['bg', 'idle']) {
+            const sk = grp + 'SoundStyle'
+            const pk = grp + 'SoundPath'
+            if (a[pk] === undefined) continue
+            // 这次请求之后的生效音效（本请求没给 style 就用磁盘上那个）
+            const style = a[sk] !== undefined ? a[sk] : config.global.notify && config.global.notify[sk]
+            if (style !== 'custom') continue
+            // `null` = 显式清除；清除后仍是 custom 就是「选中了但没有音频」——
+            // 那个状态下次提醒会静默不响，而用户看不出原因，故在这里拒掉。
+            const r = await readCustomSound(grp, a[pk])
+            if (!r.ok) return json(res, { error: soundErrorText(r.error, lang) })
+          }
+          if (!config.global.notify || typeof config.global.notify !== 'object') config.global.notify = {}
+          for (const k of Object.keys(next)) config.global.notify[k] = next[k]
+          // `null` = 显式清除（删键）；非空 = 落盘。删键而非落空串：
+          // 空串会让 `explicit` 里多一个「用户设过」的键，而它其实等于没设。
+          for (const grp of ['bg', 'idle']) {
+            const pk = grp + 'SoundPath'
+            if (a[pk] === undefined) continue
+            if (a[pk] === null) { delete config.global.notify[pk]; continue }
+            config.global.notify[pk] = a[pk]
+          }
+          await persist(exec)
+          return json(res, statusView(exec))
+        }
+        // ── /permgate/notify-sound：按需取自定义音频的 base64 ─────────────────────
+        //
+        // 为什么单开一条而不是塞进 statusView：读文件是磁盘 I/O，而 statusView
+        // 会被面板反复取（SSE 通知后重查、各写盘路由回带、perm_status 每次调用）。
+        // 客户端只在**真正要播放自定义音效时**才取一次，取到后缓存在内存里。
+        //
+        // 失败时回 `{ ok:false, error }` 而不是 500：这是**用户配置问题**，
+        // 面板要据此显示「文件不存在」这类可处置的提示，而不是一个泛化故障。
+        if (pathname === '/permgate/notify-sound' && method === 'GET') {
+          await init(exec)
+          // 读哪一组由 `group` 决定（`bg` / `idle`）—— 两组各有自己的路径。
+          // GET 的参数在 `search` 里，不在 `a` 里（`a` 只装 POST body）：
+          // 从 `a` 取会让两组永远读到第一组的文件。
+          const grpQ = search ? search.get('group') : null
+          const r = await readCustomSound(grpQ === 'idle' ? 'idle' : 'bg')
+          if (!r.ok) return json(res, { ok: false, error: soundErrorText(r.error, lang), code: r.error })
+          return json(res, { ok: true, data: r.b64, size: r.size })
         }
         // ── /permgate/set-auto-policy：额外审批策略 + 高风险处置的两维 ──────────────
         //

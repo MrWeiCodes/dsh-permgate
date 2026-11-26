@@ -3215,7 +3215,10 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // 只剔第一张（早先的写法）会让后两张里的 select 被算进来 —— 而那正是本条要放过的。
     const cardNoPolicy = (function () {
       let out = card
-      for (const marker of ['const policyCard = () => {', 'const highRiskCard = () => {', 'const denyReasonCard = () => {']) {
+      // 排除列表里也要放 `otherTab`：它整块落在 `autoReviewCard` 与 `tabBtn` 之间，
+      // 而它里面的音效下拉本来就是原生 select（六个选项、没有 drill 层级，
+      // 与模型选择那条判据无关）。不排除会让「别的 tab 加了个 select」误伤本条。
+      for (const marker of ['const policyCard = () => {', 'const highRiskCard = () => {', 'const denyReasonCard = () => {', 'const otherTab = () => {']) {
         const a = out.indexOf(marker)
         if (a < 0) continue
         let d4 = 0
@@ -4138,7 +4141,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (/const reasoning = cur && cur\.model\.reasoning/.test(comp)) return false
     return true
   })())
-  // ⑨f autoReviewCard 里**不得有任何 hook 调用**
+  // ⑨f autoReviewCard / otherTab 里**不得有任何 hook 调用**
   //
   // 踩过的真实崩溃：模型目录的 `React.useEffect` 最初写在 `autoReviewCard()` 里，
   // 而那个函数只在 `tab === 'auto'` 时被调用 —— 切 tab 就改变了组件的 hook 数量，
@@ -4148,21 +4151,26 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // 与本文件上方「添加成功后滚到列表末尾」那段注释是同一条规则：
   // hook 不能出现在条件分支或按需调用的函数里。组件层的 hook 数量恒定。
   //
+  // otherTab 是**同一类**风险（同样按 tab 条件调用），故一起查：
+  // 只查 autoReviewCard 时，往新 tab 里加 hook 不会红。
+  //
   // 判据：卡片函数体内不得出现 React.useState / useEffect / useRef / useMemo / useCallback。
   // 这条能抓到「顺手在卡片里加一个 hook」的所有变体。
-  ok('★★ autoReviewCard 里没有 hook（否则切 tab 会抛 #310 整页白屏）', (function () {
-    const i = cli.indexOf('const autoReviewCard = () => {')
-    if (i < 0) return false
-    // 取到卡片函数结尾：从 `{` 配平到对应的 `}`
-    let d = 0
-    let body = ''
-    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
-      if (cli[k] === '{') d++
-      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
-    }
-    if (!body) return false
-    for (const hk of ['React.useState', 'React.useEffect', 'React.useRef', 'React.useMemo', 'React.useCallback', 'React.useLayoutEffect']) {
-      if (body.indexOf(hk) !== -1) return false
+  ok('★★ autoReviewCard / otherTab 里都没有 hook（否则切 tab 会抛 #310 整页白屏）', (function () {
+    for (const marker of ['const autoReviewCard = () => {', 'const otherTab = () => {']) {
+      const i = cli.indexOf(marker)
+      if (i < 0) return false
+      // 取到卡片函数结尾：从 `{` 配平到对应的 `}`
+      let d = 0
+      let body = ''
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+      }
+      if (!body) return false
+      for (const hk of ['React.useState', 'React.useEffect', 'React.useRef', 'React.useMemo', 'React.useCallback', 'React.useLayoutEffect']) {
+        if (body.indexOf(hk) !== -1) return false
+      }
     }
     return true
   })())
@@ -4859,23 +4867,412 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (/numInput\('timeoutMs'[^)]*panel\.autoMsUnit/.test(cli)) return false
     return true
   })())
-  // ⑥ auto 是独立的第三个 tab，且它**完全挡掉**其余设置卡片。
+  // ⑪ 两组判据各自独立成立，且**计时起点不同**。
+  //
+  // 这是本次设计的核心，也是最容易写错的地方：两组的差别全在「从什么时候开始算」——
+  //   · bg  ：从**切入后台**那一刻（`bgElapsedMs`）；
+  //   · idle：从**审批创建**那一刻（`now - p.ts`）。
+  // 判据走**真实求值**：把 pgDueNow 抽出来，喂各种时间组合，看命中组对不对。
+  ok('★★ 两组判据各自成立且计时起点不同（bg 看后台时长、idle 看审批年龄）', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const dueSrc = grabFn('function pgDueNow(allPending, cfg, env) {')
+    const groupSrc = grabFn('function pgGroupOn(cfg, group) {')
+    if (!dueSrc || !groupSrc) return false
+    let f = null
+    try {
+      f = new Function('PG_ANNOUNCED', groupSrc + '\n' + dueSrc + '\n; return pgDueNow;')(new Set())
+    } catch (e) { return false }
+    if (typeof f !== 'function') return false
+    const NOW = 1000000
+    // 通道键必须给全：判据层会跳过「两条通道都关」的组（否则默认 0 秒的 bg 组
+    // 在后台恒成立、把 idle 组永远挡在外面）。这条测的是**计时**，两组都开着。
+    const cfg = { bgSound: true, bgDesktop: false, bgDelaySec: 5, idleSound: true, idleDesktop: false, idleDelaySec: 10 }
+    const mk = (ageMs) => ({ id: 'a', tool: 'x', ts: NOW - ageMs })
+    // ① 前台 + 审批很新：两组都不成立
+    if (f([mk(0)], cfg, { hidden: false, bgElapsedMs: 0, now: NOW }) !== null) return false
+    // ② 后台但后台时长不够：第一组不成立（第二组也还早）
+    if (f([mk(0)], cfg, { hidden: true, bgElapsedMs: 1000, now: NOW }) !== null) return false
+    // ③ 后台够久 → 第一组命中（哪怕审批刚创建）
+    let r = f([mk(0)], cfg, { hidden: true, bgElapsedMs: 6000, now: NOW })
+    if (!r || r.group !== 'bg' || r.entries.length !== 1) return false
+    // ④ 前台 + 审批够老 → 第二组命中（这正是「前台走神」的场景，第一组永远覆盖不到）
+    r = f([mk(11000)], cfg, { hidden: false, bgElapsedMs: 0, now: NOW })
+    if (!r || r.group !== 'idle' || r.entries.length !== 1) return false
+    // ⑤ 后台 + 两组都成立 → 取 bg（后台场景下那组的秒数更贴近用户意图）
+    r = f([mk(20000)], cfg, { hidden: true, bgElapsedMs: 6000, now: NOW })
+    if (!r || r.group !== 'bg') return false
+    // ⑥ ts 缺失时按「刚到」算：不得凭坏字段判成「等了很久」而立刻响
+    r = f([{ id: 'a', tool: 'x' }], { bgSound: true, bgDelaySec: 0, idleSound: true, idleDelaySec: 10 }, { hidden: false, bgElapsedMs: 0, now: NOW })
+    if (r !== null) return false
+    // ⑦ 空池子：不命中
+    if (f([], cfg, { hidden: true, bgElapsedMs: 99999, now: NOW }) !== null) return false
+    return true
+  })())
+  // ⑫ 同一个审批**全局只响一次**（跨两组共用一个已提醒集合）。
+  //
+  // 为什么这条必须有：两组都开着时，后台场景下第一组（默认 0 秒）先命中，
+  // 若集合不共享，10 秒后第二组会为同一张卡片再响一次 —— 用户以为来了两个审批。
+  ok('★★ 同一审批跨两组只响一次（两组都开时不得响两次）', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const dueSrc = grabFn('function pgDueNow(allPending, cfg, env) {')
+    const dispSrc = grabFn('function pgDispatchDue(due, cfg, loadCustom) {')
+    const groupSrc = grabFn('function pgGroupOn(cfg, group) {')
+    if (!dueSrc || !dispSrc || !groupSrc) return false
+    const announced = new Set()
+    let due = null
+    let dispatch = null
+    try {
+      const bundle = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+        groupSrc + '\n' + dueSrc + '\n' + dispSrc + '\n; return { due: pgDueNow, dispatch: pgDispatchDue };')
+      // 桩必须**返回 true**：pgDispatchDue 只在「真的响了」时才记入已提醒集合
+      // （见那里对「尝试过 ≠ 响过了」的说明）。返回 undefined 会被判成没响，
+      // 集合永远是空的，这条断言就变成空转。
+      const o = bundle(announced, null, (k) => k, () => true, () => false)
+      due = o.due
+      dispatch = o.dispatch
+    } catch (e) { return false }
+    const NOW = 1000000
+    const cfg = { bgSound: true, bgDesktop: false, bgDelaySec: 0, idleSound: true, idleDesktop: false, idleDelaySec: 10 }
+    const p = { id: 'a', tool: 'x', ts: NOW - 60000 }
+    // 判据用 announced 集合（「真的响过」），不是调用次数 ——
+    // 派发函数在通道都关或没响时都会提前返回，调用次数区分不出这两种情形。
+    // ① 后台 0 秒窗口：第一组命中 → 记为已提醒
+    dispatch(due([p], cfg, { hidden: true, bgElapsedMs: 0, now: NOW }), cfg)
+    if (!announced.has('a')) return false
+    // ② 同一审批、同一时刻，第二组也够老了 → 不得再派发（due 直接返回 null）
+    if (due([p], cfg, { hidden: false, bgElapsedMs: 0, now: NOW }) !== null) return false
+    // ③ 另一条新审批 → 该命中（证明上面不是因为「永远不命中」）
+    const r3 = due([p, { id: 'b', tool: 'y', ts: NOW - 60000 }], cfg, { hidden: false, bgElapsedMs: 0, now: NOW })
+    if (!r3 || r3.entries.length !== 1 || r3.entries[0].id !== 'b') return false
+    return true
+  })())
+  // ⑬ 两条通道都关时**不记入已提醒集合** —— 没响过就不算提醒过。
+  //
+  // 这条防的是「用户先关着通道，后来打开，那条审批永远不再提醒」：
+  // 若在派发前就记集合，用户打开通道时那条已经被标记为「响过了」。
+  ok('★★ 两条通道都关时不记已提醒（否则事后打开通道会永久吞掉那条审批）', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const dispSrc = grabFn('function pgDispatchDue(due, cfg, loadCustom) {')
+    if (!dispSrc) return false
+    const announced = new Set()
+    let f = null
+    try {
+      // 桩返回 true = 「真的响了」，见上一条对桩的说明。
+      f = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+        dispSrc + '\n; return pgDispatchDue;')(announced, null, (k) => k, () => true, () => false)
+    } catch (e) { return false }
+    const due = { group: 'bg', entries: [{ id: 'a', tool: 'x' }] }
+    // 全关：不记集合
+    f(due, { bgSound: false, bgDesktop: false })
+    if (announced.size !== 0) return false
+    // 对照：开着时记进去（否则上面那条会被「永远不记」满足）
+    f(due, { bgSound: true, bgDesktop: false })
+    if (announced.size !== 1) return false
+    return true
+  })())
+  // ⑬b 通道**尝试过但没响**（未解锁 / 未授权）时同样不记已提醒。
+  //
+  // 这是「超时未处理提醒不生效」的直接成因：pgPlayChime 在用户手势解锁前静默返回，
+  // 若此时仍记进 PG_ANNOUNCED，那条审批会被永久标记成已提醒 —— 用户之后解锁了
+  // 也再不会响，而他完全看不出原因（面板上开关是开的）。
+  ok('★★ 通道尝试但没响时不记已提醒（未解锁/未授权不得吞掉审批）', (function () {
+    const i = cli.indexOf('function pgDispatchDue(due, cfg, loadCustom) {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    // 判据必须看返回值，不能只看调用：`pgPlayChime();` 这种写法区分不出响没响。
+    // 音效参数从 `c.soundStyle` 取（两组共用），自定义音频走 `pgCustomB64`。
+    // 判据必须看返回值，不能只看调用：`pgPlayChime(...)` 这种写法区分不出响没响。
+    // 音效按**命中组**取（`bgSoundStyle` / `idleSoundStyle`），两组各有自己的键。
+    if (!/pgPlayChime\(style, null\) === true/.test(body)) return false
+    if (!/pgShowNotification\(title, body\) === true/.test(body)) return false
+    // 真实执行：通道返回 false 时集合必须保持空
+    const mkDispatch = (announcedSet, soundResult, desktopResult) => {
+      try {
+        return new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+          body + '\n; return pgDispatchDue;')(
+          announcedSet, null, (k) => k, () => soundResult, () => desktopResult)
+      } catch (e) { return null }
+    }
+    const none = new Set()
+    const f0 = mkDispatch(none, false, false)
+    if (!f0) return false
+    f0({ group: 'idle', entries: [{ id: 'a', tool: 'x' }] }, { idleSound: true, idleDesktop: true })
+    if (none.size !== 0) return false
+    // 对照：任一通道真的响了才记（否则上面那条会被「永远不记」满足）
+    const one = new Set()
+    const f1 = mkDispatch(one, true, false)
+    if (!f1) return false
+    f1({ group: 'idle', entries: [{ id: 'b', tool: 'x' }] }, { idleSound: true, idleDesktop: true })
+    return one.has('b')
+  })())
+  // ⑭ 派发按**命中组**选通道，不得混用两组的开关。
+  //
+  // 混用的形态：`if (cfg.sound)` —— 那是旧版单组时代的键，在新结构下恒为 undefined，
+  // 表现为「两组都开着却永远不响」。故必须逐组取键。
+  ok('★ 派发按命中组选通道（bg 用 bgSound/bgDesktop，idle 用 idleSound/idleDesktop）', (function () {
+    const i = cli.indexOf('function pgDispatchDue(due, cfg, loadCustom) {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    for (const need of ['c.bgSound === true', 'c.bgDesktop === true', 'c.idleSound === true', 'c.idleDesktop === true']) {
+      if (body.indexOf(need) === -1) return false
+    }
+    // 真实执行：bg 组的开关不得影响 idle 组
+    const announced = new Set()
+    const played = []
+    let f = null
+    try {
+      f = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+        body + '\n; return pgDispatchDue;')(announced, null, (k) => k, () => { played.push(1); return true }, () => false)
+    } catch (e) { return false }
+    // bgSound 关、idleSound 开 → idle 组命中时仍要响
+    f({ group: 'idle', entries: [{ id: 'a', tool: 'x' }] }, { bgSound: false, idleSound: true })
+    if (played.length !== 1) return false
+    // 反过来：bg 组命中时不得被 idleSound 触发
+    announced.clear()
+    f({ group: 'bg', entries: [{ id: 'b', tool: 'x' }] }, { bgSound: false, idleSound: true })
+    if (played.length !== 1) return false
+    return true
+  })())
+  // ⑮ 首次 poll 只登记、不提醒。
+  //
+  // 页面刚打开时那些审批本来就摆在用户眼前，再响一声只是噪音；而这条退化
+  // （把 seeded 判据删掉）在功能上完全看不出来 —— 每次刷新都多响一次而已。
+  ok('★ 首次 poll 只登记不提醒（页面打开时就存在的审批不该响）',
+    /const seeded = React\.useRef\(false\)/.test(cli)
+    && /if \(!seeded\.current\) \{ seeded\.current = true; return; \}/.test(cli))
+  // ⑯ 提示音必须等用户手势解锁后才播（浏览器自动播放策略）。
+  // 这条的失效形态是「静默不响」：AudioContext 在页面加载时是 suspended，
+  // 直接 play 不会有任何报错，也不会有声音 —— 用户只会以为功能坏了。
+  ok('★ 提示音在用户手势解锁前不播（否则被自动播放策略静默拦掉）',
+    /if \(!pgAudioUnlocked\) return false;/.test(cli)
+    && /document\.addEventListener\('pointerdown', unlock, true\)/.test(cli)
+    && /document\.addEventListener\('keydown', unlock, true\)/.test(cli))
+  // ⑯b 合成音必须**每个音一条包络**，不得所有音共用一条。
+  //
+  // 共用一条时，包络从第一个音起音、到整段结束衰减，后续音落在已经衰减下去的
+  // 同一根曲线上 —— 音量由「它排第几个」决定而不是由设计决定。`low` 的第二个音
+  // 落在 0.26s，那里只剩峰值的约 2%（-33 dB），与第一个音差 33 dB，
+  // 听感上就是一个音而不是两个（用户报的正是这个）。同理 `triple` 的第三音是 -35 dB。
+  //
+  // 判据按**真实求值**：用桩 AudioContext 跑一遍合成音分支，数「每个音是否各自
+  // 拿到一条包络、且都到得了设计峰值」。只查源码里 `createGain` 出现在 forEach
+  // 里面不够 —— 把 gain 建在循环里却仍接同一条曲线照样能通过字符串匹配。
+  ok('★★ 合成音每个音各自一条包络（共用一条会让第 2、3 个音衰减到听不见）', (function () {
+    const pick = (marker) => {
+      const i = cli.indexOf(marker)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const tonesSrc = pick('const PG_TONES = {')
+    const chimeSrc = pick('function pgPlayChime(style, customB64) {')
+    if (!tonesSrc || !chimeSrc) return false
+    // 桩：记录每个 gain 节点收到的包络关键点，以及每个 osc 接到了哪个 gain
+    const gains = []
+    const oscs = []
+    const mkCtx = () => ({
+      currentTime: 0,
+      state: 'running',
+      destination: {},
+      createGain: () => {
+        const g = { points: [], connect: () => {} }
+        g.gain = {
+          setValueAtTime: (v, t) => g.points.push(['set', v, t]),
+          exponentialRampToValueAtTime: (v, t) => g.points.push(['ramp', v, t]),
+        }
+        gains.push(g)
+        return g
+      },
+      createOscillator: () => {
+        const o = {
+          type: '', frequency: { setValueAtTime: () => {} },
+          start: () => {}, stop: () => {},
+          connect: (g) => { o.gainRef = g },
+        }
+        oscs.push(o)
+        return o
+      },
+    })
+    let out = null
+    try {
+      const fn = new Function('window', 'pgAudioUnlocked', 'pgAudioCtx', 'PG_VOICE_SRC', 'pgVoiceCache',
+        'pgCustomCache', 'pgDecodeVoice', 'pgPlayBuffer',
+        tonesSrc + '\n' + chimeSrc + '\n; return pgPlayChime;')(
+        { AudioContext: function () { return mkCtx() } }, true, null, {}, {}, { key: '', buf: null },
+        () => Promise.resolve(null), () => true)
+      // 逐个预设跑一遍：每个音都必须落到**自己的** gain 上，且该 gain 的峰值 = tone.peak
+      const tones = new Function(tonesSrc + '\n; return PG_TONES;')()
+      out = {}
+      for (const name of Object.keys(tones)) {
+        gains.length = 0
+        oscs.length = 0
+        fn(name, null)
+        const t = tones[name]
+        const ownGains = new Set(oscs.map((o) => o.gainRef))
+        const peaks = oscs.map((o) => {
+          const pts = o.gainRef ? o.gainRef.points.filter((p) => p[0] === 'ramp') : []
+          return pts.length ? Math.max(...pts.map((p) => p[1])) : 0
+        })
+        out[name] = {
+          notes: t.notes.length,
+          oscs: oscs.length,
+          // 关键判据：不同的 gain 节点数必须等于音数（共用一条时恒为 1）
+          gains: ownGains.size,
+          // 每个音都要到设计峰值（共用一条时后面的音远低于 peak）
+          minPeak: peaks.length ? Math.min(...peaks) : 0,
+          peak: t.peak,
+        }
+      }
+    } catch (e) { return false }
+    return Object.keys(out).every((k) => {
+      const r = out[k]
+      return r.oscs === r.notes && r.gains === r.notes
+        && Math.abs(r.minPeak - r.peak) < 1e-9
+    })
+  })())
+  // ⑰ 打开桌面通知时**先申请授权**，拿到 granted 才写配置。
+  //
+  // 顺序反了（先写配置再申请）就会出现「配置里是开、浏览器里是拒」——
+  // 面板显示开、实际永远不响，而用户看不出哪一步没成。
+  //
+  // 两组各有一个桌面开关，但它们共用同一个浏览器权限，故只有一个申请函数，
+  // 键名由调用方传入（`bgDesktop` / `idleDesktop`）。
+  ok('★★ 打开桌面通知先申请授权、granted 才写配置（不得先写后问）', (function () {
+    const i = cli.indexOf('const toggleDesktop = (cur, setLocal, key) => {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    // 已拒绝时**不写配置**，只提示（写了就是「面板说开、实际不响」）
+    if (!/perm === 'denied'/.test(body)) return false
+    if (!/setMsg\(T\('panel\.notifyDenied'\)\);\s*\n\s*return;/.test(body)) return false
+    // 未表态时申请授权，granted 才 save
+    if (body.indexOf('window.Notification.requestPermission()') === -1) return false
+    if (!/res === 'granted'\) \{ setLocal\(true\); save\(key, true\); \}/.test(body)) return false
+    // 拒绝时不 save（只提示）
+    if (!/else setMsg\(T\('panel\.notifyDenied'\)\)/.test(body)) return false
+    return true
+  })())
+  // ⑱ 开关回填必须**每次 status 都整体替换**，不得「有值才赋值」。
+  //
+  // 只写不读式的写法会让用户在面板关掉提醒后，提醒逻辑还按旧值响铃 ——
+  // 而面板已经显示「关」了。
+  //
+  // 判据是「无条件赋一个三元的结果」：`if (eff) PG_NOTIFY_CFG = eff` 与
+  // `Object.assign(PG_NOTIFY_CFG, eff)` 两种退化都匹配不上。
+  ok('★ 提醒开关每次 status 都整体替换（关掉后必须真的不响）',
+    /PG_NOTIFY_CFG = \(eff && typeof eff === 'object'\) \? eff : \{\}/.test(cli)
+    && /setNotifyBgSound\(asBool\(nt\.bgSound\)\)/.test(cli)
+    && /setNotifyIdleSound\(asBool\(nt\.idleSound\)\)/.test(cli)
+    && /setNotifyBgDesktop\(asBool\(nt\.bgDesktop\)\)/.test(cli)
+    && /setNotifyIdleDesktop\(asBool\(nt\.idleDesktop\)\)/.test(cli))
+  // ⑲ 第一组按「**连续**在后台」计时：切回前台必须清起点。
+  //
+  // 不清的话，「切走 → 回来看一眼 → 再切走」会在第二次切走时立刻响 ——
+  // 而那正是这组设置要避免的打断。这条退化在功能上极难察觉（只在来回切时多响）。
+  ok('★★ 切回前台清掉后台计时起点（否则来回切会每次都响）', (function () {
+    const i = cli.indexOf('const onVis = () => {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    if (!body) return false
+    // 进后台记起点
+    if (!/if \(pgBgSince === null\) pgBgSince = Date\.now\(\)/.test(body)) return false
+    // 回前台清起点
+    if (!/else \{\s*\n\s*pgBgSince = null;/.test(body)) return false
+    return true
+  })())
+  // ⑳ 提醒开关必须由**始终挂载**的 OverlayRoot 回填，不能只靠设置面板。
+  //
+  // 踩不到但必然发生的场景：用户配好开关后再也不打开设置页 —— 若回填只发生在
+  // 面板的 applyStatus（面板只在点进设置页时挂载），提醒逻辑读到的永远是空配置，
+  // 配了「开」也不会响，且没有任何报错可循。
+  ok('★★ 提醒开关由 OverlayRoot 回填（不能只靠设置面板，否则没打开过设置页就不响）', (function () {
+    const i = cli.indexOf('function OverlayRoot(props) {')
+    if (i < 0) return false
+    let d = 0
+    let body = ''
+    for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+      if (cli[k] === '{') d++
+      else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
+    }
+    return !!body && body.indexOf('pgSetNotifyCfg(s)') !== -1
+  })())
+  // ⑥ auto / other 是独立的两个 tab，且它们**完全挡掉**其余设置卡片。
   //
   // 为什么这条重要：`tab === 'global' ? A : B` 在这个文件里有 100+ 处。
-  // 若让 `tab='auto'` 流进那一片代码，它们会**集体**走「项目层」分支 ——
-  // 既显示错误的配置，又会向宿主发 `{ target: 'auto' }` 这种它不认识的值。
-  // 故必须在 tab 栏之后立刻分流，让那片代码对 auto tab 完全不可达。
-  ok('★★ auto 是独立 tab，且挡掉其余设置卡片（100+ 处 tab 判断不可被污染）', (function () {
-    // ① tab 栏里有第三个按钮
+  // 若让 `tab='auto'` / `tab='other'` 流进那一片代码，它们会**集体**走「项目层」分支 ——
+  // 既显示错误的配置，又会向宿主发 `{ target: 'auto' }` / `{ target: 'other' }`
+  // 这种它不认识的值。故必须在 tab 栏之后立刻分流，让那片代码对这两个 tab 完全不可达。
+  //
+  // 两个 tab 一起钉而不是各写一条：它们的判据**完全相同**（都是「非层 tab，必须挡掉
+  // 层卡片」），各写一条会让「新增第三个非层 tab 时只改一处」成为可能。
+  ok('★★ auto / other 是独立 tab，且挡掉其余设置卡片（100+ 处 tab 判断不可被污染）', (function () {
+    // ① tab 栏里有这两个按钮
     if (!/tabBtn\('auto', T\('panel\.tabAuto'\)\)/.test(cli)) return false
     if (!cli.includes("'panel.tabAuto'")) return false
-    // ② tab 栏之后有分流：auto 只渲染卡片
+    if (!/tabBtn\('other', T\('panel\.tabOther'\)\)/.test(cli)) return false
+    if (!cli.includes("'panel.tabOther'")) return false
+    // ② tab 栏之后有分流：两个 tab 各渲染自己的内容
     const iBar = cli.indexOf("tabBtn('auto', T('panel.tabAuto'))")
     if (iBar < 0) return false
-    const iFork = cli.indexOf("tab === 'auto' ? autoReviewCard() : null", iBar)
-    if (iFork < 0) return false
-    // ③ 其余卡片被包在 `tab === 'auto' ? null : <Fragment>` 里
-    const iFrag = cli.indexOf("tab === 'auto' ? null : React.createElement(React.Fragment, null,", iFork)
+    const iForkAuto = cli.indexOf("tab === 'auto' ? autoReviewCard() : null", iBar)
+    if (iForkAuto < 0) return false
+    const iForkOther = cli.indexOf("tab === 'other' ? otherTab() : null", iForkAuto)
+    if (iForkOther < 0) return false
+    // ③ 其余卡片被包在 `tab === 'auto' || tab === 'other' ? null : <Fragment>` 里
+    const iFrag = cli.indexOf("tab === 'auto' || tab === 'other' ? null : React.createElement(React.Fragment, null,", iForkOther)
     if (iFrag < 0) return false
     // ④ 那个 Fragment 必须覆盖**全部**设置卡片（逐一检查几个代表性标题）
     let d = 0
@@ -4895,9 +5292,31 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     for (const marker of ["T('panel.sandbox')", "T('panel.quick')", "T('panel.rules')", "T('panel.fallback')", "T('panel.decisions')", 'CATS.map((c, i)']) {
       if (frag.indexOf(marker) === -1) return false
     }
-    // ⑤ auto 卡片**不在**那个 Fragment 里（否则它会被 `tab === 'auto' ? null` 挡掉，
-    //    auto tab 就什么都不显示 —— 这是个静默的全空页面）
-    return frag.indexOf('autoReviewCard()') === -1
+    // ⑤ 两个 tab 的内容**不在**那个 Fragment 里（否则会被挡掉，
+    //    那两个 tab 就什么都不显示 —— 静默的全空页面）
+    if (frag.indexOf('autoReviewCard()') !== -1) return false
+    if (frag.indexOf('otherTab()') !== -1) return false
+    return true
+  })())
+  // ⑥b 审批提醒**不在** auto tab 里 —— 两者正交。
+  //
+  // 提醒回答「有东西等我处理时怎么通知到人」，与「这次调用要不要问模型」无关：
+  // 普通 ask 审批同样需要提醒，而「切到后台就看不见」这个问题跟评审机制没有任何关系。
+  // 混在一起会说出两句错话：让人以为只有开了自动审批才提醒；以及 auto tab 那套
+  // 「设置范围：全局/项目」的层切换会让人以为提醒也能按项目配（宿主明确拒绝）。
+  ok('★★ 审批提醒是独立 tab，不得挂在 auto tab 里（两者正交，普通 ask 审批也要提醒）', (function () {
+    const iCard = cli.indexOf('const autoReviewCard = () => {')
+    if (iCard < 0) return false
+    const iEnd = cli.indexOf('const otherTab = () => {', iCard)
+    if (iEnd < 0) return false
+    const autoCard = cli.slice(iCard, iEnd)
+    // auto 卡片体内不得出现提醒相关的任何文案、提交，或渲染入口。
+    // 最后一项是关键：`otherTab()` 是函数调用，**不含任何文案** ——
+    // 只查文案时把提醒整块搬回 auto tab 依然全绿。
+    for (const bad of ["T('panel.notify')", "T('panel.notifyDesktop')", "T('panel.notifySound')", "permgate:set-notify", 'otherTab()']) {
+      if (autoCard.indexOf(bad) !== -1) return false
+    }
+    return true
   })())
   // ⑦ auto tab 内有**层切换**，且每张卡片只渲染当前层。
   //
@@ -10599,6 +11018,27 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
         commandSub: { effective: { action: 'ask' }, global: null, project: null, labels: [] },
         doomloop: { effective: { threshold: 6, source: 'default' }, global: null, project: null, defaultThreshold: 6, min: 1, max: null },
         fallback: { global: 'ask', project: 'inherit', effective: 'ask' },
+        // 审批提醒：两组的音效**刻意取不同的值** —— 都一样时分不出「按组读键」
+        // 与「两组共用一份」，那正是本组要钉的东西。第一组选 custom（应出现路径行），
+        // 第二组选预设（不应出现）。
+        notify: {
+          effective: {
+            bgSound: true, bgDesktop: false, bgDelaySec: 0,
+            idleSound: true, idleDesktop: false, idleDelaySec: 10,
+            bgSoundStyle: 'custom', bgSoundPath: 'D:/a.mp3',
+            idleSoundStyle: 'deepdeep', idleSoundPath: '',
+          },
+          defaults: {
+            bgSound: true, bgDesktop: false, bgDelaySec: 0,
+            idleSound: true, idleDesktop: false, idleDelaySec: 10,
+            bgSoundStyle: 'triple', bgSoundPath: '',
+            idleSoundStyle: 'triple', idleSoundPath: '',
+          },
+          ranges: { bgDelaySec: { min: 0, max: 3600 }, idleDelaySec: { min: 0, max: 3600 } },
+          soundStyles: ['chime', 'single', 'triple', 'low', 'deepdeep', 'jingjing'],
+          customMaxBytes: 61440,
+          explicit: ['bgSoundStyle', 'bgSoundPath'],
+        },
       }
       const calls = []
       const fetchStub = (url, opts) => {
@@ -10852,7 +11292,20 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
           // 分不出差别；而「键缺席」正是「只在有值时赋值」会漏掉的那一种。
           // 实测顺序写反（先喂空对象）时该变异会漏网 —— 因为 ③ 已经把值清成 {}，
           // ② 再检查就永远是空的，断言变成空转。
-          const fn = new Function('return (function(){ let CATS=[], EXC_CATS=[], MODES=[], ALL_MODES=[], QUICK_PRESET=[], QUICK_DEFAULTS={}, EXCEPTION_BLAST={};\n'
+          // pgSetNotifyCfg 从源码抽真身，不在测试里抄一份 —— 抄一份等于测自己。
+          const notifyFnSrc = (function () {
+            const i = cli.indexOf('function pgSetNotifyCfg(s) {')
+            if (i < 0) return ''
+            let d = 0
+            for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+              if (cli[k] === '{') d++
+              else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+            }
+            return ''
+          })()
+          if (!notifyFnSrc) { detail = 'pgSetNotifyCfg 未找到' } else {
+          const fn = new Function('return (function(){ let CATS=[], EXC_CATS=[], MODES=[], ALL_MODES=[], QUICK_PRESET=[], QUICK_DEFAULTS={}, EXCEPTION_BLAST={}, PG_NOTIFY_CFG={};\n'
+            + notifyFnSrc + '\n'
             + applySrc + '\n'
             + 'return { apply: applyStatusLists, get: () => EXCEPTION_BLAST }; })()')()
           fn.apply({ exceptionBlast: { global: { e1: { level: 'drive-root', path: 'B:' } }, project: {} } })
@@ -10864,6 +11317,7 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
           seqOk = !!(after1.global && after1.global.e1)
             && Object.keys(after2).length === 0 && Object.keys(after3).length === 0
           detail = JSON.stringify({ after1: Object.keys(after1.global || {}), after2: Object.keys(after2), after3: Object.keys(after3) })
+          }
         } catch (e) { detail = e.name + ': ' + e.message }
       }
       ok('★★ 例外标注每次整体替换（删掉例外后旧标注不得残留）', seqOk, detail)
@@ -10909,6 +11363,107 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     })
     ok('★ 每个档位都有中英两处文案（只写一处会让另一语言显示裸键名）',
       noText.length === 0, JSON.stringify(noText))
+  }
+  // ── 27d-2. 「其他设置」tab 的**渲染级**验证：两组各一个音效选择器，路径行只在 custom 时出现 ──
+  //
+  // 为什么必须渲染级：这三件事都是「源码里写得对、渲染出来不是那样」的典型 ——
+  //   · 音效选择器落在**分组卡片内部**（放进独立卡片，源码照样有 soundPicker 调用）；
+  //   · 路径输入框**只在选中 custom 时**渲染（改成常驻显示，源码里那个三元照样在）；
+  //   · 两组**各一个**（共用一份时 select 只有一个）。
+  // 结构断言一条都抓不到，因为它们的判据是「字符串出现过」而不是「渲染成什么」。
+  if (globalThis.__pgRender && !globalThis.__pgRender.rErr) {
+    const { out } = globalThis.__pgRender
+    let oErr = null
+    let res = null
+    try {
+      // 先把 status 重新拉一遍再渲染：27d 那一段点过「↑」，那次 invoke 的响应体是空对象，
+      // `applyStatus({})` 会把 notify 的开关全部回填成 false —— 而提示音开关关着时
+      // 音效选择器**本来就不该渲染**（它只在提示音开着时有意义）。
+      // 不重拉的话这里量到的是「开关关掉后没有选择器」，而那是正确行为，不是要钉的东西。
+      out.effects.length = 0
+      out.renderComp(out.Panel, { sessionId: 'sess-1' })
+      for (const fn of out.effects) { try { fn() } catch (e) {} }
+      await new Promise((r) => setTimeout(r, 60))
+      // fixture 的 notify 块：第一组选 custom（应出现路径行），第二组选预设（不应出现）。
+      // 两组的取值**刻意不同** —— 都一样时分不出「按组读键」和「两组共用一份」。
+      const withNotify = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+      // 先点进「其他设置」tab：它在 `tab === 'other'` 时才渲染
+      const findTab = (n, acc) => {
+        if (!n || typeof n !== 'object') return acc
+        if (n.type === 'button' && (n.kids || [])[0] === 'panel.tabOther') acc.push(n)
+        for (const k of n.kids || []) findTab(k, acc)
+        return acc
+      }
+      const btn = findTab(withNotify, [])[0]
+      if (!btn) throw new Error('未渲染出「其他设置」tab 按钮')
+      btn.props.onClick()
+      const tree2 = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+      const walk2 = (n, acc) => {
+        if (!n || typeof n !== 'object') return acc
+        acc.push(n)
+        for (const k of n.kids || []) walk2(k, acc)
+        if (n.props && n.props.children) walk2(n.props.children, acc)
+        return acc
+      }
+      const ns = walk2(tree2, [])
+      const sels = ns.filter((n) => n.type === 'select')
+      const pathInputs = ns.filter((n) => n.type === 'input' && n.props
+        && n.props.placeholder === 'panel.notifyCustomPathPh')
+      const styleLabels = ns.filter((n) => n.type === 'span' && (n.kids || [])[0] === 'panel.notifySoundStyleLabel')
+      const bgTitle = ns.find((n) => n.type === 'div' && (n.kids || [])[0] === 'panel.notifyBgTitle')
+      const idleTitle = ns.find((n) => n.type === 'div' && (n.kids || [])[0] === 'panel.notifyIdleTitle')
+      res = {
+        sels: sels.length, selVals: sels.map((s) => s.props.value),
+        paths: pathInputs.length, pathVals: pathInputs.map((i) => i.props.value),
+        styleLabels: styleLabels.length,
+        order: [ns.indexOf(bgTitle), ns.indexOf(styleLabels[0]), ns.indexOf(idleTitle), ns.indexOf(styleLabels[1])],
+      }
+    } catch (e) { oErr = e }
+    ok('★★ 「其他设置」两组各渲染一个音效选择器，且都落在各自的分组卡片内',
+      oErr === null && res.sels === 2 && res.styleLabels === 2
+      // 两个选择器的值必须**各自不同**（fixture 里第一组 custom、第二组 deepdeep）：
+      // 只数个数抓不到「两个都渲染了，但都读同一组」—— 那时个数照样是 2。
+      && res.selVals[0] === 'custom' && res.selVals[1] === 'deepdeep'
+      // 第一个选择器夹在「切后台」标题与「超时未处理」标题之间，第二个在其后 ——
+      // 这就是「在分组里」的渲染判据（放进独立卡片会两个都排到两标题之后）。
+      && res.order[0] > 0 && res.order[0] < res.order[1] && res.order[1] < res.order[2] && res.order[2] < res.order[3],
+      JSON.stringify({ err: oErr && oErr.message, n: res && res.sels, vals: res && res.selVals, order: res && res.order }))
+    ok('★★ 路径输入框只在选中自定义音频时出现（两组不同取值 → 只有一个，且值来自该组）',
+      oErr === null && res.paths === 1 && res.pathVals[0] === 'D:/a.mp3',
+      JSON.stringify({ err: oErr && oErr.message, n: res && res.paths, v: res && res.pathVals }))
+    // 清除自定义音频后回落到**默认音效**（宿主下发的 `defaults`），不是写死的某个预设。
+    //
+    // 写死预设 id 的失效形态：默认音效改了之后，用户点一次「清除」就落到一个
+    // **不是默认值**的音效上 —— 面板上别处都说默认是三连音，唯独这一格是别的，
+    // 而用户没有任何办法看出这是清除动作带来的。
+    {
+      let cErr = null
+      let sent = null
+      try {
+        const walk3 = (n, acc) => {
+          if (!n || typeof n !== 'object') return acc
+          acc.push(n)
+          for (const k of n.kids || []) walk3(k, acc)
+          if (n.props && n.props.children) walk3(n.props.children, acc)
+          return acc
+        }
+        const tree3 = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const clearBtn = walk3(tree3, []).find((n) => n.type === 'button'
+          && n.props && typeof n.props.className === 'string'
+          && n.props.className.indexOf('pg-btn-danger') !== -1
+          && (n.kids || [])[0] === 'panel.notifyCustomClear')
+        if (!clearBtn) throw new Error('未渲染出「清除」按钮')
+        out.calls.length = 0
+        clearBtn.props.onClick()
+        await new Promise((r) => setTimeout(r, 40))
+        sent = out.calls.find((c) => c.url.indexOf('/permgate/set-notify') !== -1)
+      } catch (e) { cErr = e }
+      // fixture 的 defaults 是 triple，而该组当前是 custom —— 清除后必须回到 triple。
+      ok('★★ 清除自定义音频回落到宿主下发的默认音效（不写死预设 id）',
+        cErr === null && !!sent && sent.body
+        && sent.body.bgSoundStyle === 'triple' && sent.body.bgSoundPath === null,
+        JSON.stringify({ err: cErr && cErr.message, body: sent && sent.body }))
+    }
   }
   // 清理全局桩：后续断言（尤其涉及 window/document 的）不该看见本次渲染留下的痕迹
   try { delete globalThis.__pgRender; delete globalThis.window; delete globalThis.document; delete globalThis.EventSource; delete globalThis.fetch } catch (e) {}
