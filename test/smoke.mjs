@@ -548,7 +548,7 @@ async function runApproval(name, args, fileText, fileName) {
   const diff = await withTimeout(callRoute(host.routes, 'POST', '/permgate/file-diff', { id: item.id, lang: 'zh' }), 'file-diff')
   const decided = await withTimeout(callRoute(host.routes, 'POST', '/permgate/decide', { id: item.id, action: 'deny', lang: 'zh' }), 'decide')
   const outcome = await withTimeout(pending, 'pre-execute settle')
-  return { id: item.id, diff, decided, outcome }
+  return { id: item.id, item, diff, decided, outcome }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -556,6 +556,9 @@ group('1. insert 预览（覆盖 overMaxChars / previewInsert / windowedDiffPayl
 {
   const r = await runApproval('str_replace_editor', { command: 'insert', path: 'a.txt', insert_line: 2, new_str: 'X' }, 'L1\nL2\nL3\n')
   ok('发起审批并拿到 pending id', !!r.id)
+  ok('★ 66 /permgate/pending 下发意图正文与标签',
+    r.item?.intentLabel === '操作概要' && typeof r.item.intent === 'string' && r.item.intent.length > 0,
+    JSON.stringify({ intent: r.item?.intent, intentLabel: r.item?.intentLabel }))
   ok('file-diff 返回 ok:true（overMaxChars 不再抛 ReferenceError）', !!(r.diff && r.diff.data && r.diff.data.ok === true), JSON.stringify(r.diff && r.diff.data && r.diff.data.error))
   const ops = (r.diff && r.diff.data && r.diff.data.ops) || []
   const added = ops.filter((o) => o.t === 'a')

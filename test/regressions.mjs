@@ -4871,8 +4871,9 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //
   // 这是本次设计的核心，也是最容易写错的地方：两组的差别全在「从什么时候开始算」——
   //   · bg  ：从**切入后台**那一刻（`bgElapsedMs`）；
-  //   · idle：从**审批创建**那一刻（`now - p.ts`）。
+  //   · idle：从**审批入池**那一刻（`pgIdleWait`）。
   // 判据走**真实求值**：把 pgDueNow 抽出来，喂各种时间组合，看命中组对不对。
+  const notifyWaitSource = (grabFn) => [grabFn('function pgNotifyElapsed('), grabFn('function pgIdleWait(')].join('\n')
   ok('★★ 两组判据各自成立且计时起点不同（bg 看后台时长、idle 看审批年龄）', (function () {
     const grabFn = (sig) => {
       const i = cli.indexOf(sig)
@@ -4889,32 +4890,33 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (!dueSrc || !groupSrc) return false
     let f = null
     try {
-      f = new Function('PG_ANNOUNCED', groupSrc + '\n' + dueSrc + '\n; return pgDueNow;')(new Set())
+      f = new Function('PG_ANNOUNCED', [notifyWaitSource(grabFn), groupSrc, dueSrc, 'return pgDueNow;'].join('\n'))(new Set())
     } catch (e) { return false }
     if (typeof f !== 'function') return false
     const NOW = 1000000
     // 通道键必须给全：判据层会跳过「两条通道都关」的组（否则默认 0 秒的 bg 组
     // 在后台恒成立、把 idle 组永远挡在外面）。这条测的是**计时**，两组都开着。
     const cfg = { bgSound: true, bgDesktop: false, bgDelaySec: 5, idleSound: true, idleDesktop: false, idleDelaySec: 10 }
-    const mk = (ageMs) => ({ id: 'a', tool: 'x', ts: NOW - ageMs })
+    const clock = { now: NOW, wallNow: NOW }
+    const mk = (age) => ({ id: 'a', tool: 'x', notifyTiming: { now: NOW - age, wallNow: NOW - age } })
     // ① 前台 + 审批很新：两组都不成立
-    if (f([mk(0)], cfg, { hidden: false, bgElapsedMs: 0, now: NOW }) !== null) return false
+    if (f([mk(0)], cfg, { hidden: false, bgElapsedMs: 0, clock }) !== null) return false
     // ② 后台但后台时长不够：第一组不成立（第二组也还早）
-    if (f([mk(0)], cfg, { hidden: true, bgElapsedMs: 1000, now: NOW }) !== null) return false
+    if (f([mk(0)], cfg, { hidden: true, bgElapsedMs: 1000, clock }) !== null) return false
     // ③ 后台够久 → 第一组命中（哪怕审批刚创建）
-    let r = f([mk(0)], cfg, { hidden: true, bgElapsedMs: 6000, now: NOW })
+    let r = f([mk(0)], cfg, { hidden: true, bgElapsedMs: 6000, clock })
     if (!r || r.group !== 'bg' || r.entries.length !== 1) return false
     // ④ 前台 + 审批够老 → 第二组命中（这正是「前台走神」的场景，第一组永远覆盖不到）
-    r = f([mk(11000)], cfg, { hidden: false, bgElapsedMs: 0, now: NOW })
+    r = f([mk(11000)], cfg, { hidden: false, bgElapsedMs: 0, clock })
     if (!r || r.group !== 'idle' || r.entries.length !== 1) return false
     // ⑤ 后台 + 两组都成立 → 取 bg（后台场景下那组的秒数更贴近用户意图）
-    r = f([mk(20000)], cfg, { hidden: true, bgElapsedMs: 6000, now: NOW })
+    r = f([mk(20000)], cfg, { hidden: true, bgElapsedMs: 6000, clock })
     if (!r || r.group !== 'bg') return false
-    // ⑥ ts 缺失时按「刚到」算：不得凭坏字段判成「等了很久」而立刻响
-    r = f([{ id: 'a', tool: 'x' }], { bgSound: true, bgDelaySec: 0, idleSound: true, idleDelaySec: 10 }, { hidden: false, bgElapsedMs: 0, now: NOW })
+    // ⑥ 起点缺失时按「刚到」算：不得凭坏字段判成「等了很久」而立刻响
+    r = f([{ id: 'a', tool: 'x' }], { bgSound: true, bgDelaySec: 0, idleSound: true, idleDelaySec: 10 }, { hidden: false, bgElapsedMs: 0, clock })
     if (r !== null) return false
     // ⑦ 空池子：不命中
-    if (f([], cfg, { hidden: true, bgElapsedMs: 99999, now: NOW }) !== null) return false
+    if (f([], cfg, { hidden: true, bgElapsedMs: 99999, clock }) !== null) return false
     return true
   })())
   // ⑫ 同一个审批**全局只响一次**（跨两组共用一个已提醒集合）。
@@ -4941,7 +4943,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     let dispatch = null
     try {
       const bundle = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
-        groupSrc + '\n' + dueSrc + '\n' + dispSrc + '\n; return { due: pgDueNow, dispatch: pgDispatchDue };')
+        [notifyWaitSource(grabFn), groupSrc, dueSrc, dispSrc, 'return { due: pgDueNow, dispatch: pgDispatchDue };'].join('\n'))
       // 桩必须**返回 true**：pgDispatchDue 只在「真的响了」时才记入已提醒集合
       // （见那里对「尝试过 ≠ 响过了」的说明）。返回 undefined 会被判成没响，
       // 集合永远是空的，这条断言就变成空转。
@@ -4950,17 +4952,19 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       dispatch = o.dispatch
     } catch (e) { return false }
     const NOW = 1000000
+    const clock = { now: NOW, wallNow: NOW }
     const cfg = { bgSound: true, bgDesktop: false, bgDelaySec: 0, idleSound: true, idleDesktop: false, idleDelaySec: 10 }
-    const p = { id: 'a', tool: 'x', ts: NOW - 60000 }
+    const notifyTiming = { now: NOW - 60000, wallNow: NOW - 60000 }
+    const p = { id: 'a', tool: 'x', notifyTiming }
     // 判据用 announced 集合（「真的响过」），不是调用次数 ——
     // 派发函数在通道都关或没响时都会提前返回，调用次数区分不出这两种情形。
     // ① 后台 0 秒窗口：第一组命中 → 记为已提醒
-    dispatch(due([p], cfg, { hidden: true, bgElapsedMs: 0, now: NOW }), cfg)
+    dispatch(due([p], cfg, { hidden: true, bgElapsedMs: 0, clock }), cfg)
     if (!announced.has('a')) return false
     // ② 同一审批、同一时刻，第二组也够老了 → 不得再派发（due 直接返回 null）
-    if (due([p], cfg, { hidden: false, bgElapsedMs: 0, now: NOW }) !== null) return false
+    if (due([p], cfg, { hidden: false, bgElapsedMs: 0, clock }) !== null) return false
     // ③ 另一条新审批 → 该命中（证明上面不是因为「永远不命中」）
-    const r3 = due([p, { id: 'b', tool: 'y', ts: NOW - 60000 }], cfg, { hidden: false, bgElapsedMs: 0, now: NOW })
+    const r3 = due([p, { id: 'b', tool: 'y', notifyTiming }], cfg, { hidden: false, bgElapsedMs: 0, clock })
     if (!r3 || r3.entries.length !== 1 || r3.entries[0].id !== 'b') return false
     return true
   })())
@@ -5072,13 +5076,240 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (played.length !== 1) return false
     return true
   })())
-  // ⑮ 首次 poll 只登记、不提醒。
-  //
-  // 页面刚打开时那些审批本来就摆在用户眼前，再响一声只是噪音；而这条退化
-  // （把 seeded 判据删掉）在功能上完全看不出来 —— 每次刷新都多响一次而已。
-  ok('★ 首次 poll 只登记不提醒（页面打开时就存在的审批不该响）',
-    /const seeded = React\.useRef\(false\)/.test(cli)
-    && /if \(!seeded\.current\) \{ seeded\.current = true; return; \}/.test(cli))
+  // ⑮ 跑实际组件的首包、pending 事件和到期定时器，观察卡片和桌面通知。
+  try {
+    const loadClient = new Function('window', 'document', 'fetch', 'EventSource', 'Date', 'setTimeout', 'clearTimeout', 'globalThis', cli)
+    const start = 1000000
+    const snapshot = (revision, pending, epoch = 'host') => ({ epoch, revision, pending })
+    const mount = (documentState, list, tickMs = 0, idleDelaySec = 10) => {
+      let now = start, sleptMs = 0
+      let pendingAvailable = true
+      const clockReading = (ms) => tickMs ? Math.floor(ms / tickMs) * tickMs : ms
+      let source, loaded, Root, hooks
+      let cursor = 0
+      const rootHooks = [], layerHooks = [], effects = [], notifications = []
+      const timers = new Map()
+      let timerId = 0
+      const React = {
+        Component: class {},
+        memo: (component) => component,
+        createElement: (type, props, ...children) => ({ type, props, children }),
+        useRef: (current) => hooks[cursor++] ??= { current },
+        useState(initial) {
+          const slot = React.useRef(initial)
+          return [slot.current, (value) => { slot.current = typeof value === 'function' ? value(slot.current) : value }]
+        },
+        useEffect(fn, deps) {
+          const slot = React.useRef(null)
+          if (deps && deps.length === slot.current?.deps?.length && deps.every((v, i) => Object.is(v, slot.current.deps[i]))) return
+          effects.push(() => {
+            slot.current?.cleanup?.()
+            slot.current = { deps, cleanup: fn() }
+          })
+        },
+      }
+      const document = Object.assign(new EventTarget(), documentState, { querySelector: () => ({}) })
+      const window = Object.assign(new EventTarget(), {
+        __ModuleLoader__: { load: (mod) => { loaded = mod } },
+        Notification: class {
+          static permission = 'granted'
+          constructor(_title, { body }) { notifications.push(body) }
+        },
+      })
+      const fetch = async (path) => {
+        const [route, query] = path.split('?')
+        if (route === '/permgate/pending') {
+          if (!pendingAvailable) throw new Error('审批补查暂不可用')
+          const data = await list
+          return { ok: true, json: async () => new URLSearchParams(query).get('snapshot') === '1' ? data : data.pending }
+        }
+        if (route === '/permgate/status') {
+          const delay = await idleDelaySec
+          return { ok: true, json: async () => ({ notify: { effective: { idleDesktop: true, idleDelaySec: delay } } }) }
+        }
+        throw new Error('意外的请求：' + path)
+      }
+      class EventSourceStub { constructor() { source = this } close() {} }
+      class Clock extends Date { static now() { return start + clockReading(now - start + sleptMs) } }
+      loadClient(window, document, fetch, EventSourceStub, Clock,
+        (fn, delay) => { timers.set(++timerId, { at: now + delay, fn }); return timerId },
+        (id) => timers.delete(id),
+        { performance: { now: () => clockReading(now - start) } })
+      loaded.factory((name) => name === 'react' ? React : {}).apply({
+        effect() {},
+        slots: {
+          inject: (_name, register) => register(),
+          register: (meta, component) => { if (meta.name === 'shell.overlay') Root = component },
+        },
+      })
+      const findApproval = (node) => node?.type?.name === 'ApprovalOverlay' ? node : node?.children?.map(findApproval).find(Boolean)
+      const cardIds = (node) => node?.props?.p?.id ? [node.props.p.id] : node?.children?.flat().flatMap(cardIds) ?? []
+      let view
+      const render = () => {
+        hooks = rootHooks
+        cursor = 0
+        const layer = findApproval(Root({}))
+        if (!layer) throw new Error('shell.overlay 未渲染审批组件')
+        hooks = layerHooks
+        cursor = 0
+        view = layer.type(layer.props)
+        for (const run of effects.splice(0)) run()
+      }
+      const settle = async () => { await new Promise((resolve) => setImmediate(resolve)); render() }
+      render()
+      return { notifications, settle, cards: () => cardIds(view),
+        resume: (ms) => { sleptMs += ms; window.dispatchEvent(new Event('blur')) },
+        failNewPending: () => { pendingAvailable = false },
+        announceEpoch: (epoch) => source.onmessage({ data: JSON.stringify({ type: 'pending-epoch', epoch }) }),
+        setDelay: async (delay) => { idleDelaySec = delay; source.onmessage({ data: '{"type":"status"}' }); await settle() },
+        update: async (next, type = 'pending') => {
+          list = next
+          if (type === 'refresh') source.onopen()
+          else source.onmessage({ data: JSON.stringify({ type }) })
+          await settle()
+        },
+        advance: (ms) => {
+          const target = now + ms
+          for (;;) {
+            const next = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0]
+            if (!next) break
+            const [id, { at, fn }] = next
+            timers.delete(id)
+            now = at
+            fn()
+          }
+          now = target
+        },
+      }
+    }
+    const checkDue = (name, app, waitMs, expected) => {
+      app.advance(waitMs - 100)
+      const before = app.notifications.join(',')
+      app.advance(200)
+      const after = app.notifications.join(',')
+      ok(name, before === '' && after === expected, `到期前=[${before}]，到期后=[${after}]`)
+    }
+    const focused = { visibilityState: 'visible', hasFocus: () => true }
+    const existing = ['a', 'b'].map((id) => ({ id, intent: id, ts: start - 12000, pendingAgeMs: 12000 }))
+    let resolveFront
+    const front = mount(focused, new Promise((resolve) => { resolveFront = resolve }))
+    await front.update(snapshot(2, existing), 'refresh')
+    const opened = front.cards().join(',')
+    await front.update(snapshot(3, existing.slice(1)), 'refresh')
+    const reconnected = front.cards().join(',')
+    resolveFront(snapshot(1, existing))
+    await front.settle()
+    front.advance(100)
+    ok('★★ 首连和重连独立展示已有审批且不立即提醒，迟到旧快照不覆盖',
+      opened === 'a,b' && reconnected === 'b' && front.cards().join(',') === 'b' && front.notifications.length === 0,
+      `首连=[${opened}]，重连=[${reconnected}]，迟到旧快照后=[${front.cards()}]，通知=[${front.notifications}]`)
+    await front.update(snapshot(4, [{ id: 'c', intent: 'c', ts: start + 100, pendingAgeMs: 0 }]))
+    checkDue('★★ 后续 pending 事件新增的审批只在到期时提醒', front, 10000, 'c')
+
+    const back = mount({ ...focused, hasFocus: () => false }, snapshot(1, [
+      { id: 'old', intent: 'old', ts: start - 12000, pendingAgeMs: 12000 },
+      { id: 'a', intent: 'a', ts: start - 2000, pendingAgeMs: 2000 },
+    ]))
+    await back.settle()
+    back.advance(100)
+    const alreadyDue = back.notifications.join(',')
+    back.advance(7800)
+    const stillWaiting = back.notifications.join(',')
+    back.advance(200)
+    ok('★★ 可见但失焦时首包不暂缓，未到期的审批仍按窗口等待',
+      alreadyDue === 'old' && stillWaiting === 'old' && back.notifications.join(',') === 'old,a',
+      `首包后=[${alreadyDue}]，到期前=[${stillWaiting}]，到期后=[${back.notifications}]`)
+
+    let resolveInitial
+    const racing = mount(focused, new Promise((resolve) => { resolveInitial = resolve }), 1000 / 60)
+    racing.advance(10)
+    // 两种浏览器时钟仍在同一刻度，宿主已能观测到新审批等待了 8 毫秒。
+    await racing.update(snapshot(2, [{ id: 'r', intent: 'r', ts: start - 1999, pendingAgeMs: 8 }]))
+    resolveInitial(snapshot(1, []))
+    await racing.settle()
+    checkDue('★★ 时钟偏差和降精度不会吞掉先返回的新审批', racing, 9992, 'r')
+
+    let resolveLate
+    const late = mount(focused, new Promise((resolve) => { resolveLate = resolve }))
+    await late.update(snapshot(1, []), 'refresh')
+    late.advance(100)
+    resolveLate(snapshot(2, [{ id: 'n', intent: 'n', ts: start + 100, pendingAgeMs: 0 }]))
+    await late.settle()
+    const lateCards = late.cards().join(',')
+    late.advance(10100)
+    ok('★★ 先发的请求若在宿主采到更新的快照，照常展示和提醒',
+      lateCards === 'n' && late.notifications.join(',') === 'n', `卡片=[${lateCards}]，通知=[${late.notifications}]`)
+
+    for (const announceFirst of [true, false]) {
+      let resolveOld, resolveLive
+      const restarted = mount(focused, new Promise((resolve) => { resolveOld = resolve }))
+      await restarted.update(new Promise((resolve) => { resolveLive = resolve }), 'refresh')
+      restarted.failNewPending()
+      resolveOld(snapshot(5, [{ id: 'old', intent: 'old', ts: start, pendingAgeMs: 0 }]))
+      await restarted.settle()
+      const oldCards = restarted.cards().join(',')
+      if (announceFirst) restarted.announceEpoch('restarted')
+      resolveLive(snapshot(1, [{ id: 'live', intent: 'live', ts: start, pendingAgeMs: 0 }], 'restarted'))
+      await restarted.settle()
+      if (!announceFirst) restarted.announceEpoch('restarted')
+      await restarted.settle()
+      const liveCards = restarted.cards().join(',')
+      restarted.advance(10100)
+      ok(`★★ 宿主重启后采纳成功快照，不依赖再次补查（${announceFirst ? '世代公告先到' : '快照先到'}）`,
+        oldCards === 'old' && liveCards === 'live' && restarted.notifications.join(',') === 'live',
+        `换代前=[${oldCards}]，换代后=[${liveCards}]，通知=[${restarted.notifications}]`)
+    }
+
+    const short = mount(focused, snapshot(1, [{ id: 'short', intent: 'short', ts: start - 9000, pendingAgeMs: 9000 }]))
+    await short.settle()
+    short.advance(500)
+    await short.setDelay(8)
+    short.advance(100)
+    ok('★★ 调短超时不为原本未到期的首包补加暂缓', short.notifications.join(',') === 'short',
+      `调短后=[${short.notifications}]`)
+
+    let resolveDelay
+    const long = mount(focused, snapshot(1, [{ id: 'long', intent: 'long', ts: start - 12000, pendingAgeMs: 12000 }]),
+      0, new Promise((resolve) => { resolveDelay = resolve }))
+    await long.settle()
+    long.advance(100)
+    resolveDelay(10)
+    await long.settle()
+    long.advance(400)
+    await long.setDelay(15)
+    checkDue('★★ 配置晚于首包到达时，按首次有效窗口确定暂缓资格', long, 14500, 'long')
+
+    let resolveMount, resolveEvent
+    const mixed = mount(focused, new Promise((resolve) => { resolveMount = resolve }))
+    mixed.advance(1000)
+    const joined = [existing[0], { id: 'm', intent: 'm', ts: start + 500, pendingAgeMs: 500 }]
+    await mixed.update(new Promise((resolve) => { resolveEvent = resolve }))
+    resolveMount(snapshot(1, joined))
+    await mixed.settle()
+    resolveEvent(snapshot(2, joined))
+    await mixed.settle()
+    mixed.advance(9400)
+    const beforeDue = mixed.notifications.join(',')
+    mixed.advance(200)
+    const newDue = mixed.notifications.join(',')
+    mixed.advance(500)
+    ok('★★ 前台首包的到期审批只暂缓，新审批照原窗口提醒',
+      beforeDue === '' && newDue === 'm' && mixed.notifications.join(',') === 'm,a',
+      `到期前=[${beforeDue}]，新审批到期后=[${newDue}]，暂缓结束后=[${mixed.notifications}]`)
+
+    let hasFocus = true
+    const sleeping = mount({ ...focused, hasFocus: () => hasFocus }, snapshot(1, []))
+    await sleeping.settle()
+    await sleeping.update(snapshot(2, [{ id: 's', intent: 's', ts: start, pendingAgeMs: 0 }]))
+    sleeping.advance(1000)
+    const beforeSleep = sleeping.notifications.join(',')
+    hasFocus = false
+    sleeping.resume(12000)
+    ok('★★ 休眠停掉单调钟时，唤醒失焦也能提醒已到期审批',
+      beforeSleep === '' && sleeping.notifications.join(',') === 's', `休眠前=[${beforeSleep}]，唤醒后=[${sleeping.notifications}]`)
+  } catch (error) {
+    ok('★★ 审批提醒场景可运行', false, String(error))
+  }
   // ⑯ 提示音必须等用户手势解锁后才播（浏览器自动播放策略）。
   // 这条的失效形态是「静默不响」：AudioContext 在页面加载时是 suspended，
   // 直接 play 不会有任何报错，也不会有声音 —— 用户只会以为功能坏了。
@@ -5200,15 +5431,19 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     if (!/else setMsg\(T\('panel\.notifyDenied'\)\)/.test(body)) return false
     return true
   })())
-  // ⑱ 开关回填必须**每次 status 都整体替换**，不得「有值才赋值」。
-  //
-  // 只写不读式的写法会让用户在面板关掉提醒后，提醒逻辑还按旧值响铃 ——
-  // 而面板已经显示「关」了。
-  //
-  // 判据是「无条件赋一个三元的结果」：`if (eff) PG_NOTIFY_CFG = eff` 与
-  // `Object.assign(PG_NOTIFY_CFG, eff)` 两种退化都匹配不上。
-  ok('★ 提醒开关每次 status 都整体替换（关掉后必须真的不响）',
-    /PG_NOTIFY_CFG = \(eff && typeof eff === 'object'\) \? eff : \{\}/.test(cli)
+  // ⑱ 新 status 缺少某个开关或整个 notify 时，不能沿用上次的开启值。
+  ok('★ 提醒开关每次 status 都整体替换（关掉后必须真的不响）', (function () {
+    const setter = cli.match(/^([ \t]*)function pgSetNotifyCfg\(s\) \{[\s\S]*?^\1\}/m)?.[0]
+    if (!setter) return false
+    const { set, get } = new Function('let PG_NOTIFY_CFG = null; const PG_NOTIFY_CFG_SUBS = new Set();\n'
+      + setter + '\nreturn { set: pgSetNotifyCfg, get: () => PG_NOTIFY_CFG };')()
+    set({ notify: { effective: { bgSound: true, idleDesktop: true } } })
+    if (!get()?.bgSound || !get()?.idleDesktop) return false
+    set({ notify: { effective: { idleDesktop: false, idleSound: true } } })
+    if (get()?.bgSound || get()?.idleDesktop !== false || !get()?.idleSound) return false
+    set({})
+    return !get()?.idleSound
+  })()
     && /setNotifyBgSound\(asBool\(nt\.bgSound\)\)/.test(cli)
     && /setNotifyIdleSound\(asBool\(nt\.idleSound\)\)/.test(cli)
     && /setNotifyBgDesktop\(asBool\(nt\.bgDesktop\)\)/.test(cli)
@@ -5228,7 +5463,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     }
     if (!body) return false
     // 进后台记起点
-    if (!/if \(pgBgSince === null\) pgBgSince = Date\.now\(\)/.test(body)) return false
+    if (!/if \(pgBgSince === null\) pgBgSince = clock\.wallNow/.test(body)) return false
     // 回前台清起点
     if (!/else \{\s*\n\s*pgBgSince = null;/.test(body)) return false
     return true
@@ -13936,11 +14171,9 @@ group('27. 审批弹窗「意图」取值链：六级顺序、白名单过滤、
   ok('★ 65 describeIntent 内不再自带 80 字截断（口径分叉会漏改）',
     !/const f = first\.length > 80/.test(src))
 
-  // ★ 66 intent 与 intentLabel 必须成对下发（漏了 intentLabel 客户端会静默退回旧标签）
+  // ★ 66 intent 与 intentLabel 必须成对写入审批；实际下发由宿主冒烟用例检查。
   ok('★ 66 askUser 里 intent / intentLabel 成对写入 entry',
     /intent: intentInfo\.text,/.test(src) && /intentLabel: intentInfo\.label,/.test(src))
-  ok('★ 66 /permgate/pending 白名单投影含 intentLabel（漏字段不报错，只会静默退化）',
-    /out\.push\(\{ id: e\.id, tool: e\.tool, reason, ts: e\.ts, args: argsPreview, intent, intentLabel:/.test(src))
 
   // ★ 67 客户端只显示、不推导：intentLabel 缺失时回落旧标签
   ok('★ 67 客户端用 p.intentLabel || T(\'app.intent\') 回落，不做任何推导',

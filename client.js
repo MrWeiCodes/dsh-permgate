@@ -590,34 +590,88 @@ window.__ModuleLoader__.load({
 
 		// SSE 事件订阅：/permgate/events 长连接推送（状态/待审批变化即时刷新，替代轮询）
 		let eventSource = null;
+		let eventRetry = null;
+		// CLOSED 后换连接对象仍是同一次断线，栅栏探测的判定顺序不能随连接重置。
+		let eventOutage = null;
+		let pendingStreamEpoch = null;
 		const eventListeners = new Set();
-		// 栅栏拒绝的会话级标记：置位后不再反复建连（EventSource 对 403 会一直自动重连，
-		// 而每次重连都被拒 —— 既是日志噪音，也让面板永远停在「没有待审批」的假象里）。
+		// 最新确认的栅栏结果为拒绝时，不再反复建连或补查。
 		let fenceBlocked = null;
+		function isFenceError(e) {
+			if (!e || (e.code !== 'untrusted-origin' && e.code !== 'unauthenticated')) return false;
+			return true;
+		}
 		function notifyEvents(data) {
 			for (const fn of Array.from(eventListeners)) { try { fn(data); } catch (e) {} }
 		}
+		function closeEventSource(keepOutage = false) {
+			if (!keepOutage) eventOutage = null;
+			if (eventRetry !== null) { clearTimeout(eventRetry); eventRetry = null; }
+			const source = eventSource;
+			eventSource = null;
+			pendingStreamEpoch = null;
+			if (source) { try { source.close(); } catch (e) {} }
+		}
+		function applyEventDenial(outage, attemptFailed = false) {
+			const e = outage.denial;
+			// CONNECTING 也包含浏览器内部的重试，等 open/error 再判定已有尝试。
+			if (!e || (!attemptFailed && eventSource && eventSource.readyState !== EventSource.CLOSED)) return;
+			outage.denial = null;
+			if (fenceBlocked === e.code) return;
+			fenceBlocked = e.code;
+			// 停止重连，但不作废同次断线中已在途的更新探测。
+			closeEventSource(true);
+			notifyEvents({ type: 'fence', code: e.code, message: String(e.message || '') });
+		}
 		function ensureEventSource() {
-			if (eventSource || fenceBlocked) return;
-			eventSource = new EventSource('/permgate/events');
-			eventSource.onmessage = (ev) => {
+			if (eventSource || fenceBlocked || !eventListeners.size) return;
+			const source = eventSource = new EventSource('/permgate/events');
+			source.onmessage = (ev) => {
+				if (eventSource !== source) return;
 				let data = null;
 				try { data = JSON.parse(ev.data); } catch (e) {}
+				if (data?.type === 'pending-epoch' && typeof data.epoch === 'string') pendingStreamEpoch = data.epoch;
 				if (data) notifyEvents(data);
 			};
 			// 首连与断线重连成功都会触发：全量刷新兜底，收敛重连期间丢失的事件
-			eventSource.onopen = () => { fenceBlocked = null; notifyEvents({ type: 'refresh' }); };
-			// EventSource 不暴露状态码，无法直接区分「普通断线」与「被栅栏拒绝」。
-			// 用一次轻量探测判定：只有确实是栅栏错误才停掉重连并上报，
-			// 普通断线仍交给 EventSource 自动重连（否则会把网络抖动当成权限问题）。
-			eventSource.onerror = () => {
-				if (fenceBlocked) return;
-				call('permgate:status', {}).catch((e) => {
-					if (!e || (e.code !== 'untrusted-origin' && e.code !== 'unauthenticated')) return;
-					fenceBlocked = e.code;
-					if (eventSource) { try { eventSource.close(); } catch (err) {} eventSource = null; }
-					notifyEvents({ type: 'fence', code: e.code, message: String((e && e.message) || '') });
-				});
+			source.onopen = () => {
+				if (eventSource !== source) return;
+				eventOutage = null;
+				notifyEvents({ type: 'refresh' });
+			};
+			const probeFence = (outage) => {
+				// 原生重连复用 EventSource；每次失败都要有自己的状态探测，旧请求不能代表新失败。
+				const request = ++outage.issued;
+				const check = call('permgate:status', {});
+				const finish = (passed, e) => {
+					if (eventOutage !== outage || request <= outage.confirmed) return;
+					// 只有通过或明确拒绝才能更新栅栏水位；路由未挂载不代表凭据已恢复。
+					if (!passed && !isFenceError(e)) return;
+					outage.confirmed = request;
+					outage.denial = passed ? null : e;
+					if (!passed) applyEventDenial(outage);
+					else if (fenceBlocked) {
+						fenceBlocked = null;
+						ensureEventSource();
+					}
+				};
+				check.then(() => finish(true), (e) => finish(false, e));
+			};
+			source.onerror = () => {
+				if (eventSource !== source) return;
+				pendingStreamEpoch = null;
+				const outage = eventOutage ??= { issued: 0, confirmed: 0, denial: null };
+				// 失败的握手也必须启动探测，才能用更新结果推翻之前暂存的拒绝。
+				probeFence(outage);
+				applyEventDenial(outage, true);
+				if (eventSource !== source) return;
+				// CONNECTING 由浏览器自动重连。路由暂未挂载等非 SSE 响应可使连接永久 CLOSED。
+				if (source.readyState === EventSource.CLOSED && eventRetry === null) {
+					eventRetry = setTimeout(() => {
+						closeEventSource(true);
+						ensureEventSource();
+					}, 3000);
+				}
 			};
 		}
 		// 供面板读取当前栅栏状态（面板据此报错而不是渲染一份空配置）
@@ -635,10 +689,7 @@ window.__ModuleLoader__.load({
 			ensureEventSource();
 			return () => {
 				eventListeners.delete(fn);
-				if (eventListeners.size === 0 && eventSource) {
-					try { eventSource.close(); } catch (e) {}
-					eventSource = null;
-				}
+				if (!eventListeners.size) closeEventSource();
 			};
 		}
 
@@ -1537,9 +1588,8 @@ window.__ModuleLoader__.load({
 		// 落盘后宿主会回带新 status，故「调整顺序后重新处理标注」是自动的 ——
 		// 前提是这里不能像缓存那样只在首次赋值。
 		let EXCEPTION_SHADOW = {};
-		// 审批提醒的生效开关（宿主下发）。默认空对象 = 两项都关，
-		// 与宿主 NOTIFY_DEFAULTS 同向：没有配置时不提醒。
-		let PG_NOTIFY_CFG = {};
+		// 配置未取到（null）时不提醒，但还不能认定首包到达时的通道开关。
+		let PG_NOTIFY_CFG = null;
 		// 配置变化的订阅者（提醒的到期定时器据此重排，见 pgSetNotifyCfg）。
 		const PG_NOTIFY_CFG_SUBS = new Set();
 		// 取某层某条例外的爆炸半径。层名非法或缺失时返回 undefined（渲染处据此不标注）。
@@ -1585,12 +1635,14 @@ window.__ModuleLoader__.load({
 			// `typeof null === 'object'`：半截响应里 `effective: null` 会让下面读它的
 			// 调用方全部炸掉，故显式判空，落成 {}。
 			const eff = s && s.notify && s.notify.effective;
-			PG_NOTIFY_CFG = (eff && typeof eff === 'object') ? eff : {};
-			// 值没变就不通知：status 会随各种写盘操作反复到达，每次重排定时器
-			// 都是白白 clear/set 一次（结果相同）。
-			const a = Object.keys(prev);
-			const b = Object.keys(PG_NOTIFY_CFG);
-			if (a.length === b.length && a.every((k) => prev[k] === PG_NOTIFY_CFG[k])) return;
+			PG_NOTIFY_CFG = !s ? null : (eff && typeof eff === 'object') ? eff : {};
+			// 仍区分「没取到」与「确认没开」：首包的静默资格只由首次已知配置决定。
+			if (prev === PG_NOTIFY_CFG) return;
+			if (prev && PG_NOTIFY_CFG) {
+				const a = Object.keys(prev);
+				const b = Object.keys(PG_NOTIFY_CFG);
+				if (a.length === b.length && a.every((k) => prev[k] === PG_NOTIFY_CFG[k])) return;
+			}
 			for (const fn of Array.from(PG_NOTIFY_CFG_SUBS)) { try { fn(); } catch (e) {} }
 		}
 		// 例外列表超过该数量默认折叠（展开/折叠按钮在标题行右侧）
@@ -3136,6 +3188,26 @@ window.__ModuleLoader__.load({
 		// 多个审批同时进来时合并成一次提醒：连续三声铃与一声铃表达的是同一件事，
 		// 而三声会让用户以为系统出了问题。
 		const PG_ANNOUNCED = new Set();
+		function pgNotifyClock() { return { now: globalThis.performance.now(), wallNow: Date.now() }; }
+		// 单调钟兜住墙钟回拨，墙钟补足部分浏览器的休眠停钟。
+		function pgNotifyElapsed(from, to) {
+			return Math.max(0, to.now - from.now, to.wallNow - from.wallNow);
+		}
+		function pgLockFirstIdleDelay(baseline) {
+			if (!baseline || baseline.delayMs !== undefined || !PG_NOTIFY_CFG) return;
+			const delay = PG_NOTIFY_CFG.idleDelaySec;
+			// null 表示首包没有待推迟的超时组，之后开启也按审批年龄求值。
+			baseline.delayMs = pgGroupOn(PG_NOTIFY_CFG, 'idle') && Number.isFinite(delay) ? Math.max(0, delay) * 1000 : null;
+		}
+		function pgIdleWait(p, delay, clock) {
+			const timing = p.notifyTiming;
+			if (!timing) return delay;
+			const wait = delay - pgNotifyElapsed(timing, clock);
+			const first = timing.frontFirst;
+			// 设置可以调整剩余窗口，不能追溯改变首包是否已经到期。
+			return first && Number.isFinite(first.baseline.delayMs) && first.age >= first.baseline.delayMs
+				? Math.max(wait, delay - pgNotifyElapsed(first.baseline, clock)) : wait;
+		}
 		// 进入后台的时刻（毫秒）。前台时为 null。
 		// 第一组的「连续后台时长」由它算：切回前台置 null，下次切走重新取 ——
 		// 这就是「切走→看一眼→再切走」不会立刻响的原因。
@@ -3143,8 +3215,7 @@ window.__ModuleLoader__.load({
 		// 当前是否在后台。**同时**看 visibilityState 与焦点：只判前者会让
 		// 「双屏时在另一个窗口打字」也算前台（那正是该提醒的情形）。
 		//
-		// 注意：这个函数只服务第一组的判据；`pgDueNow` 收的是它的结果，
-		// 不自己去读 document（那样判定就没法被测试直接求值）。
+		// 后台窗口与首包静默共用此判据；`pgDueNow` 接收结果，不直接读 document。
 		function pgIsHidden() {
 			try {
 				if (typeof document === 'undefined') return false;
@@ -3398,10 +3469,10 @@ window.__ModuleLoader__.load({
 		// ── 提醒判定的唯一实现：两组判据各算各的，返回「该响的那几条 + 用哪组通道」──
 		//
 		// 两组**计时起点不同**，这是它们不能合并的全部原因：
-		//   · `idle`：审批创建后多久（`now - p.ts`）—— 不分前后台；
+		//   · `idle`：审批入池后多久（见 `pgIdleWait`）—— 不分前后台；
 		//   · `bg`  ：切入后台后多久（`bgElapsedMs`）—— 只在后台成立。
 		//
-		// 参数用**纯数据**（`hidden` / `bgElapsedMs` / `now`）而不是直接读 document，
+		// 参数用**纯数据**（`hidden` / `bgElapsedMs` / 时钟读数）而不是直接读 document，
 		// 这样判定可以被测试直接求值 —— 读全局状态的实现只能靠 mock document 测，
 		// 而那种测试验的是 mock 而不是判据。
 		//
@@ -3411,7 +3482,7 @@ window.__ModuleLoader__.load({
 		function pgDueNow(allPending, cfg, env) {
 			if (!Array.isArray(allPending) || !allPending.length) return null;
 			const c = cfg && typeof cfg === 'object' ? cfg : {};
-			const now = env && typeof env.now === 'number' ? env.now : Date.now();
+			const clock = env?.clock ?? pgNotifyClock();
 			const hidden = !!(env && env.hidden);
 			const bgElapsedMs = env && typeof env.bgElapsedMs === 'number' && Number.isFinite(env.bgElapsedMs)
 				? Math.max(0, env.bgElapsedMs) : 0;
@@ -3419,12 +3490,6 @@ window.__ModuleLoader__.load({
 			const secToMs = (v) => Math.max(0, Number(v) || 0) * 1000;
 			const bgMs = secToMs(c.bgDelaySec);
 			const idleMs = secToMs(c.idleDelaySec);
-			// 各审批的年龄。ts 缺失/非法时按「刚到」处理：宁可晚一个窗口，
-			// 也不要凭一个坏字段判成「等了很久」而立刻响铃。
-			const ageOf = (p) => {
-				const ts = p && typeof p.ts === 'number' && Number.isFinite(p.ts) ? p.ts : now;
-				return now - ts;
-			};
 			// ① 第一组：在后台且已连续后台够久。
 			//
 			// 通道全关的组必须跳过：默认 `bgDelaySec=0` 使它在后台恒成立，
@@ -3436,7 +3501,7 @@ window.__ModuleLoader__.load({
 			}
 			// ② 第二组：审批年龄够久（不分前后台）
 			const idle = pgGroupOn(c, 'idle')
-				? allPending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id) && ageOf(p) >= idleMs)
+				? allPending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id) && pgIdleWait(p, idleMs, clock) <= 0)
 				: [];
 			if (idle.length) return { group: 'idle', entries: idle };
 			return null;
@@ -3549,28 +3614,118 @@ window.__ModuleLoader__.load({
 			const [denySaved, setDenySaved] = React.useState({});
 			const [, setTick] = React.useState(0);
 			useLocaleTick();
-			// 首次 poll 只**登记**已有 id、不提醒：页面刚打开时用户就看着这些卡片，
-			// 再响一声只是噪音。之后才按「还没响过」的判据提醒（见 pgDueNow）。
-			const seeded = React.useRef(false);
+			const pendingPoll = React.useRef(null);
+			const applySnapshot = (state, snapshot) => {
+				if (state.applied === snapshot) return;
+				if (state.applied && state.applied.epoch !== snapshot?.epoch) {
+					state.timingById.clear();
+					PG_ANNOUNCED.clear();
+				}
+				state.applied = snapshot;
+				if (!snapshot) { setPending([]); return; }
+				state.requestWatermark = Math.max(state.requestWatermark, snapshot.request);
+				const first = !state.received;
+				state.received = true;
+				const clock = pgNotifyClock();
+				const hidden = pgIsHidden();
+				if (first && !hidden) {
+					state.frontFirst = { ...clock, delayMs: undefined };
+					pgLockFirstIdleDelay(state.frontFirst);
+				}
+				const timingById = new Map();
+				const list = snapshot.pending.map((p) => {
+					if (!p || !p.id) return p;
+					const age = Number.isFinite(p.pendingAgeMs) && p.pendingAgeMs >= 0 ? p.pendingAgeMs : 0;
+					const previous = state.timingById.get(p.id);
+					// 快照年龄不含传输耗时。在单调钟上保留最早估计，墙钟只从首个样本计时，
+					// 避免在回拨期间补查后又校回去时，把同一段时间算两次。
+					const notifyTiming = {
+						now: Math.min(previous?.now ?? Infinity, snapshot.clock.now - age),
+						wallNow: previous?.wallNow ?? (snapshot.clock.wallNow - age),
+						frontFirst: first && state.frontFirst
+							? { age: age + pgNotifyElapsed(snapshot.clock, clock), baseline: state.frontFirst } : previous?.frontFirst,
+					};
+					timingById.set(p.id, notifyTiming);
+					return { ...p, notifyTiming };
+				});
+				state.timingById = timingById;
+				setPending(list);
+				if (!first) pgAnnouncePending(list, PG_NOTIFY_CFG, { clock, hidden, bgElapsedMs: pgBgElapsedMs(clock.wallNow) });
+			};
+			const clearPendingRetry = (state) => {
+				if (state.retryTimer !== null) { clearTimeout(state.retryTimer); state.retryTimer = null; }
+			};
+			const schedulePendingRetry = (state) => {
+				if (pendingPoll.current !== state || fenceBlocked || state.retryTimer !== null) return;
+				state.retryTimer = setTimeout(poll, 3000);
+			};
 			const poll = () => {
-				call('permgate:pending', {}).then((r) => {
-					const list = Array.isArray(r) ? r : [];
-					setPending(list);
-					// 首次 poll 只登记、不提醒：页面刚打开时那些审批就在眼前。
-					if (!seeded.current) { seeded.current = true; return; }
-					const now = Date.now();
-					pgAnnouncePending(list, PG_NOTIFY_CFG, { hidden: pgIsHidden(), bgElapsedMs: pgBgElapsedMs(now), now: now });
-				}).catch(() => {});
+				const state = pendingPoll.current;
+				if (!state || fenceBlocked) return;
+				clearPendingRetry(state);
+				const request = ++state.issued;
+				const retry = () => { if (request === state.issued) schedulePendingRetry(state); };
+				call('permgate:pending', { snapshot: 1 }).then((r) => {
+					if (pendingPoll.current !== state) return;
+					const legacy = Array.isArray(r);
+					const data = legacy ? { epoch: null, revision: 0, pending: r } : r;
+					if (!Array.isArray(data?.pending) || !Number.isSafeInteger(data.revision) || (!legacy && typeof data.epoch !== 'string')) {
+						retry();
+						return;
+					}
+					const { epoch, revision } = data;
+					const matchesStream = pendingStreamEpoch === null || epoch === pendingStreamEpoch;
+					if (request === state.issued) {
+						if (matchesStream) clearPendingRetry(state);
+						else retry();
+					}
+					// 数组没有宿主采样版本，不能像同世代快照那样绕过请求水位。
+					if (legacy) {
+						if (matchesStream && request > state.requestWatermark) {
+							applySnapshot(state, { ...data, request, clock: pgNotifyClock() });
+						}
+						return;
+					}
+					const known = state.snapshots.get(epoch);
+					if (known && revision <= known.revision) return;
+					const snapshot = { ...data, request, clock: pgNotifyClock() };
+					state.snapshots.set(epoch, snapshot);
+					// 两条连接可能让快照比世代公告先到；留住快照，等 SSE 确认时直接使用。
+					const current = pendingStreamEpoch !== null ? matchesStream
+						: epoch === state.applied?.epoch || (!state.applied && epoch === state.confirmedEpoch)
+							|| request > state.requestWatermark;
+					if (current) applySnapshot(state, snapshot);
+				}).catch((e) => {
+					if (isFenceError(e)) {
+						if (pendingPoll.current === state && request === state.issued) clearPendingRetry(state);
+					} else retry();
+				});
 			};
 			React.useEffect(() => {
+				const state = {
+					applied: null, confirmedEpoch: pendingStreamEpoch, issued: 0, requestWatermark: 0, received: false, frontFirst: null,
+					snapshots: new Map(), timingById: new Map(), retryTimer: null,
+				};
+				pendingPoll.current = state;
 				// 音频解锁必须尽早挂钩：用户可能一直不打开设置面板，
 				// 而提示音只在他与页面交互过之后才允许播放。
 				pgHookGestureOnce();
 				poll();
 				const off = subscribeEvents((ev) => {
 					if (ev.type === 'pending' || ev.type === 'refresh') poll();
+					else if (ev.type === 'pending-epoch' && typeof ev.epoch === 'string') {
+						const { epoch } = ev;
+						// 再次断线时，公告前已在途的响应仍不能让页面回到另一世代。
+						state.requestWatermark = state.issued;
+						if (state.confirmedEpoch !== epoch) state.snapshots.delete(state.confirmedEpoch);
+						state.confirmedEpoch = epoch;
+						const snapshot = state.snapshots.get(epoch) ?? null;
+						applySnapshot(state, snapshot);
+						// onopen 已经发出补查；留一条恢复路径，防止它失败后只剩注释心跳。
+						if (!snapshot) schedulePendingRetry(state);
+					} else if (ev.type === 'fence') clearPendingRetry(state);
 				});
-				return () => off();
+				return () => { pendingPoll.current = null; clearPendingRetry(state); off(); };
 			}, []);
 			// 等待窗口到期与「刚切到后台」这两件事都**不产生新事件**，故必须有本 effect
 			// 兜住 —— 否则提醒只在「审批入池」的那一刻被求值一次，而那一刻多半还在窗口内：
@@ -3589,38 +3744,34 @@ window.__ModuleLoader__.load({
 				//
 				// `futureOnly` 用于「刚触发过一次之后的续排」：已过去的到期点不再排，
 				// 否则播不出声（未解锁 / 解码失败）时会退化成 1ms 一次的无限重试。
-				const nextWait = (futureOnly) => {
+				const nextWait = (futureOnly, clock) => {
 					if (!pending.length) return Infinity;
-					const now = Date.now();
 					const open = pending.filter((p) => p && p.id && !PG_ANNOUNCED.has(p.id));
 					if (!open.length) return Infinity;
 					const cands = [];
 					if (pgGroupOn(PG_NOTIFY_CFG, 'idle')) {
 						const idleMs = secToMs(PG_NOTIFY_CFG.idleDelaySec);
-						for (const p of open) {
-							const ts = typeof p.ts === 'number' && Number.isFinite(p.ts) ? p.ts : now;
-							cands.push(ts + idleMs - now);
-						}
+						for (const p of open) cands.push(pgIdleWait(p, idleMs, clock));
 					}
 					if (pgGroupOn(PG_NOTIFY_CFG, 'bg') && pgIsHidden()) {
 						// pgBgElapsedMs 同时负责「前台清残留起点」：窗口从哪一刻算起
 						// 只有一个来源，不能在这里另算一份。
-						cands.push(secToMs(PG_NOTIFY_CFG.bgDelaySec) - pgBgElapsedMs(now));
+						cands.push(secToMs(PG_NOTIFY_CFG.bgDelaySec) - pgBgElapsedMs(clock.wallNow));
 					}
 					const live = futureOnly ? cands.filter((v) => v > 0) : cands;
 					return live.length ? Math.min.apply(null, live) : Infinity;
 				};
-				const arm = (futureOnly) => {
+				const arm = (futureOnly, clock = pgNotifyClock()) => {
 					if (timer) { clearTimeout(timer); timer = null; }
-					const wait = nextWait(futureOnly === true);
+					const wait = nextWait(futureOnly, clock);
 					if (!Number.isFinite(wait)) return;
-					// +1ms 让「刚好等于窗口」的那次求值落在 `>=` 的成立侧。
+					// +1ms 让「刚好等于窗口」的那次求值落在到期侧。
 					timer = setTimeout(() => {
 						timer = null;
-						const t = Date.now();
-						pgAnnouncePending(pending, PG_NOTIFY_CFG, { hidden: pgIsHidden(), bgElapsedMs: pgBgElapsedMs(t), now: t });
-						// 响过之后必须续排：下一张审批、或另一组的窗口可能还在未来。
-						arm(true);
+						const sample = pgNotifyClock();
+						pgAnnouncePending(pending, PG_NOTIFY_CFG, { clock: sample, hidden: pgIsHidden(), bgElapsedMs: pgBgElapsedMs(sample.wallNow) });
+						// 用同一时钟读数续排，避免跳过求值之后才到期的审批。
+						arm(true, sample);
 					}, Math.max(0, wait) + 1);
 				};
 				// ① 可见性 / 焦点变化：切后台时记起点，切回前台时清起点。
@@ -3628,19 +3779,19 @@ window.__ModuleLoader__.load({
 				// 「清起点」是第一组语义的核心：切回前台即重置，下次切走重新计。
 				// 不清的话，「切走 → 回来看一眼 → 再切走」会在第二次切走时立刻响。
 				const onVis = () => {
+					const clock = pgNotifyClock();
 					if (pgIsHidden()) {
-						if (pgBgSince === null) pgBgSince = Date.now();
+						if (pgBgSince === null) pgBgSince = clock.wallNow;
 						// 立刻求值一次：窗口早就过了的审批该马上提醒，而不是等下一次 SSE
 						// （那时可能已经过了几分钟）。
-						const t = Date.now();
-						pgAnnouncePending(pending, PG_NOTIFY_CFG, { hidden: true, bgElapsedMs: pgBgElapsedMs(t), now: t });
+						pgAnnouncePending(pending, PG_NOTIFY_CFG, { clock, hidden: true, bgElapsedMs: pgBgElapsedMs(clock.wallNow) });
 					} else {
 						pgBgSince = null;
 					}
 					// 进出后台都必须重排：进后台多出一个 bg 到期点，回前台它消失（只剩
 					// idle 那条）。只求值不重排时，bg 的窗口永远不会到点 —— 默认 0 秒
 					// 掩盖了这个缺口，调大后该组就完全不生效。
-					arm(false);
+					arm(false, clock);
 				};
 				// 后台判据同时看 visibilityState 与焦点（见 pgIsHidden），故两个来源
 				// 都要听：只挂 visibilitychange 时，「在另一个窗口打字」这类失焦
@@ -3657,11 +3808,15 @@ window.__ModuleLoader__.load({
 				// ② 设置变化也要重排：窗口与通道都不在 React state 里，改完设置后
 				// 已排的定时器仍按旧值算 —— 改大时那次求值不命中且无人续排（漏提醒），
 				// 改小时不生效。
-				PG_NOTIFY_CFG_SUBS.add(onVis);
+				const onNotifyCfg = () => {
+					pgLockFirstIdleDelay(pendingPoll.current?.frontFirst);
+					onVis();
+				};
+				PG_NOTIFY_CFG_SUBS.add(onNotifyCfg);
 				arm(false);
 				return () => {
 					if (timer) clearTimeout(timer);
-					PG_NOTIFY_CFG_SUBS.delete(onVis);
+					PG_NOTIFY_CFG_SUBS.delete(onNotifyCfg);
 					try {
 						if (typeof document !== 'undefined' && document.removeEventListener) {
 							document.removeEventListener('visibilitychange', onVis);

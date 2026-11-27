@@ -18,6 +18,7 @@ import { assessCommand, matchCommand, codeLabel, tierLabel, decomposeCommand, se
 import { join as pathJoin, resolve as pathResolve, isAbsolute as pathIsAbsolute } from 'node:path'
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync } from 'node:fs'
 import { homedir as osHomedir } from 'node:os'
+import { performance } from 'node:perf_hooks'
 // 消息 id：assistant 轮属于 dsh-llm 的 `Message`（不是无身份的 `RequestUserInput`），
 // 契约要求带 `id`。只用来满足契约，不参与任何判定。
 import { randomUUID } from 'node:crypto'
@@ -1089,6 +1090,9 @@ export default {
     // 于是 REPEAT_STREAK_MAX 与「窗口」一起被删掉 —— 简化即修复。
     const streakBySession = new Map()
     const pendingApprovals = new Map()
+    let pendingApprovalsClosed = false
+    const pendingSnapshotEpoch = randomUUID()
+    let pendingSnapshotSeq = 0
     // SSE 订阅者：/permgate/events 长连接的响应对象集合（状态/待审批变化即推）
     const sseClients = new Set()
     // 沙箱升级跟踪：{token: {session, prev}}，工具执行完成后写回原沙箱（一次性升级）
@@ -8877,7 +8881,12 @@ export default {
     // onTimeout 只能是 allow/deny 的论证：能走到超时机制的配置，
     // 其 autoFallback 必然不是 ask（若为 ask，异常与正常失败本来就都弹窗，不需要超时），
     // 故落点必然二选一。
+    function approvalUnavailable() {
+      return { kind: 'deny', reason: uiLang === 'en' ? 'Approval service stopped; request cancelled' : '审批服务已停止，审批请求已取消' }
+    }
     function askUser(exec, d, opts) {
+      // 已进入 pre-execute 的调用可能在卸载后才从异步评审返回，旧实例不再接收审批。
+      if (pendingApprovalsClosed) return Promise.resolve(approvalUnavailable())
       const o = opts || {}
       // 必须同时校验「有限」与「正数」，并把上界钳到 32 位有符号整数上限：
       // setTimeout 的延迟超出该范围时，Node 只发 TimeoutOverflowWarning 并把延迟**改成 1ms**。
@@ -9040,7 +9049,7 @@ export default {
           editorKernel: resolveEditorKernel(exec, rootOf(exec)).kernel,
           resolve,
           // 结案认领单点：置 settled + 清定时器 + 摘 abort 监听 + 移出待审批池。
-          // 所有结束路径（用户操作 / 超时 / abort）都必须经过它，否则定时器泄漏。
+          // 所有结束路径（用户操作 / 超时 / abort / 卸载）都必须经过它，否则定时器泄漏。
           //
           // claim() 与 cleanup() 分开的原因：`/permgate/decide` 路由在结案前还有
           // `await init(exec)` 这个真实 I/O 挂起点（fs.resolve/stat/readText），而
@@ -9097,6 +9106,7 @@ export default {
           },
         }
         entry.candidates = buildCandidates(entry)
+        entry.pendingSince = performance.now()
         pendingApprovals.set(id, entry)
         broadcast({ type: 'pending' })
         // 默认永不超时：审批完全由用户在弹窗中决定。传了 timeoutMs 才启动倒计时。
@@ -10374,9 +10384,9 @@ export default {
 
     // ── HTTP 路由（浏览器 UI 经 /permgate/* 同源调用）──────────────────────────
 
-    function json(res, data, status) {
+    function json(res, data, status, headers) {
       const body = JSON.stringify(data)
-      res.writeHead(status || 200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) })
+      res.writeHead(status || 200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), ...headers })
       res.end(body)
     }
 
@@ -10410,7 +10420,8 @@ export default {
         connection: 'keep-alive',
         'x-accel-buffering': 'no',
       })
-      res.write(': connected\n\n')
+      // 连接的宿主世代与审批快照相同；重连可以直接辨认并采纳已经到达的快照。
+      res.write('data: ' + JSON.stringify({ type: 'pending-epoch', epoch: pendingSnapshotEpoch }) + '\n\n')
       sseClients.add(res)
       const done = () => { sseClients.delete(res) }
       req.on('close', done)
@@ -10631,6 +10642,9 @@ export default {
           return json(res, { groups, failures })
         }
         if (pathname === '/permgate/pending' && method === 'GET') {
+          // 在读取池时编号，空池也有版本；客户端发请求的顺序不等于宿主读取的顺序。
+          const revision = ++pendingSnapshotSeq
+          const observedAt = performance.now()
           const out = []
           for (const e of pendingApprovals.values()) {
             const argsPreview = e.argsJson && e.argsJson.length > 160 ? e.argsJson.slice(0, 160) + '…' : (e.argsJson || '')
@@ -10646,9 +10660,12 @@ export default {
             // 按 onTimeout 显示超时落点，note 是「为什么走到这一步」的唯一说明位，
             // modelReason 是模型原话（escalate 时那句「拿不准，因为 X」的唯一来源）。
             // 白名单式投影漏字段不会报错，只会让客户端静默退化，故新增 entry 字段时必须同步此处。
-            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, args: argsPreview, intent, intentLabel: e.intentLabel ? L(e.intentLabel, lang) : null, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note ? L(e.note, lang) : null, modelReason: e.modelReason || null, blast: e.blast || null })
+            // 下发时长而不是另一个时间戳，浏览器无需与宿主同步时钟。
+            out.push({ id: e.id, tool: e.tool, reason, ts: e.ts, pendingAgeMs: observedAt - e.pendingSince, args: argsPreview, intent, intentLabel: e.intentLabel ? L(e.intentLabel, lang) : null, candidates: e.candidates || [], argLines: e.argLines || [], hasDiff: e.hasDiff === true, projRoot: e.projRoot || null, sessionId: e.sessionId || null, sessionTitle: e.sessionTitle || null, cat: e.cat || null, deadline: e.deadline || null, onTimeout: e.onTimeout || null, note: e.note ? L(e.note, lang) : null, modelReason: e.modelReason || null, blast: e.blast || null })
           }
-          return json(res, out)
+          // 旧客户端仍读数组；采用宿主采样顺序的客户端显式请求版本化快照。
+          const data = search?.get('snapshot') === '1' ? { epoch: pendingSnapshotEpoch, revision, pending: out } : out
+          return json(res, data, 200, { 'cache-control': 'no-store' })
         }
         if (pathname === '/permgate/file-diff' && method === 'POST') {
           const entry = pendingApprovals.get(a.id)
@@ -11266,6 +11283,16 @@ export default {
     }
 
     onDispose(ctx.webServer.register({ kind: 'prefix', path: '/permgate', handler: routePermgate }))
+    onDispose(() => {
+      pendingApprovalsClosed = true
+      // 注册路由的生命周期结束后，让浏览器重连，不能继续绑定已经停用的世代。
+      for (const res of sseClients) { try { res.end() } catch (e) {} }
+      sseClients.clear()
+      // 用户尚未决定的审批不能跨实例等待；已认领的决定仍由 decide 路由收尾。
+      for (const entry of pendingApprovals.values()) {
+        if (entry.claim()) entry.settle(approvalUnavailable())
+      }
+    })
     // SSE 心跳：每 30 秒向订阅者写注释帧，防止空闲连接被中间层掐断
     onDispose(ctx.timer.interval(() => {
       for (const res of sseClients) {
