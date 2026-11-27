@@ -1924,14 +1924,21 @@ export default {
       // 第一组的音效与自定义音频路径。
       bgSoundStyle: 'triple',
       bgSoundPath: '',
+      // 提示音音量，0-100。默认 100 = 不改动原响度。
+      //
+      // **0 与关掉提示音开关是同一个状态**（见 pgGroupOn / pgDispatchDue）：音量 0 时
+      // 该组的提示音通道按关闭计。若把 0 当成「开着但不响」，判据层会命中一个永远
+      // 发不出声的组，另一组跟着轮不到，而面板上两处控件看起来都正常。
+      bgVolume: 100,
       // ── 第二组：超时未处理提醒 ──
       idleSound: true,
       idleDesktop: false,
       // 审批创建后多少秒仍未处理就提醒。**不分前后台**。
       idleDelaySec: 10,
-      // 第二组的音效与自定义音频路径。
+      // 第二组的音效、自定义音频路径与音量。
       idleSoundStyle: 'triple',
       idleSoundPath: '',
+      idleVolume: 100,
     }
 
     // 自定义音频的**文件路径**。只在对应组的 `*SoundStyle === 'custom'` 时有意义。
@@ -1963,12 +1970,14 @@ export default {
     const SOUND_STYLE_CUSTOM = 'custom'
     // 自定义音频文件的大小上限（字节）。
     //
-    // 60KB 的依据：两个内嵌语音各约 5.9KB，而 60KB 的单声道 mp3 约 10 秒 48kbps ——
-    // 提示音没有超过 10 秒的正当用途，再长用户自己都听不完就响下一次了。
+    // 5MB 的依据：128kbps 的 mp3 约 5 分钟 —— 覆盖「一段铃声、一个提示片段」的全部
+    // 正常用法，同时仍挡得住误选。
     //
-    // 这个上限**不限制配置文件体积**（配置里只存路径），它限制的是「一次读多少字节
-    // 进内存」：提醒可能连续触发，读一个几百 MB 的文件只为播 1 秒是荒谬的。
-    const SOUND_PATH_MAX_BYTES = 60 * 1024
+    // 上限**必须存在**，不能只靠「用户不会选错」：`readBytes` 会把整个文件读进内存，
+    // 转 base64 后体积再涨三分之一，宿主与浏览器各持一份 —— 误选一个几 GB 的视频
+    // 足以把进程拖死。这个数字**不限制配置文件体积**（配置里只存路径），它限制的是
+    // 一次读取与一次上传各能有多大。
+    const SOUND_PATH_MAX_BYTES = 5 * 1024 * 1024
 
     // 数字项的上下限。与 AUTO_REVIEW_RANGES 同一条纪律：**只有这一份**，
     // normalizeNotify 与 statusView 都从它取 —— 面板据此在提交前拦住超范围值，
@@ -1979,6 +1988,10 @@ export default {
     const NOTIFY_RANGES = {
       bgDelaySec: { min: 0, max: 3600 },
       idleDelaySec: { min: 0, max: 3600 },
+      // 音量下限是 0：0 与「关掉提示音」在判据上等价（见 NOTIFY_DEFAULTS 处说明），
+      // 故面板可以把滑块拖到 0，而不必让用户去找那个开关。
+      bgVolume: { min: 0, max: 100 },
+      idleVolume: { min: 0, max: 100 },
     }
 
     // 与 normalizeAutoReview 同一条纪律：**只保留用户显式写下的、合法的值**，
@@ -2018,11 +2031,11 @@ export default {
         const rg = NOTIFY_RANGES[k] || {}
         const min = typeof rg.min === 'number' ? rg.min : 0
         const max = rg.max
-        // 判据用**取整后**的值：负数一律丢弃，与 normalizeThreshold 一样不把误输入
+        // 判据用**取整后**的值：低于下限一律丢弃，与 normalizeThreshold 一样不把误输入
         // 落成用户表态 —— 把 -3 钳成 0 会让面板显示「已配置」，磁盘上却是别的值。
         const n = Math.floor(v)
-        if (n < 0) continue
-        out[k] = max === undefined ? Math.max(n, min) : Math.min(Math.max(n, min), max)
+        if (n < min) continue
+        out[k] = max === undefined ? n : Math.min(n, max)
       }
       // 自定义音频的 base64 载荷**不再落盘**（改成存路径）。
       // 存量配置里若有 `soundCustom` 键，这里不再认它 —— 它会在下一次任意写盘时
@@ -8579,10 +8592,15 @@ export default {
         return typeof v === 'string' && v ? v : dflt
       }
       // 数字项：非法值回落默认，与 autoReviewSetting 同口径。
-      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return dflt
+      // 下界取 `NOTIFY_RANGES` 而不是写死 0 —— 音量允许 0，秒数也允许 0，
+      // 但将来若有一项不允许，写死 0 会让它静默接受一个越界值。
+      if (typeof v !== 'number' || !Number.isFinite(v)) return dflt
       const rg = NOTIFY_RANGES[key] || {}
+      const min = typeof rg.min === 'number' ? rg.min : 0
       const max = rg.max
-      return max === undefined ? Math.floor(v) : Math.min(Math.floor(v), max)
+      const n = Math.floor(v)
+      if (n < min) return dflt
+      return max === undefined ? n : Math.min(n, max)
     }
     // 自定义音频的读取错误 → 一句给人看的话。
     // 三种失败分开说，因为它们对用户的处置完全不同（见 readCustomSound 的说明）。
@@ -8594,6 +8612,258 @@ export default {
         return en ? `Audio file is too large (limit ${kb} KB)` : `音频文件过大（上限 ${kb} KB）`
       }
       return en ? 'Cannot read that audio file (missing or not a file)' : '读不到这个音频文件（不存在或不是文件）'
+    }
+
+    // ── 原生文件对话框：拿**原路径** ─────────────────────────────────────────────
+    //
+    // 浏览器对 `<input type="file">` 只交出 name / size / type 与字节，**没有完整路径**
+    // —— 那是安全边界，网页不能借它探测本机目录结构。所以「选文件」若由页面发起，
+    // 只能退化成复制一份副本。
+    //
+    // 但宿主是本机进程，可以直接弹系统对话框，拿到的就是原路径。配置里存的仍是路径，
+    // 与手填完全同一条链 —— 没有副本、没有第二份文件。
+
+    // 弹一次原生文件框，返回所选文件的**原路径**；取消时返回 null。
+    //
+    // ── 三平台各一套，按 `process.platform` 分派 ─────────────────────────────────
+    // 与 DSH 自己的工作区目录选择器同一条纪律：没有哪个「一个命令」能在三个系统上
+    // 都弹框，硬凑一个只会让另外两平台静默失效。
+    //
+    //   · win32   —— PowerShell + WinForms `OpenFileDialog`（不依赖 koffi）；
+    //   · darwin  —— osascript + JXA 的 `NSOpenPanel`；
+    //   · linux   —— zenity，退回 kdialog（与 DSH 同序）。
+    //
+    // 三者都只输出**路径本身**，取消时不输出任何内容 —— 调用方据退出码区分
+    // 「脚本失败」与「用户取消」（见下面的判据说明）。
+    //
+    // 标题与过滤器都**写死在这里**、不从请求里取：把它们做成参数等于让调用方能
+    // 构造任意脚本片段（标题里一个引号就能闭合字符串）。这类注入面没有正当用途。
+    const AUDIO_PICK_TITLE = '选择提示音文件'
+    const AUDIO_PICK_FILTER = '音频文件|*.mp3;*.wav;*.ogg;*.m4a;*.aac;*.flac|所有文件|*.*'
+    // 对话框开着不动的上限。模态对话框不返回时子进程也不会退出，故这个 deadline
+    // 必须由调用方持有 —— `graceMs` 只决定 provider 终止流程里 TERM→KILL 的间隔，
+    // 本身不产生超时（见 SubprocessSpawnSpec 的 signal 注释）。
+    // 给足时间是因为用户可能开着框去找文件；到点按「取消」收场，不把宿主和面板一起挂住。
+    const AUDIO_PICK_DEADLINE_MS = 300000
+    // 终止流程的宽限：abort 之后等子进程退出的上限，与上面的 deadline 是两件事。
+    const AUDIO_PICK_KILL_GRACE_MS = 2000
+
+    // 只在「用户能看到宿主桌面」时有意义。远程访问时宿主弹的框出现在**服务器那台机器**
+    // 的桌面上，而用户在浏览器这头 —— 他会点一下按钮、什么都不发生。
+    //
+    // 两条判据都要满足：浏览器可见的 Host 是回环字面量，**且** socket 来源是回环。
+    //
+    // 只看 socket 不够：反代（nginx/Caddy 与宿主同机）转发时 remoteAddress 恒为
+    // 127.0.0.1，远程已认证浏览器会被判成本机 —— 框弹在服务器桌面上而用户看不见。
+    // 反代必须保留浏览器可见的 Host（否则第一层栅栏的同源判据也会失败），故 Host
+    // 才是「用户在哪台机器上」的判据。只看 Host 也不够：远程直连端口并伪造
+    // `Host: 127.0.0.1` 就能自证本机，socket 那一半挡住它。
+    //
+    // 不看 `x-forwarded-for` 之类的头：那些由客户端完全控制，用它判「是不是远程」
+    // 等于让远程端自己声明自己是本机。Host 也由客户端给，但它同时是第一层栅栏的
+    // 同源判据（Origin 必须与之一致），故伪造 Host 要连 Origin 一起伪造 —— 而
+    // 反代只改写 Host、保留 Origin 的配置会先在第一层被 403 挡掉。
+    function isLocalPeer(req) {
+      try {
+        if (!isLoopbackAuthority(parseAuthority(req && req.headers && req.headers.host))) return false
+        const addr = req && req.socket && req.socket.remoteAddress
+        if (!addr) return false
+        const a = String(addr)
+        return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'
+      } catch (e) { return false }
+    }
+
+    // ── 平台命令：每个平台给出 argv 与「取消」的退出码 ───────────────────────────
+    //
+    // 取消在三个平台上是**三种不同的事实**，不能统一成「没有输出」：
+    //   · win32  —— 脚本正常结束、无输出；
+    //   · darwin —— osascript 退出码 0、无输出（`NSModalResponseOK` 不成立时返回 ''）；
+    //   · linux  —— zenity/kdialog 用退出码 1 表示取消，那是**正常**结果。
+    // 把 linux 的 1 当成失败，会让每次取消都弹一句「文件对话框启动失败」。
+
+    // Windows：`[Console]::Out` 默认按系统 ANSI 代码页写（中文 Windows 是 GBK/936），
+    // 而宿主按 UTF-8 解码 —— 含中文的路径会变成一串 `�`。路径本身在 .NET 里是正确的，
+    // 坏的只是写出的那一步。只设 `$OutputEncoding` 或 `chcp 65001` 都**不管用**：
+    // 前者管的是往管道传数据的编码，后者改控制台代码页但不改 `[Console]::Out.Encoding`。
+    //
+    // `ErrorActionPreference = 'Stop'` 不是风格：PowerShell 默认 `Continue`，于是
+    // `Add-Type` 加载不了 WinForms 时只写一行 stderr 就继续，脚本最终仍以**退出码 0**
+    // 结束。调用方因此无法把「脚本自身失败」与「用户取消」分开 —— 两者都是
+    // 「退出码 0 + stdout 为空」。
+    //
+    // `-STA` 是硬要求：`OpenFileDialog` 是 COM 组件，MTA 线程上会直接抛
+    // `ThreadStateException`。PowerShell 5 默认 STA，但 pwsh 7 默认 MTA。
+    function audioPickArgvWin32(exe) {
+      const script = [
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        "$ErrorActionPreference = 'Stop'",
+        'Add-Type -AssemblyName System.Windows.Forms',
+        '$d = New-Object System.Windows.Forms.OpenFileDialog',
+        "$d.Title = '" + AUDIO_PICK_TITLE + "'",
+        "$d.Filter = '" + AUDIO_PICK_FILTER + "'",
+        '$d.CheckFileExists = $true',
+        'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
+      ].join('; ')
+      return [exe, '-NoProfile', '-STA', '-Command', script]
+    }
+
+    // macOS：JXA 的 `NSOpenPanel`。用 JXA 而不是 AppleScript 的 `choose file`，
+    // 因为后者跑在没有主菜单的辅助进程里，面板的「前往文件夹」输入框无法粘贴。
+    // 这里同样装一份 Edit 菜单，让 ⌘V 等快捷键在面板里生效。
+    //
+    // `canChooseFiles = true` / `canChooseDirectories = false` 是与 DSH 那个目录
+    // 选择器的唯一差别（那里反过来）。`allowsMultipleSelection = false` 让返回值只有一个。
+    //
+    // 不传 `allowedFileTypes`：那会维护一份与播放侧不一致的扩展名清单，而真正能不能
+    // 解码由播放侧判定（`pgPlayChime` 解码失败会诚实降级）。
+    const AUDIO_PICK_JXA = `
+ObjC.import('AppKit');
+function run(argv) {
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  var mainMenu = $.NSMenu.alloc.init;
+  mainMenu.addItem($.NSMenuItem.alloc.init);
+  var editMenu = $.NSMenu.alloc.initWithTitle('Edit');
+  var editItem = $.NSMenuItem.alloc.init;
+  editItem.submenu = editMenu;
+  mainMenu.addItem(editItem);
+  editMenu.addItemWithTitleActionKeyEquivalent('Cut', 'cut:', 'x');
+  editMenu.addItemWithTitleActionKeyEquivalent('Copy', 'copy:', 'c');
+  editMenu.addItemWithTitleActionKeyEquivalent('Paste', 'paste:', 'v');
+  editMenu.addItemWithTitleActionKeyEquivalent('Select All', 'selectAll:', 'a');
+  app.mainMenu = mainMenu;
+  var panel = $.NSOpenPanel.openPanel;
+  panel.canChooseFiles = true;
+  panel.canChooseDirectories = false;
+  panel.allowsMultipleSelection = false;
+  panel.message = argv[0];
+  $.NSOperationQueue.mainQueue.addOperationWithBlock(function() {
+    app.activateIgnoringOtherApps(true);
+  });
+  if (panel.runModal !== $.NSModalResponseOK) return '';
+  var urls = panel.URLs;
+  if (urls.count < 1) return '';
+  return ObjC.unwrap(urls.objectAtIndex(0).path);
+}`
+    function audioPickArgvDarwin(exe) {
+      return [exe, '-l', 'JavaScript', '-e', AUDIO_PICK_JXA, AUDIO_PICK_TITLE]
+    }
+
+    // Linux：zenity 优先，kdialog 退回（与 DSH 同序）。两者的过滤器语法不通用，
+    // 故分开给；退出码 1 = 用户取消，由 `cancelCodes` 认。
+    function audioPickArgvLinux(exe, tool) {
+      if (tool === 'kdialog') {
+        return [exe, '--getopenfilename', '.', '--title', AUDIO_PICK_TITLE,
+          '--filter', '*.mp3 *.wav *.ogg *.m4a *.aac *.flac|Audio files']
+      }
+      return [exe, '--file-selection', '--title=' + AUDIO_PICK_TITLE,
+        '--file-filter=Audio files | *.mp3 *.wav *.ogg *.m4a *.aac *.flac',
+        '--file-filter=All files | *']
+    }
+
+    // 按平台解析出可执行文件与 argv。返回 `{ argv, cancelCodes, cwd }` 或 `{ error }`。
+    async function resolveAudioPickCommand(sub) {
+      const platform = process.platform
+      if (platform === 'win32') {
+        const exe = await sub.resolveExecutable('powershell')
+        return { argv: audioPickArgvWin32(exe), cancelCodes: [], cwd: String(fallbackRoot || 'C:\\').replace(/\//g, '\\') }
+      }
+      if (platform === 'darwin') {
+        const exe = await sub.resolveExecutable('osascript')
+        return { argv: audioPickArgvDarwin(exe), cancelCodes: [], cwd: String(fallbackRoot || '/') }
+      }
+      if (platform === 'linux') {
+        // 两个工具都不在时回 `no-dialog-tool`：那与「脚本失败」不同，用户能处置
+        // （装一个），而「文件对话框启动失败」只会让人反复重试。
+        try {
+          const exe = await sub.resolveExecutable('zenity')
+          return { argv: audioPickArgvLinux(exe, 'zenity'), cancelCodes: [1], cwd: String(fallbackRoot || '/') }
+        } catch (e) {}
+        try {
+          const exe = await sub.resolveExecutable('kdialog')
+          return { argv: audioPickArgvLinux(exe, 'kdialog'), cancelCodes: [1], cwd: String(fallbackRoot || '/') }
+        } catch (e) {}
+        return { error: 'no-dialog-tool' }
+      }
+      return { error: 'unsupported-platform' }
+    }
+
+    async function pickAudioPathViaDialog() {
+      const sub = ctx.get('subprocess')
+      if (!sub) return { ok: false, error: 'no-subprocess' }
+      const cmd = await resolveAudioPickCommand(sub).catch(() => ({ error: 'dialog-failed' }))
+      if (cmd.error) return { ok: false, error: cmd.error }
+      // deadline 由本函数持有：`handle.done` 只在子进程退出时 resolve，而模态对话框
+      // 不返回时子进程也不会退出。两件事分开做 —— abort 让 provider 去终止进程树，
+      // 与定时器竞速的那个 Promise 才是让 `await` 返回的东西。只靠 abort 等于把
+      // 「请求会不会返回」押在 provider 能不能杀掉这个进程上。
+      const abort = new AbortController()
+      let timer = null
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          try { abort.abort(new Error('audio pick dialog deadline')) } catch (e) {}
+          resolve(null)
+        }, AUDIO_PICK_DEADLINE_MS)
+      })
+      try {
+        const handle = sub.spawn({
+          argv: cmd.argv,
+          cwd: cmd.cwd,
+          stdio: { stdin: 'ignore', stdout: { maxBytes: 8192 }, stderr: { maxBytes: 8192 } },
+          // 只用于 abort 之后的 TERM→KILL 间隔；执行超时由上面的 timer 负责
+          graceMs: AUDIO_PICK_KILL_GRACE_MS,
+          signal: abort.signal,
+        })
+        // race 的败者若在之后 reject（超时后 provider 收尸失败），会变成进程级
+        // unhandledRejection —— 那会打死宿主。先挂一个空 catch，真正的失败仍由
+        // race 的胜者分支处理。
+        handle.done.catch(() => {})
+        const outcome = await Promise.race([handle.done, deadline])
+        // 超时判据取 `abort.signal.aborted`，不取「谁先 settle」：abort 生效快时
+        // `handle.done` 会先于 deadline 的 resolve 落地（终止流程把它杀了），那时
+        // outcome 是非零退出码 —— 若按 outcome 判就会把「我们自己的超时」报成
+        // 「脚本失败」，而面板会给一个其实什么都没做的用户弹红字。
+        if (abort.signal.aborted || !outcome) {
+          // 超时按「取消」收场：用户没选，面板不该弹红字。框可能还开着，报出来更诚实。
+          console.warn('[permgate] audio pick dialog timed out after ' + AUDIO_PICK_DEADLINE_MS + 'ms')
+          return { ok: true, path: null }
+        }
+        // 退出码是「脚本自己失败」与「用户取消」的唯一判据：取消时脚本正常结束
+        // （exitCode 0、无输出）；失败时 Add-Type 不可用 / ShowDialog 抛
+        // InvalidOperationException / 被策略拦下都会非零退出（脚本首句的
+        // `ErrorActionPreference = 'Stop'` 保证了这一点）。只看 stdout 为空会把
+        // 这两种情况折叠成「取消」，面板于是静默无反应。
+        //
+        // Linux 的退出码 1 例外：那是 zenity/kdialog 的取消语义，属正常结果
+        // （见 `cancelCodes`）。把每个平台各自的「取消」判据写成数据而不是
+        // 在这里 `if (platform === ...)`，是因为取消语义属于命令本身。
+        //
+        // 不拿 stderr 非空当判据：PowerShell 会把无害警告也写到 stderr，而那时
+        // 退出码是 0 —— 用 stderr 判会在用户正常取消时误报「对话框启动失败」。
+        // stderr 只用于失败时的日志。
+        const out = handle.collected && handle.collected.stdout ? handle.collected.stdout.readFrom(0).text : ''
+        const picked = String(out || '').trim()
+        const code = outcome.exitCode
+        if (!picked && code !== 0 && cmd.cancelCodes.indexOf(code) === -1) {
+          const err = handle.collected && handle.collected.stderr ? handle.collected.stderr.readFrom(0).text : ''
+          console.warn('[permgate] audio pick dialog failed:', code, String(err || '').trim().slice(0, 500))
+          return { ok: false, error: 'dialog-failed' }
+        }
+        // 取消时脚本什么都不输出 —— 这是正常结果，不是失败
+        return { ok: true, path: picked || null }
+      } catch (e) {
+        return { ok: false, error: 'dialog-failed' }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    function pickErrorText(code, lang) {
+      const en = normLang(lang) === 'en'
+      if (code === 'remote') return en ? 'Picking a file is only available from the machine running the host' : '只有在本机打开页面时才能用文件选择（宿主弹框出现在它自己的桌面上）'
+      if (code === 'no-subprocess') return en ? 'Cannot start the file dialog here' : '这里无法启动文件对话框'
+      if (code === 'no-dialog-tool') return en ? 'No file dialog available (install zenity or kdialog)' : '没有可用的文件对话框（请安装 zenity 或 kdialog）'
+      if (code === 'unsupported-platform') return en ? 'Picking a file is not supported on this platform' : '这个平台不支持文件选择'
+      return en ? 'The file dialog failed' : '文件对话框启动失败'
     }
 
     // 自定义音频的**读取**单点：按某一组的 `*SoundPath` 读文件，
@@ -9985,9 +10255,11 @@ export default {
             bgSound: notifySetting('bgSound'),
             bgDesktop: notifySetting('bgDesktop'),
             bgDelaySec: notifySetting('bgDelaySec'),
+            bgVolume: notifySetting('bgVolume'),
             idleSound: notifySetting('idleSound'),
             idleDesktop: notifySetting('idleDesktop'),
             idleDelaySec: notifySetting('idleDelaySec'),
+            idleVolume: notifySetting('idleVolume'),
             // 两组各一份音效与路径（见 NOTIFY_DEFAULTS 处的说明）。
             bgSoundStyle: notifySetting('bgSoundStyle'),
             bgSoundPath: notifySetting('bgSoundPath'),
@@ -10976,12 +11248,13 @@ export default {
               next[k] = a[k]
               continue
             }
-            // 数字项：必须是有限数、非负、不超上限。**不在这里静默钳制** ——
+            // 数字项：必须是有限数、落在 NOTIFY_RANGES 内。**不在这里静默钳制** ——
             // 钳制后落盘的值与用户填的不同，而面板会显示钳制值，看起来像「自己变了」。
             const rg = NOTIFY_RANGES[k] || {}
+            const min = typeof rg.min === 'number' ? rg.min : 0
             const max = rg.max
-            if (typeof a[k] !== 'number' || !Number.isFinite(a[k]) || a[k] < 0) {
-              return json(res, { error: k + ' 必须是非负数' })
+            if (typeof a[k] !== 'number' || !Number.isFinite(a[k]) || a[k] < min) {
+              return json(res, { error: k + ' 必须是不小于 ' + min + ' 的数' })
             }
             const n = Math.floor(a[k])
             if (max !== undefined && n > max) return json(res, { error: k + ' 不能超过 ' + max })
@@ -11040,6 +11313,25 @@ export default {
           const r = await readCustomSound(grpQ === 'idle' ? 'idle' : 'bg')
           if (!r.ok) return json(res, { ok: false, error: soundErrorText(r.error, lang), code: r.error })
           return json(res, { ok: true, data: r.b64, size: r.size })
+        }
+        // ── /permgate/notify-pick-sound：宿主弹原生文件框，回**原路径** ─────────────
+        //
+        // 与 notify-sound 的分工：那条读**已配置的**文件内容（播放用），这条只拿路径
+        // （用户刚选的）。两者都不写配置 —— 路径要不要用由面板走 set-notify 提交。
+        //
+        // 只有本机浏览器能调：远程访问时宿主弹的框出现在服务器桌面上，用户看不见
+        // （见 isLocalPeer 的说明）。这里回 `remote` 而不是静默返回空路径，让面板能
+        // 说清「为什么这个按钮在你那里没用」。
+        if (pathname === '/permgate/notify-pick-sound' && method === 'POST') {
+          if (!isLocalPeer(req)) {
+            return json(res, { ok: false, error: pickErrorText('remote', lang), code: 'remote' })
+          }
+          await init(exec)
+          const r = await pickAudioPathViaDialog()
+          if (!r.ok) return json(res, { ok: false, error: pickErrorText(r.error, lang), code: r.error })
+          // `path: null` = 用户取消。这与失败必须分开：取消是正常动作，
+          // 面板不该弹一句红字。
+          return json(res, { ok: true, path: r.path })
         }
         // ── /permgate/set-auto-policy：额外审批策略 + 高风险处置的两维 ──────────────
         //

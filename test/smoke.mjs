@@ -9047,7 +9047,7 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       nt0 && nt0.effective.bgSoundPath === '' && nt0.effective.idleSoundPath === '',
       JSON.stringify({ bg: nt0 && nt0.effective.bgSoundPath, idle: nt0 && nt0.effective.idleSoundPath }))
     ok('★ group24 A60: 下发了音频文件的体积上限（面板据此提示）',
-      nt0 && typeof nt0.customMaxBytes === 'number' && nt0.customMaxBytes === 61440,
+      nt0 && typeof nt0.customMaxBytes === 'number' && nt0.customMaxBytes === 5 * 1024 * 1024,
       String(nt0 && nt0.customMaxBytes))
 
     // ② 切换**其中一组**的音效：只改那一组，另一组不受影响。
@@ -9113,9 +9113,10 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
       !!(r5.data && r5.data.error) && readCfgAuto(home).global.notify.bgSoundPath === beforePath,
       JSON.stringify({ err: r5.data && r5.data.error }))
 
-    // ⑦ 超上限拒收：写一个超过 60KB 的文件
+    // ⑦ 超上限拒收：按**下发值**造一个超限文件（不写死数字，上限调整时这条不会假红）
     const bigFile = join(soundDir, 'big.mp3')
-    writeFileSync(bigFile, Buffer.alloc(70 * 1024, 1))
+    const cap = nt0.customMaxBytes
+    writeFileSync(bigFile, Buffer.alloc(cap + 1024, 1))
     const r7 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgSoundPath: bigFile, bgSoundStyle: 'custom' })
     ok('★★ group24 A60: 超上限的音频回 error 且磁盘不变（不静默截断）',
       !!(r7.data && r7.data.error) && readCfgAuto(home).global.notify.bgSoundPath === beforePath,
@@ -9153,6 +9154,118 @@ group('24. 自动审批（auto）：评审段 / 统一异常路径 / 熔断 / �
     try { rmSync(soundFile, { force: true }) } catch (e) {}
     try { rmSync(bigFile, { force: true }) } catch (e) {}
     releaseTmp(ws, home)
+  }
+
+  // ── A61：音量 ────────────────────────────────────────────────────────────────
+  //
+  // 音量是**每组各一份**的 0-100 整数，且 0 与「关掉提示音」在判据上等价
+  // （见宿主 NOTIFY_DEFAULTS 处的说明）。这里钉的是路由层的落盘与值域。
+  {
+    const { ws, home, h } = mkHostAuto({}, undefined)
+    const st0 = await callRoute(h.routes, 'GET', '/permgate/status', null)
+    const nt0 = st0.data && st0.data.notify
+    ok('★ group24 A61: 两组音量默认 100 且都在 statusView 里',
+      nt0 && nt0.effective.bgVolume === 100 && nt0.effective.idleVolume === 100,
+      JSON.stringify(nt0 && nt0.effective && { bg: nt0.effective.bgVolume, idle: nt0.effective.idleVolume }))
+
+    // 0 必须能落盘：它是「静音」的合法表达，不能被「0 = 空/未设」的判据误拦
+    const r1 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgVolume: 0 })
+    ok('★★ group24 A61: 音量 0 是合法值（静音必须能落盘）',
+      !(r1.data && r1.data.error) && readCfgAuto(home).global.notify.bgVolume === 0,
+      JSON.stringify({ err: r1.data && r1.data.error, disk: readCfgAuto(home).global.notify }))
+
+    // 越界必须回 error 而不是静默钳制 —— 钳制后磁盘值与面板显示值分叉，看起来像「自己变了」
+    const before = readCfgAuto(home).global.notify.bgVolume
+    const r2 = await callRoute(h.routes, 'POST', '/permgate/set-notify', { bgVolume: 101 })
+    ok('★★ group24 A61: 音量超上限回 error 且磁盘不变（不静默钳制）',
+      !!(r2.data && r2.data.error) && readCfgAuto(home).global.notify.bgVolume === before,
+      JSON.stringify({ err: r2.data && r2.data.error, disk: readCfgAuto(home).global.notify.bgVolume }))
+
+    // 两组独立：改一组不影响另一组
+    await callRoute(h.routes, 'POST', '/permgate/set-notify', { idleVolume: 40 })
+    ok('★★ group24 A61: 改第二组音量不影响第一组（两组独立）',
+      readCfgAuto(home).global.notify.idleVolume === 40
+      && readCfgAuto(home).global.notify.bgVolume === before,
+      JSON.stringify(readCfgAuto(home).global.notify))
+    releaseTmp(ws, home)
+  }
+
+  // ── A63：原生文件框路由只对**本机**开放 ──────────────────────────────────────
+  //
+  // 宿主弹的对话框出现在**宿主那台机器**的桌面上。远程访问时用户坐在浏览器这头，
+  // 点了按钮只会什么都不发生，而宿主桌面上凭空弹出一个框 —— 故这条路由必须先拒。
+  //
+  // 判据是「浏览器可见的 Host 是回环」**且**「socket 来源是回环」，**不看**
+  // x-forwarded-for 之类的头：那些由客户端完全控制，用它判「是不是远程」等于让
+  // 远程端自己声明自己是本机。两条缺一不可 —— 反代与宿主同机时 socket 恒为回环，
+  // 只有 Host 能区分「用户在本机」与「用户隔着反代」。
+  {
+    const { ws, home, h } = mkHostAuto({}, undefined)
+    // 无 socket（远程 / 反代 / 非本机连接）→ 拒绝，且回可识别的 code
+    const r1 = await callRoute(h.routes, 'POST', '/permgate/notify-pick-sound', {})
+    ok('★★ group24 A63: 非本机连接调文件框路由被拒（宿主弹框在它自己桌面上）',
+      !!(r1.data && r1.data.ok === false) && r1.data.code === 'remote',
+      JSON.stringify(r1.data))
+    releaseTmp(ws, home)
+  }
+
+  // ── A64：文件框脚本必须显式把 stdout 设成 UTF-8 ─────────────────────────────
+  //
+  // `[Console]::Out` 默认按系统 ANSI 代码页写（中文 Windows 是 GBK/936），而宿主按
+  // UTF-8 解码 —— 含中文的路径会变成一串 `�`（实测 `D:\中文目录\音乐\clip.mp3`
+  // 输出成 `d6d0 cec4` 开头的 GBK 字节，解出来是 `D:\����Ŀ¼\...`）。
+  //
+  // 这条只能靠源码判据：测试进程不弹真对话框，而 `�` 不会让任何东西报错 ——
+  // 用户看到的只是一条坏路径，保存后「读不到这个音频文件」。
+  //
+  // 判据要求它出现在**第一句**：`Add-Type` 之后才设就晚了，而晚了的形态与没设
+  // 一样（后面的 Write 仍走旧编码）。
+  {
+    const src = readFileSync(join(ROOT, 'index.js'), 'utf8')
+    // 脚本现在住在 audioPickArgvWin32 里（三平台分派之后 Windows 那支）。
+    const i = src.indexOf('function audioPickArgvWin32(exe) {')
+    let body = ''
+    if (i >= 0) {
+      let d = 0
+      for (let k = src.indexOf('{', i); k < src.length; k++) {
+        if (src[k] === '{') d++
+        else if (src[k] === '}') { d--; if (d === 0) { body = src.slice(i, k + 1); break } }
+      }
+    }
+    // 脚本数组的第一项必须是 OutputEncoding 那一句
+    const first = (body.match(/const script = \[\s*\n\s*'([^']+)'/) || [])[1] || ''
+    ok('★★ group24 A64: 文件框脚本首句显式设 stdout 为 UTF-8（否则中文路径输出成乱码）',
+      first.indexOf('[Console]::OutputEncoding') !== -1 && first.indexOf('UTF8') !== -1,
+      JSON.stringify({ first }))
+  }
+
+  // ── A65：文件框按平台分派，三平台都有实现 ────────────────────────────────────
+  //
+  // 只有 Windows 那支时，macOS/Linux 上「选择文件」按钮会永远回 `dialog-failed`
+  // —— 用户点一次、弹一句「文件对话框启动失败」，而这是缺实现，不是故障。
+  //
+  // 判据按**命令**而不是按分支名：三个平台各有一个真实可执行文件，
+  // 那是「这条平台真的能弹框」的唯一证据。
+  {
+    const src = readFileSync(join(ROOT, 'index.js'), 'utf8')
+    const need = [
+      "platform === 'win32'", "'powershell'",
+      "platform === 'darwin'", "'osascript'",
+      "platform === 'linux'", "'zenity'", "'kdialog'",
+    ]
+    const missing = need.filter((n) => src.indexOf(n) === -1)
+    ok('★★ group24 A65: 文件框按三平台分派（缺一平台即「点了没反应」）',
+      missing.length === 0, JSON.stringify({ missing }))
+    // macOS 那支必须是 NSOpenPanel 且**选文件不选目录** —— 照抄目录选择器会让
+    // 用户只能选文件夹，而这里的用途是选音频文件。
+    const jxa = (src.match(/const AUDIO_PICK_JXA = `([\s\S]*?)`/) || [])[1] || ''
+    ok('★ group24 A65: macOS 支选文件而非目录（照抄目录选择器会让用户只能选文件夹）',
+      /panel\.canChooseFiles = true/.test(jxa) && /panel\.canChooseDirectories = false/.test(jxa),
+      JSON.stringify({ hasFiles: /canChooseFiles = true/.test(jxa), hasDirs: /canChooseDirectories = false/.test(jxa) }))
+    // Linux 的退出码 1 是取消，不是失败 —— 漏了它每次取消都弹红字。
+    ok('★ group24 A65: Linux 取消（退出码 1）不被当成失败',
+      /cancelCodes: \[1\]/.test(src) && /cmd\.cancelCodes\.indexOf\(code\) === -1/.test(src),
+      JSON.stringify({ hasCancelCodes: /cancelCodes: \[1\]/.test(src) }))
   }
 }
 

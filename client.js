@@ -522,6 +522,9 @@ window.__ModuleLoader__.load({
 			// 自定义音效的 base64 载荷。**按需取**，不进 statusView ——
 			// 那份数据最多 80KB，而 statusView 会被面板反复取。
 			'permgate:notify-sound': ['GET', '/permgate/notify-sound'],
+			// 宿主弹原生文件框、回**原路径**。与上面那条分开：那条读文件内容（播放用），
+			// 这条只拿用户刚选的路径。两者都不写配置。
+			'permgate:notify-pick-sound': ['POST', '/permgate/notify-pick-sound'],
 			// 额外审批策略 + 高风险处置的两维。与上面那条分开：这条**两层都能写**
 			// （项目层可以有一套与全局不同的规则），故 target 由调用方显式给。
 			'permgate:set-auto-policy': ['POST', '/permgate/set-auto-policy'],
@@ -1973,7 +1976,12 @@ window.__ModuleLoader__.load({
 				'panel.notifyCustomClear': '清除',
 				'panel.notifyCustomCleared': '已清除自定义音频',
 				'panel.notifyCustomSaved': '已保存并启用',
-				'panel.notifyCustomHint': '填本机音频文件的完整路径（任意目录，不限工作区）。支持 mp3 / wav 等浏览器能解码的格式，上限 {max} KB。',
+				'panel.notifyCustomHint': '填本机音频文件的完整路径（任意目录，不限工作区），或点「选择文件」直接取路径。支持 mp3 / wav 等浏览器能解码的格式，上限 {max} KB。',
+				'panel.notifyCustomPick': '选择文件',
+				'panel.notifyPickDone': '已填入路径，点「保存」后启用',
+				'panel.notifyPickFailed': '取不到这个文件的路径',
+				'panel.notifyVolumeLabel': '音量',
+				'panel.notifyVolumeMute': '音量为 0 等于关闭本组提示音。',
 				'panel.notifyDenied': '浏览器已拒绝通知权限。需在浏览器的站点设置里重新允许，本页才能弹出通知。',
 				'panel.notifyDefault': '首次打开会请求浏览器授权。',
 				'panel.notifyNeedGesture': '提示音要等你先在本页面点一下或按一下键才会生效（浏览器的自动播放限制）。',
@@ -2523,7 +2531,12 @@ window.__ModuleLoader__.load({
 				'panel.notifyCustomClear': 'Clear',
 				'panel.notifyCustomCleared': 'Custom audio cleared',
 				'panel.notifyCustomSaved': 'Saved and enabled',
-				'panel.notifyCustomHint': 'Full path to an audio file on this machine (any directory). Any format the browser can decode, up to {max} KB.',
+				'panel.notifyCustomHint': 'Full path to an audio file on this machine (any directory), or use "Choose file" to take the path directly. Any format the browser can decode, up to {max} KB.',
+				'panel.notifyCustomPick': 'Choose file',
+				'panel.notifyPickDone': 'Path filled in; click Save to enable it',
+				'panel.notifyPickFailed': 'Cannot obtain the path of that file',
+				'panel.notifyVolumeLabel': 'Volume',
+				'panel.notifyVolumeMute': 'Volume 0 is the same as turning this group\'s sound off.',
 				'panel.notifyDenied': 'The browser has denied notification permission. Allow it in the site settings before this page can raise notifications.',
 				'panel.notifyDefault': 'The browser asks for permission the first time you turn this on.',
 				'panel.notifyNeedGesture': 'Sound starts working after you click or press a key on this page (browser autoplay restriction).',
@@ -3345,13 +3358,28 @@ window.__ModuleLoader__.load({
 			})
 		}
 
+		// 音量归一：配置里的 0-100 → 增益系数 0-1。
+		//
+		// **平方曲线**，不是线性。人耳对响度的感知接近对数，线性增益 50% 听起来仍有
+		// 八成响度 —— 滑块拖到中间几乎没变化，用户会以为滑块坏了。平方后 50% 约
+		// -12dB，听感上才真的「小了一半」。
+		//
+		// 缺键/非数字按 100 处理（与宿主 NOTIFY_DEFAULTS 同向）：读不到音量时应当按
+		// 原响度响，而不是静音 —— 后者会让「提醒没声音」变成一个查不出来的故障。
+		function pgVolumeGain(v) {
+			const n = typeof v === 'number' && Number.isFinite(v) ? v : 100;
+			const clamped = Math.max(0, Math.min(100, n)) / 100;
+			return clamped * clamped;
+		}
+
 		// 播放一段已解码的 AudioBuffer。返回是否真的排进了播放队列。
-		function pgPlayBuffer(ctx, buf, peak) {
+		// `peak` 是基准峰值，`vol` 是 0-100 的用户音量，两者相乘后才是实际增益。
+		function pgPlayBuffer(ctx, buf, peak, vol) {
 			try {
 				const src = ctx.createBufferSource()
 				src.buffer = buf
 				const gain = ctx.createGain()
-				gain.gain.setValueAtTime(peak, ctx.currentTime)
+				gain.gain.setValueAtTime(peak * pgVolumeGain(vol), ctx.currentTime)
 				src.connect(gain)
 				gain.connect(ctx.destination)
 				src.start()
@@ -3365,10 +3393,16 @@ window.__ModuleLoader__.load({
 		// 「尝试过」与「响过了」无法区分，未解锁的静默失败会被当成响过，
 		// 那条审批就永久哑掉（见 pgDispatchDue 的说明）。
 		//
-		// `style` 是音效 id；`customB64` 是自定义音频的 base64（仅 style === 'custom' 时用）。
-		// 两者都由调用方从 status 取，本函数不读全局配置 —— 那样就没法在设置面板里试听。
-		function pgPlayChime(style, customB64) {
+		// `style` 是音效 id；`customB64` 是自定义音频的 base64（仅 style === 'custom' 时用）；
+		// `vol` 是该组的音量 0-100（缺省按 100）。
+		// 三者都由调用方从 status 取，本函数不读全局配置 —— 那样就没法在设置面板里试听。
+		//
+		// **音量 0 时返回 false 且不建任何节点**：合成音的包络用 exponentialRamp，
+		// 峰值 0 会让它抛错（该曲线不能过零），而返回 false 正好与「没响」同义 ——
+		// 调用方据此不把该审批记进已提醒集合，用户把音量调回来后它仍会提醒。
+		function pgPlayChime(style, customB64, vol) {
 			if (!pgAudioUnlocked) return false;
+			if (pgVolumeGain(vol) <= 0) return false;
 			try {
 				const AC = typeof window !== 'undefined' ? (window.AudioContext || window.webkitAudioContext) : null;
 				if (!AC) return false;
@@ -3382,14 +3416,14 @@ window.__ModuleLoader__.load({
 				if (PG_VOICE_SRC[s]) {
 					const cached = pgVoiceCache[s];
 					if (cached === null) return false;          // 已知解不开，别再试
-					if (cached) return pgPlayBuffer(ctx, cached, 0.9);
+					if (cached) return pgPlayBuffer(ctx, cached, 0.9, vol);
 					// 首次：异步解码。**先返回 true** —— 解码失败的概率很低，而
 					// 这里返回 false 会让「已提醒」集合不记，导致同一审批反复重试解码。
 					// 真解码失败时缓存成 null，下一次就不会再响（诚实降级）。
 					pgVoiceCache[s] = 'pending';
 					pgDecodeVoice(ctx, PG_VOICE_SRC[s]).then((buf) => {
 						pgVoiceCache[s] = buf;
-						if (buf) pgPlayBuffer(ctx, buf, 0.9);
+						if (buf) pgPlayBuffer(ctx, buf, 0.9, vol);
 					});
 					return true;
 				}
@@ -3398,12 +3432,12 @@ window.__ModuleLoader__.load({
 					if (!customB64) return false;
 					if (pgCustomCache.key === customB64 && pgCustomCache.buf === null) return false;
 					if (pgCustomCache.key === customB64 && pgCustomCache.buf) {
-						return pgPlayBuffer(ctx, pgCustomCache.buf, 0.9);
+						return pgPlayBuffer(ctx, pgCustomCache.buf, 0.9, vol);
 					}
 					pgCustomCache = { key: customB64, buf: null };
 					pgDecodeVoice(ctx, customB64).then((buf) => {
 						pgCustomCache = { key: customB64, buf: buf };
-						if (buf) pgPlayBuffer(ctx, buf, 0.9);
+						if (buf) pgPlayBuffer(ctx, buf, 0.9, vol);
 					});
 					return true;
 				}
@@ -3418,7 +3452,8 @@ window.__ModuleLoader__.load({
 				// 与第一个音差 33 dB，听感上就是一个音而不是两个。
 				//
 				// 包络两端都收：不淡出会在音尾爆一声「咔」，不淡入则起音过于尖锐。
-				const peak = tone.peak;
+				// 峰值同样乘音量增益 —— 用户调的是「这一组提醒有多响」，不分音效种类。
+				const peak = tone.peak * pgVolumeGain(vol);
 				const attack = 0.02;
 				const release = 0.16;
 				tone.notes.forEach(([hz, at]) => {
@@ -3460,11 +3495,21 @@ window.__ModuleLoader__.load({
 		//     另一组永远轮不到，而它自己又响不了；
 		//   · 调度层据此不为一组全关的窗口排定时器 —— 那种到期点求值后必然不派发，
 		//     而 bg 的默认窗口是 0 秒，排上去就是 0ms 定时器自旋。
+		//
+		// **音量 0 算提示音关闭**：否则这一组每轮都命中却永远发不出声，另一组跟着
+		// 轮不到（见 NOTIFY_DEFAULTS 里 bgVolume 的说明）。判据必须与 pgPlayChime
+		// 的「音量 0 返回 false」同口径 —— 两处不一致就会出现「命中但不响」。
+		function pgGroupSoundOn(c, group) {
+			const on = group === 'bg' ? c.bgSound === true : c.idleSound === true;
+			if (!on) return false;
+			const vol = group === 'bg' ? c.bgVolume : c.idleVolume;
+			return pgVolumeGain(vol) > 0;
+		}
 		function pgGroupOn(cfg, group) {
 			const c = cfg && typeof cfg === 'object' ? cfg : {};
 			return group === 'bg'
-				? (c.bgSound === true || c.bgDesktop === true)
-				: (c.idleSound === true || c.idleDesktop === true);
+				? (pgGroupSoundOn(c, 'bg') || c.bgDesktop === true)
+				: (pgGroupSoundOn(c, 'idle') || c.idleDesktop === true);
 		}
 		// ── 提醒判定的唯一实现：两组判据各算各的，返回「该响的那几条 + 用哪组通道」──
 		//
@@ -3519,7 +3564,8 @@ window.__ModuleLoader__.load({
 			if (!due || !due.entries || !due.entries.length) return;
 			const c = cfg && typeof cfg === 'object' ? cfg : {};
 			const bg = due.group === 'bg';
-			const wantSound = bg ? c.bgSound === true : c.idleSound === true;
+			// 提示音通道是否「真的能响」：开关开着且音量不是 0（见 pgGroupSoundOn）。
+			const wantSound = pgGroupSoundOn(c, bg ? 'bg' : 'idle');
 			const wantDesktop = bg ? c.bgDesktop === true : c.idleDesktop === true;
 			// 两条通道都关时**不记入已提醒集合**：没响过就不算提醒过，
 			// 用户之后打开通道仍应收到这一条。若此时就记进去，那条审批会被永久吞掉。
@@ -3540,8 +3586,9 @@ window.__ModuleLoader__.load({
 			// 两条都试（开关各自独立），任一成功即视为已提醒：
 			// 只开提示音时它必须响；只开桌面通知时它必须弹；两个都开时任一生效即可。
 			//
-			// 音效按**命中组**取（两组各有自己的 style 与 path）。
+			// 音效按**命中组**取（两组各有自己的 style / path / 音量）。
 			const style = bg ? c.bgSoundStyle : c.idleSoundStyle;
+			const vol = bg ? c.bgVolume : c.idleVolume;
 			const shown = wantDesktop ? pgShowNotification(title, body) === true : false;
 			// 自定义音频要异步取（读文件），故「响没响」分两条路径处理：
 			//   · 预设：同步就能知道结果；
@@ -3559,12 +3606,12 @@ window.__ModuleLoader__.load({
 				for (const p of due.entries) PG_ANNOUNCED.add(p.id);
 				const undo = () => { if (!shown) for (const p of due.entries) PG_ANNOUNCED.delete(p.id); };
 				Promise.resolve(loadCustom(bg ? 'bg' : 'idle')).then((b64) => {
-					if (b64 && pgPlayChime('custom', b64) === true) return;
+					if (b64 && pgPlayChime('custom', b64, vol) === true) return;
 					undo();
 				}).catch(undo);
 				return;
 			}
-			const sounded = wantSound ? pgPlayChime(style, null) === true : false;
+			const sounded = wantSound ? pgPlayChime(style, null, vol) === true : false;
 			finish(sounded);
 		}
 		// 一次完整的「求值 + 派发」。三个触发源（新事件 / 可见性变化 / 到期定时器）
@@ -5802,6 +5849,22 @@ window.__ModuleLoader__.load({
 			const [notifyBgPath, setNotifyBgPath] = React.useState('');
 			const [notifyIdleStyle, setNotifyIdleStyle] = React.useState(PG_DEFAULT_SOUND_STYLE);
 			const [notifyIdlePath, setNotifyIdlePath] = React.useState('');
+			// 音量 0-100，两组各一份。初值 100 与宿主 NOTIFY_DEFAULTS 同向 ——
+			// 读不到音量时按原响度响，而不是静音。
+			const [notifyBgVolume, setNotifyBgVolume] = React.useState(100);
+			const [notifyIdleVolume, setNotifyIdleVolume] = React.useState(100);
+			// 「选择文件」用的隐藏 file input。**只在 Desktop 载体下有用途** ——
+			// 那里的 preload 注入 `__DSH_HOST_PATHS__`，能从 File 反查真实路径；
+			// 普通浏览器直接让宿主弹原生对话框，不经过这个 input。
+			//
+			// **每组一个 ref**，不能共用：两组都选中 custom 时会同时渲染两个 input，
+			// 共用一份 ref 时它指向后挂载的那个 —— 点第一组的按钮会打开第二组的
+			// input，路径也写进第二组。
+			//
+			// 放组件层而不是 otherTab 里：otherTab 不得有 hook（hook 数量会随 tab
+			// 变化 → React #310 整页白屏）。
+			const notifyBgFileRef = React.useRef(null);
+			const notifyIdleFileRef = React.useRef(null);
 			const [excCollapsed, setExcCollapsed] = React.useState({});
 			// 长列表的过滤词，三处各一份、**按 tab 分开**（与 excCollapsed 同构）：
 			//   quick  —— 快捷工具（一份，不分 tab：它是同一份列表，只是取值按层）
@@ -6275,6 +6338,10 @@ window.__ModuleLoader__.load({
 				setNotifyBgPath(pgStr(nt.bgSoundPath, ''));
 				setNotifyIdleStyle(pgStr(nt.idleSoundStyle, pgStr(nt.defaults && nt.defaults.idleSoundStyle, PG_DEFAULT_SOUND_STYLE)));
 				setNotifyIdlePath(pgStr(nt.idleSoundPath, ''));
+				// 音量：缺键/非数字回落 100（与宿主 NOTIFY_DEFAULTS 同向），
+				// 越界值由宿主钳制过，这里只做「是不是数」的判断。
+				setNotifyBgVolume(typeof nt.bgVolume === 'number' && Number.isFinite(nt.bgVolume) ? nt.bgVolume : 100);
+				setNotifyIdleVolume(typeof nt.idleVolume === 'number' && Number.isFinite(nt.idleVolume) ? nt.idleVolume : 100);
 			};
 
 			const refresh = () => {
@@ -8395,7 +8462,7 @@ window.__ModuleLoader__.load({
 						setMsg(T('panel.notifyDenied'));
 					}
 				};
-				// `grp` 决定试听用哪一组的音效 —— 两组各有自己的 style/path。
+				// `grp` 决定试听用哪一组的音效 —— 两组各有自己的 style/path/volume。
 				const toggleSound = (cur, setLocal, key, grp) => {
 					const next = !cur;
 					setLocal(next);
@@ -8405,12 +8472,13 @@ window.__ModuleLoader__.load({
 					if (!next) return;
 					const g = grp === 'idle' ? 'idle' : 'bg';
 					const style = g === 'idle' ? notifyIdleStyle : notifyBgStyle;
+					const vol = g === 'idle' ? notifyIdleVolume : notifyBgVolume;
 					if (style === 'custom') {
 						call('permgate:notify-sound', { group: g }).then((r) => {
-							if (r && r.ok === true && typeof r.data === 'string') pgPlayChime('custom', r.data);
+							if (r && r.ok === true && typeof r.data === 'string') pgPlayChime('custom', r.data, vol);
 							else if (r && r.error) setMsg(String(r.error));
 						}).catch(() => {});
-					} else pgPlayChime(style, null);
+					} else pgPlayChime(style, null, vol);
 				};
 				const toggleRow = (labelKey, hintKey, checked, onChange) => React.createElement('div', { style: { marginTop: 6 } },
 					React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' } },
@@ -8514,13 +8582,32 @@ window.__ModuleLoader__.load({
 				// 常驻显示会让界面看起来像「音效 + 文件」两个并列设置，而实际只有一个。
 				const soundPicker = (grp) => {
 					const styles = Array.isArray(nt.soundStyles) && nt.soundStyles.length ? nt.soundStyles : [PG_DEFAULT_SOUND_STYLE];
-					const maxBytes = typeof nt.customMaxBytes === 'number' && nt.customMaxBytes > 0 ? nt.customMaxBytes : 61440;
+					const maxBytes = typeof nt.customMaxBytes === 'number' && nt.customMaxBytes > 0 ? nt.customMaxBytes : 5242880;
 					const style = grp === 'bg' ? notifyBgStyle : notifyIdleStyle;
 					const path = grp === 'bg' ? notifyBgPath : notifyIdlePath;
+					const volume = grp === 'bg' ? notifyBgVolume : notifyIdleVolume;
 					const setStyle = grp === 'bg' ? setNotifyBgStyle : setNotifyIdleStyle;
 					const setPath = grp === 'bg' ? setNotifyBgPath : setNotifyIdlePath;
+					const setVolume = grp === 'bg' ? setNotifyBgVolume : setNotifyIdleVolume;
 					const styleKey = grp + 'SoundStyle';
 					const pathKey = grp + 'SoundPath';
+					const volumeKey = grp + 'Volume';
+					// 音量落盘。只在松手/按键抬起时调 —— 拖动时每个像素都触发 onChange，
+					// 逐次写盘就是一次拖动几十个请求，而宿主每次都要重写整份 config.json。
+					//
+					// 比较基准是**宿主下发的生效值**，不是上面那个 `volume`（当前渲染值）：
+					// 拖动时 onChange 已经把 volume 改成新值，等松手时两者恒等，用它比较
+					// 会让滑块永远提交不了 —— 面板显示新值、磁盘上还是旧值。
+					//
+					// 值没变就不提交：range 上点一下也会触发 mouseup，那一次的值往往与原值
+					// 相同，而它会让 `explicit` 里凭空多一个「用户设过」的键。
+					const savedVolume = grp === 'bg'
+						? (typeof nt.effective === 'object' && nt.effective ? nt.effective.bgVolume : undefined)
+						: (typeof nt.effective === 'object' && nt.effective ? nt.effective.idleVolume : undefined);
+					const commitVolume = (v) => {
+						if (!Number.isFinite(v) || v === savedVolume) return;
+						save(volumeKey, v);
+					};
 					// 从宿主取该组自定义音频的 base64（按需，按「组+路径」缓存）。
 					const fetchSound = () => {
 						const cacheKey = grp + ':' + String(path || '');
@@ -8537,10 +8624,11 @@ window.__ModuleLoader__.load({
 							return null;
 						}).catch(() => null);
 					};
-					// 试听当前选中的音效。
+					// 试听当前选中的音效。用**当前滑块的值**，不必先保存 ——
+					// 试听就是用来决定这个值该调到哪的，要求先落盘再试会让人来回点。
 					const preview = () => {
-						if (style === 'custom') fetchSound().then((b64) => { if (b64) pgPlayChime('custom', b64); });
-						else pgPlayChime(style, null);
+						if (style === 'custom') fetchSound().then((b64) => { if (b64) pgPlayChime('custom', b64, volume); });
+						else pgPlayChime(style, null, volume);
 					};
 					// 切换音效：先本地生效（试听要立刻反映选择），再写盘。
 					const pick = (v) => {
@@ -8557,10 +8645,10 @@ window.__ModuleLoader__.load({
 								if (r && r.ok === true && typeof r.data === 'string') {
 									pgCustomB64 = r.data;
 									pgCustomKey = grp + ':' + String(path || '');
-									pgPlayChime('custom', r.data);
+									pgPlayChime('custom', r.data, volume);
 								} else if (r && r.error) setMsg(String(r.error));
 							}).catch(() => {});
-						} else pgPlayChime(v, null);
+						} else pgPlayChime(v, null, volume);
 					};
 					// 清除该组的自定义音频：路径置空 + 音效回落默认，两件事必须一起提交。
 					//
@@ -8591,6 +8679,58 @@ window.__ModuleLoader__.load({
 							setMsg(T('panel.notifyCustomSaved'));
 						});
 					};
+					// 选文件：**拿原路径**，不复制副本。
+					//
+					// 两条路，按载体分：
+					//   · Desktop —— preload 注入了 `__DSH_HOST_PATHS__.pathFor(file)`，
+					//     它能从 File 对象反查出真实路径（Electron 的 webUtils 能力）；
+					//   · 普通浏览器 —— 页面拿不到路径，但**宿主**能：调
+					//     `notify-pick-sound` 让宿主弹系统对话框，回来的是原路径。
+					//
+					// 为什么不是「读成 base64 交给宿主存一份」：那存下来的是副本，
+					// 用户之后改原文件、或者删掉它，面板里那个路径就指向一份他不知道的拷贝。
+					// 用户要的是「我那个文件」，不是「它的一份快照」。
+					const pickFile = () => {
+						const bridge = typeof window !== 'undefined' ? window.__DSH_HOST_PATHS__ : null;
+						// Desktop：借一个隐藏 file input 拿到 File，再问桥要路径。
+						if (bridge && typeof bridge.pathFor === 'function') {
+							const ref = grp === 'bg' ? notifyBgFileRef : notifyIdleFileRef;
+							if (ref.current) ref.current.click();
+							return;
+						}
+						// Web：宿主弹原生对话框。
+						setBusy(true);
+						setMsg('');
+						call('permgate:notify-pick-sound', {})
+							.then((r) => {
+								if (!r || r.ok !== true) {
+									// `remote` 是「这个按钮在你那里用不了」，不是故障，
+									// 但仍然要说出来 —— 静默无反应是最难查的形态。
+									setMsg(String((r && r.error) || T('panel.notifyPickFailed')));
+									return;
+								}
+								// `path: null` = 用户取消，正常动作，不提示。
+								if (typeof r.path !== 'string' || !r.path) return;
+								setPath(r.path);
+								pgCustomB64 = null;
+								pgCustomKey = '';
+								setMsg(T('panel.notifyPickDone'));
+							})
+							.catch((e) => setMsg(String((e && e.message) || e)))
+							.then(() => setBusy(false));
+					};
+					// Desktop 那条路的收尾：File 已选中，取路径填进输入框。
+					const onFilePicked = (file) => {
+						if (!file) return;
+						const bridge = typeof window !== 'undefined' ? window.__DSH_HOST_PATHS__ : null;
+						let p = '';
+						try { p = bridge && typeof bridge.pathFor === 'function' ? String(bridge.pathFor(file) || '') : ''; } catch (e) { p = ''; }
+						if (!p) { setMsg(T('panel.notifyPickFailed')); return; }
+						setPath(p);
+						pgCustomB64 = null;
+						pgCustomKey = '';
+						setMsg(T('panel.notifyPickDone'));
+					};
 					return React.createElement('div', { style: { marginTop: 8 } },
 						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 } },
 							React.createElement('span', { style: { minWidth: 60, color: 'rgba(128,128,128,0.9)', fontSize: 12 } }, T('panel.notifySoundStyleLabel')),
@@ -8609,6 +8749,36 @@ window.__ModuleLoader__.load({
 							),
 							React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: preview }, T('panel.notifyPreview')),
 						),
+						// ── 音量 ────────────────────────────────────────────────────────
+						// 用 range 而不是数字输入框：音量是「试出来的」而不是「算出来的」，
+						// 边拖边听（配合上面的试听）才有意义。
+						//
+						// 提交时机是**松手**（onMouseUp / onTouchEnd / onKeyUp），不是 onChange：
+						// range 拖动时每个像素都触发 onChange，一次拖动就是几十次写盘。
+						// 显示值仍随 onChange 走（拖动时数字要动），落盘只在松手时发生。
+						React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 6, fontSize: 12 } },
+							React.createElement('span', { style: { minWidth: 60, color: 'rgba(128,128,128,0.9)' } }, T('panel.notifyVolumeLabel')),
+							React.createElement('input', {
+								type: 'range',
+								min: 0,
+								max: 100,
+								step: 1,
+								style: { width: 160 },
+								value: volume,
+								disabled: busy,
+								onChange: (e) => setVolume(Number(e.target.value)),
+								// 松手才提交。三个事件都接：鼠标、触摸、键盘方向键
+								// （键盘没有 mouseup，只有 keyup）。
+								onMouseUp: (e) => commitVolume(Number(e.target.value)),
+								onTouchEnd: (e) => commitVolume(Number(e.target.value)),
+								onKeyUp: (e) => commitVolume(Number(e.target.value)),
+							}),
+							React.createElement('span', { style: { minWidth: 34, color: 'rgba(128,128,128,0.9)' } }, volume + '%'),
+						),
+						// 音量 0 与关掉提示音等价 —— 说清楚，否则用户会以为「0% 仍然会响」。
+						volume === 0
+							? React.createElement('div', { style: { fontSize: 11, color: '#bf8700', marginTop: 2 } }, T('panel.notifyVolumeMute'))
+							: null,
 						// 路径输入**只在选中 custom 时出现** —— 它是那个选项的参数，不是并列设置。
 						style === 'custom'
 							? React.createElement('div', { style: { marginTop: 6, fontSize: 12 } },
@@ -8624,6 +8794,26 @@ window.__ModuleLoader__.load({
 										onChange: (e) => setPath(e.target.value),
 										// 回车即保存：填路径通常一次到位，不必再去点按钮。
 										onKeyDown: (e) => { if (e.key === 'Enter') savePath(); },
+									}),
+									// 选文件：拿**原路径**填进输入框（见 pickFile 的两条路）。
+									// 原生 file input 隐藏起来由按钮触发 —— 它的「未选择文件」
+									// 文案与语言/主题都不受控。
+									React.createElement('button', {
+										className: 'pg-btn',
+										disabled: busy,
+										onClick: pickFile,
+									}, T('panel.notifyCustomPick')),
+									React.createElement('input', {
+										ref: grp === 'bg' ? notifyBgFileRef : notifyIdleFileRef,
+										type: 'file',
+										accept: 'audio/*',
+										style: { display: 'none' },
+										onChange: (e) => {
+											onFilePicked(e.target.files && e.target.files[0]);
+											// 清空 value：否则选中同一个文件不会再触发 onChange
+											// （用户改完文件回来重选同一个是常见动作）。
+											e.target.value = '';
+										},
 									}),
 									React.createElement('button', { className: 'pg-btn', disabled: busy, onClick: savePath }, T('panel.notifyCustomSave')),
 									path

@@ -4874,6 +4874,14 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   //   · idle：从**审批入池**那一刻（`pgIdleWait`）。
   // 判据走**真实求值**：把 pgDueNow 抽出来，喂各种时间组合，看命中组对不对。
   const notifyWaitSource = (grabFn) => [grabFn('function pgNotifyElapsed('), grabFn('function pgIdleWait(')].join('\n')
+  // 判据/派发用到的两个纯函数依赖。pgDueNow 与 pgDispatchDue 都经 pgGroupOn →
+  // pgGroupSoundOn → pgVolumeGain 判断「这一组的提示音能不能响」，三者必须一起抽出来，
+  // 少一个就是 ReferenceError（而 new Function 里的 ReferenceError 只会让断言静默返回 false）。
+  const notifyGateSource = (grabFn) => [
+    grabFn('function pgVolumeGain(v) {'),
+    grabFn('function pgGroupSoundOn(c, group) {'),
+    grabFn('function pgGroupOn(cfg, group) {'),
+  ].join('\n')
   ok('★★ 两组判据各自成立且计时起点不同（bg 看后台时长、idle 看审批年龄）', (function () {
     const grabFn = (sig) => {
       const i = cli.indexOf(sig)
@@ -4886,7 +4894,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       return ''
     }
     const dueSrc = grabFn('function pgDueNow(allPending, cfg, env) {')
-    const groupSrc = grabFn('function pgGroupOn(cfg, group) {')
+    const groupSrc = notifyGateSource(grabFn)
     if (!dueSrc || !groupSrc) return false
     let f = null
     try {
@@ -4936,7 +4944,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     }
     const dueSrc = grabFn('function pgDueNow(allPending, cfg, env) {')
     const dispSrc = grabFn('function pgDispatchDue(due, cfg, loadCustom) {')
-    const groupSrc = grabFn('function pgGroupOn(cfg, group) {')
+    const groupSrc = notifyGateSource(grabFn)
     if (!dueSrc || !dispSrc || !groupSrc) return false
     const announced = new Set()
     let due = null
@@ -4990,7 +4998,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     try {
       // 桩返回 true = 「真的响了」，见上一条对桩的说明。
       f = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
-        dispSrc + '\n; return pgDispatchDue;')(announced, null, (k) => k, () => true, () => false)
+        [notifyGateSource(grabFn), dispSrc, 'return pgDispatchDue;'].join('\n'))(announced, null, (k) => k, () => true, () => false)
     } catch (e) { return false }
     const due = { group: 'bg', entries: [{ id: 'a', tool: 'x' }] }
     // 全关：不记集合
@@ -5007,6 +5015,16 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
   // 若此时仍记进 PG_ANNOUNCED，那条审批会被永久标记成已提醒 —— 用户之后解锁了
   // 也再不会响，而他完全看不出原因（面板上开关是开的）。
   ok('★★ 通道尝试但没响时不记已提醒（未解锁/未授权不得吞掉审批）', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
     const i = cli.indexOf('function pgDispatchDue(due, cfg, loadCustom) {')
     if (i < 0) return false
     let d = 0
@@ -5020,13 +5038,13 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     // 音效参数从 `c.soundStyle` 取（两组共用），自定义音频走 `pgCustomB64`。
     // 判据必须看返回值，不能只看调用：`pgPlayChime(...)` 这种写法区分不出响没响。
     // 音效按**命中组**取（`bgSoundStyle` / `idleSoundStyle`），两组各有自己的键。
-    if (!/pgPlayChime\(style, null\) === true/.test(body)) return false
+    if (!/pgPlayChime\(style, null, vol\) === true/.test(body)) return false
     if (!/pgShowNotification\(title, body\) === true/.test(body)) return false
     // 真实执行：通道返回 false 时集合必须保持空
     const mkDispatch = (announcedSet, soundResult, desktopResult) => {
       try {
         return new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
-          body + '\n; return pgDispatchDue;')(
+          [notifyGateSource(grabFn), body, 'return pgDispatchDue;'].join('\n'))(
           announcedSet, null, (k) => k, () => soundResult, () => desktopResult)
       } catch (e) { return null }
     }
@@ -5042,11 +5060,61 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     f1({ group: 'idle', entries: [{ id: 'b', tool: 'x' }] }, { idleSound: true, idleDesktop: true })
     return one.has('b')
   })())
+  // ⑬c 音量 0 = 提示音通道关闭：不得派发、不得记已提醒。
+  //
+  // 这条防的是「静音吞掉审批」：音量 0 时若照样派发并记集合，用户把音量调回来
+  // 那条审批已经算「响过了」，永远不会再提醒 —— 而他完全看不出原因。
+  // 判据必须与 pgPlayChime 的「音量 0 返回 false」同口径，故这里真实求值两处。
+  ok('★★ 音量 0 等同关闭提示音：不派发、不记已提醒', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
+    const dispSrc = grabFn('function pgDispatchDue(due, cfg, loadCustom) {')
+    if (!dispSrc) return false
+    const announced = new Set()
+    const played = []
+    let f = null
+    try {
+      f = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+        [notifyGateSource(grabFn), dispSrc, 'return pgDispatchDue;'].join('\n'))(
+        announced, null, (k) => k, () => { played.push(1); return true }, () => false)
+    } catch (e) { return false }
+    // 音量 0、桌面通道关 → 一条通道都没有，不得派发
+    f({ group: 'idle', entries: [{ id: 'a', tool: 'x' }] }, { idleSound: true, idleVolume: 0, idleDesktop: false })
+    if (played.length !== 0 || announced.size !== 0) return false
+    // 音量 0 但桌面通道开着 → 仍然要弹通知（0 只关提示音，不关整组）
+    const f2Ann = new Set()
+    let f2 = null
+    try {
+      f2 = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
+        [notifyGateSource(grabFn), dispSrc, 'return pgDispatchDue;'].join('\n'))(
+        f2Ann, null, (k) => k, () => { throw new Error('音量 0 不应尝试播放') }, () => true)
+    } catch (e) { return false }
+    f2({ group: 'idle', entries: [{ id: 'b', tool: 'x' }] }, { idleSound: true, idleVolume: 0, idleDesktop: true })
+    return f2Ann.has('b')
+  })())
   // ⑭ 派发按**命中组**选通道，不得混用两组的开关。
   //
   // 混用的形态：`if (cfg.sound)` —— 那是旧版单组时代的键，在新结构下恒为 undefined，
   // 表现为「两组都开着却永远不响」。故必须逐组取键。
   ok('★ 派发按命中组选通道（bg 用 bgSound/bgDesktop，idle 用 idleSound/idleDesktop）', (function () {
+    const grabFn = (sig) => {
+      const i = cli.indexOf(sig)
+      if (i < 0) return ''
+      let d = 0
+      for (let k = cli.indexOf('{', i); k < cli.length; k++) {
+        if (cli[k] === '{') d++
+        else if (cli[k] === '}') { d--; if (d === 0) return cli.slice(i, k + 1) }
+      }
+      return ''
+    }
     const i = cli.indexOf('function pgDispatchDue(due, cfg, loadCustom) {')
     if (i < 0) return false
     let d = 0
@@ -5056,8 +5124,13 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       else if (cli[k] === '}') { d--; if (d === 0) { body = cli.slice(i, k + 1); break } }
     }
     if (!body) return false
+    // 开关的**读取点**是 pgGroupSoundOn（提示音）与 pgDispatchDue 里的桌面键。
+    // 前者是单一判据：判据层与派发层必须同口径，否则会出现「命中但不响」的组。
+    if (body.indexOf('pgGroupSoundOn(c, bg') === -1) return false
+    const gateSrc = grabFn('function pgGroupSoundOn(c, group) {')
+    if (!gateSrc) return false
     for (const need of ['c.bgSound === true', 'c.bgDesktop === true', 'c.idleSound === true', 'c.idleDesktop === true']) {
-      if (body.indexOf(need) === -1) return false
+      if (body.indexOf(need) === -1 && gateSrc.indexOf(need) === -1) return false
     }
     // 真实执行：bg 组的开关不得影响 idle 组
     const announced = new Set()
@@ -5065,7 +5138,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     let f = null
     try {
       f = new Function('PG_ANNOUNCED', 'pgCustomB64', 'T', 'pgPlayChime', 'pgShowNotification',
-        body + '\n; return pgDispatchDue;')(announced, null, (k) => k, () => { played.push(1); return true }, () => false)
+        [notifyGateSource(grabFn), body, 'return pgDispatchDue;'].join('\n'))(announced, null, (k) => k, () => { played.push(1); return true }, () => false)
     } catch (e) { return false }
     // bgSound 关、idleSound 开 → idle 组命中时仍要响
     f({ group: 'idle', entries: [{ id: 'a', tool: 'x' }] }, { bgSound: false, idleSound: true })
@@ -5339,8 +5412,9 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
       return ''
     }
     const tonesSrc = pick('const PG_TONES = {')
-    const chimeSrc = pick('function pgPlayChime(style, customB64) {')
-    if (!tonesSrc || !chimeSrc) return false
+    const chimeSrc = pick('function pgPlayChime(style, customB64, vol) {')
+    const gainSrc = pick('function pgVolumeGain(v) {')
+    if (!tonesSrc || !chimeSrc || !gainSrc) return false
     // 桩：记录每个 gain 节点收到的包络关键点，以及每个 osc 接到了哪个 gain
     const gains = []
     const oscs = []
@@ -5371,7 +5445,7 @@ group('12b. 第四档 auto 的面板契约（文案 / 颜色 / 回落值选择�
     try {
       const fn = new Function('window', 'pgAudioUnlocked', 'pgAudioCtx', 'PG_VOICE_SRC', 'pgVoiceCache',
         'pgCustomCache', 'pgDecodeVoice', 'pgPlayBuffer',
-        tonesSrc + '\n' + chimeSrc + '\n; return pgPlayChime;')(
+        tonesSrc + '\n' + gainSrc + '\n' + chimeSrc + '\n; return pgPlayChime;')(
         { AudioContext: function () { return mkCtx() } }, true, null, {}, {}, { key: '', buf: null },
         () => Promise.resolve(null), () => true)
       // 逐个预设跑一遍：每个音都必须落到**自己的** gain 上，且该 gain 的峰值 = tone.peak
@@ -11186,7 +11260,11 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     let out = null
     try {
       let loaded = null
-      new Function('window', cli)({ __ModuleLoader__: { load: (m) => { loaded = m } } })
+      // 命名的 window 桩（不是字面量）：断言要往它上面挂 `__DSH_HOST_PATHS__`
+      // 模拟 Desktop 载体，而挂到 globalThis.window 上没用 —— 客户端闭包捕获的是
+      // **这里传进去的那个对象**。
+      const pgWin = { __ModuleLoader__: { load: (m) => { loaded = m } } }
+      new Function('window', cli)(pgWin)
       if (!loaded || typeof loaded.factory !== 'function') throw new Error('未捕获到 factory')
       // React 桩：useState 有状态、useEffect 收集起来由外部按拍执行（真实 React 在渲染后跑）。
       //
@@ -11262,14 +11340,21 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
             idleSound: true, idleDesktop: false, idleDelaySec: 10,
             bgSoundStyle: 'custom', bgSoundPath: 'D:/a.mp3',
             idleSoundStyle: 'deepdeep', idleSoundPath: '',
+            // 两组音量也**刻意不同**：都一样时分不出「按组读键」与「两组共用一份」。
+            // 30 还是个非默认值 —— 默认值相同的话，读错键也量不出来。
+            bgVolume: 30, idleVolume: 80,
           },
           defaults: {
             bgSound: true, bgDesktop: false, bgDelaySec: 0,
             idleSound: true, idleDesktop: false, idleDelaySec: 10,
             bgSoundStyle: 'triple', bgSoundPath: '',
             idleSoundStyle: 'triple', idleSoundPath: '',
+            bgVolume: 100, idleVolume: 100,
           },
-          ranges: { bgDelaySec: { min: 0, max: 3600 }, idleDelaySec: { min: 0, max: 3600 } },
+          ranges: {
+            bgDelaySec: { min: 0, max: 3600 }, idleDelaySec: { min: 0, max: 3600 },
+            bgVolume: { min: 0, max: 100 }, idleVolume: { min: 0, max: 100 },
+          },
           soundStyles: ['chime', 'single', 'triple', 'low', 'deepdeep', 'jingjing'],
           customMaxBytes: 61440,
           explicit: ['bgSoundStyle', 'bgSoundPath'],
@@ -11285,6 +11370,21 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
           payload = [{ id: 'p1', tool: 'pwsh', reason: '执行命令', ts: Date.now(), args: '{"command":"rmdir /s /q B:\\\\"}', intent: '执行命令', candidates: [{ id: 'c1', label: 'rmdir /s /q B:\\', value: 'rmdir /s /q B:\\', kind: 'command', writes: [], hint: '仅放行这一条命令本身' }], argLines: [{ label: '命令', value: 'rmdir /s /q B:\\' }], hasDiff: false, projRoot: 'X:/ws', sessionId: 's1', sessionTitle: null, cat: 'command', deadline: null, onTimeout: null, note: null, blast: { level: 'drive-root', path: 'B:' } }]
         } else if (u.indexOf('/permgate/status') !== -1) {
           payload = statusFixture
+        } else if (u.indexOf('/permgate/set-notify') !== -1) {
+          // 真实宿主对这条路由回**整份 statusView**（见 index.js 的 set-notify 分支），
+          // 面板的 invoke 会拿它 applyStatus 回填。桩若回 `{}`，回填就会把 notify 的
+          // 开关全部清成 false —— 后续断言量到的「开关关着所以没有控件」是桩造成的，
+          // 不是被测行为。这里按真实形状回，并在 effective 里合并这次提交的字段。
+          const sent = opts && opts.body ? JSON.parse(opts.body) : {}
+          const eff = Object.assign({}, statusFixture.notify.effective)
+          for (const k of Object.keys(sent)) {
+            if (k === 'lang' || k === 'sessionId' || k === 'target') continue
+            if (sent[k] === null) eff[k] = ''
+            else eff[k] = sent[k]
+          }
+          payload = Object.assign({}, statusFixture, {
+            notify: Object.assign({}, statusFixture.notify, { effective: eff }),
+          })
         }
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload), text: () => Promise.resolve('') })
       }
@@ -11318,7 +11418,7 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
       // 三拍：首渲染 → 跑 effect（发 status 请求）→ 等 resolve → 用同一组 state 重渲染。
       renderComp(PanelComp, { sessionId: 'sess-1' })
       for (const fn of effects) { try { fn() } catch (e) {} }
-      out = { calls: calls, Panel: PanelComp, Overlay: OverlayComp, renderComp: renderComp, effects: effects }
+      out = { calls: calls, Panel: PanelComp, Overlay: OverlayComp, renderComp: renderComp, effects: effects, win: pgWin }
     } catch (e) { rErr = e }
     ok('★★ 设置面板可真实渲染（无渲染期异常；排序控件真的渲染出来）', rErr === null,
       rErr ? (rErr.name + ': ' + rErr.message) : '')
@@ -11666,6 +11766,160 @@ group('26. 会话记录的编码（recordedEncoding）：edit/insert/write 的�
     ok('★★ 路径输入框只在选中自定义音频时出现（两组不同取值 → 只有一个，且值来自该组）',
       oErr === null && res.paths === 1 && res.pathVals[0] === 'D:/a.mp3',
       JSON.stringify({ err: oErr && oErr.message, n: res && res.paths, v: res && res.pathVals }))
+    // ── 音量滑块：两组各一个、各读自己的键、松手才提交 ──────────────────────────
+    //
+    // 必须渲染级，且必须**真的触发一次拖动**：`onChange` 改本地值 + 松手提交这套写法
+    // 里，最容易错的是「提交判据拿当前渲染值做比较」—— 拖动时 onChange 已经把它改成
+    // 新值，松手时两者恒等，于是永远不提交。源码怎么看都对，只有跑一遍才看得见。
+    //
+    // 必须在「清除」**之前**跑：清除会把第一组音效回落成预设，而滑块渲染在
+    // `o.soundCur ? o.soundPicker() : null` 里 —— 那次 invoke 的响应回填状态后
+    // 提示音开关归 false，滑块随之不再渲染（那是正确行为，不是本段要钉的东西）。
+    //
+    // 拖动只改音量、不改音效与路径，故不会影响后面清除断言量到的 custom 组。
+    {
+      let vErr = null
+      let vRes = null
+      try {
+        const walkV = (n, acc) => {
+          if (!n || typeof n !== 'object') return acc
+          acc.push(n)
+          for (const k of n.kids || []) walkV(k, acc)
+          if (n.props && n.props.children) walkV(n.props.children, acc)
+          return acc
+        }
+        const treeV = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const ranges = walkV(treeV, []).filter((n) => n.type === 'input' && n.props && n.props.type === 'range')
+        // ① 两个滑块，值分别是 fixture 里那两组的音量（30 / 80）
+        const vals = ranges.map((r) => r.props.value)
+        // ② 在第一个滑块上拖到 55：先 onChange（改本地值），再 mouseup（提交）
+        out.calls.length = 0
+        if (ranges[0]) {
+          ranges[0].props.onChange({ target: { value: '55' } })
+          // onChange 之后重新渲染，松手事件要打在**新渲染出来的**那个滑块上 ——
+          // 与真实浏览器一致（React 每次 onChange 后都会重渲染）。
+          const treeV2 = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+          const r2 = walkV(treeV2, []).filter((n) => n.type === 'input' && n.props && n.props.type === 'range')
+          if (r2[0]) r2[0].props.onMouseUp({ target: { value: '55' } })
+        }
+        await new Promise((r) => setTimeout(r, 40))
+        const sentV = out.calls.find((c) => c.url.indexOf('/permgate/set-notify') !== -1)
+        // ③ 在**同一位置**再点一次（onChange 给同值 + mouseup）：生效值已是 55，
+        // 这次不该提交 —— range 上点一下也会触发 mouseup，逐次提交会让 explicit
+        // 里凭空多一个「用户设过」的键。
+        out.calls.length = 0
+        const treeV3 = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const r3 = walkV(treeV3, []).filter((n) => n.type === 'input' && n.props && n.props.type === 'range')
+        if (r3[0]) { r3[0].props.onChange({ target: { value: '55' } }); r3[0].props.onMouseUp({ target: { value: '55' } }) }
+        await new Promise((r) => setTimeout(r, 40))
+        const sentSame = out.calls.find((c) => c.url.indexOf('/permgate/set-notify') !== -1)
+        vRes = {
+          n: ranges.length, vals,
+          body: sentV && sentV.body, same: sentSame && sentSame.body,
+        }
+      } catch (e) { vErr = e }
+      ok('★★ 两组音量滑块各读自己的键，拖动松手后提交该组的新值',
+        vErr === null && vRes.n === 2 && vRes.vals[0] === 30 && vRes.vals[1] === 80
+        && !!vRes.body && vRes.body.bgVolume === 55 && !('idleVolume' in vRes.body),
+        JSON.stringify({ err: vErr && vErr.message, n: vRes && vRes.n, vals: vRes && vRes.vals, body: vRes && vRes.body }))
+      ok('★ 音量拖回原值时不提交（避免 explicit 里凭空多一个键）',
+        vErr === null && !vRes.same,
+        JSON.stringify({ err: vErr && vErr.message, same: vRes && vRes.same }))
+    }
+    // ── 「选择文件」：两组各一个按钮、各触发**自己的** input、取的是原路径 ────────
+    //
+    // 三个失效形态都不会报错，只有真跑一遍才看得见：
+    //   · 两组共用一个 ref → 点第一组打开的是第二组的 input，路径写错组；
+    //   · 按钮渲染了但 onClick 没接 ref → 点了毫无反应；
+    //   · 走 base64 上传而不是取路径 → 存下来的是副本，用户改原文件时它不再跟随。
+    // 第三条用判据钉：请求体里**不得有 data 字段**，且路径必须来自 `pathFor`。
+    {
+      let kErr = null
+      let kRes = null
+      try {
+        const walkK = (n, acc) => {
+          if (!n || typeof n !== 'object') return acc
+          acc.push(n)
+          for (const k of n.kids || []) walkK(k, acc)
+          if (n.props && n.props.children) walkK(n.props.children, acc)
+          return acc
+        }
+        // 让两组都选中 custom，才会同时渲染两个 input —— 共用 ref 的缺陷只在
+        // 「两个都存在」时暴露（只渲染一个时它总是对的）。
+        //
+        // 桥必须在**取树之前**装好：pickFile 在渲染期读 `window.__DSH_HOST_PATHS__`，
+        // 而渲染出的 onClick 闭包捕获的是那一刻的 window —— 装晚了它会走 Web 分支
+        // （调宿主弹框），hits 恒为 0，这条断言就变成在测另一条路。
+        let bridgeCalls = 0
+        const winK = out.win
+        const prevBridge = winK ? winK.__DSH_HOST_PATHS__ : undefined
+        if (winK) {
+          winK.__DSH_HOST_PATHS__ = {
+            pathFor: () => { bridgeCalls += 1; return 'D:/music/tone.mp3' },
+          }
+        }
+        out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        // 先把第二组切到 custom（fixture 里它是 deepdeep）：共用 ref 的缺陷只有
+        // 在两组都渲染出 file input 时才可观察 —— 只渲染一个时它必然是对的。
+        const treePre = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const selsPre = walkK(treePre, []).filter((n) => n.type === 'select')
+        if (selsPre[1] && selsPre[1].props.onChange) selsPre[1].props.onChange({ target: { value: 'custom' } })
+        await new Promise((r) => setTimeout(r, 40))
+        const treeK = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const nodesK = walkK(treeK, [])
+        const fileInputs = nodesK.filter((n) => n.type === 'input' && n.props && n.props.type === 'file')
+        const pickBtns = nodesK.filter((n) => n.type === 'button' && (n.kids || [])[0] === 'panel.notifyCustomPick')
+        // 每个 input 各自记一个 click 计数器，点第 i 个按钮后只有第 i 个 +1
+        const hits = fileInputs.map(() => 0)
+        fileInputs.forEach((fi, i) => {
+          if (fi.props.ref && typeof fi.props.ref === 'object') {
+            fi.props.ref.current = { click: () => { hits[i] += 1 } }
+          }
+        })
+        pickBtns.forEach((b) => { if (b && b.props && b.props.onClick) b.props.onClick() })
+        out.calls.length = 0
+        if (fileInputs[0]) {
+          fileInputs[0].props.onChange({ target: { value: 'C:\\fakepath\\tone.mp3', files: [{ name: 'tone.mp3' }] } })
+        }
+        await new Promise((r) => setTimeout(r, 40))
+        if (winK) {
+          if (prevBridge === undefined) delete winK.__DSH_HOST_PATHS__
+          else winK.__DSH_HOST_PATHS__ = prevBridge
+        }
+        // 路径填进输入框后，再点该组的「保存」，看提交的是不是那条原路径
+        const treeK2 = out.renderComp(out.Panel, { sessionId: 'sess-1' })
+        const nodesK2 = walkK(treeK2, [])
+        const pathInputs2 = nodesK2.filter((n) => n.type === 'input' && n.props
+          && n.props.placeholder === 'panel.notifyCustomPathPh')
+        const saveBtn = nodesK2.find((n) => n.type === 'button'
+          && (n.kids || [])[0] === 'panel.notifyCustomSave')
+        out.calls.length = 0
+        if (saveBtn) saveBtn.props.onClick()
+        await new Promise((r) => setTimeout(r, 40))
+        const sentK = out.calls.find((c) => c.url.indexOf('/permgate/set-notify') !== -1)
+        kRes = {
+          inputs: fileInputs.length,
+          btns: pickBtns.length,
+          hits,
+          bridgeCalls,
+          pathVals: pathInputs2.map((i) => i.props.value),
+          body: sentK && sentK.body,
+        }
+      } catch (e) { kErr = e }
+      ok('★★ 两组「选择文件」各触发自己的 input，且填入的是桥给的原路径（不是副本）',
+        kErr === null
+        // 两组都切到 custom 后各渲染一个 input 与一个按钮 —— 共用 ref 时
+        // hits 会变成 [0, 2]（两次点击都落到后挂载的那个 input 上）
+        && kRes.inputs === 2 && kRes.btns === 2
+        && kRes.hits.length === 2 && kRes.hits[0] === 1 && kRes.hits[1] === 1
+        && kRes.bridgeCalls === 1
+        && kRes.pathVals[0] === 'D:/music/tone.mp3'
+        && !!kRes.body && kRes.body.bgSoundPath === 'D:/music/tone.mp3'
+        // 关键：走的必须是路径，不是字节载荷（有 data 字段就是又退回复制了）
+        && !('data' in kRes.body),
+        JSON.stringify({ err: kErr && kErr.message, r: kRes }))
+    }
+
     // 清除自定义音频后回落到**默认音效**（宿主下发的 `defaults`），不是写死的某个预设。
     //
     // 写死预设 id 的失效形态：默认音效改了之后，用户点一次「清除」就落到一个
